@@ -7,6 +7,7 @@ import 'package:bond_inbox/models/draft_request.dart';
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/cloud_drafts.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
@@ -740,7 +741,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(replyExpected: 0.1)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       var capReads = 0;

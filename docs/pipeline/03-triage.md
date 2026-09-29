@@ -56,6 +56,32 @@ format failure that spends one. `decisionClient` is a REQUIRED constructor
 argument: there is no triage without the decision model (tests pass a
 `FakeDecisionClient` / `ScriptedDecisionClient`).
 
+**The heads file and the question set.** The nine message heads live in
+`decide-heads.json` beside the three storyline questions' heads (schema 2,
+question set v5): `questions` lists the nine message fields in
+`decisionFields` order, renderer `message`, then `same_effort` (`pair`),
+`member_of` (`membership`) and `charter_specific` (`charter`), each with its
+options, weight, bias and temperature. `DecisionHeads.fromJson` checks all of
+it, plus `pooling: mean`, `max_tokens`, 1024-wide weight rows, the renderer
+set `bond-state/2` (`decisionRendererVersion`) and the question hash
+`f495a7dc48aa34d5` (`decisionQhash` in `decision_questions.dart`). Triage reads
+only the nine message fields (`DecisionHeads.apply`). The message state's bytes
+did not change from `bond-state/1`; the new version names the whole renderer
+set, storyline texts included ([06-storylines.md](06-storylines.md#storyline-questions-bond-state2)).
+A schema-1 file, meaning the first decision model's nine-field heads, is
+refused under `decision_misconfigured` with its own sentence: the installed
+decision model is the older version, so install the new one with `make
+decide-install`. A stored `message_decisions` row whose `qhash` is not
+`decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
+as no decision. Until the planned install-time re-decide one-shot lands, that
+is the whole of it: after the upgrade every older row reads as undecided (the
+Why panel shows no decision, `replyExpectedP` is null, and extraction's intent
+and importance fall back as for a message with no decision), the needs-you pass
+does NOT rerun those messages on its own (the repair pass requeues only a
+missing or ownerless p), and the raw SQL readers (the claim order's
+importance, `requeueOwnerlessNeedsYou`) still read the older rows as they
+stand.
+
 **The CTA rollup.** `foldCtaUp` (`app/lib/services/conversation_cta.dart`) is
 the ONE fold, called twice per message. Triage calls it with the decision's
 urgency and category: on a new message (no summary on the row yet) it writes

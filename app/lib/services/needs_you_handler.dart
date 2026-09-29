@@ -5,9 +5,9 @@ import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'decision/decision_client.dart';
-import 'decision/decision_heads.dart';
 import 'decision/decision_input.dart' show decisionOwnerString;
 import 'decision/decision_policy.dart';
+import 'decision/decision_questions.dart' show decisionQhash;
 import 'decision/needs_you_predicate.dart';
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
@@ -204,7 +204,7 @@ class NeedsYouHandler extends WorkHandler {
       source,
       id,
       decided,
-      qhash: DecisionHeads.expectedQhash,
+      qhash: decisionQhash,
       ownerKnown: owner != null,
     );
     final p = needsYouP(decided.answers);

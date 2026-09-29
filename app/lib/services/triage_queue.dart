@@ -8,6 +8,7 @@ import 'decision/decision_client.dart';
 import 'decision/decision_heads.dart';
 import 'decision/decision_input.dart';
 import 'decision/decision_policy.dart';
+import 'decision/decision_questions.dart' show decisionQhash;
 import 'drain_gate.dart';
 import 'gates.dart';
 import 'backend/backend_types.dart';
@@ -732,7 +733,7 @@ class TriageQueue {
         source,
         id,
         decided,
-        qhash: DecisionHeads.expectedQhash,
+        qhash: decisionQhash,
         ownerKnown: owner != null,
       );
 

@@ -41,6 +41,7 @@ import '../services/deadline_parse.dart';
 // and its reader would come to disagree about a probability.
 import '../services/decision/decision_client.dart' show DecisionResult;
 import '../services/decision/decision_heads.dart' show DecisionAnswers;
+import '../services/decision/decision_questions.dart' show decisionQhash;
 import '../services/decision/stored_decision.dart';
 // The one needs-you rule (`needsYouAtSql`) and the slider's parse, so every
 // query here compares a probability against the threshold the same way the
@@ -1281,6 +1282,33 @@ WHERE source = ? AND conversation_key = ?
   ///   never said.
   static String keptMessageSql(String alias) => "($alias.triage_status "
       "<> 'skipped' OR $alias.gate_reason = 'teams_source')";
+
+  /// Every message of one thread, for its storyline thread text
+  /// (`storylineThreadTextFor`), oldest first by `received_at`, then
+  /// `source_message_id` — [loadThread]'s order. ALL of them, because the
+  /// subject and the people are read over the whole thread as jev's corpus
+  /// reads them; `shown` is 1 for the ones the text shows, the owner's
+  /// outbound and the inbound the gates kept ([keptMessageSql]). Only the
+  /// columns the text reads, and no attachments: the caller asks for those
+  /// only where a shown body is empty.
+  Future<List<Map<String, Object?>>> storylineThreadRows(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.source_message_id, m.direction, m.subject, m.from_name, '
+          'm.from_address, m.to_json, m.body_text, m.body_preview, '
+          "CASE WHEN m.direction = 'outbound' OR ${keptMessageSql('m')} "
+          'THEN 1 ELSE 0 END AS shown '
+          'FROM messages m '
+          'WHERE m.source = ? AND m.conversation_key = ? '
+          'ORDER BY m.received_at ASC, m.source_message_id ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) row.data];
+  }
 
   /// How many inbound messages of one conversation the gates kept.
   ///
@@ -2554,7 +2582,16 @@ WHERE COALESCE(cta_text, '') <> ''
 
   /// The stored decision for one message, or null when the decision model
   /// never read it — a message triaged before this build, or one a rules gate
-  /// dropped first.
+  /// dropped first — or when a model trained on another question set did
+  /// ([decisionQhash]). That row answered other questions, so every caller of
+  /// this treats the message as undecided (the Why panel, `replyExpectedP`,
+  /// extraction's intent and importance fall back as for no decision).
+  ///
+  /// Only THIS reader filters. The raw SQL readers of `message_decisions` —
+  /// the claim order's importance and [requeueOwnerlessNeedsYou] — still read
+  /// an older model's row as they stand, and nothing re-decides such a row on
+  /// its own: the needs-you pass decides a message again only when something
+  /// queues it, until the planned install-time re-decide one-shot does it.
   Future<StoredDecision?> decisionFor(
     String source,
     String sourceMessageId,
@@ -2566,6 +2603,7 @@ WHERE COALESCE(cta_text, '') <> ''
     ).get();
     if (rows.isEmpty) return null;
     final row = rows.first.data;
+    if (row['qhash'] != decisionQhash) return null;
     var answers = const DecisionAnswers({});
     var ownerKnown = false;
     try {

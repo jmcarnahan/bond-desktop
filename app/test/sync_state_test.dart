@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 // `show`: the one thing this file wants from the embedding client is the pair
@@ -526,7 +527,7 @@ void main() {
         'email',
         id,
         fakeDecision(fakeAnswers(needsYou: 0.7)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: ownerKnown,
       );
       await store.writeNeedsYouP('email', id, p: 0.7, reason: 'Judged.');

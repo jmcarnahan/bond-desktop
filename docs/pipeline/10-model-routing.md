@@ -320,8 +320,11 @@ box's `/decide/` slot.
   here. Missing, it throws `DecisionNotInstalledException` with "The
   decision model is not installed. Run: make decide-install" (never cached,
   so an install is seen at the next claim). A file this build refuses (not
-  JSON, another schema or question set) throws
-  `DecisionMisconfiguredException`, and that failure IS cached on the file's
+  JSON, another schema, question set or renderer set) throws
+  `DecisionMisconfiguredException`. A schema-1 file (the first decision
+  model) gets its own sentence, `DecisionHeads.olderModelText`, which says the
+  installed model is the older version and to run `make decide-install`. That
+  failure IS cached on the file's
   mtime, so a bad file is parsed once rather than once per claim. Settings'
   **Check** does not drop the cache: rebuilding it would rebuild the decision
   client and the triage queue under it mid-drain.

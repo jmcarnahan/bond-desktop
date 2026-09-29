@@ -11,17 +11,17 @@ library;
 
 import 'decision_input.dart';
 
-/// The state format this renderer writes: the one the decision model was
-/// trained against, jev-prototype's `distill/state.py` (`render_state`) and
-/// `distill/build_states.py` (the block helpers) as of 2026-09-27.
+/// The renderer set the decision model was trained against, and the name
+/// its heads file carries (`renderer`). `bond-state/2` is this file's
+/// message state, whose bytes did not change from `bond-state/1`
+/// (jev-prototype's `distill/state.py` `render_state` and
+/// `distill/build_states.py`'s block helpers, as of 2026-09-27), plus the
+/// storyline renderers in `storyline_state.dart` (`renderers.py`).
 ///
-/// Forward-compatible, and read by nothing yet: a future model bundle
-/// declares the renderer it needs (tmp/PLAN-decision-model.md "Next round
-/// pointer", jev-prototype `docs/DESIGN-model-bundles.md`), and a bundle
-/// whose renderer is not this one must be REFUSED rather than fed these
-/// bytes. Bump it only with a change to the bytes, which the render-parity
-/// fixture pins.
-const String decisionRendererVersion = 'bond-state/1';
+/// `DecisionHeads.fromJson` refuses a heads file naming another. Bump it only
+/// with a change to the bytes of any renderer in the set, which the two
+/// render-parity fixtures pin.
+const String decisionRendererVersion = 'bond-state/2';
 
 /// The owner line, the date line, the directness line, the tail (when there
 /// is one) and the message block, joined by blank lines.
@@ -155,14 +155,16 @@ String _messageBlock(DecisionInput input) {
   var body = stripDecisionMarkers(
     bodyText.isNotEmpty ? bodyText : (input.bodyPreview ?? ''),
   );
-  if (body.isEmpty) body = _attachmentStandIn(input.attachments);
+  if (body.isEmpty) body = decisionAttachmentStandIn(input.attachments);
   body = cutCodePoints(body, decisionBodyCap);
   return '$sender\n${subject}Received: ${input.receivedAt ?? ''}\n\nBody:\n'
       '$body';
 }
 
-/// `build_states.attachment_stand_in`: what an empty body says instead.
-String _attachmentStandIn(List<DecisionAttachment> attachments) {
+/// `build_states.attachment_stand_in`: what an empty body says instead. The
+/// storyline thread text uses it too (`storylineThreadTextFor`), as jev's
+/// corpus does.
+String decisionAttachmentStandIn(List<DecisionAttachment> attachments) {
   final shared = [
     for (final a in attachments)
       if (!a.isInline) a,

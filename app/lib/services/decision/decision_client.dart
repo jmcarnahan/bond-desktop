@@ -1,5 +1,6 @@
 /// The decision model's client: render a message's state, embed it, apply the
-/// heads.
+/// heads — and the same for the storyline questions ([DecisionClient.ask]),
+/// over texts `storyline_state.dart` rendered.
 ///
 /// The server is a stock llama-server serving the fine-tuned encoder as a
 /// mean-pooled embedding model (`make decide` on :8083). It answers
@@ -40,7 +41,9 @@ import '../llm/model_slots.dart'
     show LlmTarget, decideModelDefault, decideUrlDefault;
 import 'decision_heads.dart';
 import 'decision_input.dart';
+import 'decision_questions.dart';
 import 'decision_state.dart';
+import 'storyline_state.dart' show renderStorylinePair;
 
 /// One message's decision, and what produced it.
 @immutable
@@ -178,7 +181,7 @@ class DecisionClient {
   Future<DecisionResult> decide(DecisionInput input) async {
     final sw = Stopwatch()..start();
     final destination = target;
-    return _instrumented(destination, sw, (facts) async {
+    return _instrumented(destination, sw, 'decision', (facts) async {
       final heads = _heads();
       await _verifyServer(destination, facts);
       final state = renderDecisionState(input, toLocal: _toLocal);
@@ -213,56 +216,14 @@ class DecisionClient {
     if (states.isEmpty) return const [];
     final sw = Stopwatch()..start();
     final destination = target;
-    return _instrumented(destination, sw, (facts) async {
+    return _instrumented(destination, sw, 'decision', (facts) async {
       final heads = _heads();
-      // Once per batch, before the first array goes.
-      await _verifyServer(destination, facts);
-      final vectors = List<List<double>?>.filled(states.length, null);
-      final truncated = List<bool>.filled(states.length, false);
-
-      final short = [
-        for (var i = 0; i < states.length; i++)
-          if (states[i].length <= longStateChars) i,
-      ];
-      for (var start = 0; start < short.length; start += batchChunk) {
-        final chunk = short.sublist(
-          start,
-          math.min(start + batchChunk, short.length),
-        );
-        final answered = await _embed(
-          destination,
-          [for (final i in chunk) states[i]],
-          heads,
-          facts,
-          textRequest: true,
-        );
-        if (answered == null) {
-          // One of them is over the context and the server refused the whole
-          // array. Each goes on its own, and only the long one pays for it.
-          for (final i in chunk) {
-            final (vector, cut) =
-                await _vectorFor(states[i], destination, heads, facts);
-            vectors[i] = vector;
-            truncated[i] = cut;
-          }
-        } else {
-          for (var j = 0; j < chunk.length; j++) {
-            vectors[chunk[j]] = answered[j];
-          }
-        }
-      }
-      for (var i = 0; i < states.length; i++) {
-        if (vectors[i] != null) continue;
-        final (vector, cut) =
-            await _truncatedVector(states[i], destination, heads, facts);
-        vectors[i] = vector;
-        truncated[i] = cut;
-      }
-
+      final (vectors, truncated) =
+          await _vectors(states, destination, heads, facts);
       return [
         for (var i = 0; i < states.length; i++)
           DecisionResult(
-            answers: heads.apply(vectors[i]!),
+            answers: heads.apply(vectors[i]),
             state: states[i],
             model: heads.model,
             latencyMs: sw.elapsedMilliseconds,
@@ -270,6 +231,101 @@ class DecisionClient {
           ),
       ];
     });
+  }
+
+  /// [question]'s calibrated p(yes) for each of [states], in order: texts
+  /// already rendered by the question's renderer (`storyline_state.dart`).
+  ///
+  /// The same transport as [decideStates] — the identity probe, the raw
+  /// vector checks, the too-large truncation, every exception and park — and
+  /// one [LlmCallRecord] labelled `decision:<question id>`, so the activity
+  /// pane tells a storyline question from a message decision.
+  Future<List<double>> ask(
+    StorylineQuestion question,
+    List<String> states,
+  ) async {
+    if (states.isEmpty) return const [];
+    final sw = Stopwatch()..start();
+    final destination = target;
+    return _instrumented(destination, sw, 'decision:${question.id}',
+        (facts) async {
+      final heads = _heads();
+      final (vectors, _) = await _vectors(states, destination, heads, facts);
+      return [for (final v in vectors) heads.pYes(question, v)];
+    });
+  }
+
+  /// `same_effort` for each pair of thread texts (`renderStorylineThread`),
+  /// in order: the mean of p(yes) over both orders, A-then-B and B-then-A,
+  /// which is how the model was trained and how the contract asks it. Both
+  /// orders of every pair go out together, batched as [ask] batches.
+  Future<List<double>> askPairs(List<(String, String)> pairs) async {
+    if (pairs.isEmpty) return const [];
+    final p = await ask(StorylineQuestion.sameEffort, [
+      for (final (a, b) in pairs) ...[
+        renderStorylinePair(a, b),
+        renderStorylinePair(b, a),
+      ],
+    ]);
+    return [
+      for (var i = 0; i < pairs.length; i++) (p[2 * i] + p[2 * i + 1]) / 2,
+    ];
+  }
+
+  /// Every state's raw vector, in [states] order, and whether ids had to be
+  /// cut to get it: the one embed-and-check path [decideStates] and [ask]
+  /// share. The short states go in array requests of up to [batchChunk] and
+  /// each long one on its own token path; the identity probe runs once,
+  /// before the first array.
+  Future<(List<List<double>>, List<bool>)> _vectors(
+    List<String> states,
+    LlmTarget destination,
+    DecisionHeads heads,
+    _CallFacts facts,
+  ) async {
+    await _verifyServer(destination, facts);
+    final vectors = List<List<double>?>.filled(states.length, null);
+    final truncated = List<bool>.filled(states.length, false);
+
+    final short = [
+      for (var i = 0; i < states.length; i++)
+        if (states[i].length <= longStateChars) i,
+    ];
+    for (var start = 0; start < short.length; start += batchChunk) {
+      final chunk = short.sublist(
+        start,
+        math.min(start + batchChunk, short.length),
+      );
+      final answered = await _embed(
+        destination,
+        [for (final i in chunk) states[i]],
+        heads,
+        facts,
+        textRequest: true,
+      );
+      if (answered == null) {
+        // One of them is over the context and the server refused the whole
+        // array. Each goes on its own, and only the long one pays for it.
+        for (final i in chunk) {
+          final (vector, cut) =
+              await _vectorFor(states[i], destination, heads, facts);
+          vectors[i] = vector;
+          truncated[i] = cut;
+        }
+      } else {
+        for (var j = 0; j < chunk.length; j++) {
+          vectors[chunk[j]] = answered[j];
+        }
+      }
+    }
+    for (var i = 0; i < states.length; i++) {
+      if (vectors[i] != null) continue;
+      final (vector, cut) =
+          await _truncatedVector(states[i], destination, heads, facts);
+      vectors[i] = vector;
+      truncated[i] = cut;
+    }
+    return ([for (final v in vectors) v!], truncated);
   }
 
   /// For a Connect that must not write a server of the wrong kind: whether
@@ -644,12 +700,13 @@ class DecisionClient {
   Future<T> _instrumented<T>(
     LlmTarget destination,
     Stopwatch sw,
+    String label,
     Future<T> Function(_CallFacts facts) body,
   ) async {
     final facts = _CallFacts();
     try {
       final result = await body(facts);
-      _report(destination, sw, facts, 'ok', null);
+      _report(destination, sw, facts, label, 'ok', null);
       return result;
     } on LlmUnavailableException catch (e) {
       // A server that went away, refused the key or answered wrongly may not
@@ -660,16 +717,16 @@ class DecisionClient {
           e is DecisionUnauthorizedException) {
         _verified.remove('${destination.baseUrl}|${destination.model}');
       }
-      _report(destination, sw, facts, 'unavailable', e.message);
+      _report(destination, sw, facts, label, 'unavailable', e.message);
       rethrow;
     } on LlmFormatException catch (e) {
-      _report(destination, sw, facts, 'format', e.message);
+      _report(destination, sw, facts, label, 'format', e.message);
       rethrow;
     } on LlmException catch (e) {
-      _report(destination, sw, facts, 'error', e.message);
+      _report(destination, sw, facts, label, 'error', e.message);
       rethrow;
     } catch (e) {
-      _report(destination, sw, facts, 'error', '$e');
+      _report(destination, sw, facts, label, 'error', '$e');
       rethrow;
     }
   }
@@ -678,6 +735,7 @@ class DecisionClient {
     LlmTarget destination,
     Stopwatch sw,
     _CallFacts facts,
+    String label,
     String outcome,
     String? error,
   ) {
@@ -687,7 +745,7 @@ class DecisionClient {
     // decision into a failure.
     try {
       observer(LlmCallRecord(
-        label: 'decision',
+        label: label,
         durationMs: sw.elapsedMilliseconds,
         outcome: outcome,
         model: destination.model,

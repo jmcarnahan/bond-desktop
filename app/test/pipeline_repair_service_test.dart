@@ -1,6 +1,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/pipeline_repair_service.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
@@ -163,7 +164,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(needsYou: 0.9)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: false,
       );
       final service = PipelineRepairService(store);
@@ -178,7 +179,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(needsYou: 0.9)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       final service = PipelineRepairService(store);

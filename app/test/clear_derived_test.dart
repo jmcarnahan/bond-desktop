@@ -14,6 +14,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/services/cloud_drafts.dart' show DraftRoutes;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
@@ -634,7 +635,7 @@ void main() {
             source,
             id,
             fakeDecision(fakeAnswers(gateDrop: 0.9, dropReason: 'outbound')),
-            qhash: 'test',
+            qhash: decisionQhash,
             ownerKnown: true,
           );
       await seedMessage('learned-out',

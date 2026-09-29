@@ -6,7 +6,7 @@
 /// parse only on the first call and whenever the file's path or modification
 /// time moved — which is what `make decide-install` over an older export
 /// looks like. The heads are needed even when a remote server embeds (the
-/// plan's D12): the nine heads always run here.
+/// plan's D12): the heads always run here.
 library;
 
 import 'dart:convert';
@@ -32,7 +32,9 @@ class DecisionHeadsFile {
       'The decision model is not installed. Run: make decide-install';
 
   /// What a file this build cannot use says, before the parser's own
-  /// reason. It parks under `decision_misconfigured`.
+  /// reason. It parks under `decision_misconfigured`, as does the older
+  /// model's file, which throws `DecisionOlderModelException` with
+  /// `DecisionHeads.olderModelText` alone.
   static const String mismatchText =
       "The decision model's heads file does not match this build. Run: make "
       'decide-install';
@@ -92,6 +94,11 @@ class DecisionHeadsFile {
     final DecisionHeads heads;
     try {
       heads = DecisionHeads.fromJson(decoded.cast<String, Object?>());
+    } on DecisionOlderModelException catch (e) {
+      // The older model's file is the refusal an upgrade brings, and its own
+      // sentence names the cause; a mismatch prefix ahead of it would only
+      // bury it.
+      throw _remember(path, modified, e);
     } on LlmFormatException catch (e) {
       throw _fail(path, modified, e.message);
     } catch (_) {
@@ -109,8 +116,18 @@ class DecisionHeadsFile {
     String path,
     DateTime modified,
     String why,
+  ) =>
+      _remember(
+        path,
+        modified,
+        DecisionMisconfiguredException('$mismatchText. $why'),
+      );
+
+  DecisionMisconfiguredException _remember(
+    String path,
+    DateTime modified,
+    DecisionMisconfiguredException failure,
   ) {
-    final failure = DecisionMisconfiguredException('$mismatchText. $why');
     _failure = failure;
     _failedPath = path;
     _failedModified = modified;

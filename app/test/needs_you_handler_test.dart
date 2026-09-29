@@ -5,9 +5,9 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart'
     show needsYouYesReason;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart'
@@ -117,7 +117,7 @@ void main() {
         source,
         id,
         fakeDecision(fakeAnswers(needsYou: needsYou, intent: intent)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: ownerKnown,
       );
 
@@ -304,6 +304,34 @@ void main() {
       final stored = await store.decisionFor('email', 'm1');
       expect(stored!.needsYouP, closeTo(0.8, 1e-9));
       expect(stored.ownerKnown, isTrue);
+    });
+
+    test('a decision stored under another question set is undecided, and is '
+        'decided again', () async {
+      // The first decision model's row (qhash 6eba…): it answered other
+      // questions, so decisionFor reads it as no decision at all.
+      await seed();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.1)),
+        qhash: '6eba387492208260',
+        ownerKnown: true,
+      );
+      await writeP(0.1);
+      expect(await store.decisionFor('email', 'm1'), isNull);
+      final decision = FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.7));
+
+      await runOne(handler(
+        decision: decision,
+        owner: () async =>
+            (name: 'Alex Rivera', address: 'alex.rivera@rivermail.example.com'),
+      ));
+
+      expect(decision.calls, hasLength(1));
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.7, 1e-9));
+      final stored = await store.decisionFor('email', 'm1');
+      expect(stored!.needsYouP, closeTo(0.7, 1e-9));
     });
 
     test('the input carries the thread before the message, as triage builds it',
@@ -625,6 +653,6 @@ void main() {
                 "WHERE source_message_id = 'm1'")
             .getSingle())
         .data;
-    expect(row['qhash'], DecisionHeads.expectedQhash);
+    expect(row['qhash'], decisionQhash);
   });
 }

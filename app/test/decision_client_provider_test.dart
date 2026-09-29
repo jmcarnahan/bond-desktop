@@ -6,6 +6,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
@@ -176,14 +177,29 @@ void main() {
   });
 
   group('a heads file this build cannot use parks, and is read once', () {
-    for (final (what, contents) in [
-      ('not JSON', '{not json'),
-      ('not a JSON object', '[1, 2]'),
+    for (final (what, contents, sentence) in [
+      ('not JSON', '{not json', startsWith(DecisionHeadsFile.mismatchText)),
+      (
+        'not a JSON object',
+        '[1, 2]',
+        startsWith(DecisionHeadsFile.mismatchText),
+      ),
       (
         'a different question set',
         jsonEncode({...syntheticHeadsJson(), 'qhash': 'not-this-one'}),
+        startsWith(DecisionHeadsFile.mismatchText),
       ),
-      ('another schema', jsonEncode({...syntheticHeadsJson(), 'schema': 2})),
+      (
+        'another schema',
+        jsonEncode({...syntheticHeadsJson(), 'schema': 3}),
+        startsWith(DecisionHeadsFile.mismatchText),
+      ),
+      // The installed v2 model's file: its own sentence, naming the cause.
+      (
+        'the older model (schema 1)',
+        jsonEncode({...syntheticHeadsJson(), 'schema': 1}),
+        equals(DecisionHeads.olderModelText),
+      ),
     ]) {
       test(what, () async {
         final container = containerFor(const AppPrefs());
@@ -203,8 +219,7 @@ void main() {
           isA<DecisionMisconfiguredException>()
               .having((e) => parkReasonFor(e), 'park word',
                   'decision_misconfigured')
-              .having((e) => e.message, 'message',
-                  startsWith(DecisionHeadsFile.mismatchText)),
+              .having((e) => e.message, 'message', sentence),
         );
         // Cached on the file's mtime: the same failure, with no re-parse.
         Object? second;

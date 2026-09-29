@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -64,7 +64,7 @@ void main() {
         'email',
         id,
         fakeDecision(fakeAnswers(importance: importance)),
-        qhash: DecisionHeads.expectedQhash,
+        qhash: decisionQhash,
         ownerKnown: true,
       );
     }

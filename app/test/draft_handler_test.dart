@@ -11,6 +11,7 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/services/context/context_retriever.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/draft_stream.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -430,7 +431,7 @@ void main() {
           'email',
           id,
           fakeDecision(fakeAnswers(replyExpected: replyP)),
-          qhash: 'test',
+          qhash: decisionQhash,
           ownerKnown: true,
         );
     Future<void> storeReplyExpected(int? value, {String id = 'm2'}) =>

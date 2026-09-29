@@ -542,15 +542,36 @@ enforce the ones that are commands.
   state. The date line is the Mac's LOCAL zone, as in training: render on the
   Mac, never on a server. The golden leg composes through the same
   `renderDecisionStateFromParts`, so the two cannot drift.
-  `decisionRendererVersion` (`'bond-state/1'`) beside it names the state
-  format for the next round's model bundles (a bundle naming another is
-  refused); it is bumped only with a change to the bytes, fixtures and all.
+  `decisionRendererVersion` (`'bond-state/2'`) beside it names the WHOLE
+  renderer set, the heads file carries it and `DecisionHeads.fromJson`
+  refuses another; it is bumped only with a change to the bytes of any
+  renderer in the set, fixtures and all. The storyline texts (thread, pair,
+  membership, charter) are `services/decision/storyline_state.dart`, a port of
+  jev-prototype `distill/eval_questions/renderers.py`, pinned by
+  `test/fixtures/decision/render_cases_v2.json` (jev
+  `distill/export/render_fixtures_v2.py`, never edited by hand). The Python
+  pitfalls: caps count code points (`runes`); whitespace is the fixture's
+  `str.isspace()` set, never `trim()` or `\s` (U+FEFF, U+180E and U+200B are
+  not whitespace); collapsing comes before the Re/Fw strip; and the people
+  de-dup is `pyLower` (Python `str.lower()`: `İ` → `i̇`, final sigma), never
+  `toLowerCase`.
 - The heads file (`decide-heads.json`, installed beside the GGUF under
   `<models>/local_bond-decide/` by `make decide-install`) is needed on THIS
-  Mac even when the decision server is remote: the nine heads, temperatures
-  and softmax run in Dart. `decisionHeadsProvider` re-reads it when its mtime
-  moves and refuses a file whose `qhash` differs from
-  `DecisionHeads.expectedQhash`; a missing file parks the decision pass.
+  Mac even when the decision server is remote: the heads, temperatures and
+  softmax run in Dart. It is SCHEMA 2 with 12 `questions`: the nine message
+  fields (renderer `message`, `decisionFields` order), then `same_effort`
+  (`pair`), `member_of` (`membership`) and `charter_specific` (`charter`),
+  each `yes`/`no`. `apply` answers the nine; `pYes(question, vector)` answers
+  one storyline question. `decisionHeadsProvider` re-reads it when its mtime
+  moves and refuses a file whose `qhash` is not `decisionQhash`
+  (`'f495a7dc48aa34d5'`, `decision_questions.dart`, the one place it is
+  named). A schema-1 file (the older model) is refused under
+  `decision_misconfigured` with `DecisionHeads.olderModelText`, which says to
+  run `make decide-install`. A missing file parks the decision pass. Tests
+  build heads from `test/fixtures/decision_heads_fixture.dart`
+  (`syntheticHeadsJson`, schema 2, one axis per option, `yesAxisOf`).
+  `MessageStore.decisionFor` answers null for a row stored under another
+  qhash, and every `writeDecision` passes `decisionQhash`.
 - The `DecisionPolicy` constants (`services/decision/decision_policy.dart`:
   `gateDrop`, `booleanYes`, `replyYes`) were fitted on the golden set and move
   only with a golden row on each side (`make golden-decision`, plus `make

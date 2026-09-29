@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/draft_policy.dart';
@@ -194,7 +195,7 @@ void main() {
           intent: intent ?? 'fyi',
           importance: importance ?? 'normal',
         )),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       return a;
@@ -298,7 +299,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(intent: 'request', importance: 'high')),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       final llm = scripted([
@@ -1102,7 +1103,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(intent: 'fyi', importance: 'low')),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
 
@@ -1342,7 +1343,7 @@ void main() {
         'email',
         id,
         fakeDecision(fakeAnswers(replyExpected: replyP)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
     }

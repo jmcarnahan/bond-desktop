@@ -1671,6 +1671,52 @@ bare-key hash for the same candidate set, and
 matches either against either column in one query. Every write uses the new
 recipe; a dismissal made under the old one holds forever.
 
+## Storyline questions (bond-state/2)
+
+The decision model can answer three storyline questions. No pass asks them
+yet: membership and the sweep will use them in later rounds, and every pass
+below still asks the generative model.
+
+- `same_effort` asks whether two threads are about the same specific project,
+  event or topic. It is asked of `renderStorylinePair(a, b)` in both orders,
+  and the two p(yes) are averaged (`DecisionClient.askPairs`).
+- `member_of` asks whether a thread belongs to one storyline, over
+  `renderStorylineMembership(title, charter, thread)`.
+- `charter_specific` asks whether a title and charter describe one specific
+  effort, over `renderStorylineCharter(title, charter)`.
+
+The renderers are in `app/lib/services/decision/storyline_state.dart`, a
+byte-for-byte port of jev-prototype's `distill/eval_questions/renderers.py`,
+and `render_cases_v2.json` pins them. A thread text keeps the newest three
+messages at 300 code points each, a cleaned subject and at most six
+de-duplicated names. `storylineThreadTextFor` (`storyline_thread_input.dart`)
+builds a thread's text from the database after the rules of jev's training
+corpus (`distill/storyline_data/corpus.py`). For mail, the subject and the
+people are rebuilt from the thread's own messages, oldest first: the subject is
+the oldest one whose Re/Fw-stripped subject is non-empty, and the people are
+each inbound sender and each outbound To recipient, at most eight. For Teams,
+they are the stored `conversations` row's topic (else the names subject) and
+roster. The messages are the owner's outbound and the kept inbound. Each is
+written as `You` or the sender's name (else the address), then its body with
+the markers stripped (else the attachment stand-in). It also returns a 16-hex
+`cardHash` of the text.
+
+The text is close to what training saw, not equal to it. A message whose body
+was never fetched (an outbound one, or one still pending its detail fetch)
+renders `body_preview`, which for mail is Graph's preview of the whole body,
+quoted chain included, where training had the unique body.
+`StorylineThreadText.previewRows` counts those rows among the three rendered,
+so a caller can fetch the bodies first. Outbound recipients' names come from
+the stored participants, because `to_json` keeps addresses only. A renamed
+Teams chat shows its new topic.
+
+`DecisionClient.ask(question, states)` sends the texts
+over the same transport as a message decision (the identity probe, raw
+vectors, truncation through `/tokenize`, the same park reasons), in arrays of
+up to 16. `DecisionHeads.pYes` reads each answer, and each call writes one
+record labelled `decision:<question id>`. The question texts and the hash
+(`decisionQhash`) are in `decision_questions.dart`.
+
 ## The model calls
 
 **GroupThreadsTask** — `app/lib/services/llm/storyline_tasks.dart`, schema
