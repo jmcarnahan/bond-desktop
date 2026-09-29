@@ -198,7 +198,7 @@ void main() {
         excerptOf(locator: 'digest'),
         excerptOf(truncated: true, expanded: true),
         excerptOf(
-          dirName: 'southbay analysis',
+          dirName: 'northwind analysis',
           relPath: 'analysis/2031/renewals-by-segment.md',
         ),
       ]) {
