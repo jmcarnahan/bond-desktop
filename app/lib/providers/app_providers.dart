@@ -10,11 +10,13 @@ import 'package:path_provider/path_provider.dart';
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
 import '../data/app_paths.dart';
+import '../data/calendar_store.dart';
 import '../data/context_store.dart';
 import '../data/database.dart' show BondDatabase;
 import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../data/setup_store.dart';
+import '../models/calendar_models.dart' show MailboxSettings;
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/ai_workers.dart';
@@ -28,9 +30,13 @@ import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
+import '../services/backend/calendar_backend.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/backend/unavailable_calendar_backend.dart';
+import '../services/calendar/calendar_sync.dart';
+import '../services/calendar/calendar_zone.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
@@ -59,6 +65,7 @@ import '../services/llm/model_slots.dart';
 import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_attachment_backend.dart';
 import '../services/mcp/mcp_auth.dart';
+import '../services/mcp/mcp_calendar_backend.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
@@ -937,6 +944,74 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
     // the setting. The same rule [syncServiceProvider] follows above.
     lookbackDays: () => ref.read(appPrefsProvider).teamsLookbackDays,
   );
+});
+
+/// The calendar mirror's store — a second store over the same database, for
+/// the reason [CalendarStore] gives. Mailbox data, so a wipe empties it.
+final calendarStoreProvider =
+    Provider<CalendarStore>((ref) => CalendarStore(ref.watch(dbProvider)));
+
+/// The primary calendar, behind the backend switch. MCP mode only (D11): SDK
+/// mode's sign-in asks for no calendar scope, so it gets the backend whose
+/// every call says so rather than one answering an empty calendar.
+final calendarBackendProvider = Provider<CalendarBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? const UnavailableCalendarBackend()
+      : McpCalendarBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// The calendar mirror's sync. Unlike [teamsSyncProvider] the inbox's poll
+/// timer MAY reach it: this is Graph calendar, not the Teams messaging
+/// endpoints, and it throttles itself to [CalendarSync.throttle].
+///
+/// The precheck ([calendarPrecheck]) answers SDK mode and a grant without
+/// `calendars.read` before any request, so neither costs a call; a session
+/// that cannot answer even `mail.read` — an MCP server offline, mid-restart —
+/// is treated as having no calendar right now, not as missing the scope.
+///
+/// A rebuild (backend or server change) builds a fresh [CalendarSync]; a tick
+/// the old one still has in flight is kept by the sync's generation check
+/// from writing into a run the new one has since replaced, or a wipe deleted.
+final calendarSyncProvider = Provider<CalendarSync>((ref) {
+  final auth = ref.watch(authSessionProvider);
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return CalendarSync(
+    ref.watch(calendarBackendProvider),
+    ref.watch(messageStoreProvider),
+    ref.watch(calendarStoreProvider),
+    activityLog: ref.watch(activityLogProvider),
+    precheck: () => calendarPrecheck(mode == backendModeSdk, auth.hasScope),
+  );
+});
+
+/// Bumped after every sync that changed rows (and, from Phase 5, every
+/// write). Readers of the mirror watch it, which is how a Day stop left open
+/// follows the calendar without polling the table.
+final calendarRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// What the Day stop and the Today section show about the calendar as a
+/// whole; written by the inbox after each sync. SDK mode is known without
+/// asking, so it starts there rather than at unknown.
+final calendarAvailabilityProvider = StateProvider<CalendarAvailability>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? CalendarAvailability.sdkMode
+      : CalendarAvailability.unknown;
+});
+
+/// The mailbox's zone and working hours as last cached by the sync; null
+/// until the first fetch, or when the grant lacks MailboxSettings.Read.
+final mailboxSettingsProvider = FutureProvider<MailboxSettings?>((ref) {
+  ref.watch(calendarRevisionProvider);
+  return CalendarSync.readMailboxSettings(ref.watch(messageStoreProvider));
+});
+
+/// The zone the calendar displays in: the OS zone, then the mailbox's, then
+/// UTC ([resolveCalendarZone]). Never an error.
+final calendarZoneProvider = FutureProvider<CalendarZone>((ref) async {
+  final settings = await ref.watch(mailboxSettingsProvider.future);
+  return resolveCalendarZone(mailboxIana: settings?.timeZoneIana);
 });
 
 /// One chat client per pipeline stage. Constructing one opens nothing — the

@@ -123,7 +123,12 @@ mail a calendar sends back about the reader's own invites — mail that never
 needs a reply, and that sat in Needs You saying `Needs reply` over a summary
 reading "no further action required". The field that decides is
 `meetingMessageType`, Graph's own word, stored off the per-message detail
-`$select` since Phase 1 — so this is mostly a tier-2 gate, with one exception:
+`$select` since Phase 1, and in MCP mode off `read_email`'s
+`meeting_message_type` since the calendar round (before that, MCP rows had no
+kind and relied on the subject and content-class fallbacks; the
+`meeting_detail_backfill` one-shot fetches the kind for the recent ones, see
+[14-calendar.md](14-calendar.md)) — so this is mostly a tier-2 gate, with one
+exception:
 a delta row whose preview came down empty can be caught at tier 1 by the
 subject-and-empty-body fallback. A meeting INVITE (`meetingRequest`) is never
 gated, and both fallbacks require a response-shaped subject before reading

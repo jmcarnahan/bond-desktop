@@ -1029,7 +1029,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// it. Nothing on the timer path awaits it; [_syncNow] does, because it has
   /// a "Syncing…" label to hold up until the screen is actually showing what
   /// the pull brought in.
-  Future<void> _refresh() async {
+  ///
+  /// The calendar rides the timer too — it is Graph calendar, not the Teams
+  /// messaging endpoints, so the poll may reach it — but fire-and-forget and
+  /// only once the mail load has returned, so it can neither fail nor delay
+  /// mail. It is started in the same `finally` that clears the pulling flag,
+  /// so a mail load that threw does not cost the calendar its tick.
+  /// [forceCalendar] skips its two-minute throttle.
+  Future<void> _refresh({bool forceCalendar = false}) async {
     if (!mounted) return;
     _notePulling(mail: true);
     final mail = ref.read(conversationsProvider.notifier).load();
@@ -1050,6 +1057,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       await mail;
     } finally {
       _notePulling(mail: false);
+      // Un-awaited, as everywhere: the calendar never holds up this pass.
+      if (mounted) _syncCalendar(force: forceCalendar);
     }
     if (!mounted) return;
     final selected = _selectedId;
@@ -1150,7 +1159,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// What the refresh button does: the mail refresh the timer also runs, plus
-  /// the Teams pull the timer must never run.
+  /// the Teams pull the timer must never run. Startup comes through here too,
+  /// and both force the calendar past its throttle: a person who pressed
+  /// Refresh, or just opened the app, is asking for now.
   ///
   /// The read-acks are pumped from HERE rather than from [_refresh], for the
   /// same reason [_refreshTeams] is: the queue carries chat acks as well as
@@ -1158,13 +1169,41 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// did. Refresh is the second way a parked ack gets another go — the first
   /// is reopening the thread.
   Future<void> _refreshAll() async {
-    final mail = _refresh();
+    final mail = _refresh(forceCalendar: true);
     unawaited(ref.read(readAckQueueProvider).pump());
     await _refreshTeams();
     // Held to the end rather than awaited first: the two pulls go out
     // together, as they always have, and this future is only here so a caller
     // that wants to know when the whole thing is done can find out.
     await mail;
+  }
+
+  /// One calendar sync tick, fire-and-forget, and what it found published to
+  /// the two providers the calendar's readers watch.
+  ///
+  /// Never awaited by [_refresh] and never on `ConversationsNotifier.load`:
+  /// a slow or failing calendar must not hold up or break the mail. The sync
+  /// itself never throws; the catch is for the provider read and the writes,
+  /// and it is silent beyond a trace for the same reason.
+  void _syncCalendar({bool force = false}) {
+    unawaited(() async {
+      try {
+        final sync = ref.read(calendarSyncProvider);
+        final outcome = await sync.syncNow(force: force);
+        if (!mounted) return;
+        final availability = ref.read(calendarAvailabilityProvider.notifier);
+        if (availability.state != sync.availability) {
+          availability.state = sync.availability;
+        }
+        // A first mailbox-settings fetch is news to the zone's readers even
+        // on a tick that moved no rows; they watch this same revision.
+        if (outcome.changed || outcome.settingsRefreshed) {
+          ref.read(calendarRevisionProvider.notifier).state++;
+        }
+      } on Object catch (e) {
+        debugPrint('calendar sync was not run: $e');
+      }
+    }());
   }
 
   /// The Storylines pane's Sync: [_refreshAll] and nothing else.

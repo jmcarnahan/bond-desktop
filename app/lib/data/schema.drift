@@ -807,3 +807,72 @@ CREATE TABLE message_decisions (
   decided_at TEXT NOT NULL,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
+
+-- The calendar mirror: the owner's PRIMARY calendar, read through bond-mcps
+-- `sync_calendar` over a rolling window (`services/calendar/calendar_sync.dart`,
+-- docs/pipeline/14-calendar.md). SYNCED — it is mailbox data, so Clear AI
+-- results leaves it and a mailbox wipe empties it.
+--
+-- One row per event id; recurring series arrive expanded into occurrences, and
+-- the series master row (event_type 'seriesMaster'), when the server sends one,
+-- is kept for its fields and never placed on a day. A TIMED event fills
+-- `start_utc`/`end_utc` (stamps in `MessageStore.isoStamp`'s fixed width, so a
+-- string comparison is a chronological one) and leaves the dates NULL; an
+-- ALL-DAY event fills `start_date`/`end_date` (`yyyy-mm-dd`, end EXCLUSIVE) and
+-- leaves the instants NULL, because an all-day event is a date on the wall and
+-- not a span of time. The nullable booleans keep Graph's "said nothing" apart
+-- from an explicit false. `sync_run` is the mark in mark-and-sweep: the run id
+-- that last saw the row.
+--
+-- `AS CalendarEventRow` (and `AS EventBriefRow` below) renames drift's
+-- generated row class, which would otherwise be `CalendarEvent` and collide
+-- with the model class of that name in every file importing both. Nothing
+-- reads through the generated classes; the store is raw SQL.
+CREATE TABLE calendar_events (
+  id TEXT NOT NULL PRIMARY KEY,
+  series_master_id TEXT NOT NULL DEFAULT '',
+  ical_uid TEXT NOT NULL DEFAULT '',
+  event_type TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  organizer_name TEXT NOT NULL DEFAULT '',
+  organizer_address TEXT NOT NULL DEFAULT '',
+  is_organizer INTEGER NOT NULL DEFAULT 0,
+  is_all_day INTEGER NOT NULL DEFAULT 0,
+  is_cancelled INTEGER NOT NULL DEFAULT 0,
+  start_utc TEXT,
+  end_utc TEXT,
+  start_date TEXT,
+  end_date TEXT,
+  show_as TEXT NOT NULL DEFAULT '',
+  response_status TEXT NOT NULL DEFAULT 'none',
+  response_requested INTEGER,
+  allow_new_time_proposals INTEGER,
+  sensitivity TEXT NOT NULL DEFAULT '',
+  join_url TEXT NOT NULL DEFAULT '',
+  web_link TEXT NOT NULL DEFAULT '',
+  change_key TEXT NOT NULL DEFAULT '',
+  attendees_json TEXT NOT NULL DEFAULT '[]',
+  categories_json TEXT NOT NULL DEFAULT '[]',
+  is_reminder_on INTEGER,
+  reminder_minutes INTEGER,
+  body_preview TEXT NOT NULL DEFAULT '',
+  sync_run TEXT NOT NULL DEFAULT '',
+  synced_at TEXT NOT NULL
+) STRICT AS CalendarEventRow;
+
+CREATE INDEX ix_calendar_events_start_utc ON calendar_events(start_utc);
+CREATE INDEX ix_calendar_events_start_date ON calendar_events(start_date);
+
+-- One pre-meeting brief per event (the calendar round's Phase 7). DERIVED —
+-- Clear AI results empties it and the brief is written again on demand.
+-- `inputs_hash` names what the brief was made from, so a changed invite or a
+-- new message in its thread is told apart from a brief still current.
+CREATE TABLE event_briefs (
+  event_id TEXT NOT NULL PRIMARY KEY,
+  inputs_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  brief_json TEXT,
+  model TEXT NOT NULL DEFAULT '',
+  generated_at TEXT NOT NULL
+) STRICT AS EventBriefRow;

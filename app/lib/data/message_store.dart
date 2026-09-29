@@ -122,6 +122,16 @@ const String activityLastSyncMailKey = 'activity_last_sync_mail';
 const String activityLastSyncTeamsKey = 'activity_last_sync_teams';
 const String activityLastSweepKey = 'activity_last_sweep';
 
+/// The calendar mirror's current run — its window and run id, and whether
+/// the run has been swept — as JSON (`CalendarSync`). Mailbox bookkeeping
+/// like the bootstrap floors, so [MessageStore.wipeAll] clears it.
+const String calendarRunKey = 'calendar_run';
+
+/// The mailbox's zone and working hours as last fetched, cached as JSON with
+/// the fetch stamp (`CalendarSync.readMailboxSettings`). One mailbox's
+/// settings, so [MessageStore.wipeAll] clears it.
+const String calendarMailboxKey = 'calendar_mailbox';
+
 /// How often a worker holding a claim says it is still alive, by bumping the
 /// row's `updated_at`.
 ///
@@ -3337,13 +3347,14 @@ RETURNING *
     'context_text',
     'context_chunks',
     'message_decisions',
+    'event_briefs',
   ];
 
   /// Every table a CONNECTOR or the user's own directory scan wrote.
   ///
   /// Nothing here can be recomputed: it came off a server or off this disk,
   /// and getting it back means fetching it again. [clearDerived] keeps every
-  /// row of all seven and only nulls the derived COLUMNS that sit on three of
+  /// row of all eight and only nulls the derived COLUMNS that sit on three of
   /// them.
   static const List<String> syncedTables = [
     'messages',
@@ -3353,6 +3364,7 @@ RETURNING *
     'context_dirs',
     'context_links',
     'context_files',
+    'calendar_events',
   ];
 
   /// Configuration and identity: what the user chose and who they are.
@@ -3466,7 +3478,7 @@ RETURNING *
   ///
   /// Four things happen, and the order is the method:
   ///
-  /// 1. One transaction: the seventeen [derivedTables] are emptied, the verdict
+  /// 1. One transaction: the eighteen [derivedTables] are emptied, the verdict
   ///    columns on `messages` and `conversations` are reset, the derived
   ///    columns on `context_dirs` and `context_files` are nulled, and the
   ///    one-shot markers that describe rows this just deleted are dropped.
@@ -3816,6 +3828,17 @@ FROM messages
         // a wipe does not.
         ...derivedOneShotPrefs,
         'mail_last_reconcile',
+        // The calendar mirror is mailbox data (`calendar_events` is in
+        // [syncedTables]), and these two describe that mailbox: the run over
+        // rows just deleted, and the zone and hours of an account that may
+        // not be the next one.
+        calendarRunKey,
+        calendarMailboxKey,
+        // Says the meeting fields were backfilled over rows this deletes; the
+        // next mailbox's rows are owed their own pass. Not in
+        // [derivedOneShotPrefs]: a clear keeps `source_meta_json`, so the
+        // backfill's work survives it.
+        'meeting_detail_backfill',
       ];
       await db.customUpdate(
         'DELETE FROM app_prefs WHERE key IN (${_placeholders(keys.length)})',
@@ -5575,6 +5598,80 @@ SELECT conversation_key FROM (
       variables: _args([_nowIso()]),
     );
     return [for (final row in rows) row.data['source_message_id'] as String];
+  }
+
+  /// Inbound email received at or after [sinceIso] with no `meeting` key
+  /// stored, whose subject is a calendar response's (Accepted:/Declined:/
+  /// Tentative:/Tentatively accepted:/Canceled:/Cancelled:/New time proposed:)
+  /// or equals, case-insensitively and trimmed, the subject of an event in the
+  /// calendar mirror. Newest first, at most [limit] ids.
+  ///
+  /// What the sync's `meeting_detail_backfill` one-shot re-fetches: MCP rows
+  /// fetched before `read_email` sent the meeting fields. The response
+  /// prefixes alone would miss every invitation, because an Outlook invite
+  /// carries the meeting's own subject, unprefixed — and the mirror is the
+  /// list of meetings that exist, so an exact subject match against it is the
+  /// cheap way to find those without re-reading the whole mailbox. sqlite's
+  /// LIKE is case-insensitive for ASCII, which is what the prefixes want.
+  ///
+  /// The `json_valid` CASE guard is [regateMeetingResponseIds]' own: a
+  /// malformed blob reads as "no `meeting` key" rather than throwing for the
+  /// whole statement. Local echoes are excluded by their key range — they are
+  /// outbound anyway, and `_fetchDetailInto` refuses them — so the one-shot
+  /// never spends a slot on a row it would not fetch.
+  Future<List<String>> meetingBackfillCandidates({
+    required String sinceIso,
+    int limit = 200,
+  }) async {
+    const String stored = '(CASE WHEN json_valid(source_meta_json) '
+        "THEN json_extract(source_meta_json, '\$.meeting') END)";
+    final rows = await db
+        .customSelect(
+          'SELECT source_message_id FROM messages '
+          "WHERE source = 'email' AND direction = 'inbound' "
+          '  AND received_at >= ? '
+          '  AND NOT (source_message_id >= ? AND source_message_id < ?) '
+          '  AND $stored IS NULL '
+          '  AND ('
+          "    subject LIKE 'Accepted:%' OR subject LIKE 'Declined:%' "
+          "    OR subject LIKE 'Tentative:%' "
+          "    OR subject LIKE 'Tentatively accepted:%' "
+          "    OR subject LIKE 'Canceled:%' OR subject LIKE 'Cancelled:%' "
+          "    OR subject LIKE 'New time proposed:%' "
+          '    OR lower(trim(subject)) IN ('
+          '      SELECT lower(trim(subject)) FROM calendar_events '
+          "      WHERE subject <> '')"
+          '  ) '
+          'ORDER BY received_at DESC '
+          'LIMIT ?',
+          variables: _args(
+              [sinceIso, localEchoPrefix, _localEchoPrefixEnd, limit]),
+        )
+        .get();
+    return [for (final row in rows) row.data['source_message_id'] as String];
+  }
+
+  /// Whether the calendar mirror's first full read has completed: the
+  /// [calendarRunKey] pref parses as a JSON object with `swept: true`, which
+  /// `CalendarSync` writes only once a run has reached `complete` and been
+  /// swept.
+  ///
+  /// The gate on `meeting_detail_backfill`. The SDK backend never mirrors the
+  /// calendar, so the backfill is MCP-only by construction; and until a whole
+  /// window has been read the backfill's subject join would see only part of
+  /// the calendar, so the one-shot waits for the full read rather than
+  /// spending its shot on a page or two. A cursor alone is not enough: a
+  /// first read spread across ticks holds one after its first page. A
+  /// missing or malformed pref reads as not mirrored.
+  Future<bool> calendarMirrored() async {
+    final raw = await getPref(calendarRunKey);
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final json = jsonDecode(raw);
+      return json is Map && json['swept'] == true;
+    } on FormatException {
+      return false;
+    }
   }
 
   /// Takes a plan-relative deadline back off every stored ask banner, and

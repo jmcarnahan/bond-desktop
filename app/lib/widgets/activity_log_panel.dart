@@ -77,6 +77,7 @@ class ActivityLogPanel extends StatefulWidget {
   static const Map<String, String> _kindLabels = {
     'sync_mail': 'Mail sync',
     'sync_teams': 'Teams sync',
+    'sync_calendar': 'Calendar sync',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -183,6 +184,15 @@ class ActivityLogPanel extends StatefulWidget {
     if (e.kind == 'embed_fail') {
       final reason = _reason(detail['reason']);
       return reason.isEmpty ? 'Embeddings unavailable' : 'Embeddings — $reason';
+    }
+
+    // The calendar's one error row is the grant, recorded once on the way
+    // into that state rather than every tick, so it reads as the state and
+    // names what would fix it.
+    if (e.kind == 'sync_calendar' &&
+        e.status == 'error' &&
+        detail['outcome'] == 'scope_missing') {
+      return '$label — the calendar permission is missing';
     }
 
     switch (e.status) {
@@ -394,6 +404,22 @@ class ActivityLogPanel extends StatefulWidget {
         return stages is List && stages.isNotEmpty
             ? 'Retried ${stages.join(', ')}'
             : 'Retried owed stages';
+      // Recorded only when the mirror moved or a new run finished, so the
+      // sentence is what changed; `swept` is what a completed run found gone.
+      case 'sync_calendar':
+        final count = e.count ?? 0;
+        final removed = detail['removed'];
+        final swept = detail['swept'];
+        final gone = (removed is num ? removed.toInt() : 0) +
+            (swept is num ? swept.toInt() : 0);
+        final parts = [
+          if (count > 0) '$count updated',
+          if (gone > 0) '$gone removed',
+        ];
+        final run = detail['run'] == 'new' ? ' (full read)' : '';
+        return parts.isEmpty
+            ? '$label — up to date$run'
+            : '$label — ${parts.join(', ')}$run';
       // The switch at the top of the rail. Its STATUS is the whole row — `on`
       // or `off`, neither of which any of the status cases above claims — so
       // the sentence is written here rather than left to the bare label.

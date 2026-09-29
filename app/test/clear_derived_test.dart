@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bond_inbox/data/attachment_chunk_index.dart';
+import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/context_chunk_index.dart';
 import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/conversation_vec_index.dart';
@@ -10,6 +11,7 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/keyword_index.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/data/vec_index.dart';
+import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
@@ -247,7 +249,7 @@ void main() {
     });
   }
 
-  /// A row in every one of the seventeen derived tables and all seven synced
+  /// A row in every one of the eighteen derived tables and all eight synced
   /// ones, so "emptied" and "kept" are both assertions about rows that were
   /// actually there. The awkward five go in as raw INSERTs: their writers take
   /// a reconcile pass or a notification sweep, and what this test is about is
@@ -396,6 +398,21 @@ void main() {
       variables: args([fresh()]),
     );
 
+    // The calendar mirror (synced) and one pre-meeting brief (derived).
+    await CalendarStore(db).upsertEvents([
+      CalendarEvent(
+        id: 'evt-1',
+        subject: 'Quarterly review',
+        startUtc: DateTime.now().toUtc().add(const Duration(hours: 2)),
+        endUtc: DateTime.now().toUtc().add(const Duration(hours: 3)),
+      ),
+    ], syncRun: 'run-1');
+    await db.customUpdate(
+      'INSERT INTO event_briefs (event_id, inputs_hash, status, brief_json, '
+      "model, generated_at) VALUES ('evt-1', 'h', 'ready', '{}', 'm', ?)",
+      variables: args([fresh()]),
+    );
+
     // The owner's own vocabulary and one thread filed under it. Kept, like a
     // sender rule: the words are theirs, not the model's. `messages.label` is
     // the model's verdict and lives in a derived table.
@@ -435,8 +452,8 @@ void main() {
       expect(classified.toSet(), equals(declared));
       // Pairwise disjoint, which the set comparison above cannot see.
       expect(classified.length, classified.toSet().length);
-      expect(MessageStore.derivedTables, hasLength(17));
-      expect(MessageStore.syncedTables, hasLength(7));
+      expect(MessageStore.derivedTables, hasLength(18));
+      expect(MessageStore.syncedTables, hasLength(8));
       expect(MessageStore.keptTables, hasLength(5));
     });
 
@@ -959,6 +976,7 @@ void main() {
         'participant_names_backfill',
         'mail_html_rebuild_2',
         'mail_preview_tidy',
+        'meeting_detail_backfill',
         mailLastReconcileKey,
         activityLastSyncMailKey,
       ]) {
@@ -981,6 +999,9 @@ void main() {
         // clear must not hand either one back.
         'mail_html_rebuild_2',
         'mail_preview_tidy',
+        // The meeting fields it stored live in `source_meta_json`, which a
+        // clear keeps, so re-running it would fetch the same answers again.
+        'meeting_detail_backfill',
         // And these describe the sync, which has not been undone.
         mailLastReconcileKey,
         activityLastSyncMailKey,
@@ -1213,6 +1234,8 @@ void main() {
     test('keepIdentity keeps the person and deletes the mailbox', () async {
       await seedEverything();
       await store.setPref(mailBootstrapFloorKey, '2026-08-23T00:00:00Z');
+      await store.setPref(calendarRunKey, '{"run": "r"}');
+      await store.setPref(calendarMailboxKey, '{"settings": null}');
 
       await store.wipeAll(keepIdentity: true);
 
@@ -1231,6 +1254,11 @@ void main() {
       // And the floor, so the next poll fetches the window again rather than
       // reading it as already drained.
       expect(await store.getPref(mailBootstrapFloorKey), isNull);
+      // The calendar mirror is mailbox data, and so are its run and the
+      // mailbox settings it cached.
+      expect(await rows('calendar_events'), 0);
+      expect(await store.getPref(calendarRunKey), isNull);
+      expect(await store.getPref(calendarMailboxKey), isNull);
     });
 
     test('takes every one-shot marker with it, either way', () async {
@@ -1240,6 +1268,7 @@ void main() {
       for (final key in [
         ...MessageStore.derivedOneShotPrefs,
         'sender_tip_strip',
+        'meeting_detail_backfill',
       ]) {
         await store.setPref(key, '1');
       }
@@ -1249,6 +1278,9 @@ void main() {
       for (final key in MessageStore.derivedOneShotPrefs) {
         expect(await store.getPref(key), isNull, reason: key);
       }
+      // Not a derived one-shot (a clear keeps it), but it describes rows the
+      // wipe deletes: the next mailbox is owed its own backfill.
+      expect(await store.getPref('meeting_detail_backfill'), isNull);
     });
 
     test('with no argument it still takes the person with it', () async {
