@@ -701,12 +701,6 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.generative,
   ),
   PipelineStageInfo(
-    id: 'storyline_membership',
-    label: 'Storyline membership',
-    description: 'Whether a thread belongs to a storyline',
-    slot: ModelSlot.generative,
-  ),
-  PipelineStageInfo(
     id: 'storyline_group',
     label: 'Storyline grouping',
     description: 'Which threads in a neighbourhood are one project or event',

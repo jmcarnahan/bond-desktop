@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart' show scriptedJudge;
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -98,11 +99,8 @@ Map<String, dynamic> extractAnswer() => {
       'project': 'Website redesign',
     };
 
-Map<String, dynamic> confirmAnswer() => const {
-      'evidence': 'Both concern the website redesign.',
-      'belongs': true,
-      'confidence': 'high',
-    };
+/// A `member_of` yes over both bars, as the scripted judge reads it.
+Map<String, dynamic> confirmAnswer() => const {'p': 0.9};
 
 void main() {
   late BondDatabase db;
@@ -167,6 +165,7 @@ void main() {
             StorylineService(
               store,
               llm,
+              judge: scriptedJudge(store, llm),
               embeddings: embeddings(state, vector: vector),
             ),
           ),
@@ -219,7 +218,7 @@ void main() {
       await store.enqueueWork('extract', 'email', 'm1');
       final llm = scripted({
         'message_text': [extractAnswer(), extractAnswer()],
-        'storyline_membership': [confirmAnswer()],
+        'member_of': [confirmAnswer()],
       });
       await workerWith(EmbedServer.down, llm).pump();
 

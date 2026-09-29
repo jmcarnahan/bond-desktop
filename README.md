@@ -437,7 +437,6 @@ make bench-verify-prose     # the same, for the prose slot
 make bench                  # the corpus through the message-text call, timed
 make bench-prose            # storyline names + drafted replies, verbatim
 make ab                     # the same corpus on both servers, compared
-make ab-membership          # the membership eval set on both servers
 make drain                  # the drain concurrency race (needs FAST_SLOTS=4)
 make bench-compare A=… B=…  # diff two runs
 ```

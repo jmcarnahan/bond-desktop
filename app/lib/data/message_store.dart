@@ -191,6 +191,29 @@ typedef PipelineHealth = ({
   String? oldestClaimIso,
 });
 
+/// One row of `decision_labels`: the owner's answer to one storyline question,
+/// as a press made it. See `schema.drift` for the columns and
+/// [MessageStore.writeDecisionLabels] for the writer.
+typedef DecisionLabel = ({
+  /// `member_of`, `same_effort` or `charter_specific`.
+  String question,
+
+  /// `yes` or `no`.
+  String answer,
+  String? storylineId,
+  String? source,
+  String? conversationKey,
+  String? otherSource,
+  String? otherConversationKey,
+
+  /// The storyline's words at the moment of the press.
+  String? title,
+  String? charter,
+
+  /// The press: keep, dismiss, add, remove or charter_edit.
+  String origin,
+});
+
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
 ///
@@ -2589,9 +2612,9 @@ WHERE COALESCE(cta_text, '') <> ''
   ///
   /// Only THIS reader filters. The raw SQL readers of `message_decisions` —
   /// the claim order's importance and [requeueOwnerlessNeedsYou] — still read
-  /// an older model's row as they stand, and nothing re-decides such a row on
-  /// its own: the needs-you pass decides a message again only when something
-  /// queues it, until the planned install-time re-decide one-shot does it.
+  /// an older model's row as they stand. The install-time re-decide
+  /// (`TriageQueue.redecideStale`, over [staleDecisionRefs]) is what decides
+  /// the recent ones again under the model this build reads.
   Future<StoredDecision?> decisionFor(
     String source,
     String sourceMessageId,
@@ -2631,6 +2654,92 @@ WHERE COALESCE(cta_text, '') <> ''
       latencyMs: d('latency_ms'),
       truncated: (row['truncated'] as num?)?.toInt() == 1,
       ownerKnown: ownerKnown,
+    );
+  }
+
+  /// The kept inbound messages received since [sinceIso] whose stored decision
+  /// was not made under [qhash] — or that have none — newest first, at most
+  /// [limit]: what the install-time re-decide works through.
+  ///
+  /// Kept means DECIDED: `triaged`. A pending row is triage's own, and a
+  /// skipped one is gated, which the re-decide never revisits. A row already
+  /// decided under [qhash] drops out, so a re-decide that parked halfway
+  /// resumes where it stopped.
+  Future<List<({String source, String id})>> staleDecisionRefs({
+    required String qhash,
+    required String sinceIso,
+    required int limit,
+  }) async {
+    final rows = await db.customSelect(
+      'SELECT m.source, m.source_message_id FROM messages m '
+      'LEFT JOIN message_decisions d ON d.source = m.source '
+      'AND d.source_message_id = m.source_message_id '
+      "WHERE m.direction = 'inbound' AND m.triage_status = 'triaged' "
+      'AND m.received_at >= ? AND (d.qhash IS NULL OR d.qhash <> ?) '
+      'ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT ?',
+      variables: _args([sinceIso, qhash, limit]),
+    ).get();
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String,
+          id: row.data['source_message_id'] as String,
+        ),
+    ];
+  }
+
+  /// The four triage fields the decision pass decides — urgency, category,
+  /// needs_action and reply_expected — and nothing else: not
+  /// `triage_status`, not the gate verdict, not the text. The re-decide's
+  /// writer, narrow for [writeTriage]'s reason; a message the owner restored
+  /// is written like any other, since the re-decide never gates.
+  Future<void> writeDecidedTriage(
+    String source,
+    String sourceMessageId,
+    TriageResult result,
+  ) async {
+    await db.customUpdate(
+      'UPDATE messages SET urgency = ?, category = ?, needs_action = ?, '
+      'reply_expected = ?, updated_at = ? '
+      'WHERE source = ? AND source_message_id = ?',
+      variables: _args([
+        result.urgency,
+        result.category,
+        result.needsAction ? 1 : 0,
+        result.replyExpected ? 1 : 0,
+        _nowIso(),
+        source,
+        sourceMessageId,
+      ]),
+    );
+  }
+
+  /// Moves the decision model's intent and importance inside a stored
+  /// extraction, leaving its topics, project and `extracted_at` alone. A
+  /// message with no extraction yet (or an unreadable one) is left as it is:
+  /// the message-text stage reads the new decision when it runs.
+  Future<void> rewriteExtractionDecision(
+    String source,
+    String sourceMessageId, {
+    required String intent,
+    required String importance,
+  }) async {
+    final stored = await getExtraction(source, sourceMessageId);
+    if (stored == null) return;
+    final Map<String, Object?> json;
+    try {
+      final decoded = jsonDecode(stored);
+      if (decoded is! Map) return;
+      json = decoded.cast<String, Object?>();
+    } on FormatException {
+      return;
+    }
+    json['intent'] = intent;
+    json['importance'] = importance;
+    await db.customUpdate(
+      'UPDATE message_ai SET extraction_json = ? '
+      'WHERE source = ? AND source_message_id = ?',
+      variables: _args([jsonEncode(json), source, sourceMessageId]),
     );
   }
 
@@ -3418,14 +3527,17 @@ RETURNING *
   ///
   /// The two label tables are here because **Clear AI results** must not take
   /// them: a word the owner typed is not something a model produced, and
-  /// re-running the pipeline would never write it back. They are still deleted
-  /// by [wipeAll] — see [_wipeTables].
+  /// re-running the pipeline would never write it back. `decision_labels` is
+  /// here for the same reason — the owner's storyline presses, which nothing
+  /// re-derives. All three are still deleted by [wipeAll] — see
+  /// [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
     'sender_prefs',
     'setup_state',
     'labels',
     'conversation_labels',
+    'decision_labels',
   ];
 
   /// The five tables a wipe leaves alone although two of them are derived.
@@ -3506,6 +3618,10 @@ RETURNING *
         // is not what the owner built.
         'conversation_labels',
         'labels',
+        // The owner's storyline presses go for the labels' reason: each one
+        // names a conversation key in the mailbox this deletes, and carries a
+        // title and charter written about that mail.
+        'decision_labels',
       ];
 
   /// Every row: a reset is not paced, the sync is. The cap [clearDerived]
@@ -4948,6 +5064,50 @@ SELECT conversation_key FROM (
       variables: _args([scope, scopeKey, direction, origin, _nowIso()]),
     );
   }
+
+  /// Appends the owner's storyline presses to `decision_labels`, in one
+  /// statement per row inside one transaction. INSERT only, like
+  /// [recordFeedback]: the log is the history, and a label is never revised —
+  /// a later press is a later row.
+  ///
+  /// Written by `StorylineEdits` at the press and by nothing automatic.
+  Future<void> writeDecisionLabels(List<DecisionLabel> labels) async {
+    if (labels.isEmpty) return;
+    final now = _nowIso();
+    await db.transaction(() async {
+      for (final label in labels) {
+        await db.customUpdate(
+          'INSERT INTO decision_labels '
+          '(question, answer, storyline_id, source, conversation_key, '
+          'other_source, other_conversation_key, title, charter, origin, '
+          'created_at) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          variables: _args([
+            label.question,
+            label.answer,
+            label.storylineId,
+            label.source,
+            label.conversationKey,
+            label.otherSource,
+            label.otherConversationKey,
+            label.title,
+            label.charter,
+            label.origin,
+            now,
+          ]),
+        );
+      }
+    });
+  }
+
+  /// Every row of `decision_labels`, oldest first — for the reporting counts
+  /// and the later calibration that read them.
+  Future<List<Map<String, Object?>>> decisionLabels() async => [
+        for (final row in await db
+            .customSelect('SELECT * FROM decision_labels ORDER BY id')
+            .get())
+          row.data,
+      ];
 
   // ── activity ─────────────────────────────────────────────────────────
 

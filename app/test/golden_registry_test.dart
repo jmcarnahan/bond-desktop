@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/golden_registry.dart';
@@ -58,12 +57,10 @@ void main() {
     );
   });
 
-  test('every fixture charter crosses the task\'s clamp', () {
-    // Real charters run 170–902 characters and `ConfirmMembershipTask` clamps
-    // one at 400 at prompt time, so a fixture whose charters all fit under the
-    // clamp would exercise a prompt the real registry never produces. The
-    // window is wide because the point is "long enough to be truncated", not a
-    // particular length.
+  test('every fixture charter is as long as a real one', () {
+    // Real charters run 170–902 characters, so a fixture of one-liners would
+    // exercise a state the real registry never produces. The window is wide
+    // because the point is "a real charter's length", not a particular one.
     for (final storyline in registry.storylines) {
       expect(storyline.charter.length, greaterThanOrEqualTo(350),
           reason: storyline.slug);
@@ -72,7 +69,8 @@ void main() {
     }
   });
 
-  test('a registry storyline becomes the storyline the confirm task reads', () {
+  test('a registry storyline becomes the storyline member_of is asked about',
+      () {
     final lease = registry.bySlug['river-office-lease']!;
     final storyline = lease.toAppStoryline();
 
@@ -83,64 +81,9 @@ void main() {
     expect(storyline.createdBy, 'gold');
     expect(storyline.summary, isNull);
 
-    // The task renders the charter OR the summary, never both, so a null
+    // The judge renders the charter OR the summary, never both, so a null
     // summary is what makes the charter the criterion.
-    final message = const ConfirmMembershipTask().buildUserMessage(
-      ConfirmInput(
-        storyline: storyline,
-        storylineParticipants: const ['Alex Rivera'],
-        candidateCard: 'a card | Alex Rivera |  | ',
-      ),
-    );
-    expect(message, contains('Charter: '));
-    expect(message, isNot(contains('Summary: ')));
-  });
-
-  test('a slug\'s people are the union over the set\'s own items', () {
-    // Both lease items are on the fixture, and they share two names — the
-    // union keeps first-seen order and de-duplicates case-insensitively, which
-    // is what `_participantsOfStoryline` does over the database.
-    expect(participantsFor('river-office-lease', set), [
-      'Dana Whitfield',
-      'Alex Rivera',
-      'Priya Raman',
-    ]);
-    // A registry slug no golden item carries has nobody, and says so rather
-    // than borrowing anyone.
-    expect(participantsFor('spring-portfolio-review', set), isEmpty);
-  });
-
-  test('the candidate\'s own thread is not among the people it is judged '
-      'against', () {
-    // In the app a candidate is by construction not yet a member, so the
-    // storyline it is judged against never contains it. Without the exclusion
-    // the storyline fence would hand the model the candidate card's own
-    // participants segment back as the storyline's People line.
-    expect(
-      participantsFor(
-        'river-office-lease',
-        set,
-        excludingConversation: 'email:fx-conv-lease',
-      ),
-      ['Priya Raman', 'Alex Rivera'],
-    );
-    expect(
-      participantsFor(
-        'river-office-lease',
-        set,
-        excludingConversation: 'email:fx-conv-lease-2',
-      ),
-      ['Dana Whitfield', 'Alex Rivera', 'Priya Raman'],
-    );
-    // By CONVERSATION, so a key nobody has excludes nobody.
-    expect(
-      participantsFor(
-        'river-office-lease',
-        set,
-        excludingConversation: 'email:fx-conv-nobody',
-      ),
-      participantsFor('river-office-lease', set),
-    );
+    expect(storyline.charter, isNotEmpty);
   });
 
   test('an item\'s candidates lead with gold, then the registry forbidden', () {

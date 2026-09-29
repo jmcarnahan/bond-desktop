@@ -18,6 +18,12 @@ import 'fixtures/test_db.dart';
 /// A [MailSync] that never touches a socket. [manual] holds each call open on
 /// a completer so a test can finish two loads out of order on purpose.
 class FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   final List<Completer<void>> gates = [];
   final List<Completer<void>> bodyGates = [];
   final List<String> bodiesFetched = [];

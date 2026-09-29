@@ -20,6 +20,12 @@ import 'fixtures/triage_seed.dart';
 /// scoring sweep does not immediately file it again.
 class _SilentSync implements MailSync {
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> syncNow() async {}
 
   @override

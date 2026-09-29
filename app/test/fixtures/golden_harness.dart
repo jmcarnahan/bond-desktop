@@ -10,11 +10,10 @@ import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-// `show`: the two things this file wants from the storyline service are the
-// charter clamp the app ships and the grouping mode a define can pick, so a
-// harness default cannot drift from either.
+// `show`: the one thing this file wants from the storyline service is the
+// grouping mode a define can pick, so a harness default cannot drift from it.
 import 'package:bond_inbox/services/storyline_service.dart'
-    show GroupingMode, StorylineTuning;
+    show GroupingMode;
 
 import 'bench_stats.dart';
 import 'golden_prices.dart';
@@ -66,21 +65,12 @@ class GoldenDefines {
   /// nobody a path.
   static const String registryPath = String.fromEnvironment('GOLDEN_REGISTRY');
 
-  /// The bulk run file whose extraction topics and triage summary build each
-  /// candidate card — the app's card carries the newest inbound message's
-  /// extraction and summary, so a replay without them would judge a thinner
-  /// card than the app sends.
+  /// The bulk run file whose extraction topics and triage summary the
+  /// storyline legs seed into the mailbox (`storyline_seed.dart`) — the app's
+  /// clustering card carries the newest inbound message's extraction and
+  /// summary, so a replay without them would embed a thinner card than the
+  /// app does.
   static const String runPath = String.fromEnvironment('GOLDEN_RUN');
-
-  /// How much of a storyline's charter the confirm reads, in characters. The
-  /// default IS the app's own `StorylineTuning.charterCap`, read off it rather
-  /// than copied, so a replay nobody passed a define to measures the clamp the
-  /// app ships. The define exists so one set of cards can be replayed at
-  /// several caps.
-  static const int charterCap = int.fromEnvironment(
-    'GOLDEN_CHARTER_CAP',
-    defaultValue: StorylineTuning.charterCap,
-  );
 
   /// Which clustering card the sweep replay embeds, by name. Parsed by
   /// `parseClusteringCardVariant`, which refuses anything that is not one of
@@ -377,21 +367,6 @@ int checkK(int k) {
     throw ArgumentError.value(k, 'GOLDEN_K', 'must be a positive integer');
   }
   return k;
-}
-
-/// [cap] if it names a charter clamp, or a thrown [ArgumentError]. Loud rather
-/// than clamped for [checkK]'s reason: a cap of zero would send the confirm a
-/// storyline with no description at all and record the result as a measurement
-/// of the cap somebody typed.
-int checkCharterCap(int cap) {
-  if (cap < 1) {
-    throw ArgumentError.value(
-      cap,
-      'GOLDEN_CHARTER_CAP',
-      'must be a positive integer',
-    );
-  }
-  return cap;
 }
 
 /// The message-text stage's answer, as the run file records it. A straight

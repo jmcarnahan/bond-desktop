@@ -951,6 +951,167 @@ class TriageQueue {
     if (waiting != null && !waiting.isCompleted) waiting.complete();
   }
 
+  /// How far back the install-time re-decide reaches, in days.
+  static const int redecideDays = 30;
+
+  /// The most messages one re-decide takes, newest first. At about 40 ms a
+  /// decision that is under a minute and a half of the decision server.
+  static const int redecideCap = 2000;
+
+  /// Re-decides the recent kept inbound messages a decision model trained on
+  /// another question set decided — [redecide] over
+  /// [MessageStore.staleDecisionRefs], the last [redecideDays] days, newest
+  /// first, at most [redecideCap]. The install-time one-shot the mail sync
+  /// runs when this build's heads are new (`SyncService`'s
+  /// `redecide_qhash`): without it every message decided under the old model
+  /// reads as undecided to the Why panel, extraction and drafting, and keeps
+  /// the old model's numbers.
+  ///
+  /// `complete` is false when the switch is off, the decision model parked on
+  /// the way or most of the run failed (see [redecide]); what was re-decided
+  /// stays re-decided and drops out of the next run's list, so the next sync
+  /// resumes where this one stopped.
+  ///
+  /// While the triage drain itself is parked on the decision model (the heads
+  /// are an older model's, not installed, or the server is down), nothing is
+  /// asked at all: the answer is already known, and asking would only write
+  /// the same park again on every sync.
+  Future<({int redecided, bool complete})> redecideStale({
+    DateTime? now,
+  }) async {
+    if (_off) return (redecided: 0, complete: false);
+    if (_parkedReason?.startsWith('decision_') ?? false) {
+      return (redecided: 0, complete: false);
+    }
+    final since = MessageStore.isoStamp(
+      (now ?? DateTime.now())
+          .toUtc()
+          .subtract(const Duration(days: redecideDays)),
+    );
+    return redecide(await _store.staleDecisionRefs(
+      qhash: decisionQhash,
+      sinceIso: since,
+      limit: redecideCap,
+    ));
+  }
+
+  /// The DECISION pass again for [refs], and nothing else of triage: the
+  /// same state ([decisionInputFor]) and the same writers the claim uses —
+  /// the decision row, the four triage fields ([decidedTriage] through the
+  /// narrow [MessageStore.writeDecidedTriage]), `needs_you_p` with its
+  /// sentence, and the intent and importance inside an extraction that
+  /// already ran. It never touches the text, the gate verdict or
+  /// `triage_status`, and it never gates: a message kept once stays kept.
+  ///
+  /// Outside the drain and its claims on purpose. It reads only `triaged`
+  /// rows, which no claim holds, and a message re-pended meanwhile is left to
+  /// the triage that re-pended it.
+  ///
+  /// A decision server that is down, not installed or misconfigured PARKS it
+  /// the way it parks a triage claim: it stops at that message and answers
+  /// `complete: false`. The park is logged once per question set and reason
+  /// per app run ([_redecideParksLogged]), so a model that stays parked for a
+  /// week does not write a row on every sync.
+  ///
+  /// A 4xx this one request earned skips the message. A run whose skips are
+  /// at least as many as its re-decisions answers `complete: false`, so a run
+  /// that mostly failed is tried again next sync; a few permanently bad
+  /// messages beside many good ones close it, and they keep their old
+  /// decision.
+  ///
+  /// The thread follows: [foldCtaUp] runs as the claim runs it, so a quiet
+  /// thread's `cta_urgency` and category move with the new decision.
+  Future<({int redecided, bool complete})> redecide(
+    List<({String source, String id})> refs,
+  ) async {
+    _askOwner();
+    await _awaitOwner();
+    final owner = decisionOwnerString(_ownerKnown);
+    var redecided = 0;
+    var skipped = 0;
+    for (final ref in refs) {
+      if (_off) return (redecided: redecided, complete: false);
+      final row = await _store.getMessageRow(ref.source, ref.id);
+      if (row == null || row['triage_status'] != 'triaged') continue;
+      final message = Message.fromRow(row);
+      final input = await decisionInputFor(
+        _store,
+        ref.source,
+        message,
+        conversationKey: row['conversation_key'] as String?,
+        owner: owner,
+      );
+      final DecisionResult decided;
+      try {
+        decided = await _decisionClient.decide(input);
+      } on LlmUnavailableException catch (e) {
+        final reason = parkReasonFor(e);
+        if (_redecideParksLogged.add('$decisionQhash|$reason')) {
+          await _log.record(
+            'triage',
+            status: 'parked',
+            source: ref.source,
+            entityId: ref.id,
+            detail: {'reason': reason, 'redecide': true},
+          );
+        }
+        return (redecided: redecided, complete: false);
+      } on LlmException {
+        skipped++;
+        continue;
+      }
+      await _store.writeDecision(
+        ref.source,
+        ref.id,
+        decided,
+        qhash: decisionQhash,
+        ownerKnown: owner != null,
+      );
+      await _store.writeDecidedTriage(
+        ref.source,
+        ref.id,
+        decidedTriage(decided.answers),
+      );
+      final p = needsYouP(decided.answers);
+      await _store.writeNeedsYouP(
+        ref.source,
+        ref.id,
+        p: p,
+        reason: p == null ? null : needsYouYesReason(decided.answers),
+      );
+      await _store.rewriteExtractionDecision(
+        ref.source,
+        ref.id,
+        intent: decided.answers['intent'].choice,
+        importance: decided.answers['importance'].choice,
+      );
+      // The thread follows the new decision, exactly as the claim folds it:
+      // urgency and category now, the ask from the text already on the row.
+      final result = decidedTriage(decided.answers);
+      await foldCtaUp(
+        _store,
+        ref.source,
+        row,
+        urgency: result.urgency,
+        category: result.category,
+        needsAction: result.needsAction,
+        summary: message.summary ?? '',
+        actionItems: message.actionItems,
+        deadline: message.deadline ?? '',
+        textLanded: message.summary != null,
+      );
+      redecided++;
+    }
+    return (
+      redecided: redecided,
+      complete: skipped == 0 || skipped < redecided,
+    );
+  }
+
+  /// The re-decide parks already logged this app run, as
+  /// `'<qhash>|<park reason>'`.
+  final Set<String> _redecideParksLogged = {};
+
   /// The row state the decision model's answers make: urgency and category
   /// are the heads' choices, and the two booleans are their
   /// yes-probabilities against the policy bars (`booleanYes` for

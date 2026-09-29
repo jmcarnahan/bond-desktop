@@ -82,6 +82,7 @@ import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/restore_service.dart';
 import '../services/storyline_handler.dart';
+import '../services/storyline_judge.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
@@ -870,8 +871,10 @@ final attentionServiceProvider = Provider<AttentionService>(
 );
 
 /// Typed as [MailSync], not [SyncService], so a test can override it with a
-/// stand-in that never touches the network.
-final syncServiceProvider = Provider<MailSync>(
+/// stand-in that never touches the network. Typed out on the declaration as
+/// well: the re-decide reads [triageQueueProvider] at call time and the queue
+/// watches this provider, an inference cycle (never a build-time one).
+final Provider<MailSync> syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
     ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
@@ -903,6 +906,10 @@ final syncServiceProvider = Provider<MailSync>(
     // pumps elsewhere in this file give.
     repairGatedConversations: () =>
         ref.read(gateRepairServiceProvider).repairAll(),
+    // The install-time re-decide, on the triage queue that owns the decision
+    // writers. `read` inside the closure too: the queue watches this provider
+    // for its body fetch.
+    redecide: () => ref.read(triageQueueProvider).redecideStale(),
   ),
 );
 
@@ -1897,20 +1904,42 @@ final parkedProvider = StreamProvider.autoDispose<ParkedFact>((ref) {
 /// be harmless — it is a provider because the handlers and the notifier must
 /// agree on the same store.
 ///
-/// Five of the six storyline passes carry their own client, each on its own
-/// stage, so the activity log labels each call by its stage. Every stage
-/// resolves to the one generative model since the decision-model round
-/// ([stageLlmClientProvider]).
+/// The language-model passes carry their own client, each on its own stage,
+/// so the activity log labels each call by its stage. Every stage resolves to
+/// the one generative model since the decision-model round
+/// ([stageLlmClientProvider]). Membership is not one of them: every
+/// "does this thread belong here" is the decision model's `member_of`,
+/// through the [StorylineJudge] on the decision client.
 ///
 /// The same embedding client the extraction handler holds, deliberately: a
 /// thread whose embed failed there is one this service re-embeds itself when
 /// the assignment pass reaches it, and two clients would mean two dedupe sets
 /// and two rows in the activity panel for one server being down.
-final storylineServiceProvider = Provider<StorylineService>(
+///
+/// Typed out: the judge's body fetch reads [syncServiceProvider] at call
+/// time, and the sync reaches this provider through the gate repair, so the
+/// three declarations form an inference cycle (never a build-time one).
+final Provider<StorylineService> storylineServiceProvider =
+    Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
     ref.watch(stageLlmClientProvider('storyline_name')),
-    confirmClient: ref.watch(stageLlmClientProvider('storyline_membership')),
+    judge: StorylineJudge(
+      decision: ref.watch(decisionClientProvider),
+      store: ref.watch(messageStoreProvider),
+      // A mail thread's rendered rows that still show Graph's preview have
+      // their bodies fetched before it is judged, because training read every
+      // message's own body — those rows only, and no attachment work queued
+      // (`ensureBodiesFor`). Teams has no body fetch to ask for, so a chat is
+      // judged on what is stored. `ref.read` at the call, never `watch`: the
+      // sync provider rebuilding must not rebuild this one mid-drain.
+      ensureBodies: (source, conversationKey, ids) async {
+        if (source != 'email') return;
+        await ref
+            .read(syncServiceProvider)
+            .ensureBodiesFor(conversationKey, ids);
+      },
+    ),
     // Dark until `StorylineTuning.groupingMode` says otherwise, and routable
     // anyway: the stage exists so that turning it on is a setting.
     groupClient: ref.watch(stageLlmClientProvider('storyline_group')),
@@ -1925,9 +1954,6 @@ final storylineServiceProvider = Provider<StorylineService>(
     progress: ref.watch(pipelineProgressProvider),
     // The library, for the recap's directory footer and the charter offer.
     contextStore: ref.watch(contextStoreProvider),
-    // The overlap rule in `assignConversation` counts shared people who are
-    // not the owner; the same closure the needs-you handler takes.
-    owner: _ownerLookup(ref),
   ),
 );
 

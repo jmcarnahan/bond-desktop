@@ -1,10 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:bond_inbox/services/conversation_state.dart';
-import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
-import 'package:bond_inbox/services/llm/storyline_tasks.dart';
+import 'package:bond_inbox/services/storyline_judge.dart' show StorylinePolicy;
 
 import 'golden_json.dart';
 import 'golden_run.dart';
@@ -15,9 +13,9 @@ import 'golden_set.dart';
 /// Same split as `golden_harness.dart`, for the same reason: the live test is
 /// `@Skip`'d and needs a server, a set and a registry this repo does not carry,
 /// so nothing inside it can be covered by the gate. What CAN be covered is
-/// every decision it makes around the calls — how a candidate card is built,
-/// which answers count as an accept, which storyline a set of answers derives,
-/// and what the whole thing tallied. Those live here, pure, and
+/// every decision it makes around the calls — which answers count as an
+/// accept, which storyline a set of answers derives, and what the whole thing
+/// tallied. Those live here, pure, and
 /// `golden_storyline_test.dart` pins them offline.
 ///
 /// Nothing here scores anything. The derived `storyline.id` goes into a run
@@ -29,9 +27,10 @@ import 'golden_set.dart';
 
 /// The enriched fields of one item's card, out of a bulk run file.
 ///
-/// [project] is read for the `thread` clustering card only (decision-model
-/// round, Phase 8); every other card ignores it, and the storyline replay's
-/// candidate card never read it. Empty when the run file has none.
+/// Read by the seeding (`storyline_seed.dart`) for the clustering card and the
+/// stored triage summary. [project] is read for the `thread` clustering card
+/// only (decision-model round, Phase 8); every other card ignores it. Empty
+/// when the run file has none.
 class GoldenCard {
   final List<String> topics;
   final String? summary;
@@ -114,32 +113,6 @@ Future<GoldenCards> loadGoldenCards(String path) async {
   return GoldenCards.fromRunJson(decoded);
 }
 
-/// The candidate card for [item], the way the app builds one.
-///
-/// Mirrors `enrichedCardForConversationRow` in
-/// `lib/services/storyline_service.dart:2789`: the subject stripped of its
-/// Re:/Fw: markers, the conversation's display names, and the newest inbound
-/// message's extraction topics and triage summary. The set carries the first
-/// two; the last two come from a bulk run file, so the card is the one the app
-/// would have if the model that wrote that file were the one shipping.
-///
-/// A missing card degrades to empty topics and no summary rather than failing,
-/// exactly as the app's own card does when a conversation has never been
-/// enriched — the four ` | ` segments are always there, two of them blank.
-String candidateCardFor(GoldenItem item, GoldenCard? card) =>
-    buildConversationCard(
-      subject: stripReFw(item.conversationSubject),
-      // Empty display names dropped before the join, exactly as the app drops
-      // them: a blank entry survives `join(', ')` as a stray comma, which is a
-      // character the app's own card never carries.
-      participants: [
-        for (final person in item.conversationParticipants)
-          if (person.isNotEmpty) person,
-      ],
-      topics: card?.topics ?? const [],
-      summary: card?.summary,
-    );
-
 // ── what one confirmation was, and what a set of them derives ──────────
 
 /// Why a candidate is on an item's list.
@@ -163,32 +136,30 @@ CandidateKind kindOf(GoldenItem item, String slug) {
   return CandidateKind.extra;
 }
 
-/// One confirmation: what was asked, and what came back.
+/// One confirmation: what was asked, and the decision model's p(member_of).
 class ConfirmOutcome {
   final String slug;
   final CandidateKind kind;
 
   /// Null when the call failed after its retries. Neither a yes nor a no —
   /// see [deriveStorylineId], which refuses to file an item that has one.
-  final ConfirmResult? result;
+  final double? p;
 
   const ConfirmOutcome({
     required this.slug,
     required this.kind,
-    required this.result,
+    required this.p,
   });
 
-  /// The SERVICE's rule, not the model's — and delegated to
-  /// [ConfirmResult.accepted] rather than restated, so the replay cannot score
-  /// a pipeline the app does not ship. A failed call is not an acceptance: a
-  /// null result answered nothing.
-  bool get accepted => result?.accepted ?? false;
-
-  /// A yes the service throws away. Counted separately because it is the one
-  /// number that says whether a model is being declined by its own hedging
-  /// rather than by its judgement.
-  bool get lowYes =>
-      result != null && result!.belongs && result!.confidence == 'low';
+  /// The SERVICE's rule for a storyline the owner kept, which is what every
+  /// registry storyline is (`RegistryStoryline.toAppStoryline` writes them
+  /// `active`): p at [StorylinePolicy.acceptActive] or above, so the replay
+  /// cannot score a pipeline the app does not ship. A failed call is not an
+  /// acceptance: a null p answered nothing.
+  bool get accepted {
+    final value = p;
+    return value != null && value >= StorylinePolicy.acceptActive;
+  }
 }
 
 /// The `storyline.id` a set of confirmations derives, plus whether anything
@@ -211,31 +182,31 @@ class DerivedStoryline {
 /// — so the honest record is "not attempted", which the run file expresses by
 /// omitting the section and the scorer reads as no claim rather than as a miss.
 ///
-/// Among the accepted, high beats medium; among the top rank, the
-/// alphabetically smallest slug wins. Alphabetical rather than candidate
-/// order, deliberately: candidate order puts the gold storyline first, so a
-/// tie-break that took the first would hand the model gold every time two
-/// answers were equally confident and flatter every recall number in the
-/// ledger. Alphabetical is blind to gold, and the ties are counted so a reader
-/// knows how often the rule decided anything at all.
+/// Among the accepted, the highest p wins, as the assign pass picks; among
+/// equal p, the alphabetically smallest slug. Alphabetical rather than
+/// candidate order, deliberately: candidate order puts the gold storyline
+/// first, so a tie-break that took the first would hand the model gold every
+/// time two answers were equal and flatter every recall number in the ledger.
+/// Alphabetical is blind to gold, and the ties are counted so a reader knows
+/// how often the rule decided anything at all.
 DerivedStoryline deriveStorylineId(List<ConfirmOutcome> outcomes) {
   for (final outcome in outcomes) {
-    if (outcome.result == null) {
+    if (outcome.p == null) {
       return const DerivedStoryline(id: null, tie: false);
     }
   }
 
-  var bestRank = 0;
+  var bestP = -1.0;
   final best = <String>[];
   for (final outcome in outcomes) {
     if (!outcome.accepted) continue;
-    final rank = outcome.result!.confidence == 'high' ? 2 : 1;
-    if (rank > bestRank) {
-      bestRank = rank;
+    final p = outcome.p!;
+    if (p > bestP) {
+      bestP = p;
       best
         ..clear()
         ..add(outcome.slug);
-    } else if (rank == bestRank) {
+    } else if (p == bestP) {
       best.add(outcome.slug);
     }
   }
@@ -248,7 +219,8 @@ DerivedStoryline deriveStorylineId(List<ConfirmOutcome> outcomes) {
 ///
 /// Several calls under one label, so this is a SUM rather than a copy of the
 /// last one: the item paid for every confirmation on its list, and a row that
-/// quoted one of them would understate the stage by four fifths. Tokens go
+/// quoted one of them would understate the stage by four fifths. A decision
+/// call reports no token usage, so its sums are null by this rule. Tokens go
 /// null the moment any record's are null — the same rule `GoldenCall.toJson`
 /// holds, because a runtime that reported no usage must not read downstream as
 /// one that spent nothing.
@@ -293,16 +265,15 @@ String derivedBucket(GoldenItem item, DerivedStoryline derived) {
   return id == item.gold.storylineId ? 'gold' : 'other';
 }
 
-/// How the gold candidate answered, for the per-item line. An item gold files
-/// nowhere has no gold candidate and prints `-`.
+/// How the gold candidate answered, for the per-item line: the verdict and
+/// the p it was read from. An item gold files nowhere has no gold candidate
+/// and prints `-`.
 String goldCell(List<ConfirmOutcome> outcomes) {
   for (final outcome in outcomes) {
     if (outcome.kind != CandidateKind.gold) continue;
-    final result = outcome.result;
-    if (result == null) return 'failed';
-    if (outcome.accepted) return 'yes(${result.confidence})';
-    if (outcome.lowYes) return 'low-yes';
-    return 'no';
+    final p = outcome.p;
+    if (p == null) return 'failed';
+    return '${outcome.accepted ? 'yes' : 'no'}(${p.toStringAsFixed(2)})';
   }
   return '-';
 }
@@ -320,9 +291,8 @@ String _rate(int accepted, int n) =>
 /// `storyline.id` and applies the must/should/may/forbidden rules, and that is
 /// the number a ledger row quotes. These counters answer the questions a single
 /// derived id cannot — whether the model said yes to the gold storyline at all,
-/// how often it said yes to a trap, how often it said yes to a storyline drawn
-/// at random, and how much of its judgement it hedged into `low`, which the
-/// service throws away.
+/// how often it said yes to a trap, and how often it said yes to a storyline
+/// drawn at random.
 class StorylineTally {
   /// The gold candidate of every `must` item, and of every `should` item, that
   /// answered at all. A failed gold call is counted in [derivedIncomplete]
@@ -338,12 +308,6 @@ class StorylineTally {
   int forbiddenAccepted = 0;
   int extraN = 0;
   int extraAccepted = 0;
-
-  /// Yeses the service declines, across every kind of candidate.
-  int lowYes = 0;
-
-  int acceptedHigh = 0;
-  int acceptedMedium = 0;
 
   int derivedGold = 0;
   int derivedNone = 0;
@@ -365,16 +329,7 @@ class StorylineTally {
     DerivedStoryline derived,
   ) {
     for (final outcome in outcomes) {
-      if (outcome.lowYes) lowYes++;
-      final result = outcome.result;
-      if (result == null) continue;
-      if (outcome.accepted) {
-        if (result.confidence == 'high') {
-          acceptedHigh++;
-        } else {
-          acceptedMedium++;
-        }
-      }
+      if (outcome.p == null) continue;
       switch (outcome.kind) {
         case CandidateKind.gold:
           final strength = item.gold.storylineStrength;
@@ -423,8 +378,6 @@ class StorylineTally {
         'gold_should': {'n': goldShouldN, 'accepted': goldShouldAccepted},
         'forbidden': {'n': forbiddenN, 'accepted': forbiddenAccepted},
         'extra': {'n': extraN, 'accepted': extraAccepted},
-        'low_yes': lowYes,
-        'accepted_confidence': {'high': acceptedHigh, 'medium': acceptedMedium},
         'derived': {
           'gold': derivedGold,
           'none': derivedNone,
@@ -442,8 +395,6 @@ class StorylineTally {
       '   should ${_rate(goldShouldAccepted, goldShouldN)}\n'
       '  forbidden accepted ${_rate(forbiddenAccepted, forbiddenN)}'
       '   extra accepted ${_rate(extraAccepted, extraN)}\n'
-      '  accepted confidence  high $acceptedHigh  medium $acceptedMedium'
-      '   low-confidence yeses (declined) $lowYes\n'
       '  derived  gold $derivedGold  none $derivedNone  other $derivedOther'
       '  incomplete $derivedIncomplete  ties $ties\n'
       '  gold-none filed nowhere ${_rate(goldNoneDerivedNone, goldNoneN)}';

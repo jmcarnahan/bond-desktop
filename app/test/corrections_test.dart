@@ -17,6 +17,12 @@ import 'fixtures/test_db.dart';
 /// corrections write, so nothing here needs the network to do anything at all.
 class SilentSync implements MailSync {
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> syncNow() async {}
 
   @override

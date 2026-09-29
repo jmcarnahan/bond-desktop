@@ -149,7 +149,7 @@ class StorylineRefreshHandler extends WorkHandler {
 }
 
 /// Re-judges the members one storyline's automatic passes filed, against the
-/// charter and the owner's own examples. Queued by
+/// charter, on the decision model's `member_of`. Queued by
 /// `StorylineService.removeThread` — a removal says the reasoning that filled
 /// this group was wrong, and the threads that reasoning filed are still in it
 /// — and by the About section's "Re-check members".

@@ -808,3 +808,36 @@ CREATE TABLE message_decisions (
   decided_at TEXT NOT NULL,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
+
+-- The owner's own storyline presses, as labels for the decision model's
+-- storyline questions: an append-only log, written at the press and never by
+-- an automatic pass (auto-expiry, the audit and the gates write none). KEPT —
+-- Clear AI results must not erase it, because nothing re-derives a person's
+-- word; it is what a later calibration of `member_of` and `charter_specific`
+-- reads.
+--
+-- `question` is `member_of`, `same_effort` or `charter_specific`; `answer` is
+-- `yes` or `no`. The thread is (`source`, `conversation_key`), and a pair's
+-- second thread (`other_*`) is NULL for the other two questions. `title` and
+-- `charter` are the storyline's words at the moment of the press, because the
+-- storyline itself can be renamed, re-chartered or cleared afterwards and the
+-- label must still say what it answered. `origin` names the press: keep,
+-- dismiss, add, remove or charter_edit.
+--
+-- `INTEGER PRIMARY KEY` for feedback_events' reason (AUTOINCREMENT drags in
+-- sqlite_sequence, which is not STRICT); nothing is deleted from this log but
+-- a wipe, so an id is never reused.
+CREATE TABLE decision_labels (
+  id INTEGER PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  storyline_id TEXT,
+  source TEXT,
+  conversation_key TEXT,
+  other_source TEXT,
+  other_conversation_key TEXT,
+  title TEXT,
+  charter TEXT,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;

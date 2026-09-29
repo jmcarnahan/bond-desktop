@@ -369,11 +369,11 @@ void main() {
     });
 
     test('the last model dialled is the one recorded', () async {
-      // The storyline sweep's case: membership on the fast client, naming on
-      // the prose one, both inside one span. Last writer wins, exactly as
-      // `llm_label` already does — this documents it rather than pretending
-      // one row can only ever have seen one model.
-      log.noteLlmCall(call(label: 'storyline_membership', model: 'qwen3-4b'));
+      // The storyline sweep's case: membership on the decision model, naming
+      // on the generative one, both inside one span. Last writer wins,
+      // exactly as `llm_label` already does — this documents it rather than
+      // pretending one row can only ever have seen one model.
+      log.noteLlmCall(call(label: 'decision:member_of', model: 'bond-decide'));
       log.noteLlmCall(call(label: 'storyline_name', model: 'qwen3-27b'));
 
       await log.record('storyline_sweep', entityId: 'sweep');

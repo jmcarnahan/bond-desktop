@@ -303,15 +303,15 @@ const List<String> cosineBinLabels = [
 
 /// The same four edges, moved down to where the shipped gates actually sit.
 ///
-/// Every gate the clustering and the assign run on is UNDER [cosineBinEdges]'
-/// bottom edge of 0.50: `assignCosineGateWithOverlap` 0.37,
-/// `clusterCoherenceFloor` 0.43, `assignCosineGate` 0.44 and
-/// `clusterLinkThreshold` 0.48, all four in `storyline_service.dart`. On the
-/// old edges every near-gate pair falls in the first bucket, so the chart
-/// cannot answer "how many pairs would the 0.43 floor reject". On these edges
-/// the overlap gate sits in `0.35-0.40`, the coherence floor and the assign
-/// gate in `0.40-0.45`, the link threshold in `0.45-0.50`, and everything at
-/// or above 0.50 is the tail.
+/// Both gates the clustering runs on are UNDER [cosineBinEdges]' bottom edge
+/// of 0.50: `clusterCoherenceFloor` 0.43 and `clusterLinkThreshold` 0.48, in
+/// `storyline_service.dart`. On the old edges every near-gate pair falls in
+/// the first bucket, so the chart cannot answer "how many pairs would the
+/// 0.43 floor reject". On these edges the coherence floor sits in
+/// `0.40-0.45`, the link threshold in `0.45-0.50`, and everything at or above
+/// 0.50 is the tail. The assign pass's retrieval floor
+/// (`StorylinePolicy.assignRetrievalFloor`, 0.30) is under the bottom edge: it
+/// only decides what the decision model is asked about.
 ///
 /// A printed shape and a JSON key, never an assertion: a live bench states
 /// counts and the ledger reads them.
@@ -1207,7 +1207,7 @@ class SweepTally {
   /// Items in no storyline at all.
   final int filedNowhere;
 
-  /// Model calls per task label — `storyline_name`, `storyline_membership`.
+  /// Model calls per task label — `storyline_name`, `decision:member_of`.
   final Map<String, int> callsByKind;
 
   /// Grouping calls the sweep made, summed off its own activity rows.

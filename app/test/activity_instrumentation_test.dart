@@ -657,7 +657,12 @@ void main() {
         store,
         handlers: [
           StorylineAssignHandler(
-            StorylineService(store, llm, activityLog: log),
+            StorylineService(
+              store,
+              llm,
+              judge: scriptedJudge(store, llm),
+              activityLog: log,
+            ),
             activityLog: log,
           ),
         ],
@@ -687,16 +692,8 @@ void main() {
       );
       await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
 
-      await pumpStoryline(
-        'c1',
-        scriptedLlm(
-          {
-            'evidence': 'Different project.',
-            'belongs': false,
-            'confidence': 'high',
-          },
-        ),
-      );
+      // The decision model's `member_of`, well under the bar.
+      await pumpStoryline('c1', scriptedLlm({'p': 0.1}));
 
       final row = (await rows('storyline')).single;
       // A model call happened and its answer was no. `skipped` rather than

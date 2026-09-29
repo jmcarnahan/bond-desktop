@@ -17,28 +17,27 @@ argument rather than a habit: refresh before recruit, audit between them,
 recap after the sweep. See [10-model-routing.md](10-model-routing.md).
 
 1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
-   conversation's card changes, cosine-shortlist it against live storyline
-   centroids, then ask the model to confirm the best candidate. Three rules
-   govern that shortlist. The lower gate `assignCosineGateWithOverlap` needs
-   **two shared people who are not the owner**, the count
-   `assignOverlapMinShared`: in a one-team mailbox every pair of threads
-   shares someone, so one shared person made the discount the rule rather
-   than the exception, and the owner is on every thread in their own mailbox.
-   When the top two candidates are `assignTieMargin` of 0.03 apart or less,
-   **both are confirmed** and the more confident answer wins, the higher
-   cosine on a draw. A cosine ranking inside that margin is a coin toss
-   dressed as a ranking. And a storyline that has lately taken more than
-   twice its fair share of the automatic adds, and more than 30% of
-   them, over at least 10 adds in 7 days, is a **catch-all**: it is skipped
-   as a candidate, and the pass ends `AssignOutcome.catchAll` when it was the
-   only one that cleared the gate. Skipping one always queues an audit of its
-   automatic members, including on a pass that went on to file the thread
-   somewhere else, and `requeueWorkIfStale` bounds that to **at most one
-   audit per storyline per window**. The audit runs at temperature 0 against
-   an unchanged charter, so a second one the same afternoon spends a confirm
-   per member to hear the same answer, and a storyline excluded from
-   auto-assign can only change through a refresh or a person, either of which
-   queues its own pass. Every
+   conversation's card changes, RETRIEVE its candidates by cosine and ask the
+   decision model's `member_of` about each (*Membership on the decision
+   model*, below). Retrieval takes the top `StorylinePolicy.assignTopK` (3)
+   live storylines by centroid cosine and the top 3 by nearest-member cosine,
+   merged and de-duplicated, each at `assignRetrievalFloor` (0.30) or above;
+   the cosine decides only who is asked. Every candidate is judged, and the
+   highest p that clears `_accepts` wins, an equal p keeping the candidate
+   retrieved first. There is no overlap rule and no tie margin any more: the
+   people on a thread and a near-tie of cosines were ways of guessing which
+   candidate to ask, and asking all of them is cheap. A storyline that has
+   lately taken more than twice its fair share of the automatic adds, and
+   more than 30% of them, over at least 10 adds in 7 days, is a
+   **catch-all**: it is skipped as a candidate, and the pass ends
+   `AssignOutcome.catchAll` when it was the only one that reached the floor.
+   Skipping one always queues an audit of its automatic members, including
+   on a pass that went on to file the thread somewhere else, and
+   `requeueWorkIfStale` bounds that to **at most one audit per storyline per
+   window**. A second audit the same afternoon would spend a judgement per
+   member against an unchanged charter to hear the same answer, and a
+   storyline excluded from auto-assign can only change through a refresh or
+   a person, either of which queues its own pass. Every
    candidate's members and blocks are read in one query each for the whole
    pass (`memberContextRows`, `blockedStorylineIdsFor`), so filing one thread
    costs the same against a mailbox of fifty storylines as against two. On
@@ -80,8 +79,8 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
 4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
-   MODEL filed into one storyline, against the charter as it now reads and the
-   owner's own examples. Queued by `removeThread`, by *Re-check members* at
+   MODEL filed into one storyline, against the charter as it now reads, in one
+   `member_of` batch. Queued by `removeThread`, by *Re-check members* at
    the head of the Messages tab, and by the assign pass's catch-all rule,
    which sends a storyline that has been swallowing the mailbox here rather
    than growing it further. It is registered after the refresh and before
@@ -606,16 +605,12 @@ visible: the home feed's storyline link and the hot-storylines strip both join
 on that column and know nothing about `storyline_members`, so before this the
 timeline and the rail showed the filing and the feed did not.
 
-A hand-filed membership also **teaches**. `addThread` writes `Filed by you` as
-the member row's evidence, and that is not decoration: user members ride into
-every `ConfirmMembershipTask` call as the `kept_by_owner` fence — up to three,
-newest first, because the owner's latest word is what teaches and a fourth card
-buys tokens on every membership question the storyline will ever ask. A row
-with no evidence would also hand a later removal a negative example that says
-nothing, since a removal copies the member's evidence onto its block. The
-sweep's own proposal confirms carry `(none)` in both example fences by
-construction: they judge candidates against an unsaved proposal, which has no
-row in the database, no members and no blocks.
+A hand-filed membership is also a **label**. `addThread` writes `Filed by you`
+as the member row's evidence, which a later removal copies onto its block, and
+it logs a `member_of` yes to `decision_labels` (*Membership on the decision
+model*, below). No membership question reads the owner's filings as examples
+any more: the decision model reads the storyline's title and charter and the
+thread, and the owner's lever on it is the charter.
 
 The write is deliberately NOT `writeStorylineProgress`. That one records how
 far the assignment pass got — `storyline_state`, `storyline_at` — and those
@@ -713,7 +708,7 @@ hunt over the whole mailbox. Such a storyline reports the empty pass it always
 reported.
 
 A declared storyline is `active`, not `suggested`, so the confirm's bar is the
-lower one: a `medium` yes is taken. That is intended — the user said this group
+lower one, `StorylinePolicy.acceptActive`. That is intended — the user said this group
 exists — and it is the single biggest difference between this path and the
 sweep's own, which is why wrong accepts rather than recall are the number to
 watch on it.
@@ -751,14 +746,12 @@ it is about to be gone — so the owner's block remembers what the model thought
 when it filed the thread they are now taking out. An audit's block carries the
 audit's own reason instead.
 
-**The owner's blocks are negative examples.** `ConfirmMembershipTask` takes a
-`removed_by_owner` fence: up to three of them, newest first, as the same
-enriched cards the candidate is described with. The prompt reads them as the
-owner's "no" — a candidate of the same kind, the same sender pattern, the same
-sort of message, does not belong, even when the charter reads as though it
-might. `blocked_by = 'user'` **only**: an audit's rejection is a consequence of
-a lesson the owner already taught, and feeding it back would let the model
-teach itself.
+**The owner's blocks are hard blocks and labels.** A blocked thread never
+reaches a membership question for that storyline again, whatever the decision
+model would say; the removal also logs a `member_of` no to `decision_labels`.
+Only the refresh reads the blocks as examples (below), `blocked_by = 'user'`
+**only**: an audit's rejection is a consequence of a lesson the owner already
+taught, and feeding it back would let one removal ratchet a storyline shut.
 
 **The refresh may narrow the charter for them.** `RefineStorylineTask` takes a
 `removed_threads` fence, between `threads` and `new_threads`, carrying the same
@@ -1338,7 +1331,7 @@ Round D measured `series 0 / excluded 0` on every sweep row it took, so the
 golden set contains no series to miss, and the fold's own count is what would
 show a pool where the vector-only clusters had stopped being the sweep's.
 
-### The five gates moved with the vector
+### The gates moved with the vector
 
 Round E Phase 2 put the clustering vector on `Qwen3-Embedding-0.6B` (see
 [05-embeddings.md](05-embeddings.md)), and the five cosines moved with it.
@@ -1357,8 +1350,12 @@ its 0.85.
 | `clusterLinkThreshold` | 0.65 | 0.48 |
 | `clusterCoherenceFloor` | 0.60 | 0.43 |
 | `clusterSplitCeiling` | 0.85 | 0.68 |
-| `assignCosineGate` | 0.60 | 0.44 |
-| `assignCosineGateWithOverlap` | 0.50 | 0.37 |
+| `assignCosineGate` | 0.60 | 0.44 (retired) |
+| `assignCosineGateWithOverlap` | 0.50 | 0.37 (retired) |
+
+The two assign gates were retired in the decision-questions round: assign,
+recruit and the probe retrieve at `StorylinePolicy.assignRetrievalFloor`
+(0.30) and the decision model's `member_of` decides.
 
 ### Grouping
 
@@ -1589,14 +1586,11 @@ The probe is the recruit pass in miniature, against the group that just came
 into existence. Candidates have already passed the sweep's taken-set filter, so
 a thread already filed into a storyline — or one the user pulled out of one —
 is never offered; the rest are scored against the centroid of the *surviving*
-members, gated at `assignCosineGateWithOverlap`, and the top
-`recruitMaxCandidates` by cosine each get the same `ConfirmMembershipTask` call
-recruit and assign make, against the charter the naming call wrote seconds ago,
-at temperature zero, held to the same `_accepts` rule as the cluster members
-beside them. The proposal is `suggested`, so the bar there is `high`. They are
-judged against
-the participants of the storyline as it actually stands, read back from the
-stored members rather than from the pre-confirmation cluster.
+members, at `assignRetrievalFloor`, and the top `recruitMaxCandidates` by
+cosine are judged in one `member_of` batch against the charter the naming call
+wrote seconds ago, held to the same `_accepts` rule as the cluster members
+beside them. The proposal is `suggested`, so the bar there is
+`acceptSuggested`.
 
 A sweep-born storyline always has members by the time the probe runs, so the
 probe never takes the charter-centroid path and never takes the declared
@@ -1673,9 +1667,11 @@ recipe; a dismissal made under the old one holds forever.
 
 ## Storyline questions (bond-state/2)
 
-The decision model can answer three storyline questions. No pass asks them
-yet: membership and the sweep will use them in later rounds, and every pass
-below still asks the generative model.
+The decision model can answer three storyline questions. Membership asks
+`member_of` at all five confirm sites (*Membership on the decision model*,
+below); `same_effort` and `charter_specific` are implemented in
+`StorylineJudge` and not asked by any pass yet — the sweep moves onto them in
+the next round.
 
 - `same_effort` asks whether two threads are about the same specific project,
   event or topic. It is asked of `renderStorylinePair(a, b)` in both orders,
@@ -1717,6 +1713,88 @@ up to 16. `DecisionHeads.pYes` reads each answer, and each call writes one
 record labelled `decision:<question id>`. The question texts and the hash
 (`decisionQhash`) are in `decision_questions.dart`.
 
+## Membership on the decision model
+
+Every storyline membership judgement is the decision model's `member_of`,
+through `StorylineJudge` (`app/lib/services/storyline_judge.dart`). No language
+model is asked whether a thread belongs anywhere: `ConfirmMembershipTask` and
+the `storyline_membership` stage were deleted in the decision-questions round.
+
+**The state.** `renderStorylineMembership(title, charter, thread)`: the
+storyline's title, its charter (else its summary, else `(none)`), and the
+thread's own text (`storylineThreadTextFor`). The owner's charter is the prompt
+the model reads — the lever an owner has on what gets filed.
+
+**The body fetch.** Training read every message's own body, so a mail
+thread's rendered rows that still show Graph's preview
+(`StorylineThreadText.previewIds`) have those bodies — and only those — fetched
+through the mail sync's narrow `ensureBodiesFor`, which queues no attachment
+text or digest, and the text is rebuilt before it is judged; rebuilt even when
+the fetch failed partway, since the bodies that landed are real. A failure is
+logged, the thread is judged on what is stored, and the judge does not ask
+again for that thread for five minutes (`StorylineJudge.fetchRetryAfter`), so a
+mail server that is down costs one failed round trip per thread, not one per
+candidate. Teams has no fetch to ask for.
+
+**One batch per storyline.** `memberOf(storyline, threads)` asks every thread
+in one request batch: recruit, the audit, the sweep's members and the probe
+each make ONE call per storyline per lap, and the answers are all in before
+the first membership is written — so a decision server that parks mid-batch
+files nothing, and the re-run asks the whole lap again. Assign turns it
+around with `memberOfEach(storylines, thread)`: the thread's text is built
+once, with at most one body fetch, and one batch carries a state per
+retrieved candidate (at most six).
+
+**Park before the 27B.** A sweep that has clusters to propose calls
+`StorylineJudge.ensureReady()` (`DecisionClient.ensureReady`: a managed model
+the router does not serve, Your server's kind, the heads file on this Mac —
+no question asked) before its first naming call, so a decision model that
+cannot answer parks the pass without a naming call spent on proposals it
+could never confirm. A decision server that is merely down is found by the
+first `member_of`.
+
+**The rule** is `StorylineService._accepts`, the one rule at all five sites:
+`p >= StorylinePolicy.acceptSuggested` (0.70) for a `suggested` storyline,
+`p >= StorylinePolicy.acceptActive` (0.50) for one the owner kept. The sweep
+judges its members against an unsaved proposal whose status is `suggested`, so
+a newborn storyline is held to the higher bar too, on purpose. The owner's
+removals are hard blocks, never weighed.
+
+**The policy constants** (`StorylinePolicy`, beside the judge) are
+PROVISIONAL: `acceptActive` 0.50, `acceptSuggested` 0.70,
+`assignRetrievalFloor` 0.30, `assignTopK` 3, set from the Phase 2 as-is
+evaluation and refitted with a `make golden-storyline` row on each side when
+the v3 model lands — the `StorylineTuning` rule.
+
+**The evidence sentence.** The model gives a number, not a reason, so the
+member row's evidence — the italic line on the timeline card and the reason
+after "Filed in" — is a templated sentence carrying it:
+`The decision model put this thread at 82% for this storyline.` An audit's
+block carries the same sentence at the p that removed the thread.
+
+**A decision failure parks the lane.** The judge's exceptions propagate
+(`DecisionUnavailableException` and the rest, see `10-model-routing.md`), so
+the storyline item parks with its attempt unspent. There is no fallback.
+
+**Labels.** Every owner press that answers a storyline question is logged in
+the KEPT table `decision_labels` (schema v22), with the storyline's title and
+charter as they stood at the press, for a later calibration of `member_of` and
+`charter_specific`; Clear AI results keeps it and a wipe deletes it. Written
+by `StorylineEdits` only, and never by an automatic pass (expiry, the audit, a
+gate's eviction):
+
+| Press | Label |
+|-------|-------|
+| Keep of a suggestion | `member_of` yes, every member |
+| Keep of a possible row | `member_of` yes, every surviving member |
+| Dismiss of a suggestion or possible row | `member_of` no, every member |
+| Dismiss of a kept storyline | none — "done with it" is not a membership answer |
+| Add by hand (and create) | `member_of` yes |
+| Remove | `member_of` no |
+| Allow again | none — lifting a veto is not a yes |
+| A charter saved, declared or created with | `charter_specific` yes, with the new words |
+| A charter cleared | none |
+
 ## The model calls
 
 **GroupThreadsTask** — `app/lib/services/llm/storyline_tasks.dart`, schema
@@ -1740,74 +1818,7 @@ validator drops rather than repairs — a number that is not one, a number under
 each cost that entry and nothing else. The upper bound is the service's, since
 only it knows how many cards it showed.
 
-**ConfirmMembershipTask** — `app/lib/services/llm/storyline_tasks.dart`,
-schema `storyline_membership`, **the generative model** since the
-decision-model round (`confirmClient` in `app_providers.dart`), **temperature 0** at all five call sites (assign,
-recruit, the sweep's members, its probe, the audit), which all go through one
-`StorylineService._confirm`. Given a storyline described by its *charter* and
-one candidate thread: an evidence sentence first, a boolean `belongs`, and a
-low/medium/high confidence.
-
-**The rule that reads the answer is `StorylineService._accepts`**: `belongs`,
-not `low`, and `high` when the storyline is still `suggested`. Auto-filing
-into a group nobody has kept yet needs the strongest answer the model gives,
-because a `medium` yes into a group no owner has looked at is how the blobs
-grew. The sweep judges its own members against an unsaved proposal whose
-status is `suggested`, so a newborn storyline is built of `high` answers too,
-on purpose. An `active` storyline is one the owner kept, and takes `medium` as
-it always did.
-
-The prompt's real
-work is what *not* to weigh: two threads of the same kind (two invoices, two
-trips) do not belong together, and the participant list is context, not a
-requirement. Dates are the same rule one step finer: a storyline about a
-specific dated occasion — a meeting on a named day, a trip, a deadline — admits
-only threads about *that* occasion, because another meeting is not this
-meeting. Three sentences added in Round D mirror the namer's own rule, so the
-two calls cannot disagree about what a storyline is. A charter that describes
-a team, a person, a sender or a category of message rather than one specific
-project, event or topic admits nothing, so the candidate does not belong. The
-evidence has to name the shared specific occasion, and "both involve
-meetings", "same team", "same sender" and "aligns with operational focus" are
-not evidence. Two threads with the same people and different subjects are two
-threads.
-
-Four fences, in the order `storyline`, `kept_by_owner`, `removed_by_owner`,
-`candidate_thread`. The two example fences are what the owner has taught this
-storyline (*Filing a thread by hand*, *Removing a thread*), and both are always
-present, rendering `(none)` when there is nothing — an empty fence says the
-owner has taught nothing yet, which is the fact the pass has, and a fence that
-appeared and vanished between calls would change the shape of the message for
-no gain. The candidate goes **last** on purpose: within one recruit lap the
-storyline and its examples are identical across every call while the candidate
-varies, so the constant part first is what keeps the server's prefix cache warm
-across the eight confirmations a lap makes. The examples are always passed *in*
-by the caller and never read from the storyline's id inside the task, because
-the sweep judges candidates against an unsaved proposal.
-
-**The charter clamp is a parameter** (`StorylineTuning.charterCap`, default
-400, passed at every call site). It was a private constant until 2026-09-16,
-and it bites more often than it looks: the golden confirm found 22 of the 30
-gold charters longer than 400 characters, so what the model usually judges
-against is the opening of a description rather than the whole of one. The
-golden replay ran the same cards at 400 / 800 / 1200 to say what that costs —
-`make golden-storyline GOLDEN_CHARTER_CAP=…`, which also records the cap it
-ran at in the timing JSON beside `charters_over_cap`.
-
-**Measured 2026-09-16, and the cap stays 400.** On the 4B, two token-identical
-passes per clamp: `storyline.id` 81% at 400, 78% at 800, 77% at 1200. The
-column that explains it is forbidden-accept, which climbs 20% → 25% → 26%
-while the gold-`none` items the model correctly files nowhere fall 26 → 24 →
-23 of 35; gold-accept barely moves (47 → 46 → 46 of 48 on `must`). More
-charter is more surface for a candidate to match against, and the 4B matches
-on it — so the clamp that was cutting 22 of the 30 charters was not costing
-accuracy, it was buying it. 400 is therefore what ships, which is the value
-every row before this ran at anyway. The 27B was not re-run: its 400 row
-already stands at 90% with forbidden-accept 6 of 88, a temperature-0 replay of
-the same cards reproduces token for token, and the 4B's 400 row reproduced the
-previous harness's within one item. The parameter and the `GOLDEN_CHARTER_CAP`
-knob stay, so a future model can be asked the same question without a code
-change.
+No membership call: see *Membership on the decision model*, above.
 
 **NameStorylineTask** — same file, schema `storyline_name`, **prose / 27B
 slot**, **temperature 0**. Six fields in schema order, which is the order a
@@ -1873,7 +1884,8 @@ row as `outliers`. The per-member confirms are the guard on what is left: each
 kept thread is judged against the charter the model wrote for the group it
 kept, and `minClusterSize` is applied again to the survivors. `_charterCap` on
 this task stays 300, which puts every charter the app writes under the
-confirm's 400 clamp; that clamp bites only on charters a person typed.
+membership renderer's 1,000-code-point cap; that cap bites only on charters a
+person typed.
 
 Called from the sweep's `_propose` and from the refresh pass's bootstrap
 branch. The bootstrap branch numbers its cards the same way, so the prompt's

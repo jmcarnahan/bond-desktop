@@ -27,7 +27,6 @@ Set<String> taskSchemaNames() => {
       const ContextDigestTask().schemaName,
       const ContextBriefTask().schemaName,
       const ContextSelectTask().schemaName,
-      const ConfirmMembershipTask().schemaName,
       const GroupThreadsTask().schemaName,
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
@@ -97,7 +96,6 @@ void main() {
       'context_file_digest',
       'context_brief',
       'context_select',
-      'storyline_membership',
       'storyline_group',
       'storyline_name',
       'storyline_refresh',
@@ -159,9 +157,9 @@ void main() {
       };
       expect(roleOfStage(stage.id), expected, reason: stage.id);
     }
-    // The storyline confirm is plain generative now; it was the one stage
-    // whose role depended on the placement.
-    expect(roleOfStage('storyline_membership'), StageRole.generative);
+    // Storyline membership is the decision model's `member_of`, not a stage
+    // of its own: no language model is asked whether a thread belongs.
+    expect(roleOfStage('storyline_membership'), isNull);
     expect(roleOfStage('decision'), StageRole.decision);
     expect(roleOfStage('embeddings'), StageRole.embed);
     // An id the stage table does not name has no role at all.

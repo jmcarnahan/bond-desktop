@@ -21,7 +21,6 @@ depends on a server being up, and each `make` target below runs it with
 | `make bench` | The bulk slot: the fixture corpus through triage and extraction, with a latency and throughput table. |
 | `make bench-prose` | The prose slot: five storylines named, three recapped and five replies drafted, printed verbatim. The draft leg streams, so its row carries a `ttft p50` column — how long the box stayed empty, beside how long the whole call took. No scorecard — a title, a recap and a draft are judged by reading them. |
 | `make ab` | The same corpus through triage and extraction on **both** slots, printing where they disagree and what each cost. |
-| `make ab-membership` | The membership eval set through the confirm task on both slots, against the answer a person would give. |
 | `make drain` | The drain concurrency race: one round per concurrency in `BENCH_K` over the same backlog. The only bench that can see batching. |
 | `make bench-pipeline` | The backlog end to end through the real queues, in both drain shapes (`PIPE_SHAPE=single\|lanes`): wall to a usable inbox, wall to the drafts, and how long a message that arrives mid-backlog waits. Needs BOTH servers. |
 | `make bench-verify` | Not a measurement — a contract check. See "Protocol". |
@@ -29,7 +28,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
-| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
+| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
@@ -70,8 +69,7 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   `--parallel` slots, so `SLOTS=2` at 16K is 8K a slot; `make model SLOTS=2
   MODEL_CTX=32768` is how a second slot is bought without narrowing either one.
 - `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`,
-  `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
-  "The golden set".
+  `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see "The golden set".
 - `SWEEP_CARD` — which clustering card `make golden-sweep` and `make
   golden-vector` embed. Five words since 2026-09-19: `topics`, the card the app
   ships since 2026-09-18 with its people segment left empty; `participants`,
@@ -562,63 +560,44 @@ evidence · extract evidence · draft`, as keep-only pass rates. The baseline
 appears once, carrying both judges' numbers side by side: the same stored
 output, read twice by two different readers.
 
-**Storyline membership.** Filing is the stage the golden set says has never
-once been right — the shipping app scores 42 of 99 on `storyline.id` with no
-correct positive — and the only model in it is `ConfirmMembershipTask`. So
-there is a third replay that asks that task alone, per item, against a BOUNDED
-candidate list: the item's gold storyline when it has one, every registry
-storyline gold marks forbidden on it, and three more drawn from the rest of the
-registry. That is three to six questions an item, about four and a half on
-average and 453 over the set, against the three thousand a full sweep of thirty
-storylines would ask. Each registry storyline arrives as the app's own
-`Storyline` with its charter as the membership criterion — clamped at 400
-characters at prompt time, exactly as in the app, which bites on most real
-charters — and with its people unioned out of the set's OTHER items filed
-under it. The candidate's own thread is never among the members it is judged
-against, as in the app, where a candidate is by construction not yet one; a
-whole-set union would hand the model the candidate card's own participants
-segment back as the storyline's people, on exactly the question the headline
-gold-accept rate is read from. A storyline whose only golden item IS the
-candidate therefore arrives with an empty People line, which is thinner than
-the prompt the app would send and so penalises rather than flatters — the run
-counts how many gold candidates were asked that way. The candidate card is
-built the way `enrichedCardForConversationRow` builds one: the subject
-stripped of its Re:/Fw: markers, the conversation's people, and the extraction
-topics and triage summary of a BULK RUN FILE, passed as `GOLDEN_RUN=`. The
-card is therefore the one the app would carry if the model that wrote that
-run file were the one shipping, which is the only honest way to card a thread
-the replay never triaged. The extras are drawn by a shuffle seeded with the
-item's id, so two candidates sit the same exam; the anti-storylines are never
-instantiated, because an anti-storyline has no charter to judge against and is
-scored through the real storylines' forbidden lists instead.
+**Storyline membership.** Since the decision-questions round every membership
+judgement is the decision model's `member_of` (`StorylineJudge`,
+`docs/pipeline/06-storylines.md`), and this replay asks exactly that, per item,
+against a BOUNDED candidate list: the item's gold storyline when it has one,
+every registry storyline gold marks forbidden on it, and three more drawn from
+the rest of the registry by a shuffle seeded with the item's id. That is three
+to six questions an item, 453 over the set. Each registry storyline arrives as
+the app's own `Storyline` with its charter as the criterion; each thread is the
+app's own thread text, read from the golden mailbox seeded exactly as
+`golden-sweep` seeds it (`GOLDEN_RUN=` supplies that mailbox's triage
+summaries and extraction topics; the embedding server is used if it is up and
+its vectors are not read). The anti-storylines are never instantiated, because
+an anti-storyline has no charter to judge against and is scored through the
+real storylines' forbidden lists instead.
 
-What this does NOT measure is most of the stage. The sweep that proposes
-storylines, the embeddings and thresholds that shortlist them, the recruit laps
-and the chaining are code, and this replay is blind to all of it: it hands the
-model a list a human wrote. The owner's kept and removed example fences ride
-in empty, because a gold storyline has no owner history to teach it. And the
-economics do not transfer — the app asks one confirmation per assignment and
-this asks four or five per message, so the `$/1K msgs` on a storyline row is
-per thousand messages FILED through the bounded list, not per thousand
-triaged.
+What this does NOT measure is most of the stage: the retrieval that shortlists
+storylines, the sweep, the recruit laps. It hands the model a list a human
+wrote. And the economics do not transfer — the app asks up to six judgements
+per assignment and this asks four or five per message.
 
 Scoring has two halves. The derived `storyline.id` is the accepted candidate
-with the highest confidence — `low` counts as a no, the service's own rule,
-and a tie at the top is broken alphabetically, blind to gold, with the ties
-counted so a reader knows how often the rule decided anything. That id goes
-into a run file and `make golden-score` applies the toolkit's
-must/should/may/forbidden rules to it, the same scorer as every other row. An
-item that lost a candidate call to a failure is left UNFILED, so the scorer
-reads it as not attempted rather than as a miss. Beside the scorer the run
-prints its own direct rates, which a single derived id cannot express:
-gold-accept on the `must` and `should` populations, forbidden-accept,
-extra-accept, how often a gold-`none` item was filed nowhere, and how many
-yeses were hedged into `low` and thrown away.
+(p at `StorylinePolicy.acceptActive` or above, the service's rule for a kept
+storyline) with the highest p, and a tie at the top is broken alphabetically,
+blind to gold, with the ties counted. That id goes into a run file and
+`make golden-score` applies the toolkit's must/should/may/forbidden rules to
+it. An item that lost a candidate call to a failure is left UNFILED, so the
+scorer reads it as not attempted rather than as a miss. Beside the scorer the
+run prints gold-accept on the `must` and `should` populations,
+forbidden-accept, extra-accept, how often a gold-`none` item was filed
+nowhere, and the gold candidate's p on every item line. Rows taken before the
+round asked `ConfirmMembershipTask` on the bulk slot, with a charter clamp
+(`GOLDEN_CHARTER_CAP`) that no longer exists; they stay in the ledger as
+history.
 
 ```sh
-make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json         # the shipping 4B
-make golden-storyline GOLDEN_RUN=… BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=…  # a candidate on the bulk slot
-make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # storyline.id, must/should/forbidden rules
+make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json   # member_of on make decide
+make golden-storyline GOLDEN_RUN=… DECIDE_URL=…                       # another decision server
+make golden-score R=tmp/bench/golden-run-decision-storyline-….json    # storyline.id, must/should/forbidden rules
 ```
 
 **The sweep, replayed.** The block above measures the model handed a

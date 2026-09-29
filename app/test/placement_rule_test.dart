@@ -74,11 +74,13 @@ void main() {
         expect(spec.url, 'http://127.0.0.1:8080/v1/chat/completions');
         expect(spec.model, routerProseId, reason: id);
       }
-      // Twelve (triage and extraction became message_text, the reply
-      // decision became the decision model's, and needs-you asks no language
-      // model at all), so the list has not quietly shrunk.
-      expect(generativeStages, hasLength(12));
+      // Eleven (triage and extraction became message_text, the reply
+      // decision became the decision model's, and neither needs-you nor
+      // storyline membership asks a language model at all), so the list has
+      // not quietly shrunk.
+      expect(generativeStages, hasLength(11));
       expect(generativeStages, isNot(contains('needs_you')));
+      expect(generativeStages, isNot(contains('storyline_membership')));
     });
 
     test('managed on the inbox tier: the 4B', () {
@@ -124,15 +126,6 @@ void main() {
         expect(spec.url, generativeUrlDefault, reason: id);
         expect(spec.model, generativeModelDefault, reason: id);
       }
-    });
-
-    test('the confirm is plain generative, on either placement', () {
-      // It was the one stage whose role depended on the placement.
-      expect(onBox.specForStage('storyline_membership')!.id, boxProseId);
-      expect(const AppPrefs().specForStage('storyline_membership')!.id,
-          localGenerativeId);
-      expect(onBox.specForStage('storyline_membership'),
-          onBox.specForStage('message_text'));
     });
 
     test('the discovered model name is asked for, and the wire read off the '

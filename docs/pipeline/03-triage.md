@@ -73,14 +73,31 @@ refused under `decision_misconfigured` with its own sentence: the installed
 decision model is the older version, so install the new one with `make
 decide-install`. A stored `message_decisions` row whose `qhash` is not
 `decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
-as no decision. Until the planned install-time re-decide one-shot lands, that
-is the whole of it: after the upgrade every older row reads as undecided (the
-Why panel shows no decision, `replyExpectedP` is null, and extraction's intent
-and importance fall back as for a message with no decision), the needs-you pass
-does NOT rerun those messages on its own (the repair pass requeues only a
-missing or ownerless p), and the raw SQL readers (the claim order's
-importance, `requeueOwnerlessNeedsYou`) still read the older rows as they
-stand.
+as no decision.
+
+**The install-time re-decide.** So a new model does not leave the recent
+mailbox undecided, the mail sync starts `TriageQueue.redecideStale` once per
+question-set hash (the pref `decision_redecide_qhash` holds the hash it last
+finished for). It runs the decision pass again — the same `decisionInputFor`
+state and the same writers — for the kept inbound (`triaged`) messages of the
+last 30 days whose decision row is under another hash or missing, newest
+first, at most 2,000 (`MessageStore.staleDecisionRefs`). It rewrites the
+`message_decisions` row, the four triage fields (urgency, category,
+needs_action, reply_expected, through the narrow `writeDecidedTriage`),
+`needs_you_p` with its sentence, and the intent and importance inside an
+extraction that already ran (`rewriteExtractionDecision`, topics and project
+untouched), and folds the thread's CTA as the claim does (`foldCtaUp`), so a
+quiet thread's urgency and category follow the new decision. It never
+touches the text, the gate verdict or `triage_status`, and it never gates.
+Started unawaited so new mail's sync is not held behind it; a decision park,
+the processing switch, or a run whose skipped (4xx) messages are at least as
+many as its re-decided ones ends it incomplete, the pref stays open, and the
+next sync resumes, since what was re-decided has left the list. While triage
+itself is parked on the decision model it asks nothing, and a re-decide park
+is logged once per question set and reason per app run. Not in `derivedOneShotPrefs`: Clear AI results re-triages every message
+under the current model anyway. Older rows outside the window still read as
+undecided, and the raw SQL readers (the claim order's importance,
+`requeueOwnerlessNeedsYou`) read them as they stand.
 
 **The CTA rollup.** `foldCtaUp` (`app/lib/services/conversation_cta.dart`) is
 the ONE fold, called twice per message. Triage calls it with the decision's

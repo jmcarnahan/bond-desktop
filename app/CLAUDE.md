@@ -216,9 +216,18 @@ enforce the ones that are commands.
   conversation vector by construction, so it ships with a one-shot re-embed
   in `sync_service.dart` (Round A's pref idiom).
 - `_accepts` in `storyline_service.dart` is the one membership rule at all
-  five confirm sites (assign, recruit, sweep member, probe, audit), and a
-  `suggested` storyline needs `high`. It and `_confirm` stayed in the service
-  through the split, because one rule at five sites is not a seam.
+  five confirm sites (assign, recruit, sweep member, probe, audit): the
+  decision model's `member_of` p against `StorylinePolicy`
+  (`storyline_judge.dart`) — `acceptSuggested` for a `suggested` storyline,
+  `acceptActive` for a kept one. `_confirm` asks `StorylineJudge.memberOf`,
+  ONE batch per storyline per lap, and a decision exception propagates and
+  parks the lane; no language model is asked about membership (the
+  `storyline_membership` stage is gone). Both stayed in the service through
+  the split, because one rule at five sites is not a seam. The
+  `StorylinePolicy` numbers are provisional and move only with a
+  `make golden-storyline` row on each side. Storyline tests script `member_of`
+  through `scriptedJudge(store, llm)` (`fake_decision_client.dart`): a
+  `{'p': …}` step under the `member_of` schema name, one call per thread.
 - The storyline service is four files now and one public face: the user
   actions in `storyline_edits.dart` (`StorylineEdits`), the clustering in
   `storyline_grouper.dart` (`StorylineGrouper`), the shared card statics in
@@ -601,6 +610,23 @@ enforce the ones that are commands.
   `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
   default 0.30) is the only control; every reader goes through it; no
   language model is asked about needs-you.
+- `decision_labels` (v22) is KEPT: the owner's storyline presses logged as
+  labels for the storyline questions (`member_of`, `charter_specific`), with
+  the storyline's title and charter at the press. Written ONLY by
+  `StorylineEdits` at an owner press (Keep and Dismiss of a suggestion or
+  possible row, add, remove, a charter written — Allow again writes none,
+  lifting a veto is not a yes), never by an automatic pass; Clear AI results keeps it and `wipeAll` deletes it.
+- The install-time re-decide (`TriageQueue.redecideStale`) runs the DECISION
+  pass again for the last 30 days of kept inbound messages decided under
+  another qhash (at most 2,000, newest first), writing only the decision row,
+  the four triage fields, `needs_you_p`, the extraction's intent and
+  importance, and the thread's CTA fold (`foldCtaUp`, as the claim does). The
+  mail sync starts it unawaited on the pref `decision_redecide_qhash`, whose
+  value IS the qhash it finished for; a park, the processing switch, or a run
+  whose skipped 4xx messages are at least as many as its re-decided ones
+  leaves it owed. It asks nothing while triage is parked on the decision
+  model, and logs a park once per qhash and reason per app run. Not in
+  `derivedOneShotPrefs`: a clear re-triages everything.
 - `message_decisions` is DERIVED (Clear AI results empties it; the triage
   pass writes it again), keyed by `(source, source_message_id)`. The four
   `*_p` columns are the probabilities read by hand; `answers_json` is every

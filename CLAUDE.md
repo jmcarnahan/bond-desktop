@@ -22,7 +22,7 @@ with exact commands, and the ledger of measured results. Read it before
 benching anything. The short version:
 
 - One command per evaluation: `make bench` / `bench-prose` / `ab` /
-  `ab-membership` / `drain`, pointed with `BENCH_URL`/`BENCH_MODEL`/
+  `drain`, pointed with `BENCH_URL`/`BENCH_MODEL`/
   `BENCH_LABEL` (bulk slot) or `PROSE_*` (prose slot). Result JSON lands in
   git-ignored `tmp/bench/`; `make bench-compare A=… B=…` diffs two runs
   (absolute paths — the tool runs from `app/`).

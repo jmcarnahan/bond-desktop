@@ -49,6 +49,12 @@ import 'fixtures/triage_seed.dart';
 
 class _FakeSync implements MailSync {
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> syncNow() async {}
 
   @override

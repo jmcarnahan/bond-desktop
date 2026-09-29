@@ -403,6 +403,23 @@ void main() {
     final label = await store.createLabel('FYI only', tone: 'success');
     await store.applyLabels('email', 'conv-1', [label.id]);
 
+    // One storyline press, logged as a decision label: the owner's word, like
+    // the vocabulary above, and nothing a re-run would write back.
+    await store.writeDecisionLabels([
+      (
+        question: 'member_of',
+        answer: 'yes',
+        storylineId: 'sl-1',
+        source: 'email',
+        conversationKey: 'conv-1',
+        otherSource: null,
+        otherConversationKey: null,
+        title: 'Invoice 4471',
+        charter: 'Getting invoice 4471 paid.',
+        origin: 'add',
+      ),
+    ]);
+
     // Configuration, which neither reset may touch.
     await store.setSenderPref('eric@example.com', 'later');
     await store.setPref('backend_mode', 'sdk');
@@ -438,7 +455,7 @@ void main() {
       expect(classified.length, classified.toSet().length);
       expect(MessageStore.derivedTables, hasLength(17));
       expect(MessageStore.syncedTables, hasLength(7));
-      expect(MessageStore.keptTables, hasLength(5));
+      expect(MessageStore.keptTables, hasLength(6));
     });
 
     test('name every retired clustering one-shot', () {
@@ -564,6 +581,20 @@ void main() {
         kept.single.id,
         reason: 'the filing survives as well as the word',
       );
+    });
+
+    test('keeps the storyline labels the owner pressed', () async {
+      await seedEverything();
+
+      await store.clearDerived();
+
+      // The storylines they were pressed on are derived and gone; the labels
+      // are the owner's word and stay, with the words they answered.
+      expect(await rows('storylines'), 0);
+      final labels = await store.decisionLabels();
+      expect(labels.single['question'], 'member_of');
+      expect(labels.single['answer'], 'yes');
+      expect(labels.single['charter'], 'Getting invoice 4471 paid.');
     });
 
     test('keeps the verdicts ingest wrote and re-pends the rest', () async {
@@ -1279,6 +1310,9 @@ void main() {
       // written about mail that is gone.
       expect(await rows('conversation_labels'), 0);
       expect(await rows('labels'), 0);
+      // The storyline labels too: each names a thread of the mailbox this
+      // wipe just deleted.
+      expect(await rows('decision_labels'), 0);
       // And the sender rule beside them, to show this is a deliberate
       // difference rather than the identity flag doing the work.
       expect(await store.getSenderPref('eric@example.com'), 'later');

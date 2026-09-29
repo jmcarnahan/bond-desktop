@@ -27,9 +27,15 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 |-------|------|
 | `decision` | Decision |
 | `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
-| `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
+| `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `embeddings` | Embeddings, not routed |
+
+There is no storyline-membership stage: whether a thread belongs to a storyline
+is the decision model's `member_of`, asked through `StorylineJudge` on the
+decision client (its calls are labelled `decision:member_of`), and a decision
+failure parks the storyline lane as it parks triage (see
+[06-storylines.md](06-storylines.md#membership-on-the-decision-model)).
 
 There is no reply-decision stage: whether a prefetched draft is wanted is the
 decision model's `reply_expected` probability, stored at triage and read by

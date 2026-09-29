@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart' show scriptedJudge;
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -162,11 +163,8 @@ ScriptedLlm groupLlm({
   return llm;
 }
 
-Map<String, dynamic> confirmAnswer() => const {
-      'evidence': 'Both concern the same specific piece of work.',
-      'belongs': true,
-      'confidence': 'high',
-    };
+/// A `member_of` yes over both bars, as the scripted judge reads it.
+Map<String, dynamic> confirmAnswer() => const {'p': 0.9};
 
 Map<String, dynamic> nameAnswer() => const {
       'evidence': 'shared deal',
@@ -272,7 +270,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final seen = <SeenCluster>[];
@@ -280,6 +278,7 @@ void main() {
       await StorylineService(
         store,
         llm,
+        judge: scriptedJudge(store, llm),
         groupingMode: GroupingMode.model,
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
@@ -319,11 +318,11 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
 
-      await StorylineService(store, llm, groupingMode: GroupingMode.model)
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm), groupingMode: GroupingMode.model)
           .sweep();
 
       // Determinism rests on it: the tombstone recognises a cluster by its
@@ -349,6 +348,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -375,7 +375,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final seen = <SeenCluster>[];
@@ -383,6 +383,7 @@ void main() {
       await StorylineService(
         store,
         llm,
+        judge: scriptedJudge(store, llm),
         groupingMode: GroupingMode.model,
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
@@ -404,6 +405,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -431,6 +433,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -456,7 +459,7 @@ void main() {
       );
 
       await expectLater(
-        StorylineService(store, llm, groupingMode: GroupingMode.model).sweep(),
+        StorylineService(store, llm, judge: scriptedJudge(store, llm), groupingMode: GroupingMode.model).sweep(),
         throwsA(isA<LlmUnavailableException>()),
       );
     });
@@ -499,7 +502,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final log = ActivityLog(store);
@@ -509,6 +512,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -544,7 +548,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final log = ActivityLog(store);
@@ -554,6 +558,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -586,7 +591,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final seen = <SeenCluster>[];
@@ -594,6 +599,7 @@ void main() {
       await StorylineService(
         store,
         llm,
+        judge: scriptedJudge(store, llm),
         groupingMode: GroupingMode.model,
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
@@ -620,7 +626,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final seen = <SeenCluster>[];
@@ -628,6 +634,7 @@ void main() {
       await StorylineService(
         store,
         llm,
+        judge: scriptedJudge(store, llm),
         groupingMode: GroupingMode.model,
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
@@ -669,7 +676,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final log = ActivityLog(store);
@@ -679,6 +686,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -705,7 +713,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final seen = <SeenCluster>[];
@@ -713,6 +721,7 @@ void main() {
       await StorylineService(
         store,
         llm,
+        judge: scriptedJudge(store, llm),
         groupingMode: GroupingMode.model,
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
@@ -740,6 +749,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.model,
         ),
@@ -809,7 +819,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final log = ActivityLog(store);
@@ -820,6 +830,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.pool,
           clusterObserver: (threads, outcome) =>
@@ -868,7 +879,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final log = ActivityLog(store);
@@ -878,6 +889,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.pool,
         ),
@@ -919,7 +931,7 @@ void main() {
         ],
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
       final log = ActivityLog(store);
@@ -929,6 +941,7 @@ void main() {
         StorylineService(
           store,
           llm,
+          judge: scriptedJudge(store, llm),
           activityLog: log,
           groupingMode: GroupingMode.pool,
         ),
@@ -969,13 +982,14 @@ void main() {
           ],
           scripts: {
             'storyline_name': [nameAnswer()],
-            'storyline_membership': [confirmAnswer()],
+            'member_of': [confirmAnswer()],
           },
         );
         final seen = <SeenCluster>[];
         await StorylineService(
           into,
           llm,
+          judge: scriptedJudge(into, llm),
           groupingMode: GroupingMode.model,
           clusterObserver: (threads, outcome) =>
               seen.add((threads: threads, outcome: outcome)),
@@ -1007,11 +1021,11 @@ void main() {
         keys: keys,
         scripts: {
           'storyline_name': [nameAnswer()],
-          'storyline_membership': [confirmAnswer()],
+          'member_of': [confirmAnswer()],
         },
       );
 
-      await StorylineService(store, llm).sweep();
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm)).sweep();
 
       // Cosine and neither of the two dark modes: `model` reads a
       // neighbourhood and `pool` reads the whole pool, and both ship behind a

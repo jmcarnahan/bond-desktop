@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart'
-    show GroupingMode, StorylineTuning;
+    show GroupingMode, StorylinePolicy, StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/golden_harness.dart';
@@ -423,24 +423,23 @@ void main() {
       );
     });
 
-    test('the Qwen edges bracket all four shipped gates', () {
+    test('the Qwen edges bracket both shipped clustering gates', () {
       // The reason those four numbers and not four others: every gate the
-      // clustering and the assign run on has a bucket boundary above it, so a
-      // reader can count the pairs a gate would refuse.
+      // clustering runs on has a bucket boundary above it, so a reader can
+      // count the pairs a gate would refuse.
       int binOf(double gate) =>
           cosineBins([gate], edges: cosineBinEdgesQwen).indexOf(1);
 
-      expect(binOf(StorylineTuning.assignCosineGateWithOverlap), 1);
       expect(binOf(StorylineTuning.clusterCoherenceFloor), 2);
-      expect(binOf(StorylineTuning.assignCosineGate), 2);
       expect(binOf(StorylineTuning.clusterLinkThreshold), 3);
-      // And the old edges cannot: all four land in one bucket there.
+      // The assign pass's retrieval floor is under every edge: it decides
+      // what is asked, never what is filed.
+      expect(binOf(StorylinePolicy.assignRetrievalFloor), 0);
+      // And the old edges cannot: both land in one bucket there.
       expect(
         {
           for (final gate in [
-            StorylineTuning.assignCosineGateWithOverlap,
             StorylineTuning.clusterCoherenceFloor,
-            StorylineTuning.assignCosineGate,
             StorylineTuning.clusterLinkThreshold,
           ])
             cosineBins([gate]).indexOf(1),
@@ -1132,7 +1131,7 @@ void main() {
           forbiddenByAnti: forbidden,
           unmapped: 4,
           filedNowhere: 11,
-          callsByKind: const {'storyline_name': 2, 'storyline_membership': 9},
+          callsByKind: const {'storyline_name': 2, 'decision:member_of': 9},
           groupingCalls: 4,
           grouped: 11,
           groupingFailed: 1,

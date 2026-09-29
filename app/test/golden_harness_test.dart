@@ -6,8 +6,6 @@ import 'package:bond_inbox/services/decision/decision_policy.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-import 'package:bond_inbox/services/storyline_service.dart'
-    show StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_stats.dart';
@@ -554,30 +552,6 @@ void main() {
         reason: 'k=$bad',
       );
     }
-  });
-
-  test('GOLDEN_CHARTER_CAP must name a clamp somebody could run', () {
-    // Loud rather than clamped, for checkK's reason: a zero would send the
-    // confirm a storyline with no description and record the answer as a
-    // measurement of the cap that was typed.
-    expect(checkCharterCap(800), 800);
-    expect(checkCharterCap(1), 1);
-    for (final bad in const [0, -1]) {
-      expect(
-        () => checkCharterCap(bad),
-        throwsA(isA<ArgumentError>()
-            .having((e) => e.name, 'name', contains('GOLDEN_CHARTER_CAP'))),
-        reason: 'cap=$bad',
-      );
-    }
-  });
-
-  test("with no define the charter cap is the app's own", () {
-    // A bare `flutter test` passes no define, so this is the fallback the
-    // harness runs at. Pinned against the app's constant rather than a
-    // literal: the harness default tracks whatever the app ships, so moving
-    // `StorylineTuning.charterCap` moves the replay's control with it.
-    expect(GoldenDefines.charterCap, StorylineTuning.charterCap);
   });
 
   // ── a throttled call is retried, everything else is not ───────────────

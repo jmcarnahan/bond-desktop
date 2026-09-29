@@ -375,12 +375,12 @@ void main() {
           system: 's',
           user: 'u',
           schema: const {'type': 'object'},
-          schemaName: 'storyline_membership',
+          schemaName: 'storyline_name',
         ),
         throwsA(isA<LlmFormatException>()),
       );
 
-      expect(seen.single.label, 'storyline_membership');
+      expect(seen.single.label, 'storyline_name');
       expect(seen.single.outcome, 'format');
       expect(seen.single.error, contains('did not answer with JSON'));
     });

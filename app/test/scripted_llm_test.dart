@@ -229,12 +229,12 @@ void main() {
       final llm = ScriptedLlm.never(label: 'the repair');
 
       await expectLater(
-        ask(llm, 'storyline_membership'),
+        ask(llm, 'storyline_name'),
         throwsA(
           isA<StateError>().having(
             (e) => e.message,
             'message',
-            'the repair: no script for storyline_membership',
+            'the repair: no script for storyline_name',
           ),
         ),
       );

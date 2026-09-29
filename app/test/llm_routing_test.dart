@@ -6,10 +6,12 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart' show AccountInfo;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/storyline_judge.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -44,12 +46,6 @@ ScriptedLlm routed(String label, Map<String, List<Object>> scripts) {
 
 /// A unit vector whose cosine against `[1, 0]` is exactly [c].
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
-
-Map<String, dynamic> confirmAnswer() => {
-      'evidence': 'Both concern the website redesign.',
-      'belongs': true,
-      'confidence': 'high',
-    };
 
 Map<String, dynamic> groupAnswer(List<int> threads) => {
       'groups': [
@@ -173,26 +169,34 @@ void main() {
   }
 
   group('StorylineService', () {
-    test('membership goes to the confirm client, naming to the primary',
+    /// A judge whose every `member_of` is a yes over both bars.
+    ({StorylineJudge judge, FakeDecisionClient decision}) yesJudge() {
+      final decision = FakeDecisionClient.storyline(defaultYes: 0.9);
+      return (
+        judge: StorylineJudge(decision: decision, store: store),
+        decision: decision,
+      );
+    }
+
+    test('membership goes to the decision model, naming to the primary',
         () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
       final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final (:judge, :decision) = yesJudge();
 
-      final service = StorylineService(store, primary, confirmClient: fast);
+      final service = StorylineService(store, primary, judge: judge);
       await service.assignConversation('email', 'c1');
       // The description is queued rather than written inline, so the flow has
       // two halves now — the drain is where the naming call lives.
       await service.refresh('sl-1');
 
-      // One flow, two servers: the membership question never touched the 27B
-      // and the naming never touched the small model.
-      expect(fast.schemas, ['storyline_membership']);
+      // One flow, two models: the membership question never touched a
+      // language model and the naming never touched the decision model.
+      expect(decision.asks.map((a) => a.question),
+          [StorylineQuestion.memberOf]);
       expect(primary.schemas, ['storyline_name']);
       // And it did the work, rather than routing tidily past a no-op.
       expect(await store.membersOf('sl-1'), hasLength(2));
@@ -200,15 +204,13 @@ void main() {
           'The studio is reviewing the homepage copy.');
     });
 
-    test('the sweep names on the primary and confirms on the fast client',
+    test('the sweep names on the primary and judges on the decision model',
         () async {
       // Five unassigned threads, three of which link — the sweep proposes one
       // storyline and names it. Three and not two because a cosine cluster
       // under `proposeMinClusterSize` never reaches the namer at all. The
       // cluster is a shortlist, not a verdict, so each of its threads is then
-      // confirmed against that name, and membership is a membership question
-      // wherever it is asked from: it goes to the small server exactly as an
-      // assignment's does.
+      // judged against that name, in one batch, by the decision model.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed('c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
@@ -218,18 +220,13 @@ void main() {
       final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final (:judge, :decision) = yesJudge();
 
-      await StorylineService(store, primary, confirmClient: fast).sweep();
+      await StorylineService(store, primary, judge: judge).sweep();
 
       expect(primary.schemas, ['storyline_name']);
-      expect(fast.schemas, [
-        'storyline_membership',
-        'storyline_membership',
-        'storyline_membership',
-      ]);
+      expect(decision.asks, hasLength(1));
+      expect(decision.statesFor(StorylineQuestion.memberOf), hasLength(3));
       expect(await store.loadStorylines(), hasLength(1));
     });
 
@@ -238,7 +235,7 @@ void main() {
       // The dark path, exercised with the test-only override rather than by
       // flipping the const the rest of the suite reads. Grouping is prose
       // work of the same kind naming is, so it lands on the 27B — and the
-      // membership questions it produces still go to the small server.
+      // membership questions it produces still go to the decision model.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed('c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
@@ -248,23 +245,17 @@ void main() {
         'storyline_group': [groupAnswer([1, 2, 3])],
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final (:judge, :decision) = yesJudge();
 
       await StorylineService(
         store,
         primary,
-        confirmClient: fast,
+        judge: judge,
         groupingMode: GroupingMode.model,
       ).sweep();
 
       expect(primary.schemas, ['storyline_group', 'storyline_name']);
-      expect(fast.schemas, [
-        'storyline_membership',
-        'storyline_membership',
-        'storyline_membership',
-      ]);
+      expect(decision.statesFor(StorylineQuestion.memberOf), hasLength(3));
     });
 
     test('a group client takes the grouping off the naming client', () async {
@@ -280,14 +271,11 @@ void main() {
       final grouper = routed('grouper', {
         'storyline_group': [groupAnswer([1, 2, 3])],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
 
       await StorylineService(
         store,
         primary,
-        confirmClient: fast,
+        judge: yesJudge().judge,
         groupClient: grouper,
         groupingMode: GroupingMode.model,
       ).sweep();
@@ -296,22 +284,21 @@ void main() {
       expect(primary.schemas, ['storyline_name']);
     });
 
-    test('without a confirm client everything stays on the one it was given',
-        () async {
+    test('without a judge a membership question throws, and asks no language '
+        'model', () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
-      final only = routed('only', {
-        'storyline_membership': [confirmAnswer()],
-        'storyline_name': [nameAnswer()],
-      });
+      final only = routed('only', {'storyline_name': [nameAnswer()]});
 
-      final service = StorylineService(store, only);
-      await service.assignConversation('email', 'c1');
-      await service.refresh('sl-1');
+      await expectLater(
+        StorylineService(store, only).assignConversation('email', 'c1'),
+        throwsA(isA<StateError>()),
+      );
 
-      // The pre-phase-3 behaviour, and what every other caller in the tests
-      // still relies on: one client answers both jobs.
-      expect(only.schemas, ['storyline_membership', 'storyline_name']);
+      // There is no fallback: a service built for the user actions alone has
+      // nobody to ask, and says so rather than guessing on the naming model.
+      expect(only.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
     });
   });
 
@@ -353,21 +340,18 @@ void main() {
       );
     });
 
-    test('storylineServiceProvider wires the split', () async {
+    test('storylineServiceProvider judges on the decision client', () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
       final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final decision = FakeDecisionClient.storyline(defaultYes: 0.9);
       final container = ProviderContainer(
         overrides: [
           dbProvider.overrideWithValue(db),
-          stageLlmClientProvider.overrideWith(
-            (ref, id) => id == 'storyline_membership' ? fast : primary,
-          ),
+          stageLlmClientProvider.overrideWith((ref, id) => primary),
+          decisionClientProvider.overrideWithValue(decision),
         ],
       );
       addTearDown(container.dispose);
@@ -376,9 +360,10 @@ void main() {
       await service.assignConversation('email', 'c1');
       await service.refresh('sl-1');
 
-      // The service tests above prove the service honours a confirm client;
-      // this one proves the wiring actually passes it.
-      expect(fast.schemas, ['storyline_membership']);
+      // The service tests above prove the service asks its judge; this one
+      // proves the wiring hands it the app's decision client.
+      expect(decision.asks.map((a) => a.question),
+          [StorylineQuestion.memberOf]);
       expect(primary.schemas, ['storyline_name']);
     });
 
@@ -391,13 +376,11 @@ void main() {
       // forgot one would be invisible with a single fake.
       final clients = {
         for (final id in [
-          'storyline_membership',
           'storyline_name',
           'storyline_refresh',
           'storyline_recap',
         ])
           id: routed(id, {
-            'storyline_membership': [confirmAnswer()],
             'storyline_name': [nameAnswer()],
             'storyline_refresh': [refineAnswer()],
             'storyline_recap': [recapAnswer()],
@@ -408,6 +391,9 @@ void main() {
           dbProvider.overrideWithValue(db),
           stageLlmClientProvider.overrideWith(
             (ref, id) => clients[id] ?? routed(id, const {}),
+          ),
+          decisionClientProvider.overrideWithValue(
+            FakeDecisionClient.storyline(defaultYes: 0.9),
           ),
         ],
       );
@@ -430,8 +416,6 @@ void main() {
       await service.refresh('sl-1');
       await service.recap('sl-1');
 
-      expect(clients['storyline_membership']!.schemas,
-          everyElement('storyline_membership'));
       expect(clients['storyline_name']!.schemas, ['storyline_name']);
       expect(clients['storyline_refresh']!.schemas, ['storyline_refresh']);
       expect(clients['storyline_recap']!.schemas, ['storyline_recap']);

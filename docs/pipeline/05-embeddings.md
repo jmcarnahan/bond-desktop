@@ -119,9 +119,12 @@ read. It is 86 characters and the trailing space is part of it;
 a property of the model and the prefix, not of the app, so
 `clusterLinkThreshold` 0.48, `clusterCoherenceFloor` 0.43,
 `clusterSplitCeiling` 0.68, `assignCosineGate` 0.44 and
-`assignCosineGateWithOverlap` 0.37 in `StorylineTuning` are the old numbers
+`assignCosineGateWithOverlap` 0.37 in `StorylineTuning` were the old numbers
 read off the Phase 1 rung on the new scale and confirmed by the Phase 2 sweep
-rows. Nothing about the membership RULES changed.
+rows. Nothing about the membership RULES changed. (The two assign gates were
+retired in the decision-questions round: the assign pass now retrieves at
+`StorylinePolicy.assignRetrievalFloor` and the decision model's `member_of`
+decides — see [06-storylines.md](06-storylines.md#membership-on-the-decision-model).)
 
 **A tag bump and a one-shot is how any of this ships.** Moving the model, the
 prefix or the card orphans every stored conversation vector by construction,

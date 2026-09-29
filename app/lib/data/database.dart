@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 21;
+  int get schemaVersion => 22;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -763,6 +763,21 @@ WHERE needs_you_p IS NULL''');
                   'UPDATE messages SET needs_you_verdict = NULL '
                   'WHERE needs_you_verdict IS NOT NULL',
                 );
+              },
+              // v22 — the decision-questions round. One KEPT table,
+              // `decision_labels`: the owner's storyline presses logged as
+              // labels for the decision model's storyline questions, so Clear
+              // AI results no longer erases them.
+              //
+              // Nothing to backfill: a press made before this version was not
+              // recorded as a label, and the storyline tables that remember it
+              // are derived.
+              //
+              // Guarded like every step here (db_adoption_test replays them).
+              from21To22: (m, schema) async {
+                if (!await _tableExists('decision_labels')) {
+                  await m.createTable(schema.decisionLabels);
+                }
               },
             ),
           ),

@@ -46,7 +46,7 @@ is always the authority when they disagree.
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
 | 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file, one brief per directory, and one section pick per directory-fed draft | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
-| 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
+| 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap; every membership judgement is the decision model's `member_of`, the naming and the prose are generative | **yes** (names, refresh, recap) + decision model (membership) | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply gate** — the decision model's `reply_expected` probability, read from triage's stored row BEFORE any context is gathered; skipped outright when a person asked — see 07 | no§ | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
@@ -138,7 +138,7 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Directory file digest | Generative | `context_file_digest` | `:8080` |
 | Directory brief | Generative | `context_brief` | `:8080` |
 | Directory section pick | Generative | `context_select` | `:8080` |
-| Storyline membership confirm | Generative | `storyline_membership` | `:8080` |
+| Storyline membership (`member_of`) | Decision | `decision` (labelled `decision:member_of`) | `:8083` (`make decide`) |
 | Storyline grouping (dark; `GroupingMode.model` only) | Generative | `storyline_group` | `:8080` |
 | Storyline naming | Generative | `storyline_name` | `:8080` |
 | Storyline refresh | Generative | `storyline_refresh` | `:8080` |

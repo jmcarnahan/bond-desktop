@@ -304,6 +304,36 @@ class DecisionClient {
     });
   }
 
+  /// Throws what a question would throw when the decision model plainly
+  /// cannot answer, and asks it nothing: a managed model the router does not
+  /// serve, Your server's kind (asked once and cached, as any call asks it),
+  /// and for the encoder-heads kind the heads file on this Mac. A server that
+  /// is merely down is found by the first real question.
+  ///
+  /// For a caller about to spend a language-model call on work only the
+  /// decision model can finish — the sweep names a cluster before it asks
+  /// `member_of` about it — so a parked decision model parks that caller
+  /// first. No [LlmCallRecord]: nothing was asked.
+  Future<void> ensureReady() async {
+    final destination = target;
+    if (destination.unavailable case final why?) {
+      throw DecisionNotInstalledException(why);
+    }
+    final facts = _CallFacts(yourServer: _yours(destination));
+    try {
+      final backend = await _backendFor(destination, facts);
+      if (backend is _EncoderHeadsBackend) _heads();
+    } on LlmUnavailableException catch (e) {
+      // [_instrumented]'s rule: a kind or a probe that failed is asked again.
+      if (e is DecisionUnavailableException ||
+          e is DecisionUnauthorizedException) {
+        _verified.remove(_keyOf(destination));
+        _kinds.remove(_keyOf(destination));
+      }
+      rethrow;
+    }
+  }
+
   /// `same_effort` for each pair of thread texts (`renderStorylineThread`),
   /// in order: the mean of p(yes) over both orders, A-then-B and B-then-A,
   /// which is how the model was trained and how the contract asks it. Both

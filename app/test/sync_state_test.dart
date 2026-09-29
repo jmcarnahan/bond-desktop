@@ -192,6 +192,7 @@ void main() {
     int lookbackDays, {
     Future<({int repaired, bool complete})> Function()?
         repairGatedConversations,
+    Future<({int redecided, bool complete})> Function()? redecide,
     PipelineProgress? progress,
     String? userAddress,
   }) {
@@ -206,6 +207,7 @@ void main() {
       // row's detail and nowhere else.
       activityLog: ActivityLog(store),
       repairGatedConversations: repairGatedConversations,
+      redecide: redecide,
       lookbackDays: () => lookbackDays,
       progress: progress,
       userAddress: userAddress == null ? null : () async => userAddress,
@@ -1059,6 +1061,76 @@ void main() {
           {'email/v1-a', 'email/v1-b', 'email/v2-a', 'teams/v2-b'});
       expect(await store.getPref('clustering_card_v3'), '1');
       expect((await syncMailDetail())['requeued_clustering_reembeds'], 2);
+    });
+  });
+
+  /// The install-time re-decide: once per decision model, keyed on the
+  /// question-set hash, and never holding the sync that started it.
+  group('the re-decide one-shot', () {
+    test('runs once for this build\'s hash and records it', () async {
+      var calls = 0;
+      Future<({int redecided, bool complete})> redecide() async {
+        calls++;
+        return (redecided: 4, complete: true);
+      }
+
+      final first = syncReaching(14, redecide: redecide);
+      await first.syncNow();
+      await first.redecideInFlight;
+
+      expect(calls, 1);
+      // The value IS the hash it ran for, so a new model runs it again.
+      expect(await store.getPref(redecideQhashKey), decisionQhash);
+
+      final second = syncReaching(14, redecide: redecide);
+      await second.syncNow();
+      await second.redecideInFlight;
+      expect(calls, 1, reason: 'the same hash never runs it twice');
+    });
+
+    test('a pref from another model\'s hash runs it again', () async {
+      await store.setPref(redecideQhashKey, 'an-older-qhash');
+      var calls = 0;
+      final sync = syncReaching(14, redecide: () async {
+        calls++;
+        return (redecided: 0, complete: true);
+      });
+
+      await sync.syncNow();
+      await sync.redecideInFlight;
+
+      expect(calls, 1);
+      expect(await store.getPref(redecideQhashKey), decisionQhash);
+    });
+
+    test('a parked or failed run leaves it owed, and the sync is fine',
+        () async {
+      var calls = 0;
+      Future<({int redecided, bool complete})> redecide() async {
+        calls++;
+        if (calls == 1) return (redecided: 2, complete: false);
+        if (calls == 2) throw StateError('the decision server went away');
+        return (redecided: 1, complete: true);
+      }
+
+      for (var pass = 0; pass < 2; pass++) {
+        final sync = syncReaching(14, redecide: redecide);
+        await sync.syncNow();
+        await sync.redecideInFlight;
+        expect(await store.getPref(redecideQhashKey), isNull,
+            reason: 'pass $pass');
+      }
+
+      final sync = syncReaching(14, redecide: redecide);
+      await sync.syncNow();
+      await sync.redecideInFlight;
+      expect(calls, 3);
+      expect(await store.getPref(redecideQhashKey), decisionQhash);
+    });
+
+    test('is not a derived one-shot: Clear AI results re-decides everything',
+        () {
+      expect(MessageStore.derivedOneShotPrefs, isNot(contains(redecideQhashKey)));
     });
   });
 

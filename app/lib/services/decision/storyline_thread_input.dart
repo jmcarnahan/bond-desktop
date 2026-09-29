@@ -32,7 +32,7 @@
 ///   message whose body was never fetched (an outbound one, or one still
 ///   pending its detail fetch) has a NULL `body_text` and renders its
 ///   `body_preview`, which for mail is Graph's preview of the whole body,
-///   quoted chain and all. [StorylineThreadText.previewRows] counts those
+///   quoted chain and all. [StorylineThreadText.previewIds] names those
 ///   rows so a caller can fetch the bodies first. A fetched mail whose own
 ///   body is empty falls back to its preview here, as `packer_row` does too.
 /// - **Recipient names.** `to_json` stores addresses only, so an outbound
@@ -85,25 +85,32 @@ class StorylineThreadText {
   /// these, so an answer is reused exactly while both texts are unchanged.
   final String cardHash;
 
-  /// How many of the messages the text renders (the newest three shown) were
-  /// rendered from `body_preview` because `body_text` was empty — mostly
-  /// rows whose body was never fetched, whose text is not the body training
-  /// saw; a fetched message whose own body is empty counts too, though
-  /// `packer_row` fell back to the preview for it as well.
-  final int previewRows;
+  /// The `source_message_id`s of the messages the text renders (the newest
+  /// three shown) that were rendered from `body_preview` because `body_text`
+  /// was empty — mostly rows whose body was never fetched, whose text is not
+  /// the body training saw; a fetched message whose own body is empty counts
+  /// too, though `packer_row` fell back to the preview for it as well. What
+  /// the storyline judge asks the mail sync to fetch.
+  final List<String> previewIds;
 
   const StorylineThreadText({
     required this.text,
     required this.cardHash,
-    this.previewRows = 0,
+    this.previewIds = const [],
   });
 
-  factory StorylineThreadText.of(String text, {int previewRows = 0}) =>
+  factory StorylineThreadText.of(
+    String text, {
+    List<String> previewIds = const [],
+  }) =>
       StorylineThreadText(
         text: text,
         cardHash: sha256.convert(utf8.encode(text)).toString().substring(0, 16),
-        previewRows: previewRows,
+        previewIds: previewIds,
       );
+
+  /// How many rendered rows carry their preview: [previewIds]' length.
+  int get previewRows => previewIds.length;
 }
 
 /// [conversationKey]'s thread text on [source].
@@ -135,12 +142,12 @@ Future<StorylineThreadText> storylineThreadTextFor(
   final rendered = shown.length > storylineThreadMessages
       ? shown.sublist(shown.length - storylineThreadMessages)
       : shown;
-  final previewRows = [
+  final previewIds = [
     for (final row in rendered)
       if ((row['body_text'] as String? ?? '').isEmpty &&
           stripDecisionMarkers(row['body_preview'] as String?).isNotEmpty)
-        row,
-  ].length;
+        row['source_message_id'] as String,
+  ];
 
   final teams = source == 'teams';
   return StorylineThreadText.of(
@@ -164,7 +171,7 @@ Future<StorylineThreadText> storylineThreadTextFor(
           ),
       ],
     ),
-    previewRows: previewRows,
+    previewIds: previewIds,
   );
 }
 

@@ -3,10 +3,15 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/decision/decision_client.dart'
     show rawEmbeddingsText;
+import 'package:bond_inbox/services/decision/decision_heads.dart'
+    show DecisionAnswers;
+import 'package:bond_inbox/services/decision/decision_questions.dart'
+    show decisionQhash;
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/owner_lookup.dart' show OwnerIdentity;
@@ -2543,6 +2548,294 @@ void main() {
 
       expect(gate.asks, 0);
       expect(await store.triageCounts(), {'pending': 2});
+    });
+  });
+
+  /// The install-time re-decide: the decision pass again for the recent kept
+  /// inbound messages an older model decided, writing the decision's fields
+  /// and nothing else.
+  group('re-decide', () {
+    String hoursAgo(int hours) => MessageStore.isoStamp(
+        DateTime.now().toUtc().subtract(Duration(hours: hours)));
+
+    /// A decision row an older model wrote.
+    Future<void> oldDecision(String id, {String qhash = 'old-qhash'}) =>
+        db.customStatement(
+          'INSERT INTO message_decisions (source, source_message_id, model, '
+          'qhash, answers_json, needs_you_p, decided_at) '
+          "VALUES ('email', ?, 'bond-decide-old', ?, '{}', 0.1, 't')",
+          [id, qhash],
+        );
+
+    /// The re-decide's answer: every field moved from what [seedDecided]
+    /// stored, so a field it forgot to write stays visibly old.
+    DecisionAnswers moved() => fakeAnswers(
+          urgency: 'high',
+          category: 'personal',
+          needsAction: 0.8,
+          replyExpected: 0.7,
+          needsYou: 0.66,
+          intent: 'request',
+          importance: 'high',
+        );
+
+    /// A kept inbound message the triage of an older build decided, with its
+    /// text and its extraction already written.
+    Future<void> seedDecided(String id, {int hours = 1}) async {
+      await seedMessage(
+        id: id,
+        receivedAt: hoursAgo(hours),
+        triageStatus: 'triaged',
+      );
+      await store.writeTriage(
+        'email',
+        id,
+        status: 'triaged',
+        result: const TriageResult(
+          urgency: 'normal',
+          category: 'work',
+          needsAction: false,
+          replyExpected: false,
+        ),
+      );
+      await store.writeNeedsYouP('email', id, p: 0.1, reason: 'Old reason.');
+      await store.writeMessageText(
+        'email',
+        id,
+        summary: 'Sarah asks about the launch date.',
+        actionItems: const ['Reply to Sarah'],
+        deadline: '',
+      );
+      await store.writeExtraction(
+        'email',
+        id,
+        jsonEncode({
+          'topics': ['launch date'],
+          'project': 'Launch',
+          'intent': 'fyi',
+          'importance': 'low',
+        }),
+      );
+      await oldDecision(id);
+    }
+
+    test('writes the decision fields and nothing else', () async {
+      await seedDecided('m1');
+      final decision = FakeDecisionClient.fixed(moved());
+
+      final outcome =
+          await TriageQueue(store, decisionClient: decision).redecideStale();
+
+      expect(outcome.redecided, 1);
+      expect(outcome.complete, isTrue);
+      final row = await messageRow('m1');
+      // The four triage fields and the needs-you number, from the new model.
+      expect(row['urgency'], 'high');
+      expect(row['category'], 'personal');
+      expect(row['needs_action'], 1);
+      expect(row['reply_expected'], 1);
+      expect(row['needs_you_p'], closeTo(0.66, 1e-9));
+      expect(row['needs_you_reason'], isNot('Old reason.'));
+      // Never the status, the gate or the text.
+      expect(row['triage_status'], 'triaged');
+      expect(row['gate_reason'], isNull);
+      expect(row['summary'], 'Sarah asks about the launch date.');
+      // The decision row is this build's now, so every reader sees it.
+      final stored = (await store.decisionFor('email', 'm1'))!;
+      expect(stored.model, 'bond-decide-fake');
+      expect(stored.needsYouP, closeTo(0.66, 1e-9));
+      // Intent and importance move inside the extraction; the text stage's
+      // topics and project stay.
+      final extraction = jsonDecode((await store.getExtraction('email', 'm1'))!)
+          as Map<String, dynamic>;
+      expect(extraction['intent'], 'request');
+      expect(extraction['importance'], 'high');
+      expect(extraction['topics'], ['launch date']);
+      expect(extraction['project'], 'Launch');
+    });
+
+    test('takes only recent, kept, inbound messages an older model decided, '
+        'newest first', () async {
+      await seedDecided('older', hours: 3);
+      await seedDecided('newer', hours: 1);
+      // Decided under this build's model already: nothing to do.
+      await seedDecided('current', hours: 2);
+      await db.customStatement(
+        'UPDATE message_decisions SET qhash = ? '
+        "WHERE source_message_id = 'current'",
+        [decisionQhash],
+      );
+      // Outside the thirty days.
+      await seedDecided('ancient', hours: 24 * 40);
+      // Not kept, not decided, not inbound.
+      await seedMessage(
+          id: 'gated', receivedAt: hoursAgo(1), triageStatus: 'skipped');
+      await oldDecision('gated');
+      await seedMessage(
+          id: 'pending', receivedAt: hoursAgo(1), triageStatus: 'pending');
+      await seedMessage(
+        id: 'mine',
+        direction: 'outbound',
+        receivedAt: hoursAgo(1),
+        triageStatus: 'triaged',
+      );
+      final decision = FakeDecisionClient.fixed(moved());
+
+      await TriageQueue(store, decisionClient: decision).redecideStale();
+
+      expect([for (final c in decision.calls) c.bodyText],
+          ['Body of newer', 'Body of older']);
+      // The cap is a LIMIT on the same list, newest first.
+      await db.customStatement(
+        "UPDATE message_decisions SET qhash = 'old-qhash' "
+        "WHERE source_message_id IN ('newer', 'older')",
+      );
+      final capped = await store.staleDecisionRefs(
+        qhash: decisionQhash,
+        sinceIso: hoursAgo(24 * TriageQueue.redecideDays),
+        limit: 1,
+      );
+      expect(capped.single.id, 'newer');
+    });
+
+    test('a decision server that is down parks it, and the next run resumes',
+        () async {
+      await seedDecided('older', hours: 2);
+      await seedDecided('newer', hours: 1);
+      var calls = 0;
+      final flaky = FakeDecisionClient((_) {
+        if (++calls == 2) {
+          throw const DecisionUnavailableException('The decision server is '
+              'down.');
+        }
+        return fakeDecision(moved());
+      });
+
+      final first =
+          await TriageQueue(store, decisionClient: flaky).redecideStale();
+      expect(first.redecided, 1);
+      expect(first.complete, isFalse);
+
+      final decision = FakeDecisionClient.fixed(moved());
+      final second =
+          await TriageQueue(store, decisionClient: decision).redecideStale();
+
+      // Only the one the park left: the other dropped out of the list.
+      expect(second.redecided, 1);
+      expect(second.complete, isTrue);
+      expect([for (final c in decision.calls) c.bodyText], ['Body of older']);
+    });
+
+    test('the thread follows the new decision', () async {
+      final at = hoursAgo(1);
+      await seedMessage(id: 'm1', receivedAt: at, triageStatus: 'triaged');
+      await seedConversation(lastInboundAt: at);
+      await store.updateConversationTriage(
+        'email',
+        'conv-1',
+        ctaUrgency: 'urgent',
+        category: 'work',
+        keepCtaText: true,
+      );
+      await oldDecision('m1');
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(urgency: 'normal', category: 'personal'),
+      );
+
+      await TriageQueue(store, decisionClient: decision).redecideStale();
+
+      final conversation = await conversationRow();
+      expect(conversation['cta_urgency'], 'normal');
+      expect(conversation['category'], 'personal');
+    });
+
+    test('a run that mostly failed is owed again, a few bad messages are not',
+        () async {
+      for (final (i, id) in ['a', 'b', 'c'].indexed) {
+        await seedDecided(id, hours: i + 1);
+      }
+      FakeDecisionClient failing(Set<String> bad) => FakeDecisionClient((input) {
+            if (bad.any((id) => input.bodyText == 'Body of $id')) {
+              throw const LlmFormatException('rejected');
+            }
+            return fakeDecision(moved());
+          });
+
+      // Two of three refused: more skipped than re-decided.
+      final mostly = await TriageQueue(store, decisionClient: failing({'a', 'b'}))
+          .redecideStale();
+      expect(mostly.redecided, 1);
+      expect(mostly.complete, isFalse);
+
+      // The next run finds the two still stale; one of them is bad for good.
+      final few =
+          await TriageQueue(store, decisionClient: failing({'a'})).redecideStale();
+      expect(few.redecided, 1);
+      expect(few.complete, isFalse,
+          reason: 'one skipped against one re-decided is not a majority');
+
+      await seedDecided('d', hours: 4);
+      await seedDecided('e', hours: 5);
+      final closed =
+          await TriageQueue(store, decisionClient: failing({'a'})).redecideStale();
+      expect(closed.redecided, 2);
+      expect(closed.complete, isTrue);
+    });
+
+    test('a decision model that stays parked is logged once per app run',
+        () async {
+      await seedDecided('m1');
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final queue = TriageQueue(
+        store,
+        activityLog: log,
+        decisionClient: FakeDecisionClient((_) => throw const
+            DecisionNotInstalledException('The decision model is not '
+                'installed.')),
+      );
+
+      for (var sync = 0; sync < 4; sync++) {
+        final outcome = await queue.redecideStale();
+        expect(outcome.complete, isFalse);
+      }
+
+      final parked = [
+        for (final row in await store.recentActivity(limit: 50))
+          if (row['kind'] == 'triage' && row['status'] == 'parked') row,
+      ];
+      expect(parked, hasLength(1));
+    });
+
+    test('nothing is asked while triage is already parked on the decision '
+        'model', () async {
+      await seedDecided('old');
+      await seedMessage(id: 'new', receivedAt: hoursAgo(1));
+      final decision = FakeDecisionClient((_) => throw const
+          DecisionUnavailableException('The decision server is down.'));
+      final queue = TriageQueue(store, decisionClient: decision);
+      await queue.pump();
+      final asked = decision.calls.length;
+
+      final outcome = await queue.redecideStale();
+
+      expect(outcome.complete, isFalse);
+      expect(decision.calls, hasLength(asked));
+    });
+
+    test('with processing off nothing is asked and it is not complete',
+        () async {
+      await seedDecided('m1');
+      final decision = FakeDecisionClient.fixed(moved());
+
+      final outcome = await TriageQueue(
+        store,
+        decisionClient: decision,
+        enabled: () => false,
+      ).redecideStale();
+
+      expect(outcome.complete, isFalse);
+      expect(decision.calls, isEmpty);
     });
   });
 

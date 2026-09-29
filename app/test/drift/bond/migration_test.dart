@@ -1284,6 +1284,27 @@ void main() {
     expect(verdicts.data['n'], 0);
   });
 
+  test('v21 to v22 adds decision_labels empty and keeps the storyline',
+      () async {
+    // Nothing to backfill: a press made before this version was never a
+    // label, and the storyline tables that remember it are derived.
+    final schema = await verifier.schemaAt(21);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, created_at,
+        updated_at) VALUES
+        ('sl-1', 'Lisbon offsite', 'active', 'user', 't', 't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 22);
+    addTearDown(db.close);
+
+    expect(await db.customSelect('SELECT * FROM decision_labels').get(),
+        isEmpty);
+    final storylines =
+        await db.customSelect('SELECT title FROM storylines').get();
+    expect([for (final r in storylines) r.data['title']], ['Lisbon offsite']);
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

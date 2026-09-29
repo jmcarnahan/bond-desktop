@@ -25,18 +25,21 @@ import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/storyline_tasks.dart';
 import 'mail_body.dart' show stripLinkTargets;
-import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 import 'storyline_cards.dart';
 import 'storyline_clustering.dart';
 import 'storyline_edits.dart';
 import 'storyline_grouper.dart';
+import 'storyline_judge.dart';
 import 'storyline_lint.dart';
 
 // The card and vector statics live in their own file now, because both halves
 // of the split read them. Re-exported so the seven libraries and eighteen test
 // files that import this one for them see no change at all.
 export 'storyline_cards.dart';
+// And the judge's policy and answer, which the storyline tests read beside
+// the tuning.
+export 'storyline_judge.dart' show MembershipAnswer, StorylinePolicy;
 
 /// How [StorylineService.sweep] decides which threads go together.
 ///
@@ -81,54 +84,6 @@ enum GroupingMode {
 /// that groups too little into one that groups wrongly, which is the failure
 /// users actually notice.
 class StorylineTuning {
-  /// Cosine a thread must reach against a storyline's centroid to be worth a
-  /// model call. Deliberately well below "obviously the same thread": the
-  /// embedding is a filter that decides what the model looks at, and the model
-  /// is what decides membership.
-  ///
-  /// On the Qwen scale, which is what all five of these gates are now read in.
-  /// Round E Phase 1 ranked twenty-four vector configurations on the golden
-  /// pool and the winner is `Qwen3-Embedding-0.6B` under the instruction
-  /// prefix: its cross-5 rung — the cosine at which only 5% of cross-effort
-  /// pairs still link — sits at 0.48 where the retired embeddinggemma vector
-  /// put it at 0.65, and its recall-70 rung — the cosine that still keeps 70%
-  /// of same-effort pairs — sits at 0.43. Two different models measure the
-  /// same distances on two different scales, so every gate below moved with
-  /// the vector rather than being retuned: this one is the old 0.60 times
-  /// 0.48 / 0.65, rounded to two places, and the Phase 2 sweep rows are what
-  /// confirmed the whole set.
-  static const double assignCosineGate = 0.44;
-
-  /// The gate when the thread shares enough people with the storyline. Who is
-  /// on a thread is the single strongest signal that two threads are the same
-  /// deal, so it buys a look the vector alone would not have earned. How many
-  /// people "enough" is, and who does not count, is
-  /// [assignOverlapMinShared].
-  ///
-  /// The old 0.50 on the Qwen scale — 0.50 times 0.48 / 0.65, rounded. See
-  /// [assignCosineGate] for the rescale and what measured it.
-  static const double assignCosineGateWithOverlap = 0.37;
-
-  /// How many shared people, none of them the owner, earn
-  /// [assignCosineGateWithOverlap].
-  ///
-  /// The lower gate used to fire on ANY shared participant, and in a one-team
-  /// mailbox every pair of threads shares someone — so the discount was the
-  /// rule rather than the exception and the real gate was 0.50. Two shared
-  /// people who are not the owner is a GROUP, which is the signal the
-  /// discount was meant to buy. The owner is never evidence of anything: they
-  /// are on every thread in their own mailbox.
-  static const int assignOverlapMinShared = 2;
-
-  /// How close the second-best candidate has to sit to the best one before
-  /// the cosine is no longer allowed to pick between them.
-  ///
-  /// The 4B tied fifteen times on the golden replay, and taking the first of
-  /// two candidates at 0.61 and 0.60 was a coin toss dressed as a ranking.
-  /// Within this margin both are asked and the ANSWER decides — the
-  /// confident yes, and the higher cosine only when the answers agree.
-  static const double assignTieMargin = 0.03;
-
   /// The floor share of a window's automatic adds a storyline must exceed
   /// before it can be called a catch-all. See [catchAllFairShareMultiple] for
   /// the other half of the threshold.
@@ -158,7 +113,7 @@ class StorylineTuning {
   static const int catchAllWindowDays = 7;
 
   /// Cosine two conversations must reach for the pair to count as a LINK.
-  /// Higher than the assignment gates because there is no existing group to
+  /// Higher than the retrieval floors because there is no existing group to
   /// score a candidate against — the only thing holding a cluster together is
   /// how close its members sit to each other.
   ///
@@ -178,8 +133,13 @@ class StorylineTuning {
   ///
   /// This IS the Qwen vector's cross-5 rung, read off Phase 1 rather than
   /// derived: 0.48 is where only 5% of the golden pool's cross-effort pairs
-  /// still link. The other four gates are scaled around it — see
-  /// [assignCosineGate].
+  /// still link. Round E Phase 1 ranked twenty-four vector configurations on
+  /// the golden pool and the winner is `Qwen3-Embedding-0.6B` under the
+  /// instruction prefix, whose recall-70 rung sits at 0.43 where the retired
+  /// embeddinggemma vector put this rung at 0.65. Two models measure the same
+  /// distances on two different scales, so the cosine gates below moved with
+  /// the vector by the ratio 0.48 / 0.65 rather than being retuned, and the
+  /// Phase 2 sweep rows are what confirmed the set.
   ///
   /// And a threshold is as far as arithmetic gets on this mailbox, which is
   /// what [groupingMode] exists for: the golden pool holds 1,346 cross-effort
@@ -249,7 +209,7 @@ class StorylineTuning {
   /// members do not average at least that far apart is not one most real
   /// pairs would have survived, whatever any single link in it says. The
   /// retired embeddinggemma vector put the same reading at 0.60, which is the
-  /// number this replaced; see [assignCosineGate] for the rescale.
+  /// number this replaced; see [clusterLinkThreshold] for the rescale.
   ///
   /// A cluster under it is split at a higher threshold, and what is still
   /// under it at [clusterSplitCeiling] is dropped for the pass — no naming
@@ -270,7 +230,7 @@ class StorylineTuning {
   /// exactly the ladder the retired 0.65 / 0.85 pair gave: the rescale to the
   /// Qwen vector moved both ends and kept the four rungs, so a cluster gets
   /// the same number of chances to come apart at a seam as it always did.
-  /// See [assignCosineGate].
+  /// See [clusterLinkThreshold].
   static const double clusterSplitCeiling = 0.68;
 
   /// Which pass decides what goes together. See [GroupingMode].
@@ -293,7 +253,7 @@ class StorylineTuning {
   /// be right, it only has to be a list that HOLDS the threads that belong
   /// together, so it is drawn to catch more than 70% of same-effort pairs and
   /// the model throws the rest away. It is the retired scale's 0.55 carried
-  /// over by the same 0.48 / 0.65 rescale the five gates took, rounded to two
+  /// over by the same 0.48 / 0.65 rescale the other gates took, rounded to two
   /// places. Drawing it any tighter would hand the model the same small pure
   /// groups the cosine pass already forms, and there would be nothing for it
   /// to decide.
@@ -467,24 +427,6 @@ class StorylineTuning {
   /// third on what those found; a fourth has never moved a golden row, and each
   /// lap is up to sixteen confirmation calls.
   static const int recruitMaxLapsDeclared = 3;
-
-  /// How much of a storyline's charter the confirm task is judged against, in
-  /// characters. The clamp bites often — most real charters are longer than
-  /// this, so what the model reads is usually the opening of a description
-  /// rather than the whole of one — which made it look like something worth
-  /// raising.
-  ///
-  /// Measured 2026-09-16, the 4B, the same cards at 400 / 800 / 1200: the
-  /// scorer's `storyline.id` went 81% / 78% / 77% and forbidden-accept went
-  /// 20% / 25% / 26%. So a longer charter did not buy recall, it cost
-  /// precision: more charter is more surface for a candidate to match
-  /// against, and the 4B matched on it. The cap stays at 400.
-  ///
-  /// It stays a PARAMETER of the task rather than going back to a constant
-  /// inside it, and `GOLDEN_CHARTER_CAP` stays with it: this answer is one
-  /// model's, and the 27B or whatever replaces it can be asked the same
-  /// question without a code change.
-  static const int charterCap = 400;
 }
 
 /// What one pass of [StorylineService.assignConversation] concluded.
@@ -498,20 +440,20 @@ enum AssignOutcome {
   /// Filed into a storyline.
   assigned,
 
-  /// Nothing cleared the cosine gate, or there was nothing to compare against.
-  /// The common case, and an unremarkable one.
+  /// No live storyline reached the retrieval floor, or there was nothing to
+  /// compare against. The common case, and an unremarkable one.
   noCandidate,
 
-  /// The model looked and said no — `belongs: false`, or a yes it was not
-  /// confident about.
+  /// The decision model was asked about every retrieved storyline and no
+  /// answer cleared the accept bar ([StorylineService]'s `_accepts`).
   rejected,
 
   /// The only storylines it could have joined are ones the user took it out
   /// of. Their "no" still holds.
   blocked,
 
-  /// The only storyline it cleared the gate for is one that has been taking
-  /// more than its share of the automatic adds lately. Not filed: a group
+  /// The only storylines it reached the retrieval floor for have been taking
+  /// more than their share of the automatic adds lately. Not filed: a group
   /// that swallows the mailbox is a group whose charter admits everything,
   /// and one more thread in it would be one more thread to un-file. That
   /// storyline's automatic members are queued for a re-check instead.
@@ -525,11 +467,12 @@ enum AssignOutcome {
 }
 
 /// What one storyline's membership looks like to the two comparison passes:
-/// the mean of its members' vectors, everyone on any member thread, and the
+/// the mean of its members' vectors, each member's own vector (the assign
+/// pass retrieves by the NEAREST member as well as by the centroid), and the
 /// member threads themselves. Built by `StorylineService._memberContexts`.
 typedef _MemberContext = ({
   List<double>? centroid,
-  Set<String> participants,
+  List<List<double>> vectors,
   Set<String> memberThreads,
 });
 
@@ -556,8 +499,8 @@ typedef _ProposeTally = ({
   int fragments,
 });
 
-/// A cluster member the confirms kept, with the evidence sentence the model
-/// gave for it; a fragment sibling rides its representative's.
+/// A cluster member the confirms kept, with the evidence sentence its
+/// judgement carries; a fragment sibling rides its representative's.
 typedef _Survivor = ({Map<String, Object?> row, String evidence});
 
 /// What the sweep decided about one cluster it formed, told to the golden
@@ -613,22 +556,22 @@ class StorylineService {
   final MessageStore _store;
   final LlmClient _client;
 
-  /// Where membership questions go. Deciding whether one thread belongs to a
-  /// group is a label under a tight schema, re-checked in Dart, and it was
-  /// the small model's while the app ran two; since the decision-model round
-  /// it resolves to the one generative model, like naming on [_client].
+  /// Who answers every membership question: the decision model's
+  /// `member_of`, through [StorylineJudge]. No language model is asked
+  /// whether a thread belongs anywhere.
   ///
-  /// Defaults to [_client], so a caller that passes one client gets the
-  /// single-server behaviour this service had before there were two.
-  final LlmClient _confirmClient;
+  /// Null only for a caller that never judges — the user actions and the
+  /// tests that drive them — and a membership question on a service built
+  /// without one throws, which parks the lane rather than guessing.
+  final StorylineJudge? _judge;
 
   /// Where the neighbourhood grouping questions go under
   /// [GroupingMode.model]: reading a neighbourhood and saying what is one
   /// project is prose work of the same kind naming is, so it defaults to
-  /// [_client] and not to [_confirmClient]. Since the decision-model round
-  /// every chat stage resolves to the one generative model, so the three
-  /// handles are the same server in the app; they stay three so a bench can
-  /// point one stage somewhere else without touching the other two.
+  /// [_client]. Since the decision-model round every chat stage resolves to
+  /// the one generative model, so the handles are the same server in the app;
+  /// they stay separate so a bench can point one stage somewhere else without
+  /// touching the others.
   ///
   /// Never dialled while [StorylineTuning.groupingMode] reads
   /// [GroupingMode.cosine], which is what ships.
@@ -680,17 +623,6 @@ class StorylineService {
   /// offered — which is what every caller that predates them is entitled to.
   final ContextStore? _context;
 
-  /// Who the owner is, for the overlap rule in [assignConversation]: the
-  /// owner is on every thread in their own mailbox, so counting them as a
-  /// shared person would earn the lower gate for any two threads at all.
-  ///
-  /// Asked once, by [memoizedOwner], and degraded the same way the needs-you
-  /// handler's is: a lookup that threw is forgotten and reads as null until
-  /// one answers, which leaves the overlap rule counting everyone as not the
-  /// owner and so STRICTER, never looser. Tests pass a literal; the app
-  /// passes the same closure the needs-you handler takes.
-  final OwnerLookup _owner;
-
   /// A bench seam, null in the app: called once per cluster the sweep asked
   /// [_propose] about, with the cluster as formed and what became of it. The
   /// golden sweep bench reads each cluster's gold purity BEFORE naming through
@@ -714,7 +646,7 @@ class StorylineService {
   StorylineService(
     this._store,
     LlmClient client, {
-    LlmClient? confirmClient,
+    this._judge,
     LlmClient? groupClient,
     LlmClient? refreshClient,
     LlmClient? recapClient,
@@ -722,18 +654,15 @@ class StorylineService {
     this._embeddings,
     this._progress = const PipelineProgress.disabled(),
     ContextStore? contextStore,
-    OwnerLookup? owner,
     SweepClusterObserver? clusterObserver,
     @visibleForTesting GroupingMode groupingMode = StorylineTuning.groupingMode,
     @visibleForTesting
     this._possibleHoldsRoom = StorylineTuning.possibleHoldsRoom,
   })  : _client = client,
-        _confirmClient = confirmClient ?? client,
         _groupClient = groupClient ?? client,
         _refreshClient = refreshClient ?? client,
         _recapClient = recapClient ?? client,
         _context = contextStore,
-        _owner = memoizedOwner(owner ?? (() async => null)),
         _observeCluster = clusterObserver,
         _log = activityLog ?? ActivityLog.disabled() {
     // Built in the body rather than the initializer list because
@@ -756,10 +685,14 @@ class StorylineService {
   /// most one.
   ///
   /// The shape is a funnel, and each stage exists to make the next one
-  /// cheaper: the vector gate picks candidates for free, the best candidate
-  /// alone reaches the model, and the model's answer is the only thing that
-  /// creates a membership. At most one confirmation call per thread, whatever
-  /// the mailbox looks like.
+  /// cheaper: the vector retrieval picks candidates for free — the top
+  /// [StorylinePolicy.assignTopK] live storylines by centroid cosine and the
+  /// top [StorylinePolicy.assignTopK] by nearest-member cosine, merged, each at
+  /// [StorylinePolicy.assignRetrievalFloor] or above — the decision model's
+  /// `member_of` is asked about each of them, and the highest p that clears
+  /// [_accepts] is the only thing that creates a membership. At most
+  /// `2 × assignTopK` judgements per thread, whatever the mailbox looks like,
+  /// and each is tens of milliseconds.
   ///
   /// A thread with no comparable vector is embedded here and then carries on —
   /// and PARKS the queue only when that cannot be done. Nothing about such a
@@ -797,11 +730,6 @@ class StorylineService {
     if (vector == null) return AssignOutcome.noCandidate;
 
     final conversation = Conversation.fromRow(row);
-    // The owner is left out of this list and ONLY this list: the storyline's
-    // own people, read by [_memberContexts] and [_participantsOfStoryline],
-    // are context the model reads and are not the owner's business.
-    final owner = await _owner();
-    final participants = _nonOwnerDisplaysOf(conversation, owner);
 
     // Suggestions included: a thread that belongs to a group the user has not
     // answered yet still belongs to it, and waiting would mean the suggestion
@@ -810,13 +738,6 @@ class StorylineService {
       statuses: const ['suggested', 'active'],
     );
 
-    Storyline? best;
-    var bestScore = 0.0;
-    // The runner-up, kept because a cosine ranking inside
-    // [StorylineTuning.assignTieMargin] is not a ranking. Ties on score keep
-    // the earlier candidate on top, which is the store's order.
-    Storyline? second;
-    var secondScore = 0.0;
     // Only to tell the empty-handed endings apart: a thread the user pulled
     // OUT of the one storyline it fits is a different fact from a thread
     // nothing came close to, and both differ from a thread whose one
@@ -838,7 +759,13 @@ class StorylineService {
     // the window's shape cannot change while this loop runs.
     final catchAlls = await _catchAllIds();
 
-    for (final storyline in candidates) {
+    // Two rankings, because either one alone misses a real home: a storyline
+    // whose members spread wide has a centroid that sits near none of them,
+    // and a thread can be the next message of ONE member while looking little
+    // like the average. Each keeps the store's order on a tie.
+    final byCentroid = <({Storyline storyline, double score, int order})>[];
+    final byNearest = <({Storyline storyline, double score, int order})>[];
+    for (final (order, storyline) in candidates.indexed) {
       if (blockedIn.contains(storyline.id)) {
         blocked = true;
         continue;
@@ -857,33 +784,38 @@ class StorylineService {
       final centroid = context.centroid;
       if (centroid == null) continue;
 
-      final shared = participants
-          .where((display) => context.participants.contains(display.toLowerCase()))
-          .length;
-      final gate = shared >= StorylineTuning.assignOverlapMinShared
-          ? StorylineTuning.assignCosineGateWithOverlap
-          : StorylineTuning.assignCosineGate;
+      // A centroid implies at least one member vector, so the nearest is a
+      // real cosine and never the starting value.
+      final centroidScore = cosine(vector, centroid);
+      var nearestScore = -1.0;
+      for (final member in context.vectors) {
+        nearestScore = math.max(nearestScore, cosine(vector, member));
+      }
+      if (math.max(centroidScore, nearestScore) <
+          StorylinePolicy.assignRetrievalFloor) {
+        continue;
+      }
 
-      final score = cosine(vector, centroid);
-      if (score < gate) continue;
-
-      // AFTER the gate on purpose: a catch-all this thread would not have
-      // joined anyway is not "the only qualifying candidate", and must not
-      // produce the [AssignOutcome.catchAll] ending or queue an audit.
+      // AFTER the floor on purpose: a catch-all this thread would not have
+      // been asked about anyway is not "the only qualifying candidate", and
+      // must not produce the [AssignOutcome.catchAll] ending or queue an
+      // audit. The 0.30 floor is looser than the old 0.37/0.44 gates, so a
+      // catch-all is reached — and its audit queued — for more threads than
+      // before; `requeueWorkIfStale` below still bounds that to one audit per
+      // storyline per window.
       if (catchAlls.ids.contains(storyline.id)) {
         skippedCatchAll = true;
         audits.add(storyline.id);
         continue;
       }
 
-      if (best == null || score > bestScore) {
-        second = best;
-        secondScore = bestScore;
-        best = storyline;
-        bestScore = score;
-      } else if (second == null || score > secondScore) {
-        second = storyline;
-        secondScore = score;
+      if (centroidScore >= StorylinePolicy.assignRetrievalFloor) {
+        byCentroid.add(
+            (storyline: storyline, score: centroidScore, order: order));
+      }
+      if (nearestScore >= StorylinePolicy.assignRetrievalFloor) {
+        byNearest.add(
+            (storyline: storyline, score: nearestScore, order: order));
       }
     }
 
@@ -892,14 +824,13 @@ class StorylineService {
     // narrowing this app already has.
     //
     // At most ONE audit per catch-all per window, which is what
-    // [MessageStore.requeueWorkIfStale] buys over a plain requeue. The audit
-    // runs at temperature 0 against an unchanged charter, so asking it again
-    // this afternoon spends one confirm per automatic member to be told what
-    // it was told this morning — and a storyline excluded from auto-assign
-    // can only change through a refresh or a person, either of which queues
-    // its own pass. A plain requeue collapses only while the row is still
-    // `pending`; once it drained the next arriving thread would revive it,
-    // and a mailbox that keeps delivering would re-audit all day.
+    // [MessageStore.requeueWorkIfStale] buys over a plain requeue. Asking the
+    // audit again this afternoon spends one judgement per automatic member to
+    // be told what it was told this morning — and a storyline excluded from
+    // auto-assign can only change through a refresh or a person, either of
+    // which queues its own pass. A plain requeue collapses only while the row
+    // is still `pending`; once it drained the next arriving thread would
+    // revive it, and a mailbox that keeps delivering would re-audit all day.
     for (final id in audits) {
       await _store.requeueWorkIfStale(
         'storyline_audit',
@@ -909,62 +840,52 @@ class StorylineService {
       );
     }
 
-    // Copied into finals so flow analysis can promote them: `best` and
-    // `second` are nullable locals the loop above assigns, and the branches
-    // below read them as non-null.
-    final top = best;
-    final runnerUp = second;
-    if (top == null) {
+    // The top [StorylinePolicy.assignTopK] of each ranking, centroid first,
+    // each storyline asked once however many rankings it tops.
+    List<Storyline> top(
+      List<({Storyline storyline, double score, int order})> ranked,
+    ) {
+      ranked.sort((a, b) {
+        final byScore = b.score.compareTo(a.score);
+        return byScore != 0 ? byScore : a.order.compareTo(b.order);
+      });
+      return [
+        for (final entry in ranked.take(StorylinePolicy.assignTopK))
+          entry.storyline,
+      ];
+    }
+
+    final asked = <Storyline>[];
+    for (final storyline in [...top(byCentroid), ...top(byNearest)]) {
+      if (asked.every((s) => s.id != storyline.id)) asked.add(storyline);
+    }
+    if (asked.isEmpty) {
       if (skippedCatchAll) return AssignOutcome.catchAll;
       return blocked ? AssignOutcome.blocked : AssignOutcome.noCandidate;
     }
 
-    final cardData = await _store.newestInboundCardData(source, conversationKey);
-
-    // One candidate, asked. The owner's own examples for that storyline are
-    // read here rather than above because a pass that ends up asking two
-    // storylines wants each one's own history, not the winner's.
-    Future<ConfirmResult> judge(Storyline candidate) async => _confirm(
-          candidate,
-          await _participantsOfStoryline(candidate.id),
-          row,
-          cardData,
-          examples: await _examplesFor(candidate.id),
-        );
-
-    final Storyline chosen;
-    final ConfirmResult result;
-    var confirmed = 1;
-    if (runnerUp != null &&
-        bestScore - secondScore <= StorylineTuning.assignTieMargin) {
-      // Inside the margin the cosine has stopped ranking, so both are asked
-      // and the answers rank them: the more confident yes wins, and an equal
-      // confidence leaves the higher cosine — [top], asked first — on top.
-      confirmed = 2;
-      final topAnswer = await judge(top);
-      final runnerUpAnswer = await judge(runnerUp);
-      ({Storyline storyline, ConfirmResult result})? winner;
-      if (_accepts(topAnswer, top)) {
-        winner = (storyline: top, result: topAnswer);
+    // Every candidate asked, and the highest p that clears its own bar wins:
+    // a suggested storyline's bar is higher than a kept one's, so the winner
+    // is the most likely home among those the thread may join, and an equal p
+    // keeps the candidate retrieved first. Nothing is blocked on a no — only a
+    // person removing a thread creates a block, because only a person's "no"
+    // should still hold the next time the model changes its mind.
+    final answers = await _confirmEach(
+      asked,
+      (source: source, key: conversationKey),
+    );
+    Storyline? chosen;
+    MembershipAnswer? result;
+    for (final (index, candidate) in asked.indexed) {
+      final answer = answers[index];
+      if (!_accepts(answer, candidate)) continue;
+      if (result == null || answer.p > result.p) {
+        chosen = candidate;
+        result = answer;
       }
-      if (_accepts(runnerUpAnswer, runnerUp) &&
-          (winner == null ||
-              _confidenceRank(runnerUpAnswer.confidence) >
-                  _confidenceRank(winner.result.confidence))) {
-        winner = (storyline: runnerUp, result: runnerUpAnswer);
-      }
-      // Nothing is blocked on a no either way — only a person removing a
-      // thread creates a block, because only a person's "no" should still
-      // hold the next time the model changes its mind.
-      if (winner == null) return AssignOutcome.rejected;
-      chosen = winner.storyline;
-      result = winner.result;
-    } else {
-      final answer = await judge(top);
-      if (!_accepts(answer, top)) return AssignOutcome.rejected;
-      chosen = top;
-      result = answer;
     }
+    if (chosen == null || result == null) return AssignOutcome.rejected;
+    final confirmed = asked.length;
 
     await _store.addStorylineMember(
       chosen.id,
@@ -993,8 +914,8 @@ class StorylineService {
     // the pass — an unnoted one would be indistinguishable from the far more
     // common pass that filed nothing.
     //
-    // `confirmed` rides along only when the pass asked twice, so a reader of
-    // the log can tell a near-tie that was decided by the model from the
+    // `confirmed` rides along only when the pass asked more than once, so a
+    // reader of the log can tell a choice between candidates from the
     // ordinary single question.
     _log.note({
       'assigned': chosen.title,
@@ -1735,11 +1656,11 @@ class StorylineService {
   /// a pass that runs on its own.
   ///
   /// The same funnel as [assignConversation] turned inside out: one storyline,
-  /// every UNFILED embedded thread as a candidate. The gate is the LOWER
-  /// assignment gate for every candidate, overlap or not — the user's charter
-  /// is a stronger invitation to look than a shared participant is — and the
-  /// top [StorylineTuning.recruitMaxCandidates] by cosine each get the same
-  /// confirmation call a normal assignment gets, against that charter.
+  /// every UNFILED embedded thread as a candidate. The floor is
+  /// [StorylinePolicy.assignRetrievalFloor], and the top
+  /// [StorylineTuning.recruitMaxCandidates] by cosine are judged against that
+  /// charter in ONE `member_of` batch, held to the same [_accepts] an
+  /// assignment is.
   ///
   /// A thread already in a live storyline is never offered: this pass reads
   /// the sweep's taken set without its block arm (`assignedKeys`), so one
@@ -1895,35 +1816,30 @@ class StorylineService {
       final considered = _shortlist(
         candidates,
         centroid,
-        gate: StorylineTuning.assignCosineGateWithOverlap,
+        gate: StorylinePolicy.assignRetrievalFloor,
         take: onCharter
             ? StorylineTuning.recruitMaxCandidatesDeclared
             : StorylineTuning.recruitMaxCandidates,
       );
 
-      // One snapshot for every candidate: the storyline as the user saved it is
-      // what all eight are judged against, not a group that grows under the
-      // later candidates as the earlier ones land.
-      final storylineParticipants = await _participantsOfStoryline(storylineId);
-      // And one read of the owner's examples, for the same reason and one
-      // more: they are the constant prefix of all eight prompts, so fetching
-      // them per candidate would buy queries and change nothing.
-      final examples = await _examplesFor(storylineId);
+      // One batch for the whole shortlist: the storyline as the user saved it
+      // is what every candidate is judged against, not a group that grows
+      // under the later candidates as the earlier ones land. The judgement
+      // comes back before anything is written, so a park files nothing.
+      final answers = await _confirm(storyline, [
+        for (final candidate in considered)
+          (
+            source: candidate.row['source'] as String? ?? _workSource,
+            key: candidate.row['conversation_key'] as String? ?? '',
+          ),
+      ]);
 
       recruited = 0;
-      for (final candidate in considered) {
+      for (final (index, candidate) in considered.indexed) {
         final row = candidate.row;
         final rowSource = row['source'] as String? ?? _workSource;
         final key = row['conversation_key'] as String? ?? '';
-        final cardData = await _store.newestInboundCardData(rowSource, key);
-
-        final result = await _confirm(
-          storyline,
-          storylineParticipants,
-          row,
-          cardData,
-          examples: examples,
-        );
+        final result = answers[index];
         if (!_accepts(result, storyline)) continue;
 
         await _store.addStorylineMember(
@@ -2051,8 +1967,8 @@ class StorylineService {
 
   // ── automatic: one storyline, on the owner's removal ───────────────────
 
-  /// Re-checks a storyline's AUTOMATIC members against its charter and the
-  /// owner's examples. Queued by [removeThread] and by the About section's
+  /// Re-checks a storyline's AUTOMATIC members against its charter, in one
+  /// `member_of` batch. Queued by [removeThread] and by the About section's
   /// "Re-check members"; runs after the refresh that a removal also queues
   /// (handler order), so it judges against the narrowed charter.
   ///
@@ -2092,36 +2008,32 @@ class StorylineService {
     ];
     if (auto.isEmpty) return;
 
-    // One snapshot for every member, [recruit]'s recipe exactly: all of them
-    // are judged against the group as it stood when the pass began, not
-    // against one that shrinks under the later questions as the earlier
-    // members are removed out from under them.
-    final participants = await _participantsOfStoryline(storylineId);
-    final examples = await _examplesFor(storylineId);
-
-    final removed = <Map<String, Object?>>[];
-    var checked = 0;
+    // A member whose conversation row is gone has no thread to judge. Left
+    // alone rather than removed: nothing about it is known to be wrong, and
+    // the refresh already treats such a member as contributing no card.
+    final judged = <({StorylineMember member, Map<String, Object?> row})>[];
     for (final member in auto) {
       final row = await _store.getConversationRow(
         member.source,
         member.conversationKey,
       );
-      // A member whose conversation row is gone has no card to judge. Left
-      // alone rather than removed: nothing about it is known to be wrong, and
-      // the refresh already treats such a member as contributing no card.
-      if (row == null) continue;
-      final cardData = await _store.newestInboundCardData(
-        member.source,
-        member.conversationKey,
-      );
+      if (row != null) judged.add((member: member, row: row));
+    }
 
-      final result = await _confirm(
-        storyline,
-        participants,
-        row,
-        cardData,
-        examples: examples,
-      );
+    // One batch for every member, [recruit]'s recipe exactly: all of them are
+    // judged against the storyline as it stood when the pass began, and the
+    // answers are all in before the first removal is written.
+    final answers = await _confirm(storyline, [
+      for (final entry in judged)
+        (source: entry.member.source, key: entry.member.conversationKey),
+    ]);
+
+    final removed = <Map<String, Object?>>[];
+    var checked = 0;
+    for (final (index, entry) in judged.indexed) {
+      final member = entry.member;
+      final row = entry.row;
+      final result = answers[index];
       checked++;
       // The kept members are the accepted ones; everything [_accepts] turns
       // down goes, which is this pass's whole job.
@@ -2463,6 +2375,12 @@ class StorylineService {
           },
     ];
     var overlapsPossible = 0;
+    // Before the first naming call: a cluster is named on the 27B and then
+    // confirmed on the decision model, so a decision model that cannot answer
+    // parks the pass HERE, with no naming call spent on a proposal it could
+    // never finish. Only when there is a cluster to ask about, so a quiet
+    // sweep asks nothing.
+    if (clusters.isNotEmpty) await _judgeOrThrow().ensureReady();
     for (final cluster in clusters) {
       if (proposed + (_possibleHoldsRoom ? filed : 0) >= room) break;
       if (proposed + filed >= StorylineTuning.maxQuestionsPerPass) break;
@@ -3008,11 +2926,7 @@ class StorylineService {
 
     // Everyone in the cluster AS THE NAMER KEPT IT, computed once: the charter
     // was written for the kept group, so the lint reads it against those
-    // people and not against a roster that still holds the outliers' threads,
-    // and every confirm below is judged against this same list, which no
-    // rejection shrinks out from under the later questions. The probe
-    // re-reads the stored members afterwards, which is a different snapshot
-    // again and deliberately so.
+    // people and not against a roster that still holds the outliers' threads.
     final seen = <String>{};
     final storylineParticipants = <String>[];
     for (final index in named.kept) {
@@ -3068,8 +2982,8 @@ class StorylineService {
     final outliersDropped = dropped;
     rows = [for (final index in named.kept) rows[index]];
 
-    // Never stored, and deliberately so: this exists only to give
-    // [ConfirmInput] the group to judge against, and the whole point of the
+    // Never stored, and deliberately so: this exists only to give the judge
+    // the title and charter to ask about, and the whole point of the
     // pass is that some of these threads may not survive being judged. What
     // reaches the database is decided below, once the answers are in.
     final proposal = Storyline(
@@ -3081,11 +2995,7 @@ class StorylineService {
       createdBy: 'auto',
     );
 
-    final judged = await _confirmMembers(
-      proposal,
-      storylineParticipants,
-      rows,
-    );
+    final judged = await _confirmMembers(proposal, rows);
 
     // Representatives only, here and at [StorylineTuning.proposeMinClusterSize]
     // upstream. A fragment is not a second thread that agreed: it is the same
@@ -3095,7 +3005,7 @@ class StorylineService {
     if (judged.survivors.length < StorylineTuning.minClusterSize) {
       // `rows` is already the namer's kept set — narrowed a few lines above —
       // and that, not the survivors, is what is filed. The confirms are the
-      // small model's answer thread by thread; the question being handed to
+      // decision model's answer thread by thread; the question being handed to
       // the person is the group the namer kept, and pruning it by an answer
       // the person is not being shown would ask them about something else.
       await _filePossible(id, result, clusterHash, rows, siblings);
@@ -3147,39 +3057,36 @@ class StorylineService {
   }
 
   /// Judges each of [rows] against the charter [proposal] was just named
-  /// with, one thread at a time, and returns the survivors with the evidence
-  /// sentence the model gave for each, alongside how many it turned away.
-  ///
-  /// [storylineParticipants] is the cluster as the namer kept it, computed
-  /// once by the caller: every member is judged against that same participant
-  /// list, which no rejection shrinks out from under the later questions.
+  /// with, in ONE `member_of` batch, and returns the survivors with the
+  /// evidence sentence each judgement carries, alongside how many it turned
+  /// away.
   Future<({List<_Survivor> survivors, int rejected})> _confirmMembers(
     Storyline proposal,
-    List<String> storylineParticipants,
     List<Map<String, Object?>> rows,
   ) async {
     // No cap on how many of these a cluster may spend, unlike [recruit]'s
     // eight. The cost is bounded by identity rather than by count: a cluster
     // is confirmed once ever, because the hash checks above and the row
     // [_filePossible] writes mean the same set of threads never reaches this
-    // line twice — and the confirmations run on the small local model.
+    // line twice — and a judgement is tens of milliseconds.
+    final asked = [
+      for (final row in rows)
+        if ((row['conversation_key'] as String? ?? '').isNotEmpty) row,
+    ];
+    final answers = await _confirm(proposal, [
+      for (final row in asked)
+        (
+          source: row['source'] as String? ?? _workSource,
+          key: row['conversation_key'] as String,
+        ),
+    ]);
+
     final survivors = <_Survivor>[];
     var rejected = 0;
-    for (final row in rows) {
-      final source = row['source'] as String? ?? _workSource;
-      final key = row['conversation_key'] as String? ?? '';
-      if (key.isEmpty) continue;
-      final cardData = await _store.newestInboundCardData(source, key);
-
-      // No examples: the proposal has no owner history by construction.
-      final confirm = await _confirm(
-        proposal,
-        storylineParticipants,
-        row,
-        cardData,
-      );
+    for (final (index, row) in asked.indexed) {
+      final confirm = answers[index];
       // The proposal is `suggested`, so [_accepts] holds every member of a
-      // newborn storyline to `high`.
+      // newborn storyline to [StorylinePolicy.acceptSuggested].
       if (!_accepts(confirm, proposal)) {
         rejected++;
         continue;
@@ -3368,34 +3275,29 @@ class StorylineService {
           offered.add(candidate);
         }
         // Scored, then top-N — [_shortlist], [recruit]'s recipe exactly, at
-        // the lower assignment gate for the recruit's reason: the embedding
-        // decides what the model looks at, and the model decides membership.
+        // the retrieval floor for the recruit's reason: the embedding decides
+        // what the model looks at, and the model decides membership.
         final considered = _shortlist(
           offered,
           survivorCentroid,
-          gate: StorylineTuning.assignCosineGateWithOverlap,
+          gate: StorylinePolicy.assignRetrievalFloor,
           take: StorylineTuning.recruitMaxCandidates,
         );
 
         if (considered.isNotEmpty) {
-          // Read back from the stored members, not the `storylineParticipants`
-          // list above: that one still holds everyone the confirm stage
-          // rejected, and a finished thread is judged against the group as it
-          // actually stands — the same snapshot [recruit] takes.
-          final postParticipants = await _participantsOfStoryline(id);
-          for (final candidate in considered) {
+          // One batch for the shortlist, [recruit]'s recipe.
+          final answers = await _confirm(proposal, [
+            for (final candidate in considered)
+              (
+                source: candidate.row['source'] as String? ?? _workSource,
+                key: candidate.row['conversation_key'] as String? ?? '',
+              ),
+          ]);
+          for (final (index, candidate) in considered.indexed) {
             final row = candidate.row;
             final rowSource = row['source'] as String? ?? _workSource;
             final key = row['conversation_key'] as String? ?? '';
-            final cardData = await _store.newestInboundCardData(rowSource, key);
-
-            // No examples: the proposal has no owner history by construction.
-            final confirm = await _confirm(
-              proposal,
-              postParticipants,
-              row,
-              cardData,
-            );
+            final confirm = answers[index];
             // The same rule the cluster members above were held to.
             if (!_accepts(confirm, proposal)) continue;
 
@@ -3532,7 +3434,7 @@ class StorylineService {
   /// reason: the whole cluster when the namer declined it outright, and the
   /// namer's kept rows when the lint or the confirms are what refused. The
   /// confirms' own verdicts are deliberately not applied — the person is being
-  /// asked about the GROUP, not about the small model's answer on each thread.
+  /// asked about the GROUP, not about the decision model's answer on each thread.
   ///
   /// [siblings] are the pool rows that are FRAGMENTS of one of those rows,
   /// keyed by its `'<source>\n<key>'` the way [_writeProposal] reads them, and
@@ -3871,9 +3773,8 @@ class StorylineService {
   }
 
   /// Several storylines' members, read in ONE store call: per storyline the
-  /// mean member vector (null when no member has one), every member
-  /// participant lower-cased, and the member threads themselves as
-  /// [threadKey]s.
+  /// mean member vector (null when no member has one), each member's own
+  /// vector, and the member threads themselves as [threadKey]s.
   ///
   /// Shared by [assignConversation] and [recruit], which is the point — the
   /// two passes are mirror images, and a centroid computed two ways would let
@@ -3888,7 +3789,6 @@ class StorylineService {
     List<String> storylineIds,
   ) async {
     final vectors = <String, List<List<double>>>{};
-    final participants = <String, Set<String>>{};
     final memberThreads = <String, Set<String>>{};
     for (final row in await _store.memberContextRows(
       storylineIds,
@@ -3910,20 +3810,12 @@ class StorylineService {
         final vector = decodeEmbedding(blob);
         if (vector.isNotEmpty) vectors.putIfAbsent(id, () => []).add(vector);
       }
-
-      // Empty on a member whose conversation row is gone: the row still
-      // arrives, carrying no participants, exactly as the per-member read it
-      // replaced skipped a missing row without dropping the membership.
-      final into = participants.putIfAbsent(id, () => <String>{});
-      for (final display in _displaysOf(Conversation.fromRow(row))) {
-        into.add(display.toLowerCase());
-      }
     }
     return {
       for (final entry in memberThreads.entries)
         entry.key: (
           centroid: centroid(vectors[entry.key] ?? const <List<double>>[]),
-          participants: participants[entry.key] ?? const <String>{},
+          vectors: vectors[entry.key] ?? const <List<double>>[],
           memberThreads: entry.value,
         ),
     };
@@ -3935,10 +3827,10 @@ class StorylineService {
       (await _memberContexts([storylineId]))[storylineId] ?? _emptyContext;
 
   /// What a storyline nobody has filed anything into looks like: nothing to
-  /// average, nobody on it, no members.
+  /// average, no members.
   static const _MemberContext _emptyContext = (
     centroid: null,
-    participants: <String>{},
+    vectors: <List<double>>[],
     memberThreads: <String>{},
   );
 
@@ -3947,86 +3839,53 @@ class StorylineService {
           if (participant.display.isNotEmpty) participant.display,
       ];
 
-  /// [_displaysOf] minus the owner.
-  ///
-  /// A participant IS the owner when its display or its address matches the
-  /// owner's name or address, case-insensitively and trimmed. A null owner,
-  /// or an owner with neither field, removes nobody: until the lookup
-  /// answers, every participant counts as not the owner, which keeps the
-  /// overlap rule stricter rather than looser.
-  ///
-  /// A namesake is dropped too — another Pat Owner on the thread is read as
-  /// the owner and does not count toward the overlap. Deliberate: the cost of
-  /// that is one thread that missed the lower gate, and the cost of the other
-  /// reading is the discount firing on the one person who is on every thread
-  /// in the mailbox.
-  static List<String> _nonOwnerDisplaysOf(
-    Conversation conversation,
-    OwnerIdentity? owner,
-  ) {
-    String norm(String? value) => (value ?? '').trim().toLowerCase();
-    final names = {norm(owner?.name), norm(owner?.address)}..remove('');
-    if (names.isEmpty) return _displaysOf(conversation);
-    return [
-      for (final participant in conversation.participants)
-        if (participant.display.isNotEmpty &&
-            !names.contains(norm(participant.display)) &&
-            !names.contains(norm(participant.email)))
-          participant.display,
-    ];
-  }
-
-  /// The one membership question this file asks, at temperature 0, with the
-  /// charter clamped at [StorylineTuning.charterCap].
+  /// The one membership question this file asks: the decision model's
+  /// `member_of` for each of [threads] against [storyline], in one batch,
+  /// each answer carrying the sentence a person reads for it.
   ///
   /// Every one of the five confirm sites — assign, recruit, the sweep's
-  /// members, its probe and the audit — comes through here, so the task, the
-  /// clamp, the temperature and the card recipe cannot drift apart. Zero
-  /// because the same thread judged against the same storyline twice must
-  /// give the same answer, or a re-run after a park or a restart would move
-  /// threads between groups for no reason a user could see.
-  ///
-  /// [examples] is null for the sweep's proposal, which has no owner history
-  /// by construction.
-  Future<ConfirmResult> _confirm(
+  /// members, its probe and the audit — comes through here. A decision server
+  /// that is down THROWS through it, which parks the storyline lane: there is
+  /// no language model to fall back to.
+  Future<List<MembershipAnswer>> _confirm(
     Storyline storyline,
-    List<String> storylineParticipants,
-    Map<String, Object?> row,
-    Map<String, Object?>? cardData, {
-    ({List<String> kept, List<String> removed})? examples,
-  }) =>
-      runTask(
-        _confirmClient,
-        const ConfirmMembershipTask(charterCap: StorylineTuning.charterCap),
-        ConfirmInput(
-          storyline: storyline,
-          storylineParticipants: storylineParticipants,
-          candidateCard: enrichedCardForConversationRow(row, cardData),
-          keptExamples: examples?.kept ?? const [],
-          removedExamples: examples?.removed ?? const [],
-        ),
-        temperature: 0,
-      );
+    List<({String source, String key})> threads,
+  ) async =>
+      [
+        for (final p in await _judgeOrThrow().memberOf(storyline, threads))
+          MembershipAnswer.of(p),
+      ];
 
-  /// THE membership rule: a yes the model was confident enough about
-  /// ([ConfirmResult.accepted] — `belongs`, and not `low`), and for a
-  /// storyline nobody has kept yet, `high`.
+  /// [_confirm] for ONE thread against several storylines — the assign
+  /// pass's candidates — in one batch, the thread's text built once.
+  Future<List<MembershipAnswer>> _confirmEach(
+    List<Storyline> storylines,
+    ({String source, String key}) thread,
+  ) async =>
+      [
+        for (final p in await _judgeOrThrow().memberOfEach(storylines, thread))
+          MembershipAnswer.of(p),
+      ];
+
+  StorylineJudge _judgeOrThrow() =>
+      _judge ?? (throw StateError('StorylineService: no decision judge to ask'));
+
+  /// THE membership rule: the decision model's p(member_of = yes) at the
+  /// storyline's bar — [StorylinePolicy.acceptSuggested] for a storyline
+  /// nobody has kept yet, [StorylinePolicy.acceptActive] for one the owner
+  /// kept.
   ///
   /// Auto-filing into a group the owner has never looked at needs the
-  /// strongest answer the model gives: a `medium` yes into such a group is
-  /// how the blobs grew. The sweep judges its members against an UNSAVED
-  /// proposal whose status is `suggested`, so a newborn storyline's members
-  /// are held to `high` too, on purpose. An `active` storyline — one the
-  /// owner kept — takes `medium`, as it always did.
-  static bool _accepts(ConfirmResult result, Storyline storyline) =>
-      result.accepted &&
-      (storyline.status != 'suggested' || result.confidence == 'high');
-
-  /// `high` over `medium` over anything else, for the near-tie in
-  /// [assignConversation] and nothing else: it ranks two yeses, never decides
-  /// whether one is a yes.
-  static int _confidenceRank(String confidence) =>
-      confidence == 'high' ? 2 : (confidence == 'medium' ? 1 : 0);
+  /// stronger answer: a middling yes into such a group is how the blobs grew.
+  /// The sweep judges its members against an UNSAVED proposal whose status is
+  /// `suggested`, so a newborn storyline's members are held to the higher bar
+  /// too, on purpose. The owner's removals are not weighed here: they are
+  /// hard blocks, and a blocked thread never reaches a question.
+  static bool _accepts(MembershipAnswer answer, Storyline storyline) =>
+      answer.p >=
+      (storyline.status == 'suggested'
+          ? StorylinePolicy.acceptSuggested
+          : StorylinePolicy.acceptActive);
 
   /// The storylines that have lately been taking more than their share of the
   /// automatic adds, and the floor of the window they were read over. Empty
@@ -4076,23 +3935,6 @@ class StorylineService {
     };
   }
 
-  /// Everyone on any member thread, de-duplicated, in first-seen order.
-  Future<List<String>> _participantsOfStoryline(String storylineId) async {
-    final seen = <String>{};
-    final displays = <String>[];
-    for (final member in await _store.membersOf(storylineId)) {
-      final row = await _store.getConversationRow(
-        member.source,
-        member.conversationKey,
-      );
-      if (row == null) continue;
-      for (final display in _displaysOf(Conversation.fromRow(row))) {
-        if (seen.add(display.toLowerCase())) displays.add(display);
-      }
-    }
-    return displays;
-  }
-
   /// The naming card of every member that still has a conversation row, in
   /// the order the members were given.
   ///
@@ -4119,61 +3961,21 @@ class StorylineService {
     return cards;
   }
 
-  /// How many of each kind of example ride into a confirm prompt. Three: the
+  /// How many of the owner's removals ride into a refresh prompt. Three: the
   /// owner's latest word is what teaches, and a fourth card buys tokens on
-  /// every membership question this storyline will ever ask.
+  /// every refresh this storyline will ever ask for.
   static const int _examplesEach = 3;
-
-  /// Up to three threads the owner filed by hand and up to three they took
-  /// out, as the enriched cards the confirm task reads — newest first, so the
-  /// lesson is the owner's latest word. Removed means `blocked_by = 'user'`
-  /// ONLY: an audit's rejection is a consequence of the owner's "no", not a
-  /// second lesson, and feeding it back would let the model teach itself.
-  /// Fetched once per pass and reused for every confirm in it.
-  ///
-  /// The count is taken AFTER the gone-thread filter, on both lists: a thread
-  /// the app no longer stores teaches nothing, and cutting the list to three
-  /// first would let three deleted threads crowd out the lessons that are
-  /// still there.
-  Future<({List<String> kept, List<String> removed})> _examplesFor(
-    String storylineId,
-  ) async {
-    final kept = <String>[];
-    for (final member in await _store.userMembersOf(storylineId)) {
-      if (kept.length == _examplesEach) break;
-      final card = await _cardOf(member.source, member.conversationKey);
-      if (card != null) kept.add(card);
-    }
-    final removed = <String>[];
-    for (final block in await _store.blocksOf(storylineId, blockedBy: 'user')) {
-      if (removed.length == _examplesEach) break;
-      final card = await _cardOf(block.source, block.conversationKey);
-      if (card != null) removed.add(card);
-    }
-    return (kept: kept, removed: removed);
-  }
-
-  /// One thread's enriched card, or null when its conversation row is gone —
-  /// a block outlives the thread it was written about, and an example nothing
-  /// can be said about is left out rather than rendered blank.
-  Future<String?> _cardOf(String source, String conversationKey) async {
-    final row = await _store.getConversationRow(source, conversationKey);
-    if (row == null) return null;
-    return enrichedCardForConversationRow(
-      row,
-      await _store.newestInboundCardData(source, conversationKey),
-    );
-  }
 
   /// The threads the OWNER removed from this storyline, as the naming cards
   /// the refresh prompt's other card fences carry — newest first, up to
   /// [_examplesEach].
   ///
-  /// The owner's blocks only, for [_examplesFor]'s reason: an audit's block is
-  /// a consequence of a lesson the owner already taught, and handing it back
-  /// as grounds to narrow the charter would let one removal ratchet a
-  /// storyline shut. The count is taken after the gone-thread filter, for
-  /// [_examplesFor]'s other reason.
+  /// The owner's blocks only: an audit's block is a consequence of a lesson
+  /// the owner already taught, and handing it back as grounds to narrow the
+  /// charter would let one removal ratchet a storyline shut. The count is
+  /// taken after the gone-thread filter, because a thread the app no longer
+  /// stores teaches nothing, and cutting the list to three first would let
+  /// three deleted threads crowd out the lessons that are still there.
   Future<List<String>> _removedCardsOf(String storylineId) async {
     final cards = <String>[];
     for (final block in await _store.blocksOf(storylineId, blockedBy: 'user')) {
