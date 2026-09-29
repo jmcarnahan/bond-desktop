@@ -23,16 +23,16 @@ import 'setup_controls.dart';
 /// Too little memory for the writing model is a warning and nothing more.
 /// It is also a PROMISE about what happens next: the inbox tier does not
 /// download the writing model at all, so the sentence says which models this
-/// Mac takes and where the writing stages run instead. Triage, extraction and
-/// search all run on the two small models, and those fit anywhere.
+/// Mac takes and where the writing stages run instead. The decision model,
+/// the embedding model and the 4B fit anywhere.
 class SetupDeviceBody extends StatelessWidget {
   /// Null while the platform is still being asked.
   final HardwareInfo? hardware;
 
   final bool blocked;
 
-  /// This Mac is on the inbox tier: the embedding model and the inbox model,
-  /// no writing model.
+  /// This Mac is on the inbox tier: the decision model, the embedding model
+  /// and the 4B, no 27B.
   final bool lowMemory;
 
   /// Below the smallest machine the golden set was measured on. One more
@@ -87,11 +87,11 @@ class SetupDeviceBody extends StatelessWidget {
     // about the same machine rather than a second verdict about it, so it
     // joins the alert instead of opening a second one.
     final inboxText = StringBuffer(
-      'This Mac has $memory of memory. It runs the inbox models, the '
-      'embedding model and the 4B. The writing model ($proseName) is built '
-      'for ${formatBytes(fullTierMinRamBytes)} or more and is not downloaded '
-      'here; writing stages run on the inbox model unless you point Bond at '
-      'your own servers under Settings, Models.',
+      'This Mac has $memory of memory. It runs the decision model, the '
+      'embedding model and the 4B as its generative model. $proseName is '
+      'built for ${formatBytes(fullTierMinRamBytes)} or more and is not '
+      'downloaded here; point Bond at a server of your own under Settings, '
+      'Models to write with it.',
     );
     if (underMeasuredFloor) {
       inboxText.write(
@@ -128,8 +128,8 @@ class SetupDeviceBody extends StatelessWidget {
         if (!blocked && !lowMemory) ...[
           const SizedBox(height: BondSpacing.s16),
           Text(
-            'This Mac runs all three models: the embedding model, the inbox '
-            'model and the writing model.',
+            'This Mac can run every model: the decision model, the '
+            'embedding model and the 27B generative model.',
             style: BondType.caption,
           ),
         ],

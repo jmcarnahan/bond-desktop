@@ -4,13 +4,17 @@ import '../data/message_store.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
-import 'deadline_parse.dart' show showableDeadline;
+import 'decision/decision_client.dart';
+import 'decision/decision_heads.dart';
+import 'decision/decision_input.dart';
+import 'decision/decision_policy.dart';
 import 'drain_gate.dart';
 import 'gates.dart';
 import 'backend/backend_types.dart';
-import 'llm/json_task.dart';
+import 'conversation_cta.dart';
 import 'llm/llm_client.dart';
-import 'llm/triage_task.dart';
+import 'needs_you.dart' show needsYouFloor;
+import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 
 /// How much triage is left, as of the last message the worker finished.
@@ -121,12 +125,7 @@ class TriageQueue {
   /// worth more than it is.
   static const int _maxAttempts = 2;
 
-  /// A conversation row's CTA is one line in a list, and the model was told to
-  /// write imperatives — this is a backstop, not a formatting step.
-  static const int _ctaCap = 200;
-
   final MessageStore _store;
-  final LlmClient _client;
   final DrainGate _gate;
 
   /// Fetches one message's body and headers into the store — in the app,
@@ -232,9 +231,43 @@ class TriageQueue {
   /// rebuild.
   final bool Function()? _enabled;
 
+  /// The decision model, which classifies every kept message: the learned
+  /// gate, urgency, category, needs_action and reply_expected. It is the only
+  /// model this queue calls — the message's text (summary, action items,
+  /// deadline) is the message-text stage's, on the fast lane behind it — so
+  /// it is required: there is no triage without it.
+  final DecisionClient _decisionClient;
+
+  /// Who the owner is, for the decision state's owner line — a keychain read
+  /// in the app. [_askOwner] starts it at a pump and a claim uses
+  /// [_ownerKnown], whatever has arrived — after waiting at most
+  /// [_ownerWait] for a lookup still in flight ([_awaitOwner]). The first
+  /// claims after launch are the ones that race it: a Teams message has no
+  /// body fetch to give the keychain time, and a state with no owner line is
+  /// not the state the heads were trained on — the gate, reply and urgency
+  /// heads read it too, not only needs-you. Never longer than that, for the
+  /// self gate's `userAddress` reason: a read that has not answered must not
+  /// hold the drain.
+  final OwnerLookup? _owner;
+  OwnerIdentity? _ownerKnown;
+  bool _ownerAsking = false;
+
+  /// The lookup [_askOwner] started, until it settles or a claim has waited
+  /// [_ownerWait] for it once. Null means nobody waits.
+  Future<void>? _ownerAsk;
+
+  /// The one wait the claims launched together share, and its timer. Held
+  /// so [quiesce] can end it: a test's fake clock never reaches 300 ms after
+  /// its tree is gone, and a timer left behind fails the test.
+  Completer<void>? _ownerWaiting;
+  Timer? _ownerTimer;
+
+  /// How long a claim waits for an owner lookup still in flight.
+  static const Duration _ownerWait = Duration(milliseconds: 300);
+
   TriageQueue(
-    this._store,
-    this._client, {
+    this._store, {
+    required this._decisionClient,
     this._userAddress,
     this._ensureBody,
     DrainGate? gate,
@@ -244,6 +277,7 @@ class TriageQueue {
     this._enabled,
     this._onDrained,
     this._onGated,
+    this._owner,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
@@ -321,6 +355,9 @@ class TriageQueue {
   Future<void> _quiesceOnce() async {
     _stopped = true;
     _quiescing = true;
+    // A claim waiting for the owner goes on now, ownerless, so the loop
+    // below has something to wait for that ends.
+    _endOwnerWait();
     try {
       // A LOOP, not one wait: a claim that was already at the store when
       // [_stopped] flipped lands in [_inFlight] after the first snapshot was
@@ -414,6 +451,9 @@ class TriageQueue {
       // enqueues in the same step, exactly as [DrainGate.yieldRequested]
       // promises.
       if ((counts['pending'] ?? 0) == 0) return;
+      // Who the owner is, for the decision state — started here; a claim
+      // waits a moment for it at most (see [_owner]).
+      _askOwner();
       // Asked in the same synchronous step as the `_gate.run` below, which is
       // what makes the flag transient — this run holds the ticket that clears
       // it. See [DrainGate.yieldRequested].
@@ -659,21 +699,15 @@ class TriageQueue {
       return true;
     }
 
-    // The thread is context for `reply_expected`: an unanswered question a few
-    // messages back still expects an answer, and this message on its own does
-    // not say so. Only what came BEFORE it — a later message is not context
-    // for a judgement about this one. TriageTask takes the last few.
-    // Names and sizes, never contents: the line this feeds is metadata the
-    // connector already wrote, so it costs a local query and no network at all.
-    // The rows are here by now for mail because the detail fetch above wrote
-    // them, and for chat because the ingest loop did; a failed fetch simply
-    // leaves the list empty and the line absent.
+    // The decision state's inputs. The attachment rows are metadata the
+    // connector already wrote — a local query, no network: here by now for
+    // mail because the detail fetch above wrote them, and for chat because
+    // the ingest loop did; a failed fetch leaves the list empty. They are
+    // hydrated onto the message because the state renders an empty body as
+    // "Shared a file: …" from them, so a chat message that is nothing but a
+    // dropped contract is not judged as blank.
     final attachments = await _store.attachmentsForMessage(source, id);
     final key = current['conversation_key'] as String?;
-    // Hydrated from the rows just read — `loadThread` does this for a whole
-    // thread; a single-row read has to ask. The block the model sees
-    // synthesises "Shared a file: …" from these, so a chat message that is
-    // nothing but a dropped contract stops arriving with an empty body.
     if (attachments.isNotEmpty) {
       message = message.withAttachments([
         for (final row in attachments)
@@ -681,6 +715,10 @@ class TriageQueue {
       ]);
     }
 
+    // The thread is context for `reply_expected` and needs-you: an unanswered
+    // question a few messages back still expects an answer. Only what came
+    // BEFORE this message — a later one is not context for a judgement about
+    // it. The decision state takes the last three.
     var thread = const <Message>[];
     if (key != null && key.isNotEmpty) {
       final loaded = await _store.loadThread(key, sources: [source]);
@@ -694,20 +732,115 @@ class TriageQueue {
     }
 
     try {
-      final result = await runTask(
-        _client,
-        const TriageTask(),
-        TriageInput(
-          message,
-          DateTime.now(),
-          thread: thread,
-          attachments: attachments,
-        ),
+      // The decision pass: one forward pass of the decision model answers
+      // every classification question from the message's rendered state. It
+      // is the only model call triage makes — the text is the message-text
+      // stage's, behind it on the fast lane. INSIDE this try on purpose: a
+      // decision server that is down throws [DecisionUnavailableException],
+      // an [LlmUnavailableException], so the message parks under
+      // `decision_unavailable` — as does, under its own word, every fault
+      // that would fail every message alike (a refused heads file, a server
+      // that is not the decision model: `decision_misconfigured`) and a
+      // missing install (`decision_not_installed`). Every park is retried by
+      // the next pump, so a fixed address or a fresh install recovers with
+      // nobody pressing anything. Only a 4xx the server gives this one
+      // request is a failure that spends an attempt.
+      await _awaitOwner();
+      final owner = decisionOwnerString(_ownerKnown);
+      final decided = await _decisionClient.decide(DecisionInput.fromRows(
+        message: message,
+        thread: thread,
+        attachments: message.attachments,
+        owner: owner,
+      ));
+      await _store.writeDecision(
+        source,
+        id,
+        decided,
+        qhash: DecisionHeads.expectedQhash,
+        ownerKnown: owner != null,
       );
-      await _writeTriage(source, id, status: 'triaged', result: result);
-      await _foldUp(source, current, message, result);
-      // What the model decided, on the row. The `llm_*` tally the call itself
-      // reported folds in from the log's pending slot.
+
+      // The learned gate, after the rules gates and under the same escape
+      // hatch: a message the owner restored is never gated again. Shaped
+      // like the header gate above, plus an activity row, because unlike a
+      // rules gate this one DID consult a model. A Teams 1:1 or @mention
+      // ([needsYouFloor]) is never learned-gated either: somebody wrote to
+      // the owner by name, which the needs-you floor treats as settled, and
+      // before the decision model no gate ever took one.
+      final learned = overridden || needsYouFloor(current)
+          ? null
+          : learnedGateReason(decided.answers);
+      if (learned != null) {
+        await _writeTriage(
+          source,
+          id,
+          status: 'skipped',
+          gateReason: learned,
+        );
+        await _store.refoldThreadState(source, id, restored: false);
+        await _notifyGated(source, id);
+        await _log.record(
+          'triage',
+          status: 'skipped',
+          source: source,
+          entityId: id,
+          durationMs: sw.elapsedMilliseconds,
+          detail: {
+            // `reason` is what the activity panel prints on a skipped row.
+            'reason': learned,
+            'gate': learned,
+            'learned': true,
+            'gate_p': _p2(decided.answers.p('gate', 'drop')),
+            'decision_ms': decided.latencyMs,
+          },
+        );
+        await _emit();
+        return true;
+      }
+
+      // The row, from the decision alone, written ONCE: the rail,
+      // notify-worthy and the bucket filing react now, and the text fills in
+      // when the message-text stage lands (it refolds the CTA then).
+      final result = decidedTriage(decided.answers);
+      await _writeTriage(
+        source,
+        id,
+        status: 'triaged',
+        result: result,
+      );
+      // The decision's urgency and category onto the thread now. The ask is
+      // the text's: on a new message (no summary yet) the thread's current
+      // ask is left alone until the text lands; a re-triaged message whose
+      // text already landed folds its ask from that text again.
+      await foldCtaUp(
+        _store,
+        source,
+        current,
+        urgency: result.urgency,
+        category: result.category,
+        needsAction: result.needsAction,
+        summary: message.summary ?? '',
+        actionItems: message.actionItems,
+        deadline: message.deadline ?? '',
+        textLanded: message.summary != null,
+      );
+      // A kept message with no text yet is owed its message-text call. What
+      // this is for is a revived errored or terminal triage row from before
+      // the decision model: its `extract` row closed `done` back when triage
+      // wrote the summary, so without this it would stay triaged with no text
+      // for good. The same repair `rependGatedTriage` makes, with no fresh
+      // stamp, because nobody asked. Only a FINISHED row is revived: new mail
+      // has a pending one already, and a message the sync queued no text for
+      // gets none from here either (`requeueWork` alone would insert one).
+      if (message.summary == null) {
+        final text = await _store.workStatusOf('extract', source, id);
+        if (text == 'done' || text == 'error') {
+          await _store.requeueWork('extract', source, id);
+        }
+      }
+      // What the decision model said, on the row. Its numbers ride in their
+      // own key as well, because the log keeps one label per span.
       await _log.record(
         'triage',
         source: source,
@@ -717,9 +850,8 @@ class TriageQueue {
           'urgency': result.urgency,
           'category': result.category,
           'needs_action': result.needsAction,
-          'action_items': result.actionItems.length,
           'reply_expected': result.replyExpected,
-          if (result.deadline.isNotEmpty) 'deadline': result.deadline,
+          'decision': decisionLine(decided),
         },
       );
       await _emit();
@@ -767,6 +899,96 @@ class TriageQueue {
         sw.elapsedMilliseconds,
       );
     }
+  }
+
+  /// Starts the owner lookup when the owner is not yet known and no lookup is
+  /// in flight. Not awaited here (see [_owner]); a throw or a null answer
+  /// leaves the owner unknown, and the next pump asks again.
+  void _askOwner() {
+    final lookup = _owner;
+    if (lookup == null || _ownerKnown != null || _ownerAsking) return;
+    _ownerAsking = true;
+    late final Future<void> asking;
+    asking = Future<OwnerIdentity?>.sync(lookup).then<void>(
+      (owner) {
+        _ownerKnown = owner;
+      },
+      onError: (Object _) {},
+    ).whenComplete(() {
+      _ownerAsking = false;
+      if (identical(_ownerAsk, asking)) _ownerAsk = null;
+    });
+    _ownerAsk = asking;
+  }
+
+  /// Waits for an owner lookup still in flight, [_ownerWait] at most, then
+  /// lets the claim go on with whatever is known. The claims launched
+  /// together wait on the one lookup together, and a lookup that outlives
+  /// the wait is waited for ONCE: after it, no claim waits on it again, so a
+  /// keychain that never answers costs the first claims 300 ms and the rest
+  /// nothing.
+  Future<void> _awaitOwner() {
+    final asking = _ownerAsk;
+    if (_ownerKnown != null || asking == null) return Future.value();
+    final shared = _ownerWaiting;
+    if (shared != null) return shared.future;
+    final waiting = _ownerWaiting = Completer<void>();
+    void finish() {
+      if (identical(_ownerWaiting, waiting)) {
+        _ownerTimer?.cancel();
+        _ownerTimer = null;
+        _ownerWaiting = null;
+      }
+      if (!waiting.isCompleted) waiting.complete();
+    }
+
+    _ownerTimer = Timer(_ownerWait, () {
+      // Waited for once: no later claim waits on this lookup again.
+      if (identical(_ownerAsk, asking)) _ownerAsk = null;
+      finish();
+    });
+    asking.whenComplete(finish);
+    return waiting.future;
+  }
+
+  /// Ends a wait for the owner early, for [quiesce]: the claims waiting go
+  /// on ownerless and nothing waits on the lookup again.
+  void _endOwnerWait() {
+    _ownerTimer?.cancel();
+    _ownerTimer = null;
+    _ownerAsk = null;
+    final waiting = _ownerWaiting;
+    _ownerWaiting = null;
+    if (waiting != null && !waiting.isCompleted) waiting.complete();
+  }
+
+  /// The row state the decision model's answers make: urgency and category
+  /// are the heads' choices, and the two booleans are their
+  /// yes-probabilities against the policy bars (`booleanYes` for
+  /// needs_action, `replyYes` for reply_expected). No text: the
+  /// message-text stage writes that.
+  static TriageResult decidedTriage(DecisionAnswers a) => TriageResult(
+        urgency: a['urgency'].choice,
+        category: a['category'].choice,
+        needsAction: a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
+        replyExpected: a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
+      );
+
+  static String _p2(double p) => p.toStringAsFixed(2);
+
+  /// The one line a triage activity row carries about the decision pass of a
+  /// KEPT message: `gate=keep urgency=high category=work na=0.81 re=0.12
+  /// ny=0.77 (58 ms)`. `gate=keep` is the verdict, not the head's argmax: a
+  /// drop below the bar, a cold approach and a restored message all land here.
+  static String decisionLine(DecisionResult d) {
+    final a = d.answers;
+    return 'gate=keep '
+        'urgency=${a['urgency'].choice} '
+        'category=${a['category'].choice} '
+        'na=${_p2(a.p('needs_action', 'yes'))} '
+        're=${_p2(a.p('reply_expected', 'yes'))} '
+        'ny=${_p2(a.p('needs_you', 'yes'))} '
+        '(${d.latencyMs} ms)';
   }
 
   /// Whether a failed fetch on this message is worth one more attempt instead
@@ -916,79 +1138,6 @@ class TriageQueue {
     );
     await _emit();
     return true;
-  }
-
-  /// Copies one message's result up onto its conversation — but only when the
-  /// message is the thread's newest inbound, and only while the user has not
-  /// already replied to it.
-  ///
-  /// Without the newest-inbound check a backlog would end up showing the wrong
-  /// ask: the worker runs newest-first, so an older message finishing later
-  /// would overwrite a current CTA with one from last week.
-  ///
-  /// Without the already-replied check a RE-triage would resurrect a dead ask.
-  /// Ingest clears the CTA on exactly the outbound that answers it
-  /// ([outboundResolves]); anything that sends the same message through triage
-  /// again afterwards — a re-judgment backfill, an error revive, a reply that
-  /// lands before the first drain gets there — would write that ask straight
-  /// back, along with the urgency multiplier that pushes an answered thread
-  /// into Needs You. The tie goes to the reply, matching [outboundResolves]:
-  /// an outbound at the same instant as the inbound counts as the answer.
-  Future<void> _foldUp(
-    String source,
-    Map<String, Object?> row,
-    Message message,
-    TriageResult result,
-  ) async {
-    final key = row['conversation_key'] as String?;
-    if (key == null || key.isEmpty) return;
-    final conversation = await _store.getConversationRow(source, key);
-    if (conversation == null) return;
-
-    final lastInbound = conversation['last_inbound_at'] as String?;
-    final receivedAt = message.receivedAt ?? '';
-    if (lastInbound != null &&
-        lastInbound.isNotEmpty &&
-        receivedAt.compareTo(lastInbound) < 0) {
-      return;
-    }
-
-    final lastOutbound = conversation['last_outbound_at'] as String?;
-    if (lastOutbound != null &&
-        lastOutbound.isNotEmpty &&
-        lastOutbound.compareTo(receivedAt) >= 0) {
-      return;
-    }
-
-    // The first action item is the ask, in the imperative the model was asked
-    // for. With no items, a summary stands in only when the message actually
-    // needs something — a summary shown as a CTA on mail that needs nothing
-    // reads as work that isn't there.
-    var ask = result.actionItems.isNotEmpty
-        ? result.actionItems.first
-        : (result.needsAction ? result.summary : null);
-
-    // The deadline rides the banner for free — "Send the invoice — by Friday"
-    // is the line the row wanted anyway. Appended BEFORE the clamp below, so
-    // the pair stays honest: a long ask loses its own tail rather than ending
-    // up with a deadline the cap would have cut in half. Through
-    // [showableDeadline], because this WRITES the banner: "— by Day 1"
-    // stamped here would outlive every display-time filter.
-    final deadline =
-        showableDeadline(result.deadline, now: DateTime.now());
-    if (ask != null && ask.isNotEmpty && deadline != null) {
-      ask = '$ask — by $deadline';
-    }
-
-    await _store.updateConversationTriage(
-      source,
-      key,
-      ctaText: (ask == null || ask.isEmpty)
-          ? null
-          : (ask.length > _ctaCap ? ask.substring(0, _ctaCap) : ask),
-      ctaUrgency: result.urgency,
-      category: result.category,
-    );
   }
 
   /// Awaited by every caller, never fired and forgotten: the counts are read

@@ -332,17 +332,53 @@ class StorylineTuning {
   /// deterministic for the reason the store's order is.
   static const int poolCardsPerCall = 48;
 
-  /// How many unanswered questions the app may have sitting in the rail at
-  /// once: three, of either kind. A wall of proposals is not a feature; it is
-  /// a chore, and it gets dismissed as one.
+  /// How many unanswered PROPOSALS the app may have sitting in the rail at
+  /// once: three. A wall of proposals is not a feature; it is a chore, and it
+  /// gets dismissed as one.
   ///
-  /// Both kinds, because both ask. The sweep's room count reads `suggested`
-  /// and `possible` rows created by the app, and a cluster filed as possible
-  /// spends a slot in the pass that files it the way a proposal does. A
-  /// declined cluster used to be an invisible tombstone and could fill nothing
-  /// up; since it became a row with members and two buttons, a pass whose
-  /// models declined everything would otherwise file every cluster it built.
+  /// `suggested` rows only since the decision-model round's Phase 8 — see
+  /// [possibleHoldsRoom], which is where the `possible` rows' part in this
+  /// count is decided and measured.
   static const int maxPendingSuggestions = 3;
+
+  /// Whether a `possible` row spends a slot of [maxPendingSuggestions].
+  ///
+  /// `false` ships (decision-model round, Phase 8): the sweep's room counts
+  /// the app's `suggested` rows only, at the top of the pass and inside it, so
+  /// a declined cluster no longer holds the proposer back for a fortnight.
+  /// Measured by `make golden-sweep SWEEP_POSSIBLE_ROOM=0|1` on the box 27B:
+  /// `storyline.id` 59/98 and forbidden hits 1 on both sides, identical. A
+  /// possible row still expires on [suggestionTtlDays]. What bounds the
+  /// model calls and the possible rows a pass can produce is
+  /// [maxQuestionsPerPass] and the overlap rule
+  /// ([possibleOverlapShare]), not the room. `true` is the rule before it:
+  /// both kinds counted, and a filing spent a slot in the pass that filed it.
+  /// Moves only with a golden-sweep row on each side, like every number here.
+  static const bool possibleHoldsRoom = false;
+
+  /// How many QUESTIONS one sweep pass may ask — proposals and possible
+  /// filings together — whatever the room says. Three, the old room ceiling.
+  ///
+  /// With [possibleHoldsRoom] off a filing spends no room, and without this a
+  /// pass whose models declined everything would name every cluster it built:
+  /// the first sweep after an upgrade would ask every cluster the old rule
+  /// held back, all at once. A cluster past the cap reaches no model and
+  /// writes no hash, so a later pass builds it again and asks then — the old
+  /// behaviour, unchanged.
+  static const int maxQuestionsPerPass = 3;
+
+  /// The share of a new cluster's threads that, sitting in ONE live automatic
+  /// `possible` storyline, makes the sweep skip the cluster without a model
+  /// call (noted as `overlaps_possible`).
+  ///
+  /// A possible storyline's threads stay in the pool until somebody keeps it,
+  /// so a declined cluster that gains one thread comes back as a NEW set with
+  /// a new hash: without this it would cost a namer call and confirms and
+  /// file a second possible row over the same threads. The identical set is
+  /// already answered by its hash and never reaches this rule. Expiry is
+  /// unchanged: when the possible row expires or is answered, its threads are
+  /// free to form a cluster that is asked again.
+  static const double possibleOverlapShare = 0.5;
 
   /// All this floor asks is that there be something to pair: below two
   /// unassigned threads — mail or chat — there is no pair for any rule to
@@ -578,10 +614,9 @@ class StorylineService {
   final LlmClient _client;
 
   /// Where membership questions go. Deciding whether one thread belongs to a
-  /// group is a label under a tight schema, re-checked in Dart — the small
-  /// model answers it in a fraction of the time and the app is not measurably
-  /// worse for it. Naming stays on [_client] because a title and a summary are
-  /// prose a person reads, and there the bigger model shows.
+  /// group is a label under a tight schema, re-checked in Dart, and it was
+  /// the small model's while the app ran two; since the decision-model round
+  /// it resolves to the one generative model, like naming on [_client].
   ///
   /// Defaults to [_client], so a caller that passes one client gets the
   /// single-server behaviour this service had before there were two.
@@ -590,11 +625,10 @@ class StorylineService {
   /// Where the neighbourhood grouping questions go under
   /// [GroupingMode.model]: reading a neighbourhood and saying what is one
   /// project is prose work of the same kind naming is, so it defaults to
-  /// [_client] and not to [_confirmClient]. The split that matters stays the
-  /// one it always was — `storyline_name` on the prose slot,
-  /// `storyline_membership` on the bulk one — and this is a third handle so
-  /// Phase 3 can point the stage somewhere else without touching the other
-  /// two.
+  /// [_client] and not to [_confirmClient]. Since the decision-model round
+  /// every chat stage resolves to the one generative model, so the three
+  /// handles are the same server in the app; they stay three so a bench can
+  /// point one stage somewhere else without touching the other two.
   ///
   /// Never dialled while [StorylineTuning.groupingMode] reads
   /// [GroupingMode.cosine], which is what ships.
@@ -665,6 +699,10 @@ class StorylineService {
   /// declined cluster beyond the `possible` row [_filePossible] writes.
   final SweepClusterObserver? _observeCluster;
 
+  /// [StorylineTuning.possibleHoldsRoom] unless a bench passed otherwise
+  /// (`make golden-sweep SWEEP_POSSIBLE_ROOM=0`).
+  final bool _possibleHoldsRoom;
+
   /// The user actions, which touch no model — see [StorylineEdits]. Every one
   /// of this service's twelve is a delegate onto it.
   late final StorylineEdits _edits;
@@ -687,6 +725,8 @@ class StorylineService {
     OwnerLookup? owner,
     SweepClusterObserver? clusterObserver,
     @visibleForTesting GroupingMode groupingMode = StorylineTuning.groupingMode,
+    @visibleForTesting
+    this._possibleHoldsRoom = StorylineTuning.possibleHoldsRoom,
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
         _groupClient = groupClient ?? client,
@@ -2224,15 +2264,17 @@ class StorylineService {
 
     if (await _settleGate()) return;
 
-    // A `possible` storyline counts here exactly as a `suggested` one does.
-    // Both are unanswered questions sitting in the rail with a Keep and a
-    // Dismiss on them, and the reason there is a ceiling at all — a wall of
-    // them is a chore, and a chore gets cleared rather than read — does not
-    // care which of the two a row is. `created_by = 'auto'` because the
-    // ceiling is on what the APP asks: a storyline a person made and later
-    // restored is their own row and holds no slot.
+    // `suggested` rows only, since [StorylineTuning.possibleHoldsRoom] is off:
+    // a `possible` row is a group the models declined, and letting it hold a
+    // slot stopped the proposer for a fortnight after three declines. With the
+    // switch on, both kinds count here and in the spend below.
+    // `created_by = 'auto'` because the ceiling is on what the APP asks: a
+    // storyline a person made and later restored is their own row and holds
+    // no slot.
     final pending = (await _store.loadStorylines(
-      statuses: const ['suggested', 'possible'],
+      statuses: _possibleHoldsRoom
+          ? const ['suggested', 'possible']
+          : const ['suggested'],
     ))
         .where((storyline) => storyline.createdBy == 'auto')
         .length;
@@ -2369,21 +2411,23 @@ class StorylineService {
     final seriesSeeded = seededGroups.length;
     final seriesExcluded = series.excluded.length;
 
-    // Room is spent on the QUESTIONS this pass asks — a proposal, or a
-    // cluster filed as possible — and not on clusters considered. A cluster
+    // Room is spent on the QUESTIONS this pass asks — a proposal, and a
+    // cluster filed as possible only while [StorylineTuning.possibleHoldsRoom]
+    // is on — and not on clusters considered. A cluster
     // that reached no model at all, because a hash already answered it, spends
     // nothing: the pass is deterministic and largest-first in either mode, so
     // a slot consumed by an answered cluster would be consumed again on every
     // future sweep and would permanently starve the genuinely new clusters
     // ranked behind it.
     //
-    // A filing counts because the owner sees it. Before decision 31 a declined
-    // cluster wrote an invisible member-less tombstone and could not fill
-    // anything up; now it writes a rail row with members and two buttons, so a
-    // pass whose models declined every cluster it built would otherwise walk
-    // the whole list and hand back `Possible · 40`. The rest are not lost:
-    // their hashes were never written, so the next pass — once one of these
-    // is answered — builds them again and asks then.
+    // With the switch off (what ships) a filing spends no ROOM, but every
+    // question — proposal or filing — spends one of
+    // [StorylineTuning.maxQuestionsPerPass], so a pass whose models declined
+    // everything still asks at most three and the rest are rebuilt and asked
+    // on a later pass. Each filing writes its hash, so the identical set is
+    // never asked again, and a re-cluster that mostly overlaps a live possible
+    // storyline is skipped by [_overlapsLivePossible] without a model call.
+    // With the switch on, a filing also spends a slot of room.
     var proposed = 0;
     // Kept apart from [proposed] rather than folded into it: `proposed` is
     // what the activity row means by proposed, and a filing is not a proposal.
@@ -2408,8 +2452,32 @@ class StorylineService {
     // assignment pass files a thread into its single best storyline, and the
     // sweep's own taken-set keeps it out of the pool afterwards.
     final claimedByProbe = <String>{};
+    // The live automatic possible storylines' threads, read once per pass.
+    final possibleMembers = <Set<String>>[
+      for (final storyline
+          in await _store.loadStorylines(statuses: const ['possible']))
+        if (storyline.createdBy == 'auto')
+          {
+            for (final member in await _store.membersOf(storyline.id))
+              threadKey(member.source, member.conversationKey),
+          },
+    ];
+    var overlapsPossible = 0;
     for (final cluster in clusters) {
-      if (proposed + filed >= room) break;
+      if (proposed + (_possibleHoldsRoom ? filed : 0) >= room) break;
+      if (proposed + filed >= StorylineTuning.maxQuestionsPerPass) break;
+      final threads = [
+        for (final index in cluster)
+          (
+            source: rows[index]['source'] as String? ?? _workSource,
+            key: rows[index]['conversation_key'] as String? ?? '',
+          ),
+      ];
+      if (_overlapsLivePossible(threads, possibleMembers) &&
+          !await _answeredByHash(threads)) {
+        overlapsPossible++;
+        continue;
+      }
       final tally = await _propose(
         [for (final index in cluster) rows[index]],
         [for (final index in cluster) vectors[index]],
@@ -2463,6 +2531,7 @@ class StorylineService {
     // nothing it is. Skipped entirely when no cluster reached the model,
     // because then there is not even a tally to be zero about.
     if (attempted > 0 ||
+        overlapsPossible > 0 ||
         seriesExcluded > 0 ||
         folded > 0 ||
         grouping.calls > 0) {
@@ -2487,6 +2556,9 @@ class StorylineService {
         'outliers': outliersDropped,
         'fragments': fragmentsJoined,
         'folded': folded,
+        // Clusters skipped because most of their threads already sit in one
+        // live possible storyline — see [StorylineTuning.possibleOverlapShare].
+        'overlaps_possible': overlapsPossible,
         // The four grouping counts, and they are on the row in BOTH modes —
         // four zeroes under [GroupingMode.cosine]. The bench reads the same
         // keys off either tree, so a row missing them would read as a pass
@@ -2499,6 +2571,33 @@ class StorylineService {
       });
     }
   }
+
+  /// Whether at least [StorylineTuning.possibleOverlapShare] of [threads] are
+  /// members of ONE of the live automatic possible storylines in
+  /// [possibleMembers].
+  static bool _overlapsLivePossible(
+    List<({String source, String key})> threads,
+    List<Set<String>> possibleMembers,
+  ) {
+    if (threads.isEmpty) return false;
+    for (final members in possibleMembers) {
+      final shared = threads
+          .where((thread) => members.contains(threadKey(thread.source, thread.key)))
+          .length;
+      if (shared >= threads.length * StorylineTuning.possibleOverlapShare) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Whether a stored hash already answers this candidate set — the check
+  /// [_propose] opens with, so an identical set is never counted as an
+  /// overlap skip.
+  Future<bool> _answeredByHash(List<({String source, String key})> threads) =>
+      _store.dismissedHashExistsAny(
+        [_hashOfThreads(threads), _legacyHashOfThreads(threads)],
+      );
 
   /// Dismisses the automatic suggestions nobody answered inside
   /// [StorylineTuning.suggestionTtlDays], and notes how many that was.
@@ -2859,11 +2958,7 @@ class StorylineService {
     // Both recipes for the one candidate set: the rows an older build wrote
     // hashed the bare keys and can never be rewritten, so recognition has to
     // keep speaking that language too. See [_legacyHashOfThreads].
-    if (await _store.dismissedHashExistsAny(
-      [clusterHash, _legacyHashOfThreads(threads)],
-    )) {
-      return nothing;
-    }
+    if (await _answeredByHash(threads)) return nothing;
 
     final id = newStorylineId();
     final named = await _name(rows, vectors);
@@ -3705,7 +3800,7 @@ class StorylineService {
 
     final card = clusteringCardForConversationRow(
       row,
-      await _store.newestInboundCardData(source, conversationKey),
+      await _store.clusteringCardData(source, conversationKey),
     );
     final embedded = await embeddings.embedResult(card);
     final vector = embedded.vector;

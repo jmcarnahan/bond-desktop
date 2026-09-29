@@ -423,7 +423,7 @@ void main() {
       expect(row['text_reason'], 'no_extractor');
       expect(await chunksOf('m1'), isEmpty);
       // No words means nothing for a model to read, and queuing one anyway
-      // would spend a fast-slot call establishing that.
+      // would spend a generative call establishing that.
       expect(await workStatus('attachment_digest', 'm1|a1'), isNull);
     });
 

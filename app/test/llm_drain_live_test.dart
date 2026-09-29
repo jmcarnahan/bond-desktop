@@ -3,14 +3,18 @@
 library;
 
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/extract_handler.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_report.dart';
 import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 import 'fixtures/corpus.dart';
@@ -21,9 +25,32 @@ import 'fixtures/corpus_seed.dart';
 ///
 /// `llm_bench_live_test.dart` times one request at a time, which is the number
 /// that tells you whether the MODEL got faster. This one times the whole
-/// corpus through the real [TriageQueue] once per concurrency in `BENCH_K`,
-/// because batched decode is a property of the drain and not of any one call:
-/// a per-request bench cannot see it at all.
+/// corpus through a real drain once per concurrency in `BENCH_K`, because
+/// batched decode is a property of the drain and not of any one call: a
+/// per-request bench cannot see it at all.
+///
+/// WHICH drain changed with the decision model. This bench used to race the
+/// [TriageQueue], because triage was the bulk server's per-message call. It
+/// is not any more: triage is the decision model's (an embedding call plus
+/// Dart heads) and makes no language-model call at all. The one generative
+/// call a kept message costs is now [MessageTextTask], run by
+/// [ExtractHandler] (work kind still `extract`) on the fast lane's
+/// [AiWorker] — so that is the drain raced here, and the file's purpose is
+/// kept: the corpus through the real queue at K in flight, on the bulk
+/// server. Each round:
+///
+/// 1. seeds the corpus and triages it through the real [TriageQueue] with a
+///    [FakeDecisionClient] that answers instantly (keep, `normal`, `work`) —
+///    no server, no timing, only so every ungated row is `triaged` the way
+///    the app would leave it and the gated ones are `skipped`;
+/// 2. enqueues an `extract` item per ungated message;
+/// 3. times ONE [AiWorker.pump] over an [ExtractHandler] whose width is K
+///    (the app ships it at 3; the subclass below overrides only that).
+///
+/// The embeddings client is pointed at a never-dialled port: the vector is
+/// not what this measures, and a refused connection per message costs
+/// milliseconds. No conversation rows are seeded (`seedCorpus`), so the card,
+/// bucket and recap legs return early and the wall is the model call.
 ///
 /// It points wherever the other benches do — `BENCH_URL` and friends — so a
 /// candidate runtime's batching can be measured with one command and no code
@@ -41,10 +68,27 @@ import 'fixtures/corpus_seed.dart';
 /// on the GPU, on how many slots the server was started with, and on how long
 /// the emails are; a threshold pinned here would fail on someone else's laptop
 /// for no defect. The assertion is the thing that must be true regardless:
-/// every drain triaged the same mail. A concurrency that went faster by losing
-/// messages is not a speedup.
+/// every drain wrote the text of the same mail. A concurrency that went faster
+/// by losing messages is not a speedup.
 
-/// The mean of `durationMs − prompt_ms − predicted_ms` over the triage calls
+/// [ExtractHandler] at a width of the bench's choosing, and otherwise the
+/// handler the app runs.
+class _WideExtractHandler extends ExtractHandler {
+  final int width;
+
+  _WideExtractHandler(
+    super.store,
+    super.client,
+    super.embeddings,
+    this.width,
+  );
+
+  @override
+  int get concurrency => width;
+}
+
+/// The mean of `durationMs − prompt_ms − predicted_ms` over the message text
+/// calls
 /// that reported server timings, or null when none did.
 ///
 /// Both server numbers are subtracted, not just generation: prefill is real
@@ -57,7 +101,7 @@ import 'fixtures/corpus_seed.dart';
 double? meanQueueWaitMs(CallCollector collector) {
   var total = 0;
   var counted = 0;
-  for (final record in collector.metricsFor('triage').ok) {
+  for (final record in collector.metricsFor('message_text').ok) {
     final prompt = record.serverPromptMs;
     final predicted = record.serverPredictedMs;
     if (prompt == null || predicted == null) continue;
@@ -99,30 +143,50 @@ void main() {
       // this bench measures exactly the mail it always did.
       await seedCorpus(store);
 
-      // Observed, which the old version could not be: a wall clock around
-      // `pump()` says how long the backlog took and nothing about where the
-      // time went. The records carry per-call latency and the server's own
-      // prefill and decode milliseconds, which is what makes the queue-wait
-      // column above possible at all.
+      // Triage, instantly and off the clock: the decision model is not what
+      // this measures, and the text stage will not claim a message that is
+      // still `pending` (`MessageStore.claimPendingWork`).
+      final queue = TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+        userAddress: userAddress,
+      );
+      await queue.pump();
+      await queue.dispose();
+
+      for (final id in ungatedCorpusIds()) {
+        await store.enqueueWork('extract', 'email', id);
+      }
+
+      // Observed, which a wall clock around `pump()` alone could not be: the
+      // records carry per-call latency and the server's own prefill and
+      // decode milliseconds, which is what makes the queue-wait column
+      // possible at all.
       final client = BenchTarget.bulk.client(onCall: collector.record);
       client.onReasoningLeak = collector.noteLeak;
 
-      final queue = TriageQueue(
+      final worker = AiWorker(
         store,
-        client,
-        userAddress: userAddress,
-        concurrency: concurrency,
+        handlers: [
+          _WideExtractHandler(
+            store,
+            client,
+            EmbeddingsClient(baseUrl: 'http://127.0.0.1:1/v1/embeddings'),
+            concurrency,
+          ),
+        ],
       );
 
       final watch = Stopwatch()..start();
-      await queue.pump();
+      await worker.pump();
       watch.stop();
+      await worker.dispose();
 
       // The only assertion, and it is about correctness rather than speed: a
       // drain that went faster by dropping messages has not got faster.
-      for (final entry in emailCorpus.where((e) => e.expectedGate == null)) {
-        final row = await store.getMessageRow('email', entry.id);
-        expect(row!['triage_status'], 'triaged', reason: entry.id);
+      for (final id in ungatedCorpusIds()) {
+        expect(await store.workStatusOf('extract', 'email', id), 'done',
+            reason: id);
       }
 
       return watch.elapsed;
@@ -138,7 +202,7 @@ void main() {
       // What the throughput number is over: the gated entries never reach the
       // model, so counting them would credit the server with mail it never
       // saw.
-      final triagedCount =
+      final textCount =
           emailCorpus.where((e) => e.expectedGate == null).length;
 
       // Thrown away, and on a client with no observer, so the first call's
@@ -150,8 +214,9 @@ void main() {
       for (var i = 0; i < BenchTarget.warmup; i++) {
         await runTask(
           warmupClient,
-          const TriageTask(),
-          TriageInput(emailCorpus.first.message, DateTime.now()),
+          const MessageTextTask(),
+          MessageTextInput(emailCorpus.first.message, DateTime.now()),
+          temperature: 0,
           think: BenchTarget.allowReasoning,
         );
       }
@@ -175,7 +240,7 @@ void main() {
 
         final wall = await drainCorpus(k, collector);
         final wallMs = wall.inMilliseconds;
-        final msgsPerMin = triagedCount * 60000 / wallMs;
+        final msgsPerMin = textCount * 60000 / wallMs;
         final queueWait = meanQueueWaitMs(collector);
 
         results.add({
@@ -210,7 +275,7 @@ void main() {
 
       // ignore: avoid_print
       print(
-        '\n=== drain: $triagedCount messages per round, '
+        '\n=== drain: $textCount messages per round, '
         'K=${rounds.join(',')} ===\n'
         '${lines.join('\n')}\n'
         '\n${collectors.map((c) => '${c.banner}\n\n${c.table()}\n').join('\n')}',
@@ -226,7 +291,7 @@ void main() {
         startedAt: startedAt,
         extra: {
           'k_rounds': results,
-          'triaged_count': triagedCount,
+          'text_count': textCount,
         },
       );
       // ignore: avoid_print

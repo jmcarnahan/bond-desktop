@@ -193,6 +193,14 @@ void main() {
         parseClusteringCardVariant('summary'),
         ClusteringCardVariant.summary,
       );
+      expect(
+        parseClusteringCardVariant('thread'),
+        ClusteringCardVariant.thread,
+      );
+      expect(
+        parseClusteringCardVariant('topics_untitled'),
+        ClusteringCardVariant.topicsUntitled,
+      );
     });
 
     test('refuses anything else, loudly', () {
@@ -216,6 +224,196 @@ void main() {
       }
       expect(ClusteringCardVariant.subjectTopics.wireName, 'subject_topics');
       expect(ClusteringCardVariant.topics.wireName, 'topics');
+    });
+  });
+
+  group('the thread variant', () {
+    String blob({List<String> topics = const [], String project = ''}) =>
+        jsonEncode({'topics': topics, 'project': project});
+
+    // Fictional, on example.com. Newest first, as the store returns them.
+    final threadData = <String, Object?>{
+      'summary': 'Dana confirms the fit-out starts on the ninth.',
+      'thread_extractions': [
+        blob(
+          topics: ['fit-out schedule', 'Keys handover'],
+          project: 'River Street lease',
+        ),
+        blob(topics: ['capped allowance', 'FIT-OUT SCHEDULE']),
+        blob(
+          topics: ['keys handover', 'parking permits', 'signage'],
+          project: 'river street lease',
+        ),
+        blob(topics: ['insurance certificate', 'move date'], project: 'Move'),
+        null,
+      ],
+    };
+
+    test('merges, de-duplicates and caps the topics, project first', () {
+      expect(
+        clusteringCardForConversationRow(
+          row,
+          threadData,
+          variant: ClusteringCardVariant.thread,
+        ),
+        'Addendum for the River Street suite |  | '
+        'River Street lease, fit-out schedule, Keys handover, '
+        'capped allowance, parking permits, signage | '
+        'Dana confirms the fit-out starts on the ninth.',
+      );
+    });
+
+    test('threadCardTopics: the most frequent project, ties to the newest', () {
+      expect(
+        threadCardTopics([
+          blob(project: 'Signage'),
+          blob(project: 'Parking'),
+          blob(project: 'parking'),
+        ]),
+        ['Parking'],
+      );
+      expect(
+        threadCardTopics([
+          blob(project: 'Signage'),
+          blob(project: 'Parking'),
+        ]),
+        ['Signage'],
+      );
+      expect(threadCardTopics([blob(topics: ['a']), null, 'not json']), ['a']);
+      expect(threadCardTopics(const []), isEmpty);
+    });
+
+    test('a topic equal to the project is not repeated', () {
+      expect(
+        threadCardTopics([
+          blob(topics: ['Signage', 'permits'], project: 'signage'),
+        ]),
+        ['signage', 'permits'],
+      );
+    });
+
+    test('a map with no thread list reads as a one-message thread', () {
+      expect(
+        clusteringCardForConversationRow(
+          row,
+          cardData,
+          variant: ClusteringCardVariant.thread,
+        ),
+        cardFor(ClusteringCardVariant.topics),
+      );
+    });
+
+    final teamsParticipants = [
+      {'name': 'Dana Whitfield', 'email': 'teams:u1'},
+      {'name': 'Priya Raman', 'email': 'teams:u2'},
+    ];
+    Map<String, Object?> teamsRow(String subject) => {
+          'source': 'teams',
+          'conversation_key': 'teams:fx-chat',
+          'subject': subject,
+          'participants_json': jsonEncode(teamsParticipants),
+        };
+
+    test('an untitled Teams chat has no subject on the card', () {
+      expect(
+        clusteringCardForConversationRow(
+          teamsRow('Dana Whitfield, Priya Raman'),
+          threadData,
+          variant: ClusteringCardVariant.thread,
+        ),
+        startsWith(' |  | River Street lease, '),
+      );
+    });
+
+    test('the names subject stays on every other variant', () {
+      expect(
+        clusteringCardForConversationRow(
+          teamsRow('Dana Whitfield, Priya Raman'),
+          cardData,
+        ),
+        startsWith('Dana Whitfield, Priya Raman |  | '),
+      );
+    });
+
+    test('a titled Teams chat keeps its topic', () {
+      expect(
+        clusteringCardForConversationRow(
+          teamsRow('Suite fit-out'),
+          threadData,
+          variant: ClusteringCardVariant.thread,
+        ),
+        startsWith('Suite fit-out |  | River Street lease, '),
+      );
+    });
+
+    test('a mail thread named like its people keeps its subject', () {
+      // The untitled rule is Teams-only: a mail subject is always somebody's
+      // words, whatever they are.
+      expect(
+        clusteringCardForConversationRow(
+          {
+            ...teamsRow('Dana Whitfield, Priya Raman'),
+            'source': 'email',
+          },
+          threadData,
+          variant: ClusteringCardVariant.thread,
+        ),
+        startsWith('Dana Whitfield, Priya Raman |  | '),
+      );
+    });
+  });
+
+  group('the topics_untitled variant', () {
+    final teamsParticipants = [
+      {'name': 'Dana Whitfield', 'email': 'teams:u1'},
+      {'name': 'Priya Raman', 'email': 'teams:u2'},
+    ];
+    Map<String, Object?> teamsRow(String subject) => {
+          'source': 'teams',
+          'conversation_key': 'teams:fx-chat',
+          'subject': subject,
+          'participants_json': jsonEncode(teamsParticipants),
+        };
+    String card(Map<String, Object?> row, ClusteringCardVariant variant) =>
+        clusteringCardForConversationRow(row, cardData, variant: variant);
+
+    test('is byte-identical to topics on mail', () {
+      expect(
+        card(row, ClusteringCardVariant.topicsUntitled),
+        card(row, ClusteringCardVariant.topics),
+      );
+      // A mail subject that happens to be names is still somebody's words.
+      final namedMail = {
+        ...teamsRow('Dana Whitfield, Priya Raman'),
+        'source': 'email',
+      };
+      expect(
+        card(namedMail, ClusteringCardVariant.topicsUntitled),
+        card(namedMail, ClusteringCardVariant.topics),
+      );
+    });
+
+    test('is byte-identical to topics on a titled chat', () {
+      expect(
+        card(teamsRow('Suite fit-out'), ClusteringCardVariant.topicsUntitled),
+        card(teamsRow('Suite fit-out'), ClusteringCardVariant.topics),
+      );
+    });
+
+    test('leaves the subject empty on an untitled chat', () {
+      expect(
+        card(
+          teamsRow('Dana Whitfield, Priya Raman'),
+          ClusteringCardVariant.topicsUntitled,
+        ),
+        ' |  | fit-out schedule, capped allowance | '
+        'Dana asks for a decision on the allowance clause.',
+      );
+      expect(
+        card(teamsRow('Dana Whitfield, Priya Raman'),
+            ClusteringCardVariant.topics),
+        startsWith('Dana Whitfield, Priya Raman |  | '),
+      );
     });
   });
 

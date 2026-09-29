@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -32,14 +33,15 @@ import 'fixtures/test_db.dart';
 /// A [ScriptedLlm] that answers from a script and never opens a socket.
 ///
 /// The steps go under BOTH schema names this file drives, because a script
-/// belongs to a schema and each test here drives one of the two: `triage` for
-/// the queue, `extraction` for the handler. No client here is ever shared
-/// across both names, so the two copies `scriptFor` makes are never consumed
-/// against each other — a test that did drive both would need one script per
-/// schema rather than this one split in two.
+/// belongs to a schema and each test here drives one of the two: `decision`
+/// for the queue (through `ScriptedDecisionClient`), `message_text` for the
+/// handler. No client here is ever shared across both names, so the two
+/// copies `scriptFor` makes are never consumed against each other — a test
+/// that did drive both would need one script per schema rather than this one
+/// split in two.
 ScriptedLlm fakeLlm(List<Object> script) => ScriptedLlm()
-  ..scriptFor('triage', script)
-  ..scriptFor('extraction', script);
+  ..scriptFor('decision', script)
+  ..scriptFor('message_text', script);
 
 /// An embedding server that is not running — the state every test here wants,
 /// since none of them is about vectors.
@@ -176,7 +178,7 @@ void main() {
       await seedMessage('m1');
       final queue = TriageQueue(
         store,
-        fakeLlm([triageAnswer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([triageAnswer()])),
         concurrency: 1,
         progress: progress,
       );
@@ -196,7 +198,7 @@ void main() {
       await seedMessage('m1', from: 'no-reply@example.com');
       final queue = TriageQueue(
         store,
-        fakeLlm([triageAnswer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([triageAnswer()])),
         concurrency: 1,
         progress: progress,
       );
@@ -216,7 +218,7 @@ void main() {
       await seedMessage('m1');
       final queue = TriageQueue(
         store,
-        fakeLlm([const LlmUnavailableException('server off')]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([const LlmUnavailableException('server off')])),
         concurrency: 1,
         progress: progress,
       );
@@ -234,7 +236,7 @@ void main() {
       await seedMessage('m1');
       final queue = TriageQueue(
         store,
-        fakeLlm([const LlmException('bad json', 400)]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([const LlmException('bad json', 400)])),
         concurrency: 1,
         progress: progress,
       );
@@ -499,14 +501,15 @@ void main() {
             ? TriageResult(
                 urgency: 'normal',
                 category: 'work',
-                summary: 'what m1 says',
                 needsAction: false,
-                actionItems: const [],
                 replyExpected: replyExpected,
-                deadline: '',
               )
             : null,
       );
+      if (triageStatus == 'triaged') {
+        await store.writeMessageText('email', 'm1',
+            summary: 'what m1 says', actionItems: const [], deadline: '');
+      }
       // The stages the pipeline would have written by now — completeness reads
       // `message_progress`, not the work queue.
       await progress.noteExtract('email', 'm1', state: 'done');
@@ -588,7 +591,7 @@ void main() {
     // Every constructor takes the disabled recorder, which is what keeps the
     // rest of the suite from paying for this file's subject.
     await seedMessage('m1');
-    final queue = TriageQueue(store, fakeLlm([triageAnswer()]), concurrency: 1);
+    final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([triageAnswer()])), concurrency: 1);
     addTearDown(queue.dispose);
 
     await queue.pump();

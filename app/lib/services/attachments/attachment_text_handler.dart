@@ -22,8 +22,8 @@ import 'attachment_policy.dart';
 ///
 /// The digest is a SEPARATE kind for the mirror-image reason. Reading a
 /// document and understanding it are different costs against different
-/// servers, and folding them together would mean a fast server that is not
-/// running holds back the words too — words that search, retrieval and the
+/// servers, and folding them together would mean a generative server that is
+/// not running holds back the words too — words that search, retrieval and the
 /// panel's Text segment all want whether or not any model has read them.
 ///
 /// Concurrency two: one Graph fetch dominates an item's wall clock, the embeds
@@ -237,7 +237,7 @@ class AttachmentTextHandler extends WorkHandler {
 
     await _store.indexPendingChunks();
     // Only now, and only with words: a document with nothing in it has nothing
-    // for a model to read, and queuing one anyway would spend a fast-slot call
+    // for a model to read, and queuing one anyway would spend a generative call
     // establishing that.
     await _store.enqueueWork('attachment_digest', source, entityId);
 

@@ -14,7 +14,7 @@ import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/needs_you_handler.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,21 +24,22 @@ import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
 import 'fixtures/corpus_seed.dart';
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// What the BACKLOG costs, end to end, through the real queues.
 ///
-/// `llm_drain_live_test.dart` times triage alone and answers "does this
-/// runtime batch?". This one answers the question a person actually asks: how
+/// `llm_drain_live_test.dart` times the message text stage alone and answers
+/// "does this runtime batch?". This one answers the question a person actually asks: how
 /// long until the inbox is usable, how long until the drafts are there, and
 /// what happens to a message that arrives while all that is going on.
 ///
 /// It runs the same corpus through both SHAPES, on the same tree on the same
 /// day — which is a cleaner before/after than two trees a week apart:
 ///
-/// - `PIPE_SHAPE=single` — one worker holding needs-you, extraction and
+/// - `PIPE_SHAPE=single` — one worker holding needs-you, message text and
 ///   drafting, sharing one gate with the triage drain. The pre-Round-C shape.
-/// - `PIPE_SHAPE=lanes` — a fast worker (needs-you, extraction) on the triage
+/// - `PIPE_SHAPE=lanes` — a fast worker (needs-you, message text) on the triage
 ///   gate, and a draft worker on a gate of its own, woken by
 ///   `ExtractHandler.onDraftQueued` as each draft row is written and again by
 ///   the fast drain's `onDrained`.
@@ -48,13 +49,37 @@ import 'fixtures/test_db.dart';
 /// lands, so the number INCLUDES waiting for that pass — every draft in it —
 /// before the extract handler comes round again. In `lanes` the drafts are on
 /// another gate, so it should be one triage plus one needs-you plus one
-/// extraction. The gap between the two is what T1 is about.
+/// message text call. The gap between the two is what T1 is about.
+///
+/// What each message costs the servers, since the decision model:
+///
+/// - triage is the DECISION MODEL's, not a language-model call. This bench
+///   does not run a live decision server (`make bench-pipeline` passes no
+///   `DECIDE_URL`): the [TriageQueue] is handed a [FakeDecisionClient] that
+///   answers instantly — keep, `normal`, `work` — so triage costs ~nothing
+///   here and its real cost (one embedding call per message on :8083) is NOT
+///   in any wall below. `make golden-decision` is where that is measured;
+/// - its p(needs_you) is 0.5, INSIDE the band, so every message's needs-you
+///   still asks the bulk server (`NeedsYouTask`, `needs_you` in the table).
+///   That is the worst case — the app settles a message outside the band
+///   without a call — and it is what every historical row paid, so the walls
+///   stay comparable;
+/// - `message_text` ([MessageTextTask], run by [ExtractHandler] under the
+///   work kind `extract`) is the ONE generative call per kept message, on
+///   the bulk server. It replaced the two calls the old rows carry as
+///   `triage` and `extraction`, so a row before the decision model and one
+///   after are compared on the walls, not on those per-label lines;
+/// - `draft_reply` on the prose server, per [DraftPolicy]. The fake's
+///   p(reply_expected) is 0.9, so no draft is gated for want of a reply:
+///   rows before the decision model queued no draft for about 12 of 49 (the
+///   cue gate read the triage labels) and the 27B reply decision skipped a
+///   few more; rows after it draft every message the policy allows.
 ///
 /// Three honest limits, stated here because they bound every number below:
 ///
 /// 1. The seed writes messages and NO conversation rows (`seedCorpus`, the
 ///    drain bench's shape). `ExtractHandler._refreshCard` and `_fileBucket`
-///    both return early without one, so the extraction leg measures the model
+///    both return early without one, so the message text leg measures the model
 ///    call rather than the card, the bucket filing or the thread embedding.
 /// 2. `_embedMessage` still dials the embeddings client once per message. It
 ///    is pointed at a never-dialled port, so each is a refused connection —
@@ -103,6 +128,15 @@ const bool pipeLate = bool.fromEnvironment('PIPE_LATE', defaultValue: true);
 /// and `needsYou` is how the shipped default is measured against them.
 const String pipePolicy =
     String.fromEnvironment('PIPE_POLICY', defaultValue: 'all');
+
+/// The p(needs_you) the stand-in decision model answers, as text because
+/// `double.fromEnvironment` does not exist. 0.5 is inside the band (every
+/// needs-you asks the bulk server, as every historical row did); 0.9 is the
+/// default path, where the decision model settles it with no call.
+final double pipeNeedsYouP = double.tryParse(
+      const String.fromEnvironment('PIPE_NEEDS_YOU_P', defaultValue: '0.5'),
+    ) ??
+    0.5;
 
 /// The id the late arrival is seeded under. Fixed, so a run file can be read
 /// against the rows afterwards.
@@ -213,8 +247,9 @@ void main() {
       for (var i = 0; i < BenchTarget.warmup; i++) {
         await runTask(
           warmupClient,
-          const TriageTask(),
-          TriageInput(emailCorpus.first.message, DateTime.now()),
+          const MessageTextTask(),
+          MessageTextInput(emailCorpus.first.message, DateTime.now()),
+          temperature: 0,
           think: BenchTarget.allowReasoning,
         );
       }
@@ -300,8 +335,20 @@ void main() {
 
       final queue = TriageQueue(
         store,
-        bulkClient,
+        // Instant and serverless — see the header: triage makes no
+        // language-model call, and no live decision server is part of this
+        // bench. needs_you 0.5 keeps every message's needs-you on the bulk
+        // server, as every historical row paid for it. reply_expected 0.9
+        // because the reply gate reads it before any draft is gathered: the
+        // fake's default 0.2 gates every draft and leaves the drafts wall
+        // measuring nothing.
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(needsYou: pipeNeedsYouP, replyExpected: 0.9),
+        ),
         userAddress: userAddress,
+        // Owner-known decisions, as in the app: an ownerless one sends
+        // needs-you to the generative model whatever p(needs_you) says.
+        owner: () async => (name: 'Alex Rivera', address: userAddress),
         concurrency: 3,
         gate: fastGate,
         onDrained: (triaged) async =>
@@ -466,9 +513,9 @@ void main() {
 
       // ── the late arrival ────────────────────────────────────────────────
       // One more message, upserted at the moment the prose server starts its
-      // first draft, and timed to its extraction being done. In `single` it
+      // first draft, and timed to its message text being done. In `single` it
       // waits for the pass to come round behind every draft; in `lanes` it
-      // should cost one triage plus one needs-you plus one extraction.
+      // should cost one triage plus one needs-you plus one message text call.
       var lateMs = <String, Object?>{};
       Future<void> lateArrival() async {
         await drafts.firstItem.future;

@@ -1,6 +1,6 @@
 # Bond quickstart
 
-From a bare Apple Silicon Mac to the desktop inbox running against three local
+From a bare Apple Silicon Mac to the desktop inbox running against local
 model servers and signed in. Every block below is meant to be pasted as-is;
 the text between blocks tells you what to expect.
 
@@ -10,28 +10,47 @@ Makefile knob.
 
 ## 0. What you get, what you need
 
-Bond runs three `llama-server` processes on this machine and never sends mail
-content anywhere at inference time:
+Bond uses three models, one per role, and sends mail content to no model
+server you have not named:
 
-| Server | Port | Model | Download |
-|---|---|---|---|
-| prose (names storylines, drafts replies) | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
-| bulk (triage, extraction) | 8082 | Qwen3-4B-Instruct Q8_0 | ~4.3 GB |
-| embeddings (clustering, search) | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
+| Role | Hand-started server | Port | Model | Size |
+|---|---|---|---|---|
+| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
+| **Generative** (message summaries, the needs-you band, storylines, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
+| **Embeddings** (clustering, search) | `make embed` | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
+
+`make setup` also starts `make fast` on :8082 (Qwen3-4B-Instruct Q8_0,
+~4.3 GB). The app does not use it any more: it is the benches' bulk slot.
+
+**The generative model runs on your box by default** when the build names one
+(`BOND_BOX_URL`, step 2): the 27B there, with this Mac holding only the
+decision and embedding models. Without a box, or with **This Mac** chosen, the
+app's own server runs the 27B, or the 4B on a smaller Mac.
+
+**The decision model is not published yet.** `make decide-install` copies it,
+sha256-checked, from the export the training project writes (`DECIDE_SRC`),
+so it works only on a machine that has that export. Without it new mail
+parks at triage (the rail and Settings, Models say the decision model is not
+installed): no summary, no needs-you verdict and no suggested draft until it is
+installed, because the text and needs-you work waits behind triage. Sync,
+reading and search still work. The next round
+ships it as a model bundle from a registry (JFrog Artifactory; the design is
+`docs/DESIGN-model-bundles.md` in the training project), which retires
+`make decide-install`.
 
 You need:
 
 - **An Apple Silicon Mac.** Intel Macs are not supported.
-- **Memory.** 40 GiB is the line the app itself draws. At or above it every
-  machine runs all three servers, which is what the defaults below are sized
-  for; a 48 GB Mac is comfortable and a 36 GB one is not. Below it the shipped
-  app is on its INBOX tier: it downloads and starts the embedding model and the
-  4B only, the writing model is left out, and the writing stages run on the 4B
-  until a target is added under Settings, Models. 16 GiB is the smallest
-  machine any measured row was taken on, and under it triage is slower than any
-  number in `docs/model-bakeoff.md`. Running the three servers by hand from
-  this checkout ignores all of that: `make model` starts the 27B whatever the
-  machine has, and step 2 shows the one-line overrides for a smaller one.
+- **Memory.** 40 GiB is the line the app itself draws. At or above it the
+  app's own server runs the 27B as the generative model beside the decision
+  and embedding models, which is what the defaults below are sized for; a
+  48 GB Mac is comfortable and a 36 GB one is not. Below it the shipped app is
+  on its INBOX tier: the 27B is not offered and the 4B is the generative model
+  on this Mac, unless the generative model runs on your own server. 16 GiB is
+  the smallest machine any measured row was taken on. Running the servers by
+  hand from this checkout ignores all of that: `make model` starts the 27B
+  whatever the machine has, and step 2 shows the one-line overrides for a
+  smaller one.
 - **Disk.** About 30 GB free: the weights above plus the app build.
 - **macOS 14 or newer** with Xcode installed. That is the Mac you build on;
   the app itself deploys back to macOS 12. Xcode 26 on macOS 15 and 26 is
@@ -85,16 +104,18 @@ Two defines decide where the models run. Both are optional and neither carries
 a secret:
 
 - `BOND_BOX_URL=https://box.example.com`, with the hostname you were given, for
-  a build that should open on your own servers. It makes **User defined** the
-  build's default placement and fills both addresses in,
-  `<the address>/prose/v1/chat/completions` for the big model and
-  `<the address>/bulk/v1/chat/completions` for the small one, on the wizard's
-  **Where the models run** step and under Settings, Models, where you can
-  change them. The access key is never compiled in. You type it in the app once
-  and it is kept in the macOS keychain. A separate `BOND_BOX_KEY` line is read
-  only by the bench recipes, which have no keychain to read from.
+  a build whose generative model should run on your own server. It makes
+  **Your server** the generative model's default and fills its address in,
+  `<the address>/prose/v1/chat/completions`, on the wizard's **Where the models
+  run** step and under Settings, Models, where you can change it. It also
+  fills the decision model's Your server address,
+  `<the address>/decide/v1/embeddings`, but the decision model still defaults
+  to **This Mac**. The access key is never compiled in. You type it in the app
+  (once per role you point at the box) and it is kept in the macOS keychain. A
+  separate `BOND_BOX_KEY` line is read only by the bench recipes, which have no
+  keychain to read from.
 - `BOND_LLAMA_SERVER`, the path to a `llama-server` binary, for any dev build
-  that will start the local server. It is needed under **User defined** too,
+  that will start the local server. It is needed under **Your server** too,
   because the embedding model always runs on this Mac. Without it the app
   says `The model runtime is missing from this build`. It goes in `local.mk`
   rather than `.env`, next to the other machine-local overrides below.
@@ -110,20 +131,22 @@ whichever lines apply. Nothing else in the repo needs to change:
 # 16–24 GB: a smaller prose model. Its prose quality has not been benchmarked.
 # MODEL_HF = ggml-org/Qwen3-8B-GGUF:Q8_0
 # Ports, if something on your machine already uses one of ours.
-# MODEL_PORT = 8080
-# FAST_PORT  = 8082
-# EMBED_PORT = 8081
+# MODEL_PORT  = 8080
+# FAST_PORT   = 8082
+# EMBED_PORT  = 8081
+# DECIDE_PORT = 8083
 # Lets the app run ONE bundled-style router from this dev build, instead of the
-# three servers you start by hand. Needed under User defined too: the
-# embedding model always runs here.
+# servers you start by hand. Needed under Your server too: the embedding
+# model always runs here.
 # BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
 # Skips the first-run setup wizard. Your models are in the Homebrew cache, not
 # in the app's own folder, so it would offer to download ~22 GB you already have.
 # BOND_DEV_SKIP_SETUP = 1
 # Leaves the servers to you. The app runs its own llama-server by default since
-# Round H, and this is how a machine that already has `make model fast embed`
-# up says so: the two chat slots stay on the ports above instead of following
-# the app's router. Read as a value, so `= 0` turns it back off.
+# Round H, and this is how a machine that already has `make decide model embed`
+# up says so: the decision model stays on :8083, the generative model on :8080
+# and embeddings on :8081 instead of following the app's router. Read as a
+# value, so `= 0` turns it back off.
 # BOND_DEV_HAND_SERVERS = 1
 ```
 
@@ -132,6 +155,8 @@ whichever lines apply. Nothing else in the repo needs to change:
 ```sh
 make setup
 make embed
+make decide-install
+make decide
 make status
 ```
 
@@ -147,9 +172,18 @@ What happens:
 - `make embed` starts the embeddings server on :8081. `make setup` does not
   start this one yet, and the app degrades quietly without it (no storyline
   clustering, no explanation), so do not skip it.
-- `make status` should show `model`, `embed` and `fast` as `[up]` with a pid.
-  A fourth row, `omlx`, is a benchmarking runtime this path never starts;
-  `[down]` there is correct.
+- `make decide-install` copies the decision model's GGUF and heads file from
+  `DECIDE_SRC` into the app's models folder
+  (`~/Library/Application Support/com.bondinbox.app/models/local_bond-decide/`),
+  refusing unless both match the export's `SHA256SUMS`. The app reads the
+  heads file from there whichever server runs the model, so it is needed on
+  the hand-started path too. It fails with a pointer when the export is not on
+  this machine (see step 0).
+- `make decide` serves the installed model on :8083.
+- `make status` should show `model`, `embed`, `fast` and `decide` as `[up]`
+  with a pid. `fast` is up because `make setup` starts it for the benches; the
+  app does not need it. The `omlx` row is a benchmarking runtime this path
+  never starts; `[down]` there is correct.
 
 Early in the first run you will see this from `make model`, and it is not a
 failure:
@@ -189,25 +223,30 @@ The first build takes a few minutes.
 **The first launch opens the setup wizard** — nine screens that check the Mac,
 ask where the models run, download what this Mac needs, sign in, and start
 Bond's own model server. That is not what you want on this path: you
-have just started three servers by hand and the weights are already in
+have just started the servers by hand and the weights are already in
 `~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` and
 `BOND_DEV_HAND_SERVERS = 1` to `local.mk` (step 2) and rebuild: the app goes
-straight to sign-in as it always has, and it leaves your three servers alone
+straight to sign-in as it always has, and it leaves your servers alone
 rather than starting one of its own.
 Run the wizard instead if you want the bundled shape — it downloads its own
 copies and switches the app onto one router. `docs/install.md` walks the
 screens; `docs/settings.md` (**First run**) is the reference.
 
-**What the third screen asks.** **Where the models run** is two cards,
-**Managed · recommended** and **User defined**. On a build with `BOND_BOX_URL`
-compiled in, User defined opens already chosen with both addresses filled in.
-Paste the access key you were given and press **Continue**. The app asks each
-server which model it serves and takes the names they list, the key is kept in
-the macOS keychain and nowhere else, and the download step that follows is the
-embedding model alone, because that model always runs on this Mac. **Managed**
-is the offline choice: Bond downloads the models and runs them here, and
-nothing leaves the machine. Either way, processing starts on by itself once the
-wizard finishes, so the inbox begins working without anybody finding a switch.
+**What the third screen asks.** **Where the models run** asks two questions,
+one per role, each answered by two cards, **This Mac · recommended** and
+**Your server**. The **Decision model** comes first and defaults to This Mac,
+where it answers in milliseconds (installed with `make decide-install`, never
+downloaded); its Your server form says **Connect** and writes at once. The
+**Generative model** follows: on a build with `BOND_BOX_URL` compiled in, Your
+server opens already chosen with the address filled in. Paste the access key
+you were given and press **Continue**. The app asks the server which model it
+serves and takes the name it lists, and the key is kept in the macOS keychain
+and nowhere else. Under This Mac you pick the 27B or the 4B (the 4B only on a
+smaller Mac); the download step that follows fetches the embedding model and,
+when it runs here, the generative model. This Mac for both is the offline
+choice: nothing leaves the machine. Either way, processing starts on by itself
+once the wizard finishes, so the inbox begins working without anybody finding
+a switch.
 
 With the wizard skipped, the app opens on a sign-in screen:
 
@@ -217,8 +256,9 @@ With the wizard skipped, the app opens on a sign-in screen:
    **Connect your Microsoft account**, hands you to the platform's consent
    page. Finish it and press **I've connected — continue**.
 3. The inbox syncs. Mail arrives first; the rail shows a `Triaging N
-   remaining…` counter while the bulk server works through it, and storylines
-   and drafts fill in over the next few minutes.
+   remaining…` counter while the decision model sorts it (a fraction of a
+   second a message), summaries fill in behind it from the generative model,
+   and storylines and drafts over the next few minutes.
 
 Two things you may see and can ignore:
 
@@ -229,9 +269,11 @@ Two things you may see and can ignore:
   is under Settings → Notifications either way.
 
 To confirm the app sees the servers, open the avatar menu → **Settings** →
-**Models**. The page asks one question, where the models run, and lists three
-roles under it: the big model, the small model and embeddings. Press **Check**
-on each. All three should report reachable with the model listed.
+**Models**. The page is three role blocks: **Decision model** and **Generative
+model**, each **This Mac** or **Your server**, and **Embeddings**, which always
+runs here. Each block's status line should read ready. **Check** under the
+decision model re-reads its install, which is how a `make decide-install` run
+while the app is open is picked up.
 
 ## 5. Day to day
 
@@ -243,7 +285,7 @@ that define the app runs its own llama-server and none of this is needed.
 
 ```sh
 make status
-make model fast embed
+make decide model embed
 ```
 
 The three start one after another, and each gives up after two minutes if its
@@ -252,13 +294,14 @@ port has not bound, so on a cold cache start them one at a time.
 Stop them when you need the memory back:
 
 ```sh
-make stop fast-stop embed-stop
+make stop fast-stop embed-stop decide-stop
 ```
 
 Or let the app run them for you, which is what it does BY DEFAULT: with
 `BOND_LLAMA_SERVER` set in `local.mk` (step 2), the app runs one llama-server
-that serves all three models, and starts and stops it with the app. What puts
-you back on `make model fast embed` exactly as above is
+that serves the embedding model, the decision model and, when it runs here,
+the generative model, and starts and stops it with the app. What puts you back
+on `make decide model embed` exactly as above is
 `BOND_DEV_HAND_SERVERS = 1` in `local.mk` (step 2), which is a build define
 rather than a setting. **Set up again**, at the foot of Settings → Models,
 re-runs the first-run wizard from the top — it keeps the models already on
@@ -274,12 +317,12 @@ make app-run
 
 ## 6. Troubleshooting
 
-**A port is busy.** `make model` (and `fast`, `embed`) refuse to reuse a port
-held by anything that is not a `llama-server`; they print the pid and command.
-Either free the port or move ours in `local.mk` (step 2). Then point the app at
-the new port: under **User defined**, edit the two addresses in Settings →
-Models and press **Connect**. The embeddings URL is fixed at build time, so a
-moved embeddings port means one rebuild:
+**A port is busy.** `make model` (and `fast`, `embed`, `decide`) refuse to
+reuse a port held by anything that is not a `llama-server`; they print the pid
+and command. Either free the port or move ours in `local.mk` (step 2). On the
+hand-started path the app's addresses are build defines, so a moved port means
+one rebuild with the matching define (`LLAMA_URL`, `DECIDE_URL`, `EMBED_URL`;
+the last two are full `/v1/embeddings` URLs):
 
 ```sh
 make app-run EMBED_URL=http://localhost:9081/v1/embeddings
@@ -305,12 +348,12 @@ download. Every cheap check passes on it; only the hash catches it.
 
 ```sh
 make verify
-make stop fast-stop embed-stop
-make clean-model && make setup && make embed
+make stop fast-stop embed-stop decide-stop
+make clean-model && make setup && make embed && make decide
 ```
 
 `make clean-model` refuses to run while any `llama-server` is alive, which is
-why all three are stopped first.
+why all four are stopped first.
 
 **The model never binds, or the Mac swaps and stalls.** Not enough memory for
 the model plus its context. Lower `CTX_SIZE` or choose the smaller prose model
@@ -321,7 +364,10 @@ make stop && make model
 ```
 
 **Nothing is being annotated.** `make status`: any server `[down]` parks the
-work that needs it until it comes back. Start the missing one.
+work that needs it until it comes back. Start the missing one. A rail line
+about a model that is not installed or not downloaded means the decision model
+needs `make decide-install` or a generative model the wizard has not
+downloaded needs **Set up again**.
 
 **`flutter: command not found` from make.** See the `FLUTTER=` note in step 1.
 
@@ -337,7 +383,8 @@ work that needs it until it comes back. Start the missing one.
 - The app's own server files: `~/Library/Application Support/com.bondinbox.app/servers/`
   (the preset it writes, the pid file the next launch reaps, and an empty cache
   directory the child is deliberately pointed at)
-- Models the app downloads for itself:
+- Models the app downloads for itself, and the decision model
+  `make decide-install` copies in:
   `~/Library/Application Support/com.bondinbox.app/models/`, or the folder
   chosen on the setup's Storage step (reach it again through **Set up
   again**). Separate from the Homebrew cache above, which is what `make model`
@@ -352,7 +399,7 @@ work that needs it until it comes back. Start the missing one.
 **Uninstall**
 
 ```sh
-make stop fast-stop embed-stop
+make stop fast-stop embed-stop decide-stop
 make clean-model
 rm -rf ~/Library/Application\ Support/com.bondinbox.app
 rm -rf ~/Library/Containers/com.bondinbox.app   # only if an older build ran here
@@ -376,6 +423,6 @@ of `README.md`.
 
 `README.md` covers the agent REPL (`make chat`), the benchmarks,
 `docs/model-bakeoff.md` covers swapping models and runtimes,
-`docs/inference-endpoint.md` covers running the prose model on a rented AWS
-GPU (`tools/inference.sh`), and `docs/settings.md` documents every setting in
+`docs/inference-endpoint.md` covers running the generative model (and,
+optionally, the decision model) on a rented AWS GPU (`tools/inference.sh`), and `docs/settings.md` documents every setting in
 the app.

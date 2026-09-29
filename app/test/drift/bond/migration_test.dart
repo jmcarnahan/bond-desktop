@@ -1217,6 +1217,30 @@ void main() {
     expect([for (final r in columns) r.data['name']], isNot(contains('rule_id')));
   });
 
+  test('v19 to v20 adds message_decisions empty and keeps the message',
+      () async {
+    // Nothing to backfill: a message triaged before the decision model was
+    // judged by the language model, and a missing row is what the needs-you
+    // handler reads as "ask the language model".
+    final schema = await verifier.schemaAt(19);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, created_at, updated_at, triage_status) VALUES
+        ('email', 'm-old', 'c-old', 'inbound', 't', 't', 'triaged');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 20);
+    addTearDown(db.close);
+
+    final decisions =
+        await db.customSelect('SELECT * FROM message_decisions').get();
+    expect(decisions, isEmpty);
+    final messages = await db
+        .customSelect('SELECT triage_status FROM messages')
+        .get();
+    expect([for (final r in messages) r.data['triage_status']], ['triaged']);
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

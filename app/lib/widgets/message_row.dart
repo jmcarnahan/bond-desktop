@@ -969,7 +969,18 @@ class _MessageRowState extends State<MessageRow> {
         ),
         if (meta.isNotEmpty) ...[
           const SizedBox(width: BondSpacing.s8),
-          Text(meta, style: BondType.caption),
+          // Flexible like the name: "Sep 27, 11:02 PM · triaging" beside the
+          // `@ you` marker is wider than a beside pane, and a message parked
+          // in triage wears that suffix for as long as the model is down.
+          Flexible(
+            child: Text(
+              meta,
+              style: BondType.caption,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ],
         // After the name and the stamp, before the chevron: it says something
         // about this message, not about whether the row is open.

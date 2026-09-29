@@ -184,7 +184,7 @@ class GoldenItem {
   /// written, so those labels cannot rot as the wall clock moves.
   final DateTime now;
 
-  /// Attachment rows in the shape `TriageInput.attachments` takes.
+  /// Attachment rows in the shape `MessageTextInput.attachments` takes.
   final List<Map<String, Object?>> attachmentRows;
 
   final bool addressedMe;
@@ -270,7 +270,7 @@ class GoldenItem {
       direction == 'inbound' && source == 'teams' && addressedMe;
 
   /// How many thread messages triage and needs-you read: both take the LAST
-  /// three (`TriageTask._threadTailMax`, `NeedsYouTask._maxContextMessages`),
+  /// three (`MessageTextTask._threadTailMax`, `NeedsYouTask._maxContextMessages`),
   /// dropping from the oldest end.
   static const int _threadWindow = 3;
 

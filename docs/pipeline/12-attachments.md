@@ -11,7 +11,7 @@ waits for a download.
 
 > **Live.** Every stage runs, and so does everything that uses them: the
 > metadata stage inside stage 1, then `attachment_text` (Graph plus the
-> embedding server, no chat model) and `attachment_digest` (one fast-slot call
+> embedding server, no chat model) and `attachment_digest` (one generative call
 > per document) — and then retrieval into replies, recap lines, and the
 > needs-you re-verdict on a document that asks for something. Each of those
 > three is documented further down this file.
@@ -51,9 +51,10 @@ never one per message. A handler that read a SINGLE row with `getMessageRow`
 gets no such hydration, so needs-you, extraction, drafting and the digest
 handler each hydrate the message they judge — `MessageStore.attachmentRefsFor`,
 guarded on the row's own `has_attachments` — before it reaches a prompt
-builder. Triage is the exception in mechanism and not in outcome: `TriageQueue`
-reads `attachmentsForMessage` unconditionally into `TriageInput.attachments`,
-because it wants the raw rows for the attachment line rather than refs. Without
+builder. The message-text stage (which replaced triage's text call) does both:
+it hydrates the refs and reads `attachmentsForMessage` into
+`MessageTextInput.attachments`, because it wants the raw rows for the
+attachment line; triage hydrates refs for the decision input. Without
 one or the other, a chat message whose whole body is a marker arrives at the
 model empty.
 
@@ -81,7 +82,7 @@ that:
 - **Every place a body reaches a model or an embedding calls
   `stripAttachmentMarkers`** (`app/lib/services/attachments/attachment_markers.dart`):
   `buildMessageBlock`, the triage thread tail, `DraftTask._formatMessage`,
-  `ReplyDecisionTask._body`, `NeedsYouTask._body`, `_recapLine`, and
+  `NeedsYouTask._body`, `_recapLine`, and
   `embedMessageRow` — which is the ONE place the shared search-card path is
   stripped, so `ExtractHandler` and `EmbedHandler` cannot produce different
   cards and different hashes for the same message. That change gives every
@@ -565,7 +566,7 @@ from `wipeAll`) is the eventual cleanup.
 
 ## The digest
 
-`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, fast slot)
+`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, generative model)
 runs `AttachmentDigestTask` over one document and writes
 `AttachmentDigest` — five keys, always all five:
 
@@ -1098,7 +1099,7 @@ storyline from a pin to another one; the panel passes its own.
 a composer to write into. The full viewer has none, so `AttachmentViewerPane`
 takes no such callback at all. Neither does a thread the pane cannot reply to:
 a chat without `Chat.ReadWrite` shows no composer, so the host passes a null
-target and the offer disappears rather than spending a fast-slot draft on words
+target and the offer disappears rather than spending a generative draft on words
 nobody would see. It asks the draft notifier to regenerate with this
 attachment's id in `pinned_attachment_ids`, which is what floats it to the
 front of what the retriever quotes, and it takes the cursor to the box the
@@ -1200,8 +1201,8 @@ a regenerate whose spinner is off screen is not visible feedback.
 - `app/lib/data/message_store.dart` — `messageVectorBlob` (tag-guarded, so a
   vector in an older space sends the caller to re-embed) and `requeueWork`'s
   `payloadJson`, which is overwritten on conflict including with null.
-- `app/lib/services/llm/draft_task.dart`, `reply_decision_task.dart` —
-  `attachmentExcerpts` and their 2,500 / 800 caps;
+- `app/lib/services/llm/draft_task.dart` — `attachmentExcerpts` and their
+  2,500 cap (the retired `reply_decision_task.dart` read them at 800);
   `app/lib/services/llm/needs_you_task.dart` — `attachmentDigests` and its 600
   cap. All three system prompts are unchanged and `const`.
 - `app/lib/services/draft_handler.dart` — the one retrieval both calls read,

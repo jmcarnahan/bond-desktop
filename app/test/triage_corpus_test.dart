@@ -1,6 +1,5 @@
 import 'package:bond_inbox/services/gates.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/corpus.dart';
@@ -62,12 +61,12 @@ void main() {
     }
   });
 
-  group('the triage prompt', () {
-    const task = TriageTask();
+  group('the message-text prompt', () {
+    const task = MessageTextTask();
 
     for (final entry in nonGatedCorpus) {
       test('${entry.id} is anchored and fenced', () {
-        final user = task.buildUserMessage(TriageInput(entry.message, pinnedNow));
+        final user = task.buildUserMessage(MessageTextInput(entry.message, pinnedNow));
 
         // The anchor is ours and sits OUTSIDE the fence; everything the
         // sender wrote sits inside it.
@@ -87,25 +86,11 @@ void main() {
       expect(body.length, greaterThan(bodyCap));
       expect(body.indexOf(quotedTailMarker), greaterThan(bodyCap));
 
-      final user = task.buildUserMessage(TriageInput(entry.message, pinnedNow));
+      final user = task.buildUserMessage(MessageTextInput(entry.message, pinnedNow));
 
       // Four rounds of quoted history and a confidentiality footer, not sent.
       expect(user, isNot(contains(quotedTailMarker)));
       expect(user, contains('sending the revised homepage copy'));
     });
-  });
-
-  group('the extraction prompt', () {
-    const task = ExtractTask();
-
-    for (final entry in nonGatedCorpus) {
-      test('${entry.id} builds the same way triage does', () {
-        final user =
-            task.buildUserMessage(ExtractionInput(entry.message, pinnedNow));
-
-        expect(user, startsWith('Today is 2026-08-31 ('));
-        expect(user, contains(escaped(promptBody(entry))));
-      });
-    }
   });
 }

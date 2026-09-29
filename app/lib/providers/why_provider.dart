@@ -2,7 +2,8 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/message_models.dart';
-import '../services/llm/extract_task.dart' show ExtractionResult;
+import '../services/decision/stored_decision.dart';
+import '../models/extraction_models.dart';
 import 'app_providers.dart';
 
 /// Which message the Why panel is explaining.
@@ -18,10 +19,10 @@ typedef WhyKey = ({String source, String conversationKey, String messageId});
 
 /// Everything behind one verdict, read in one pass.
 ///
-/// Three reads rather than one join, because they come from three tables with
-/// three different lifetimes — the message row, its extraction blob, the
-/// thread's AI state — and any of them may be absent without the others being
-/// wrong. The panel says so field by field.
+/// Four reads rather than one join, because they come from four tables with
+/// different lifetimes — the message row, its extraction blob, the thread's
+/// AI state, the decision model's answers — and any of them may be absent
+/// without the others being wrong. The panel says so field by field.
 @immutable
 class WhyFacts {
   /// The message itself, or null when the row is gone — synced away, wiped.
@@ -37,7 +38,11 @@ class WhyFacts {
   /// model class for three columns would be a third answer to keep in step.
   final Map<String, Object?>? ai;
 
-  const WhyFacts({this.message, this.extraction, this.ai});
+  /// The decision model's answers for the message, or null when it never
+  /// read it (a rules gate dropped it first, or it predates the model).
+  final StoredDecision? decision;
+
+  const WhyFacts({this.message, this.extraction, this.ai, this.decision});
 }
 
 /// The facts behind one message's verdict.
@@ -56,5 +61,11 @@ final whyFactsProvider =
   final message = await store.messageById(key.source, key.messageId);
   final extraction = await store.extractionFor(key.source, key.messageId);
   final ai = await store.getConversationAi(key.source, key.conversationKey);
-  return WhyFacts(message: message, extraction: extraction, ai: ai);
+  final decision = await store.decisionFor(key.source, key.messageId);
+  return WhyFacts(
+    message: message,
+    extraction: extraction,
+    ai: ai,
+    decision: decision,
+  );
 });

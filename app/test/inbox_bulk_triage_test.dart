@@ -33,6 +33,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/fake_attachment_bytes.dart';
 import 'fixtures/fake_pdf_renderer.dart';
 import 'fixtures/png_fixture.dart';
@@ -207,6 +208,7 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
+      keepingDecisionClient(),
       initialSectionProvider.overrideWithValue(RailSection.needsYou),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),

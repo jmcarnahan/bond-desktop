@@ -429,7 +429,7 @@ class NotificationCoordinator {
         sourceMessageId: row['source_message_id'] as String? ?? '',
         conversationKey: conversationKey,
         title: row['subject'] as String? ?? row['from_name'] as String?,
-        summary: row['summary'] as String?,
+        summary: toastSummary(row),
         ctaText: quotesCta ? row['cta_text'] as String? : null,
         ctaUrgency:
             CtaUrgency.fromWire(
@@ -445,6 +445,22 @@ class NotificationCoordinator {
         settledOnDeadline: decision.onDeadline,
       ),
     );
+  }
+
+  /// What a settled message's toast says about it: the message-text stage's
+  /// summary when it has landed, else the message's own preview.
+  ///
+  /// The settle waits on the text stage exactly as it waited on extraction
+  /// (`extract_state` in [_isComplete]; the kind is still `extract`), so a
+  /// COMPLETE settle always has the summary. A DEADLINE settle may not — the
+  /// text call was the slow one, or its server was down — and before the
+  /// decision model a message with no text had no triage either. The preview
+  /// is what the sender wrote, which beats an empty toast.
+  static String? toastSummary(Map<String, Object?> row) {
+    final summary = (row['summary'] as String?)?.trim() ?? '';
+    if (summary.isNotEmpty) return summary;
+    final preview = (row['body_preview'] as String?)?.trim() ?? '';
+    return preview.isEmpty ? null : preview;
   }
 
   /// The timers are cancelled BEFORE the first await, deliberately. Riverpod

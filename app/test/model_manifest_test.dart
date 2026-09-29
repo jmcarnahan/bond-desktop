@@ -86,11 +86,28 @@ Map<String, Object?> inboxTierJson() => {
       },
     };
 
-/// The placement tier: the embedding model alone, and never a memory rung.
-Map<String, Object?> remoteTierJson() => {
-      'id': 'remote',
+/// The hand-installed decision model, as the committed asset spells it.
+Map<String, Object?> decideJson() => {
+      'id': 'bond-decide',
+      'role': 'decide',
+      'source': 'local',
+      'displayName': 'Bond decision model',
+      'repo': 'local/bond-decide',
+      'file': 'bond-decide-mbl-v2swap-f16.gguf',
+      'sizeBytes': 791461056,
+      'sha256':
+          '28c10397e79c202895cbbeb200c1e58be8cfea5b889a8857ce51760d95e0a889',
       'minRamBytes': 0,
-      'models': [routerEmbedId],
+      'license': 'Apache-2.0',
+      'licenseUrl': 'https://huggingface.co/answerdotai/ModernBERT-large',
+      'notice': null,
+      'heads': {
+        'file': 'decide-heads.json',
+        'sha256':
+            '468407826614060d95bbf6f073ee62d655f5b1470b8a52d614430867bbaa7b6f',
+        'sizeBytes': 894584,
+      },
+      'serverArgs': {'embedding': 'true', 'pooling': 'mean'},
     };
 
 String manifestText(
@@ -101,18 +118,72 @@ String manifestText(
     jsonEncode({
       'version': version,
       'models': models,
-      'tiers': tiers ?? [fullTierJson(), inboxTierJson(), remoteTierJson()],
+      'tiers': tiers ?? [fullTierJson(), inboxTierJson()],
     });
 
 void main() {
   group('the committed asset', () {
-    test('parses, and names the three router ids in file order', () {
+    test('parses, and names the four router ids in file order', () {
       final manifest = realManifest();
       expect(manifest.version, 2);
       expect(
         [for (final m in manifest.models) m.id],
-        [routerEmbedId, routerBulkId, routerProseId],
+        [routerEmbedId, routerDecideId, routerBulkId, routerProseId],
       );
+    });
+
+    test('the decision model is hand-installed, with its heads beside it', () {
+      final decide = realManifest().byRole(ModelRole.decide);
+
+      expect(decide.id, routerDecideId);
+      expect(decide.isLocal, isTrue);
+      expect(decide.source, sourceLocal);
+      expect(decide.repo, 'local/bond-decide');
+      expect(decide.revision, '');
+      expect(decide.file, 'bond-decide-mbl-v2swap-f16.gguf');
+      expect(decide.sizeBytes, 791461056);
+      expect(
+        decide.sha256,
+        '28c10397e79c202895cbbeb200c1e58be8cfea5b889a8857ce51760d95e0a889',
+      );
+      expect(decide.heads!.file, 'decide-heads.json');
+      expect(decide.heads!.sizeBytes, 894584);
+      expect(
+        decide.heads!.sha256,
+        '468407826614060d95bbf6f073ee62d655f5b1470b8a52d614430867bbaa7b6f',
+      );
+      // The folder `make decide-install` writes into.
+      expect(decide.relativePath,
+          'local_bond-decide/bond-decide-mbl-v2swap-f16.gguf');
+      expect(decide.headsRelativePath, 'local_bond-decide/decide-heads.json');
+      // Never downloaded, so it costs no download bytes.
+      expect(decide.downloadBytes, 0);
+      expect(decide.serverArgs, {
+        'embedding': 'true',
+        'pooling': 'mean',
+        'c': '2048',
+        'ub': '2048',
+        'b': '2048',
+        'parallel': '1',
+        'load-on-startup': 'true',
+      });
+    });
+
+    test('a downloaded entry is hf-sourced and carries no heads', () {
+      final embed = realManifest().byRole(ModelRole.embed);
+      expect(embed.isLocal, isFalse);
+      expect(embed.source, sourceHf);
+      expect(embed.heads, isNull);
+      expect(embed.headsRelativePath, isNull);
+    });
+
+    test('a local entry round-trips through toJson', () {
+      final decide = realManifest().byRole(ModelRole.decide);
+      final again =
+          ModelFile.fromJson(jsonDecode(jsonEncode(decide.toJson())) as Map<String, Object?>);
+      expect(again, decide);
+      expect(decide.toJson().containsKey('revision'), isFalse);
+      expect(decide.toJson()['source'], 'local');
     });
 
     test('carries the measured sizes and digests', () {
@@ -184,8 +255,9 @@ void main() {
       expect(prose.downloadBytes, 18973870432 + 1680271648);
     });
 
-    test('every revision is a commit sha, never a branch', () {
+    test('every downloaded revision is a commit sha, never a branch', () {
       for (final model in realManifest().models) {
+        if (model.isLocal) continue;
         expect(model.revision, isNot('main'));
         expect(model.revision, matches(RegExp(r'^[0-9a-f]{40}$')));
       }
@@ -197,10 +269,6 @@ void main() {
         [for (final m in manifest.bySize) m.id],
         [for (final m in manifest.models) m.id],
       );
-    });
-
-    test('the inbox is usable on the two small models', () {
-      expect(realManifest().usableIds, {routerEmbedId, routerBulkId});
     });
 
     test('resolveUri pins the commit, not main', () {
@@ -227,7 +295,9 @@ void main() {
           {'c': '16384', 'parallel': '4', 'load-on-startup': 'true'});
     });
 
-    test('toPreset writes the INI Phase 2 wrote', () {
+    test('toPreset writes the INI Phase 2 wrote, plus the decision model', () {
+      // The decide section carries no heads line: the heads run in Dart and
+      // llama-server never reads them.
       expect(realManifest().toPreset('/tmp/Bond Models').toIni(), '''
 version = 1
 
@@ -240,6 +310,16 @@ load-mode = mmap+mlock
 model = /tmp/Bond Models/Qwen_Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 embedding = true
 pooling = last
+load-on-startup = true
+
+[bond-decide]
+model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf
+embedding = true
+pooling = mean
+c = 2048
+ub = 2048
+b = 2048
+parallel = 1
 load-on-startup = true
 
 [bond-bulk]
@@ -259,7 +339,8 @@ spec-type = draft-mtp
     });
 
     test('every checkpoint names its licence, and none needs a notice', () {
-      // All three are Apache-2.0 since the embedding model left
+      // All four are Apache-2.0 (the decision model is a fine-tune of
+      // ModernBERT-large, Apache-2.0) since the embedding model left
       // EmbeddingGemma on 2026-09-19; the Gemma Terms of Use went with it.
       // `notice` stays a field rather than being dropped: it is what the
       // first-run screen renders under a checkpoint whose licence has to be
@@ -352,49 +433,15 @@ spec-type = draft-mtp
   });
 
   group('tiers', () {
-    test(
-        'the committed asset declares both rungs and the placement, at the '
-        'compiled floors', () {
+    test('the committed asset declares both rungs, at the compiled floors',
+        () {
       final manifest = realManifest();
 
       expect([for (final t in manifest.tiers) t.tier],
-          [MachineTier.full, MachineTier.inbox, MachineTier.remote]);
+          [MachineTier.full, MachineTier.inbox]);
       expect(
         {for (final t in manifest.tiers) t.tier: t.minRamBytes},
-        {
-          MachineTier.full: fullTierMinBytes,
-          MachineTier.inbox: 0,
-          // Zero, and not a rung: the ladder is built over the other two.
-          MachineTier.remote: 0,
-        },
-      );
-    });
-
-    test('the remote tier is the embedding model alone', () {
-      final remote = realManifest().forTier(MachineTier.remote);
-
-      expect([for (final m in remote.models) m.id], [routerEmbedId]);
-      expect(remote.byRoleOrNull(ModelRole.bulk), isNull);
-      expect(remote.byRoleOrNull(ModelRole.prose), isNull);
-      expect(remote.byRoleOrNull(ModelRole.embed)?.id, routerEmbedId);
-    });
-
-    test('a remote tier may list the inbox model and still validate', () {
-      // Nothing REFUSES a remote tier that carries more; the exemption is on
-      // the required role, not a cap. A future placement that wanted the 4B
-      // local for the fast lane would parse without a validator change.
-      final manifest = ModelManifest.parse(manifestText(
-        [embedJson(), bulkJson(), proseJson()],
-        tiers: [
-          fullTierJson(),
-          inboxTierJson(),
-          {...remoteTierJson(), 'models': [routerEmbedId, routerBulkId]},
-        ],
-      ));
-
-      expect(
-        [for (final m in manifest.forTier(MachineTier.remote).models) m.id],
-        [routerEmbedId, routerBulkId],
+        {MachineTier.full: fullTierMinBytes, MachineTier.inbox: 0},
       );
     });
 
@@ -403,7 +450,7 @@ spec-type = draft-mtp
       final full = manifest.forTier(MachineTier.full);
 
       expect([for (final m in full.models) m.id],
-          [routerEmbedId, routerBulkId, routerProseId]);
+          [routerEmbedId, routerDecideId, routerBulkId, routerProseId]);
       expect(full.byRoleOrNull(ModelRole.prose)?.id, routerProseId);
       expect(full.models, manifest.models);
       expect(full.totalBytes, manifest.totalBytes);
@@ -413,7 +460,7 @@ spec-type = draft-mtp
       final inbox = realManifest().forTier(MachineTier.inbox);
 
       expect([for (final m in inbox.models) m.id],
-          [routerEmbedId, routerBulkId]);
+          [routerEmbedId, routerDecideId, routerBulkId]);
       // Merged ONTO the entry's own arguments: `parallel` is halved, `c`
       // restated and `load-on-startup` survives untouched.
       expect(inbox.byId(routerBulkId).serverArgs,
@@ -431,7 +478,7 @@ spec-type = draft-mtp
       expect(() => inbox.byRole(ModelRole.prose), throwsStateError);
       // The two every tier carries are still there, by role and by id.
       expect(inbox.byRole(ModelRole.embed).id, routerEmbedId);
-      expect(inbox.usableIds, {routerEmbedId, routerBulkId});
+      expect(inbox.byRole(ModelRole.bulk).id, routerBulkId);
     });
 
     test('the download total and order follow the tier', () {
@@ -439,18 +486,163 @@ spec-type = draft-mtp
       final inbox = manifest.forTier(MachineTier.inbox);
 
       // The inbox tier never takes the writing model, so it never takes the
-      // head either: two files, and neither of them a sidecar.
+      // head either; the decision model is hand-installed and costs no
+      // download bytes on either tier.
       expect(inbox.totalBytes, 639150592 + 4280403520);
       expect(
         manifest.totalBytes,
         639150592 + 4280403520 + 18973870432 + 1680271648,
       );
-      expect([for (final m in inbox.bySize) m.id],
+      expect([for (final m in inbox.downloadable.bySize) m.id],
           [routerEmbedId, routerBulkId]);
       expect(
-        [for (final m in manifest.forTier(MachineTier.full).bySize) m.id],
+        [
+          for (final m in manifest.forTier(MachineTier.full).downloadable.bySize)
+            m.id,
+        ],
         [routerEmbedId, routerBulkId, routerProseId],
       );
+    });
+
+    group('forRoles', () {
+      List<String> ids(ModelManifest m) => [for (final f in m.models) f.id];
+
+      test('everything managed on the full tier is the whole tier', () {
+        final view = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: true,
+          generativeManagedId: routerProseId,
+        );
+        expect(ids(view), [routerEmbedId, routerDecideId, routerProseId]);
+      });
+
+      test('the 4B on the full tier drops the 27B', () {
+        final view = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: true,
+          generativeManagedId: routerBulkId,
+        );
+        expect(ids(view), [routerEmbedId, routerDecideId, routerBulkId]);
+      });
+
+      test('the inbox tier merges its args onto the managed 4B', () {
+        final view = realManifest().forRoles(
+          hardwareTier: MachineTier.inbox,
+          decisionManaged: true,
+          generativeManagedId: routerBulkId,
+        );
+        expect(ids(view), [routerEmbedId, routerDecideId, routerBulkId]);
+        expect(view.byId(routerBulkId).serverArgs['parallel'], '2');
+      });
+
+      test('the 27B is never served on the inbox tier, whatever is asked', () {
+        final view = realManifest().forRoles(
+          hardwareTier: MachineTier.inbox,
+          decisionManaged: false,
+          generativeManagedId: routerProseId,
+        );
+        expect(ids(view), [routerEmbedId]);
+      });
+
+      test('both roles on your server leave the embedding model alone', () {
+        final view = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: false,
+          generativeManagedId: null,
+        );
+        expect(ids(view), [routerEmbedId]);
+      });
+
+      test('generative remote, decision here: embed and decide', () {
+        final view = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: true,
+          generativeManagedId: null,
+        );
+        expect(ids(view), [routerEmbedId, routerDecideId]);
+        // And the download view drops the hand-installed one.
+        expect(ids(view.downloadable), [routerEmbedId]);
+      });
+    });
+
+    group('withPresentFiles', () {
+      late Directory folder;
+      setUp(() => folder = Directory.systemTemp.createTempSync('manifest'));
+      tearDown(() => folder.deleteSync(recursive: true));
+
+      void touch(String relative) =>
+          File('${folder.path}/$relative')..createSync(recursive: true);
+
+      List<String> kept(ModelManifest manifest) => [
+            for (final m in manifest.withPresentFiles(folder.path).models) m.id,
+          ];
+
+      test('drops the decision model until both of its files are there', () {
+        final manifest = realManifest().forTier(MachineTier.full);
+        final decide = manifest.byId(routerDecideId);
+
+        expect(kept(manifest), isNot(contains(routerDecideId)));
+        touch(decide.relativePath);
+        expect(kept(manifest), isNot(contains(routerDecideId)));
+        touch(decide.headsRelativePath!);
+        expect(kept(manifest), contains(routerDecideId));
+      });
+
+      test('a chosen generative model that was never downloaded leaves the '
+          'preset, and embed and decide stay', () {
+        // A full Mac that downloaded embed + 27B, then chose the 4B.
+        final served = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: true,
+          generativeManagedId: routerBulkId,
+        );
+        for (final m in served.models) {
+          if (m.id == routerBulkId) continue;
+          touch(m.relativePath);
+          if (m.headsRelativePath case final heads?) touch(heads);
+        }
+
+        expect(kept(served), [
+          for (final m in served.models)
+            if (m.id != routerBulkId) m.id,
+        ]);
+        expect(kept(served), containsAll([routerEmbedId, routerDecideId]));
+        // And the preset built from it names no missing file, so the
+        // server's preflight lets the other models start.
+        final preset = served.withPresentFiles(folder.path).toPreset(folder.path);
+        expect(preset.missingFiles(), isEmpty);
+
+        touch(served.byId(routerBulkId).relativePath);
+        expect(kept(served), contains(routerBulkId));
+      });
+
+      test('the 27B needs its MTP head too', () {
+        final served = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: false,
+          generativeManagedId: routerProseId,
+        );
+        final prose = served.byId(routerProseId);
+        touch(prose.relativePath);
+        expect(kept(served), isNot(contains(routerProseId)));
+        touch(prose.sidecarRelativePath!);
+        expect(kept(served), contains(routerProseId));
+      });
+
+      test('the embedding model is kept even when missing, so the preflight '
+          'still says so', () {
+        final served = realManifest().forRoles(
+          hardwareTier: MachineTier.full,
+          decisionManaged: false,
+          generativeManagedId: null,
+        );
+        expect(kept(served), [routerEmbedId]);
+        expect(
+          served.withPresentFiles(folder.path).toPreset(folder.path)
+              .missingFiles(),
+          isNotEmpty,
+        );
+      });
     });
 
     test('two tiers that are equal hash the same', () {
@@ -709,7 +901,6 @@ spec-type = draft-mtp
           'models': [routerEmbedId, routerBulkId, 'bond-writer'],
         },
         inboxTierJson(),
-        remoteTierJson(),
       ]),
       allOf(contains('full'), contains('bond-writer')),
     );
@@ -723,7 +914,6 @@ spec-type = draft-mtp
           'models': [routerBulkId],
           'serverArgs': <String, Object?>{},
         },
-        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains(routerEmbedId)),
     );
@@ -737,7 +927,6 @@ spec-type = draft-mtp
           'models': [routerEmbedId],
           'serverArgs': <String, Object?>{},
         },
-        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains(routerBulkId)),
     );
@@ -749,7 +938,6 @@ spec-type = draft-mtp
             fullTierJson(),
             fullTierJson(),
             inboxTierJson(),
-            remoteTierJson(),
           ]),
       contains('duplicate tier'),
     );
@@ -759,7 +947,6 @@ spec-type = draft-mtp
       manifestText(models, tiers: [
         fullTierJson(),
         {...inboxTierJson(), 'id': 'tiny'},
-        remoteTierJson(),
       ]),
       allOf(contains('tiny'), contains('machine tier')),
     );
@@ -778,7 +965,6 @@ spec-type = draft-mtp
       manifestText(models, tiers: [
         {...fullTierJson(), 'minRamBytes': 34359738368},
         inboxTierJson(),
-        remoteTierJson(),
       ]),
       allOf(contains('full'), contains('$fullTierMinBytes')),
     );
@@ -788,7 +974,6 @@ spec-type = draft-mtp
       manifestText(models, tiers: [
         fullTierJson(),
         {...inboxTierJson(), 'minRamBytes': 8589934592},
-        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains('minRamBytes')),
     );
@@ -803,15 +988,12 @@ spec-type = draft-mtp
             routerProseId: {'c': '4096'},
           },
         },
-        remoteTierJson(),
       ]),
       allOf(contains('inbox'), contains(routerProseId)),
     );
 
-    // The remote tier's whole point: the inbox stages are on the box, so it
-    // carries no bulk model and the required-role loop must not ask for one.
-    // Every OTHER tier still must, and the full tier is the one this would
-    // silently stop checking if the exemption were written too widely.
+    // Every tier must hold the 4B, the one generative model every Mac can
+    // run; the full tier is the one a careless edit would drop it from.
     refuses(
       'a full tier without the inbox model',
       manifestText(models, tiers: [
@@ -820,28 +1002,67 @@ spec-type = draft-mtp
           'models': [routerEmbedId, routerProseId],
         },
         inboxTierJson(),
-        remoteTierJson(),
       ]),
       allOf(contains('full'), contains(routerBulkId)),
     );
 
     refuses(
-      'a manifest with no remote tier',
-      manifestText(models, tiers: [fullTierJson(), inboxTierJson()]),
-      contains('remote'),
+      'a local entry outside the local/ repo namespace',
+      manifestText([
+        ...models,
+        {...decideJson(), 'repo': 'someone/bond-decide'},
+      ]),
+      allOf(contains('local'), contains('someone/bond-decide')),
     );
 
-    // A placement, not a memory rung. A non-zero floor here would put a second
-    // rung in the ladder and the "lowest tier" message would name whichever
-    // of two zeroes an unstable sort picked.
     refuses(
-      'a remote tier with a memory floor',
-      manifestText(models, tiers: [
-        fullTierJson(),
-        inboxTierJson(),
-        {...remoteTierJson(), 'minRamBytes': 8589934592},
+      'a source this build does not know',
+      manifestText([
+        ...models,
+        {...decideJson(), 'source': 's3'},
       ]),
-      allOf(contains('remote'), contains('minRamBytes')),
+      contains('"source"'),
     );
+
+    refuses(
+      'a downloaded entry with no revision',
+      manifestText([
+        Map.of(embedJson())..remove('revision'),
+        bulkJson(),
+        proseJson(),
+      ]),
+      contains('revision'),
+    );
+
+    refuses(
+      'a heads record with a bad digest',
+      manifestText([
+        ...models,
+        {
+          ...decideJson(),
+          'heads': {
+            'file': 'decide-heads.json',
+            'sha256': 'abc',
+            'sizeBytes': 1,
+          },
+        },
+      ]),
+      contains('heads.sha256'),
+    );
+
+    refuses(
+      'two decision models',
+      manifestText([...models, decideJson(), decideJson()]),
+      anyOf(contains('duplicate'), contains('decide')),
+    );
+  });
+
+  group('parse accepts', () {
+    test('a manifest without a decision model (a build that ships none)', () {
+      final manifest = ModelManifest.parse(
+        manifestText([embedJson(), bulkJson(), proseJson()]),
+      );
+      expect(manifest.byRoleOrNull(ModelRole.decide), isNull);
+    });
   });
 }

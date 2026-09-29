@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -19,6 +20,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -70,14 +72,13 @@ EmbeddingsClient fakeEmbeddings() => EmbeddingsClient(
       }),
     );
 
-const Map<String, dynamic> extraction = {
-  'evidence': 'Dana wants the DPA looked at.',
+/// The message-text stage's answer (the handler behind the `extract` kind).
+const Map<String, dynamic> messageText = {
+  'summary': 'Dana wants the DPA looked at.',
+  'action_items': ['Review the DPA'],
+  'deadline': '',
   'topics': ['DPA'],
-  'people': ['Dana'],
-  'organizations': ['Acme'],
   'project': 'Acme renewal',
-  'intent': 'request',
-  'importance': 'high',
 };
 
 void main() {
@@ -578,6 +579,227 @@ void main() {
     });
   });
 
+  group('the decision model', () {
+    Future<void> decide(DecisionAnswers answers,
+            {String source = 'email',
+            String id = 'm1',
+            bool ownerKnown = true}) =>
+        store.writeDecision(source, id, fakeDecision(answers),
+            qhash: 'test', ownerKnown: ownerKnown);
+
+    test('the floor still answers first', () async {
+      await seed();
+      await decide(fakeAnswers(needsYou: 0.1), source: 'teams', id: 't1');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      expect(llm.calls, isEmpty);
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+    });
+
+    test('a sure yes is written without the language model, with a reason',
+        () async {
+      await seedAmbiguousMail();
+      await decide(fakeAnswers(needsYou: 0.7, intent: 'question'));
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, isEmpty);
+      expect(await verdictOf('email', 'm1'),
+          {'verdict': 1, 'reason': 'Asks you a question.'});
+    });
+
+    test('a sure no is written as a no', () async {
+      await seedAmbiguousMail();
+      await decide(fakeAnswers(needsYou: 0.2));
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, isEmpty);
+      expect(await verdictOf('email', 'm1'),
+          {'verdict': 0, 'reason': 'Nothing here asks for you.'});
+    });
+
+    test('the band goes to the language model exactly as before', () async {
+      await seedAmbiguousMail();
+      await decide(fakeAnswers(needsYou: 0.5));
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, hasLength(1));
+      expect(await verdictOf('email', 'm1'), {
+        'verdict': 1,
+        'reason': 'Priya asks Alex to sign off on the wayfinding sheet.',
+      });
+    });
+
+    test('a decision made with no owner line goes to the language model',
+        () async {
+      // The needs-you head was trained with the owner line; a sure yes read
+      // without it is not trusted.
+      await seedAmbiguousMail();
+      await decide(fakeAnswers(needsYou: 0.95), ownerKnown: false);
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, hasLength(1));
+      expect((await verdictOf('email', 'm1'))['reason'],
+          'Priya asks Alex to sign off on the wayfinding sheet.');
+    });
+
+    test('a message decided before the model existed goes to the language '
+        'model', () async {
+      await seedAmbiguousMail();
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, hasLength(1));
+    });
+
+    test("the owner's own rules send every message to the language model",
+        () async {
+      await seedAmbiguousMail();
+      await decide(fakeAnswers(needsYou: 0.95));
+      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, hasLength(1));
+    });
+
+    test('rules that retype the defaults are no rules', () async {
+      await seedAmbiguousMail();
+      await decide(fakeAnswers(needsYou: 0.95, intent: 'approval'));
+      await store.setPref(needsYouRulesKey, needsYouDefaultRules);
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, isEmpty);
+      expect((await verdictOf('email', 'm1'))['reason'],
+          'Asks you to approve something.');
+    });
+
+    test('an attachment digest sends the message to the language model',
+        () async {
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Lease Addendum.pdf',
+          'size': 4096,
+        },
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(const AttachmentDigest(
+          evidence: 'A lease addendum sent for signature.',
+          kind: 'contract',
+          summary: 'The rent rises to 2,600 in January.',
+          asks: ['Sign and return by Thursday'],
+        ).toJson()),
+      );
+      await decide(fakeAnswers(needsYou: 0.1));
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, hasLength(1));
+      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    });
+
+    test('a digest that asks nothing leaves the decision model to settle it',
+        () async {
+      // D6: only a file with an ask can move the verdict, so a digest with
+      // none is no reason to pay for a language-model call.
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Quarterly Report.pdf',
+          'size': 4096,
+        },
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(const AttachmentDigest(
+          evidence: 'The quarterly report, for reading.',
+          kind: 'report',
+          summary: 'Revenue rose four percent.',
+        ).toJson()),
+      );
+      await decide(fakeAnswers(needsYou: 0.1));
+      final llm = scriptedLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.calls, isEmpty);
+      expect((await verdictOf('email', 'm1'))['verdict'], 0);
+    });
+
+    group('a cold approach', () {
+      Future<Set<String>> owned() async => {'northwind.example.com'};
+
+      Future<void> seedCold() async {
+        await seed(
+          source: 'email',
+          id: 'm1',
+          fromAddress: 'sales@vendor.example.net',
+          body: 'Confirm your interest and we will send the proposal over.',
+        );
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'chat-1',
+          'subject': 'An introduction',
+          'last_inbound_at': '2026-08-29T10:00:00Z',
+        });
+      }
+
+      test('at 0.70 is in the band, so the language model reads it',
+          () async {
+        await seedCold();
+        await decide(fakeAnswers(needsYou: 0.7));
+        final llm = scriptedLlm(needsYouYes);
+
+        await runOne(NeedsYouHandler(store, llm, ownerDomains: owned),
+            source: 'email', id: 'm1');
+
+        expect(llm.calls, hasLength(1));
+      });
+
+      test('at 0.90 clears the higher bar', () async {
+        await seedCold();
+        await decide(fakeAnswers(needsYou: 0.9, replyExpected: 0.8));
+        final llm = scriptedLlm(needsYouYes);
+
+        await runOne(NeedsYouHandler(store, llm, ownerDomains: owned),
+            source: 'email', id: 'm1');
+
+        expect(llm.calls, isEmpty);
+        expect(await verdictOf('email', 'm1'),
+            {'verdict': 1, 'reason': 'Expects a reply from you.'});
+      });
+    });
+  });
+
   group('the model branch', () {
     test('an ambiguous message is judged, and the evidence is the reason',
         () async {
@@ -1009,8 +1231,8 @@ void main() {
 
       Object? verdictWhenExtractRan;
       final llm = scriptedLlm(
-        extraction,
-        schemaName: 'extraction',
+        messageText,
+        schemaName: 'message_text',
         onCall: () async {
           verdictWhenExtractRan =
               (await store.getMessageRow('teams', 't1'))!['needs_you_verdict'];

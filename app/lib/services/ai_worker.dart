@@ -119,13 +119,11 @@ enum _RunOutcome {
 ///
 /// - the FAST lane — needs-you, extraction, embed, the two attachment kinds
 ///   and the three context kinds — shares one [DrainGate] with the triage
-///   drain, because both send bulk work to the 4-slot fast server and the
-///   gate is what keeps them from double-booking it. This is the lane a new
-///   message's first seconds run on, and nothing on the 27B is allowed into
-///   it;
+///   drain, which orders the two (triage calls only the decision model
+///   since the decision-model round). This is the lane a new message's first
+///   seconds run on, and no storyline pass or draft is allowed into it;
 /// - the STORYLINE lane holds the six storyline passes, behind their own
-///   gate. They are mixed-slot (membership on the fast server, naming and
-///   recaps on the 27B) and they mutate shared membership, so the ordering
+///   gate. They mutate shared membership, so the ordering
 ///   arguments in `docs/pipeline/06-storylines.md` — refresh before recruit,
 ///   audit between them, recap after the sweep — only hold while all six stay
 ///   in ONE worker in list order;
@@ -139,9 +137,10 @@ enum _RunOutcome {
 /// list order still means exactly what it always did.
 ///
 /// A park is per KIND when it is the model server that went away, because
-/// since phase 3 the kinds do not share one: extraction runs against the fast
-/// server and drafting against the 27B, so "extraction's server is not
-/// running" says nothing about drafting's. A dead SESSION is the opposite —
+/// the kinds need not share one: embedding runs against this Mac's embedding
+/// server and the text kinds against the generative model (and drafts may go
+/// to cloud drafts), so "embed's server is not running" says nothing about
+/// drafting's. A dead SESSION is the opposite —
 /// every kind's Graph-dependent work fails identically — and parks the whole
 /// drain.
 ///
@@ -179,7 +178,7 @@ class AiWorker {
   /// Public because a handler sometimes has to know it is on its LAST attempt
   /// — a digest that keeps failing has to close its own file row, or the
   /// reconcile pass revives the work row on the next sync and the file costs
-  /// two fast-slot calls a minute forever.
+  /// two generative calls a minute forever.
   static const int maxAttempts = 2;
 
   /// Whether [error] on attempt [attempts] is the END of an item.
@@ -1047,6 +1046,17 @@ class AiWorker {
         id,
         state: fatal ? 'error' : 'pending',
       );
+      // The message-text stage gave up for good: this message's text will
+      // never land, so the ask its thread still carries — an OLDER message's,
+      // left in place by triage until the text refolded it — is taken off
+      // rather than left standing as this message's. Guarded in the store
+      // (newest inbound, triaged, no summary, not answered); a failure here
+      // costs the refold, never the failure record above.
+      if (fatal) {
+        try {
+          await _store.clearStaleAskAfterTextFailed(source, id);
+        } catch (_) {}
+      }
     }
     // The drafting handler writes `running` at entry and never gets to speak
     // again once it throws, so the same two states have to come from here —

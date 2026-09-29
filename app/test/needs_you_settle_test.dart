@@ -3,13 +3,13 @@ import 'dart:convert';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/data/progress_sql.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The needs-you verdict, rendered twice: once by `notifyWorthy` in Dart and
 /// once by `needsYouSql` in SQLite.
@@ -74,19 +74,18 @@ void main() {
       'is_read': 0,
       'created_at': '2026-09-04T09:56:00.000Z',
     });
-    await store.writeTriage(
+    await writeTriaged(
+      store,
       'email',
       'm-onboarding',
       status: 'triaged',
-      result: TriageResult(
-        urgency: 'normal',
-        category: 'work',
-        summary: 'Alex Rivera wrote up where onboarding stands.',
-        needsAction: triageAsks,
-        actionItems: triageAsks ? const ['Review the issue'] : const [],
-        replyExpected: triageAsks,
-        deadline: '',
-      ),
+      urgency: 'normal',
+      category: 'work',
+      summary: 'Alex Rivera wrote up where onboarding stands.',
+      needsAction: triageAsks,
+      actionItems: triageAsks ? const ['Review the issue'] : const [],
+      replyExpected: triageAsks,
+      deadline: '',
     );
     if (verdict != null) {
       await store.writeNeedsYouVerdict(
@@ -125,6 +124,44 @@ void main() {
     );
     return notifyWorthy(row, threshold: 0.5);
   }
+
+  // The thread's CTA is an ask of THIS message only once its text landed:
+  // triage keeps the thread's older ask in place until the message-text
+  // stage refolds it (decision-model round, Phase 6).
+  group("a thread's CTA before this message's text landed", () {
+    Future<void> seedStaleAsk({required bool textLanded}) async {
+      await seed(null);
+      // Back to the state triage leaves: classified, no text yet.
+      await db.customUpdate(
+        'UPDATE messages SET summary = NULL, action_items_json = NULL '
+        'WHERE source_message_id = ?',
+        variables: [Variable('m-onboarding')],
+      );
+      if (textLanded) {
+        await store.writeMessageText('email', 'm-onboarding',
+            summary: 'Priya asks for a date.',
+            actionItems: const ['Pick a date'],
+            deadline: '');
+      }
+      await store.updateConversationTriage('email', 'conv-onboarding',
+          ctaText: 'An older message\'s ask', ctaUrgency: 'normal');
+      await store.writeAttentionScore('email', 'conv-onboarding', 0.9);
+    }
+
+    test('is not counted on either side', () async {
+      await seedStaleAsk(textLanded: false);
+
+      expect(await sqlVerdict(), 0);
+      expect(await dartVerdict(), isFalse);
+    });
+
+    test('is counted on both sides once the text has landed', () async {
+      await seedStaleAsk(textLanded: true);
+
+      expect(await sqlVerdict(), 1);
+      expect(await dartVerdict(), isTrue);
+    });
+  });
 
   test('a judged yes is worthy on both sides', () async {
     await seed(true);
@@ -195,19 +232,18 @@ void main() {
       'is_read': 0,
       'created_at': '2026-09-04T09:56:00.000Z',
     });
-    await store.writeTriage(
+    await writeTriaged(
+      store,
       'email',
       'm-quiet',
       status: 'triaged',
-      result: const TriageResult(
-        urgency: 'normal',
-        category: 'work',
-        summary: 'Where the quarter close stands.',
-        needsAction: false,
-        actionItems: [],
-        replyExpected: false,
-        deadline: '',
-      ),
+      urgency: 'normal',
+      category: 'work',
+      summary: 'Where the quarter close stands.',
+      needsAction: false,
+      actionItems: [],
+      replyExpected: false,
+      deadline: '',
     );
     // What the extraction made of it — exactly the pair the quiet rule defers
     // on.

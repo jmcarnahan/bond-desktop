@@ -6,11 +6,13 @@
 # llama-server, Bedrock, an old box).
 #
 #   tools/inference.sh up      [--type g6e.xlarge] [--days 1] [--model REPO] [--bulk-model REPO]
+#                              [--decide-gguf PATH] [--decide-served NAME]
 #                              [--regions a,b,c] [--profile P] [--account ID] [--spot] [--mtp N] [--name NAME] …
 #   tools/inference.sh restart [--name NAME] [the same model options]   push a new configuration to a running box
-#                            (models not given are kept from the box; --bulk-model none drops the slot)
+#                            (models not given are kept from the box; --bulk-model none and
+#                            --decide-gguf none drop those slots)
 #   tools/inference.sh status  [--name NAME]              every box this script manages
-#   tools/inference.sh test    [--name NAME | --url URL --model NAME [--bearer-file FILE | --bearer KEY]]
+#   tools/inference.sh test    [--name NAME | --url URL --model NAME [--decide] [--bearer-file FILE | --bearer KEY]]
 #   tools/inference.sh tunnel  [--name NAME] [--port N]   local URLs for PROSE_URL / BENCH_URL
 #   tools/inference.sh extend  --days D [--name NAME]     move the self-termination timer
 #   tools/inference.sh down    [--name NAME] [--keep-ip]   terminate; the key pair and SG stay
@@ -18,16 +20,36 @@
 #                              [--acme-email YOU] [--name NAME] [--force]
 #                            turn a running box into an always-on keyed HTTPS endpoint
 #
-# A box serves one or two SLOTS, mirroring the app's two servers: `prose`
-# (--model, the 27B, the box's :8000) and an optional `bulk` (--bulk-model,
-# the 4B, :8001). Each is its own vLLM container with its own share of the
+# A box serves up to three SLOTS. `prose` (--model, the 27B, the box's :8000)
+# is the app's Generative model. `bulk` (--bulk-model, the 4B, :8001) is
+# optional; the app no longer uses it, but the benches may, so it stays
+# exactly as it was. Each is its own vLLM container with its own share of the
 # GPU (--mem / --bulk-mem); the shares are chosen so the pair fits one L40S.
+# `decide` (--decide-gguf PATH, :8002) is the app's Decision model: the
+# fine-tuned ModernBERT classifier as a GGUF, served as mean-pooled embeddings
+# by a llama.cpp container (llama-decide); the app applies the nine heads
+# itself, so the heads file stays on the Mac and is never uploaded. PATH has
+# no default; the usual value is the file `make decide-install` put in
+# "$HOME/Library/Application Support/com.bondinbox.app/models/local_bond-decide/
+# bond-decide-mbl-v2swap-f16.gguf". It is copied up from this machine and its
+# sha256 checked on the box before the slot starts. It is served as
+# bond-decide-mbl-v2swap (--decide-served), the name the app expects from a box. The slot is off unless --decide-gguf
+# is given; `restart` keeps it from the box like the other models.
+# --decide-image pins another llama.cpp CUDA image. The app's Your server
+# decision address for such a box is https://HOST/decide/v1/embeddings.
+# Why a third slot and not the bulk slot repurposed (the round's plan said
+# repurpose): the benches still drive bulk, and a slot that changes meaning
+# under the same flag would break them silently. The decide slot starts
+# AFTER the vLLM slots, because vLLM checks free GPU memory at start; it
+# needs about 1.5 GB, which fits beside prose alone (0.92) and is tight beside
+# prose + bulk (0.80 + 0.16).
 #
 # PERSISTENT MODE. `up --domain HOST …` builds an always-on box, and `persist`
 # converts a running one in place. Either way Caddy takes 443 on one hostname
-# and forwards /prose/ and /bulk/ to the two slots on the box's loopback, vLLM
-# checks an api-key on both, and an Elastic IP keeps the name pointing at the
-# box across a stop and start. A hostname implies --persistent, because a box
+# and forwards /prose/, /bulk/ and /decide/ to the slots on the box's
+# loopback, every slot checks an api-key (llama-server reads it with
+# --api-key-file /opt/bond/api.key), and an Elastic IP keeps the name pointing
+# at the box across a stop and start. A hostname implies --persistent, because a box
 # the app points at must not walk away mid-session: a persistent box has no
 # self-termination timer, so `down` is what ends it, and `extend` refuses.
 # Its options: --persistent, --domain HOST, --api-key KEY or --api-key-file
@@ -53,7 +75,7 @@
 # cached on the root volume, vLLM bound to the box's loopback ONLY, and SSH
 # open to the caller's IP alone. Nothing else listens, so by default the
 # endpoint needs no API key: the SSH tunnel is the credential. A persistent
-# box adds Caddy on 443 and an api-key on both slots, and then the key is the
+# box adds Caddy on 443 and an api-key on every slot, and then the key is the
 # credential. The box terminates itself
 # when its timer runs out (--days), whether or not anyone remembers it —
 # `extend` moves the timer, `down` ends it early.
@@ -92,6 +114,25 @@ BULK_MAXLEN=8192
 BULK_MEM=0.16
 BULK_ARGS="--enable-prefix-caching --kv-cache-dtype fp8 --max-num-seqs 8"
 IMAGE=vllm/vllm-openai:v0.29.0
+# The decide slot, off unless --decide-gguf is given (or kept from the box on
+# `restart`). DECIDE_GGUF is the local file to upload; DECIDE_FILE its name on
+# the box, under /opt/bond/decide/. The served name is the one the app asks a
+# box for (boxDecideModel in app/lib/services/llm/model_slots.dart).
+DECIDE_GGUF=
+DECIDE_FILE=
+DECIDE_SET=
+DECIDE_SERVED=bond-decide-mbl-v2swap
+DECIDE_SERVED_SET=
+# The llama.cpp build pinned like the vLLM image: b10896 is the bundled
+# sidecar build that matched PyTorch in the round's parity check
+# (docs/model-bakeoff.md, "Decision model ledger"). --decide-image overrides.
+DECIDE_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda-b10896
+# Context, micro-batch and batch in one number: llama-server refuses an input
+# longer than the micro-batch, and the app truncates to exactly this many
+# tokens ([CLS] + 2046 + [SEP]) when it does, so the two must agree.
+DECIDE_CTX=2048
+# `test --url … --decide` runs the embedding checks instead of the chat ones.
+TEST_DECIDE=0
 DISK=200
 REGIONS=us-west-2,us-east-2,us-east-1
 PROFILE=
@@ -241,41 +282,61 @@ allow_my_ip() {  # allow_my_ip REGION [INSTANCE_ID]
 }
 
 # The instance behind NAME: the state file first (fast), then a tag scan of
-# every region in --regions. Sets REGION INSTANCE_ID IP ITYPE STATE IMODEL IBULK.
+# every region in --regions. Sets REGION INSTANCE_ID IP ITYPE STATE IMODEL IBULK
+# IDECIDE IDECIDEFILE.
 find_instance() {
   load_state
-  local r q; q='Reservations[].Instances[?State.Name!=`terminated`&&State.Name!=`shutting-down`][].[InstanceId,PublicIpAddress,InstanceType,State.Name,Tags[?Key==`model`].Value|[0],Tags[?Key==`bulk-model`].Value|[0]]'
+  local r q; q='Reservations[].Instances[?State.Name!=`terminated`&&State.Name!=`shutting-down`][].[InstanceId,PublicIpAddress,InstanceType,State.Name,Tags[?Key==`model`].Value|[0],Tags[?Key==`bulk-model`].Value|[0],Tags[?Key==`decide-model`].Value|[0],Tags[?Key==`decide-file`].Value|[0]]'
   if [ -n "${REGION:-}" ] && [ -n "${INSTANCE_ID:-}" ]; then
     set -- $(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query "$q" --output text 2>/dev/null)
-    [ $# -ge 4 ] && { INSTANCE_ID=$1 IP=$2 ITYPE=$3 STATE=$4 IMODEL=${5:-} IBULK=${6:-}; return 0; }
+    [ $# -ge 4 ] && { INSTANCE_ID=$1 IP=$2 ITYPE=$3 STATE=$4 IMODEL=${5:-} IBULK=${6:-} IDECIDE=${7:-} IDECIDEFILE=${8:-}; return 0; }
   fi
   for r in $(echo "$REGIONS" | tr , ' '); do
     set -- $(aws ec2 describe-instances --region "$r" --filters "Name=tag:bond-inference,Values=$NAME" --query "$q" --output text 2>/dev/null)
-    [ $# -ge 4 ] && { REGION=$r INSTANCE_ID=$1 IP=$2 ITYPE=$3 STATE=$4 IMODEL=${5:-} IBULK=${6:-}; save_state REGION "$r"; save_state INSTANCE_ID "$1"; return 0; }
+    [ $# -ge 4 ] && { REGION=$r INSTANCE_ID=$1 IP=$2 ITYPE=$3 STATE=$4 IMODEL=${5:-} IBULK=${6:-} IDECIDE=${7:-} IDECIDEFILE=${8:-}; save_state REGION "$r"; save_state INSTANCE_ID "$1"; return 0; }
   done
   return 1
 }
 # `none` is what cmd_restart writes to the tag when a slot is dropped, and None
 # is what the AWS CLI prints for a tag that was never set.
 has_bulk() { [ -n "${IBULK:-}" ] && [ "$IBULK" != None ] && [ "$IBULK" != none ]; }
+# IDECIDE is the decide-model tag: the served name, or none.
+has_decide() { [ -n "${IDECIDE:-}" ] && [ "$IDECIDE" != None ] && [ "$IDECIDE" != none ]; }
 
-free_port() {  # two adjacent free ports, for the two slots
-  local p; for p in $(seq "$PORT_FROM" $((PORT_FROM + 98))); do
+free_port() {  # three adjacent free ports, for the three slots
+  local p; for p in $(seq "$PORT_FROM" $((PORT_FROM + 97))); do
     lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && continue
     lsof -nP -iTCP:"$((p + 1))" -sTCP:LISTEN >/dev/null 2>&1 && continue
+    lsof -nP -iTCP:"$((p + 2))" -sTCP:LISTEN >/dev/null 2>&1 && continue
     echo "$p"; return
-  done; die "no free local port pair in $PORT_FROM..$((PORT_FROM + 99))"
+  done; die "no three free local ports in a row in $PORT_FROM..$((PORT_FROM + 99))"
 }
 
-# A background `ssh -N -L` to the box's two slot ports; re-used while it lives.
-ensure_tunnel() {  # needs IP; sets PORT, URL, BULK_URL
+# A background `ssh -N -L` to the box's three slot ports; re-used while it
+# lives. A forward to a slot the box does not run costs nothing until used.
+ensure_tunnel() {  # needs IP; sets PORT, URL, BULK_URL, DECIDE_URL
   load_state
+  # A tunnel opened before the decide slot existed forwards two ports, not
+  # three; it is closed and reopened rather than re-used.
+  # It is waited out (bounded) and its base port re-used when all three are
+  # free, so the tunnel stays at 18100 by convention.
+  if [ -n "${TUNNEL_PID:-}" ] && [ "${TUNNEL_SLOTS:-}" != 3 ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    kill "$TUNNEL_PID" 2>/dev/null
+    local w=0; while kill -0 "$TUNNEL_PID" 2>/dev/null && [ $w -lt 10 ]; do sleep 0.3; w=$((w + 1)); done
+    TUNNEL_PID=; log "closed a two-port tunnel to reopen it with the decide port"
+    if [ -z "$PORT" ] && [ -n "${TUNNEL_PORT:-}" ] \
+       && ! lsof -nP -iTCP:"$TUNNEL_PORT" -sTCP:LISTEN >/dev/null 2>&1 \
+       && ! lsof -nP -iTCP:"$((TUNNEL_PORT + 1))" -sTCP:LISTEN >/dev/null 2>&1 \
+       && ! lsof -nP -iTCP:"$((TUNNEL_PORT + 2))" -sTCP:LISTEN >/dev/null 2>&1; then
+      PORT=$TUNNEL_PORT
+    fi
+  fi
   if [ -n "${TUNNEL_PID:-}" ] && kill -0 "$TUNNEL_PID" 2>/dev/null && [ -n "${TUNNEL_PORT:-}" ] \
      && curl -s --max-time 5 -o /dev/null "http://localhost:$TUNNEL_PORT/health"; then
     PORT=$TUNNEL_PORT
   else
     [ -n "$PORT" ] || PORT=$(free_port)
-    nohup ssh -N -L "$PORT:127.0.0.1:8000" -L "$((PORT + 1)):127.0.0.1:8001" \
+    nohup ssh -N -L "$PORT:127.0.0.1:8000" -L "$((PORT + 1)):127.0.0.1:8001" -L "$((PORT + 2)):127.0.0.1:8002" \
         -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
         -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o LogLevel=ERROR -i "$SSH_KEY" "$SSH_USER@$IP" >/dev/null 2>&1 &
     TUNNEL_PID=$!
@@ -283,10 +344,10 @@ ensure_tunnel() {  # needs IP; sets PORT, URL, BULK_URL
       kill -0 "$TUNNEL_PID" 2>/dev/null || die "ssh to $IP failed (security group, key $SSH_KEY, or the box is down: $0 status)"
       i=$((i + 1)); [ $i -gt 30 ] && die "tunnel on :$PORT is up but vLLM on the box does not answer; on the box: docker logs vllm-prose"; sleep 2
     done
-    save_state TUNNEL_PID "$TUNNEL_PID"; save_state TUNNEL_PORT "$PORT"
-    log "tunnel: localhost:$PORT → $IP:8000 (prose), localhost:$((PORT + 1)) → :8001 (bulk) (pid $TUNNEL_PID)"
+    save_state TUNNEL_PID "$TUNNEL_PID"; save_state TUNNEL_PORT "$PORT"; save_state TUNNEL_SLOTS 3
+    log "tunnel: localhost:$PORT → $IP:8000 (prose), localhost:$((PORT + 1)) → :8001 (bulk), localhost:$((PORT + 2)) → :8002 (decide) (pid $TUNNEL_PID)"
   fi
-  URL="http://localhost:$PORT"; BULK_URL="http://localhost:$((PORT + 1))"
+  URL="http://localhost:$PORT"; BULK_URL="http://localhost:$((PORT + 1))"; DECIDE_URL="http://localhost:$((PORT + 2))"
 }
 
 kill_tunnel() { load_state; [ -n "${TUNNEL_PID:-}" ] && kill "$TUNNEL_PID" 2>/dev/null && log "tunnel closed"; :; }
@@ -294,6 +355,7 @@ kill_tunnel() { load_state; [ -n "${TUNNEL_PID:-}" ] && kill "$TUNNEL_PID" 2>/de
 # ── the box's configuration ─────────────────────────────────────────────
 # One env file per slot and one serve.sh that (re)starts a slot's container:
 #   /opt/bond/serve.sh prose            /opt/bond/serve.sh bulk --some-flag
+#   /opt/bond/serve.sh decide           (llama.cpp, not vLLM; extra flags go to llama-server)
 # `up` writes them from the boot script; `restart` pushes them over SSH.
 # Single-quote a string for a sourced file, so the JSON flags inside survive.
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -311,13 +373,16 @@ slot_env() {  # slot_env SLOT → the env file's contents
     fi
     printf 'MODEL=%s\nSERVED=%s\nPORT=8000\nMAXLEN=%s\nMEM=%s\nARGS=%s\n' \
       "$MODEL" "$SERVED" "$maxlen" "$mem" "$(sq "$VLLM_ARGS $mtp_args $EXTRA_ARGS")"
+  elif [ "$1" = decide ]; then
+    printf 'FILE=%s\nSERVED=%s\nPORT=8002\nCTX=%s\n' "$DECIDE_FILE" "$DECIDE_SERVED" "$DECIDE_CTX"
   else
     printf 'MODEL=%s\nSERVED=%s\nPORT=8001\nMAXLEN=%s\nMEM=%s\nARGS=%s\n' \
       "$BULK_MODEL" "$BULK_SERVED" "$BULK_MAXLEN" "$BULK_MEM" "$(sq "$BULK_ARGS")"
   fi
 }
 # The part of the boot that is also a reconfiguration: write the slot files
-# and serve.sh, start prose, wait for it, start bulk. Runs as root on the box.
+# and serve.sh, start prose, wait for it, start bulk, then decide. Runs as
+# root on the box.
 box_setup() {
   cat <<EOF
 mkdir -p /opt/bond/hf
@@ -325,18 +390,43 @@ cat > /opt/bond/prose.env <<'ENV'
 $(slot_env prose)
 ENV
 rm -f /opt/bond/bulk.env
+rm -f /opt/bond/decide.env
 EOF
   [ -n "$BULK_MODEL" ] && cat <<EOF
 cat > /opt/bond/bulk.env <<'ENV'
 $(slot_env bulk)
 ENV
 EOF
+  [ -n "$DECIDE_FILE" ] && cat <<EOF
+cat > /opt/bond/decide.env <<'ENV'
+$(slot_env decide)
+ENV
+EOF
   cat <<EOF
 cat > /opt/bond/serve.sh <<'SERVE'
 #!/bin/bash
-# /opt/bond/serve.sh SLOT [extra vllm flags] — (re)start one slot's container.
+# /opt/bond/serve.sh SLOT [extra flags] — (re)start one slot's container.
 slot=\${1:-prose}; shift 2>/dev/null || true
 . /opt/bond/\$slot.env
+# The decide slot is llama.cpp serving the decision model's GGUF as mean-pooled
+# embeddings. A persistent box's key reaches it as a mounted file, never a flag.
+if [ "\$slot" = decide ]; then
+  KEYMOUNT=; KEYFLAG=
+  if [ -f /opt/bond/api.key ]; then
+    KEYMOUNT="-v /opt/bond/api.key:/opt/bond/api.key:ro"; KEYFLAG="--api-key-file /opt/bond/api.key"
+  fi
+  # docker run -v on a missing source CREATES a directory there, which then
+  # blocks the real file forever; refuse instead.
+  if [ ! -f "/opt/bond/decide/\$FILE" ] || [ -L "/opt/bond/decide/\$FILE" ]; then
+    echo "serve.sh decide: /opt/bond/decide/\$FILE is not a regular file; upload it with tools/inference.sh restart --decide-gguf PATH" >&2
+    exit 1
+  fi
+  docker rm -f llama-decide 2>/dev/null || true
+  exec docker run -d --name llama-decide --gpus all -p 127.0.0.1:\$PORT:8080 \\
+    -v /opt/bond/decide/\$FILE:/models/\$FILE:ro \$KEYMOUNT $DECIDE_IMAGE \\
+    -m /models/\$FILE --embeddings --pooling mean -c \$CTX -ub \$CTX -b \$CTX -np 1 -ngl 99 \\
+    --host 0.0.0.0 --port 8080 \$KEYFLAG --alias \$SERVED "\$@"
+fi
 # The api-key a persistent box checks, as an env file rather than a flag: a
 # flag would show in the box's process table. The value is still readable in
 # \`docker inspect\` .Config.Env, on a box only the operator can reach.
@@ -353,8 +443,26 @@ echo serving-prose > /opt/bond/stage
 /opt/bond/serve.sh prose
 for i in \$(seq 1 240); do curl -s -o /dev/null localhost:8000/health && break; sleep 10; done
 if [ -f /opt/bond/bulk.env ]; then echo serving-bulk > /opt/bond/stage; /opt/bond/serve.sh bulk; fi
-echo started > /opt/bond/stage
 EOF
+  # The GGUF is copied up from the operator's machine while the box boots, and
+  # appears under its final name only once its sha256 checked out; the vLLM
+  # slots go first because vLLM measures free GPU memory when it starts.
+  [ -n "$DECIDE_FILE" ] && cat <<EOF
+if [ -f /opt/bond/decide.env ]; then
+  echo waiting-gguf > /opt/bond/stage
+  for i in \$(seq 1 180); do [ -f /opt/bond/decide/$DECIDE_FILE ] && break; sleep 10; done
+  if [ -f /opt/bond/decide/$DECIDE_FILE ]; then
+    if [ -f /opt/bond/bulk.env ]; then for i in \$(seq 1 240); do curl -s -o /dev/null localhost:8001/health && break; sleep 5; done; fi
+    echo serving-decide > /opt/bond/stage; /opt/bond/serve.sh decide
+    echo started > /opt/bond/stage
+  fi
+else
+  echo started > /opt/bond/stage
+fi
+EOF
+  # With the slot on, a GGUF that never arrived leaves the stage at
+  # waiting-gguf and starts no container; the operator's command says why.
+  [ -n "$DECIDE_FILE" ] || echo "echo started > /opt/bond/stage"
 }
 userdata() {  # the first-boot script: timer, image pull, then box_setup
   local minutes; minutes=$(awk -v d="$DAYS" 'BEGIN { printf "%d", d * 1440 }')
@@ -371,6 +479,7 @@ mkdir -p /opt/bond; echo booting > /opt/bond/stage
 echo pulling > /opt/bond/stage
 docker pull $IMAGE
 EOF
+  [ -n "$DECIDE_FILE" ] && echo "docker pull $DECIDE_IMAGE"
   box_setup
 }
 
@@ -409,14 +518,16 @@ push_api_key() {  # push_api_key IP
 # the key in hand, and the slots are left alone when they match and every slot
 # is still running. --force restarts them anyway.
 key_unchanged() {  # key_unchanged IP
-  local ip=$1 here there slots=prose s
+  local ip=$1 here there slots=prose s c
   [ "$FORCE" = 1 ] && return 1
   has_bulk && slots="prose bulk"
+  has_decide && slots="$slots decide"
   here=$(printf '%s\n' "$API_KEY" | sha256_stdin)
   there=$(ssh_box "$ip" 'sudo sha256sum /opt/bond/api.key 2>/dev/null | cut -d" " -f1' 2>/dev/null) || return 1
   [ -n "$here" ] && [ "$here" = "$there" ] || return 1
   for s in $slots; do
-    [ "$(ssh_box "$ip" "docker inspect -f '{{.State.Running}}' vllm-$s 2>/dev/null")" = true ] || return 1
+    c=vllm-$s; [ "$s" = decide ] && c=llama-decide
+    [ "$(ssh_box "$ip" "docker inspect -f '{{.State.Running}}' $c 2>/dev/null")" = true ] || return 1
   done
   return 0
 }
@@ -468,7 +579,10 @@ ensure_eip() {  # ensure_eip REGION NAME → sets IP and ALLOC_ID
   log "$n now answers on $IP, and keeps that address across a stop and start"
 }
 
-# handle_path strips the prefix, so vLLM sees /v1/… . flush_interval -1 is load
+# handle_path strips the prefix, so vLLM and llama-server see /v1/… (and the
+# decide slot's /tokenize). /decide is routed whether or not the slot runs; a
+# box without it answers 502 there. A Caddyfile an older version wrote has no
+# /decide at all, and `restart --decide-gguf` writes this one over it. flush_interval -1 is load
 # bearing: drafts stream as server-sent events and a buffering proxy would hold
 # every token to the end. The email line is written only when --acme-email was
 # given, because an empty value is a Caddyfile parse error.
@@ -489,6 +603,11 @@ CF
 	}
 	handle_path /bulk/* {
 		reverse_proxy 127.0.0.1:8001 {
+			flush_interval -1
+		}
+	}
+	handle_path /decide/* {
+		reverse_proxy 127.0.0.1:8002 {
 			flush_interval -1
 		}
 	}
@@ -530,7 +649,7 @@ if [ "\$(docker inspect -f '{{.State.Running}}' caddy 2>/dev/null)" != true ]; t
   exit 1
 fi
 EOF
-  log "caddy is up; https://$DOMAIN/prose and https://$DOMAIN/bulk are the two slots"
+  log "caddy is up; https://$DOMAIN/prose, https://$DOMAIN/bulk and https://$DOMAIN/decide are the slots"
 }
 
 # The A record, then the wait for it. Caddy must not ask for a certificate
@@ -566,20 +685,24 @@ instance_tag() {  # instance_tag KEY → one tag off the instance, empty when un
   printf '%s' "$v"
 }
 
-# Both slots again, so they read a key file written after they started. The
+# Every slot again, so they read a key file written after they started. The
 # milestones and the wait are wait_serving's, exactly as on a boot.
 restart_slots() {  # restart_slots IP
   local ip=$1
-  log "restarting both slots so they read the access key"
+  log "restarting the slots so they read the access key"
   cat <<'RS' | ssh_box "$ip" 'sudo mkdir -p /opt/bond; sudo bash -c "cat > /opt/bond/restart-slots.sh"; sudo nohup bash /opt/bond/restart-slots.sh >/dev/null 2>&1 &' \
     || die "could not restart the slots on $ip"
 set -uxo pipefail
 exec >> /var/log/bond-inference.log 2>&1
-docker rm -f vllm vllm-prose vllm-bulk 2>/dev/null || true
+docker rm -f vllm vllm-prose vllm-bulk llama-decide 2>/dev/null || true
 echo restarting > /opt/bond/stage
 /opt/bond/serve.sh prose
 for i in $(seq 1 240); do curl -s -o /dev/null localhost:8000/health && break; sleep 5; done
 if [ -f /opt/bond/bulk.env ]; then echo serving-bulk > /opt/bond/stage; /opt/bond/serve.sh bulk; fi
+if [ -f /opt/bond/decide.env ]; then
+  if [ -f /opt/bond/bulk.env ]; then for i in $(seq 1 240); do curl -s -o /dev/null localhost:8001/health && break; sleep 5; done; fi
+  echo serving-decide > /opt/bond/stage; /opt/bond/serve.sh decide
+fi
 echo started > /opt/bond/stage
 RS
   wait_serving
@@ -603,10 +726,11 @@ wait_https() {
   done
 }
 
-test_https() {  # both slots through the front door, with the key
+test_https() {  # every slot through the front door, with the key
   load_state
   run_test "https://$DOMAIN/prose" "${SERVED_NAME:-$SERVED}" "$API_KEY" || return 1
   has_bulk && { run_test "https://$DOMAIN/bulk" "${BULK_SERVED_NAME:-$BULK_SERVED}" "$API_KEY" || return 1; }
+  has_decide && { run_decide_test "https://$DOMAIN/decide" "${DECIDE_SERVED_NAME:-$DECIDE_SERVED}" "$API_KEY" || return 1; }
   return 0
 }
 
@@ -623,6 +747,10 @@ the app's model URLs:
 EOF
   has_bulk && { bserved=${BULK_SERVED_NAME:-$BULK_SERVED}
     echo "  https://$DOMAIN/bulk/v1/chat/completions    model: $bserved"; }
+  has_decide && {
+    echo "the app's decision address (Settings, Decision model, Your server):"
+    echo "  https://$DOMAIN/decide/v1/embeddings        model: ${DECIDE_SERVED_NAME:-$DECIDE_SERVED}"
+    echo "  (the heads file stays on the Mac: make decide-install there)"; }
   cat <<EOF
 the access key is what a tester types in the app. It is not printed here and
 it belongs in no committed file.
@@ -630,11 +758,64 @@ next:
   $0 test --url https://$DOMAIN/prose --bearer <key> --model $served
 EOF
   has_bulk && echo "  $0 test --url https://$DOMAIN/bulk --bearer <key> --model ${BULK_SERVED_NAME:-$BULK_SERVED}"
+  has_decide && echo "  $0 test --url https://$DOMAIN/decide --decide --bearer <key> --model ${DECIDE_SERVED_NAME:-$DECIDE_SERVED}"
   echo "  $0 status      $0 down      $0 tunnel is still the operator's own path"
 }
 
 # ── up / restart ────────────────────────────────────────────────────────
-describe_box() { echo "$MODEL as '$SERVED'${BULK_MODEL:+ + bulk $BULK_MODEL as '$BULK_SERVED'}"; }
+# The one check on a decide file name, for --decide-gguf and for the
+# decide-file tag read back off the instance: it reaches a remote shell, a
+# docker mount and a tag, so it is a plain .gguf name and nothing else.
+check_decide_file() {  # check_decide_file NAME WHERE-IT-CAME-FROM
+  case "$1" in
+    *.json) die "$2: takes the .gguf; the heads file ($1) stays on the Mac" ;;
+    *[!A-Za-z0-9._-]*|.*) die "$2: the file name $1 must be letters, digits, dot, dash and underscore" ;;
+    *.gguf) ;;
+    *) die "$2: takes a .gguf file, not $1" ;;
+  esac
+}
+
+describe_box() { echo "$MODEL as '$SERVED'${BULK_MODEL:+ + bulk $BULK_MODEL as '$BULK_SERVED'}${DECIDE_FILE:+ + decide $DECIDE_FILE as '$DECIDE_SERVED'}"; }
+
+scp_box() {  # scp_box LOCAL IP REMOTE — the same options as ssh_box
+  scp -q -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
+      -o LogLevel=ERROR -i "$SSH_KEY" "$1" "$SSH_USER@$2:$3"
+}
+
+# The decide slot's GGUF, from this machine to /opt/bond/decide/ on the box.
+# It lands in incoming/ first and moves to its final name only after the box's
+# sha256 of it equals this machine's, because the boot script starts the slot
+# as soon as the final name exists. A file already there with the same digest
+# is not sent again. Only the GGUF travels: the heads file stays on the Mac,
+# where the app applies the heads.
+upload_decide() {  # upload_decide IP
+  local ip=$1 here there
+  [ -f "$DECIDE_GGUF" ] || die "no decision model at $DECIDE_GGUF (make decide-install puts it in the models folder)"
+  log "decide: hashing $DECIDE_FILE here"
+  here=$(sha256_stdin < "$DECIDE_GGUF")
+  [ -n "$here" ] || die "could not hash $DECIDE_GGUF"
+  # A non-file at the final path (a directory an older boot's docker -v left)
+  # counts as absent.
+  there=$(ssh_box "$ip" "f=/opt/bond/decide/$DECIDE_FILE; [ -f \"\$f\" ] && [ ! -L \"\$f\" ] && sudo sha256sum \"\$f\" 2>/dev/null | cut -d' ' -f1" 2>/dev/null)
+  if [ "$here" = "$there" ]; then
+    log "decide: $DECIDE_FILE is already on the box with sha256 ${here:0:12}…; not sent again"
+    return 0
+  fi
+  ssh_box "$ip" "sudo mkdir -p /opt/bond/decide/incoming && sudo chown $SSH_USER /opt/bond/decide/incoming" \
+    || die "could not make /opt/bond/decide/incoming on $ip"
+  log "decide: copying $DECIDE_FILE ($(( $(wc -c < "$DECIDE_GGUF") / 1048576 )) MB) to the box"
+  scp_box "$DECIDE_GGUF" "$ip" "/opt/bond/decide/incoming/$DECIDE_FILE" || die "could not copy $DECIDE_FILE to $ip (the box is still running and billing: retry with $0 restart --name $NAME --decide-gguf PATH, or end it with $0 down --name $NAME)"
+  there=$(ssh_box "$ip" "sha256sum /opt/bond/decide/incoming/$DECIDE_FILE | cut -d' ' -f1")
+  if [ "$here" != "$there" ]; then
+    ssh_box "$ip" "rm -f /opt/bond/decide/incoming/$DECIDE_FILE" || :
+    die "decide: sha256 MISMATCH for $DECIDE_FILE: here $here, on the box ${there:-unreadable}. The copy was deleted and the slot not started (the box is still running and billing: retry with $0 restart --name $NAME --decide-gguf PATH, or end it with $0 down --name $NAME)"
+  fi
+  # mv -T (GNU; the box is Linux) never moves INTO a directory of that name;
+  # one left by an older boot is removed first.
+  ssh_box "$ip" "f=/opt/bond/decide/$DECIDE_FILE; src=/opt/bond/decide/incoming/$DECIDE_FILE; sudo chown root:root \"\$src\" && sudo chmod 644 \"\$src\" && { [ ! -d \"\$f\" ] || [ -L \"\$f\" ] || sudo rm -rf \"\$f\"; } && sudo mv -T \"\$src\" \"\$f\"" \
+    || die "could not move $DECIDE_FILE into /opt/bond/decide on $ip (the box is still running and billing: retry with $0 restart --name $NAME --decide-gguf PATH, or end it with $0 down --name $NAME)"
+  log "decide: $DECIDE_FILE is on the box, sha256 ${here:0:12}… matches"
+}
 
 cmd_up() {
   need aws jq ssh curl lsof
@@ -651,8 +832,13 @@ cmd_up() {
     # implies persistence whether or not --persistent was given.
     PERSISTENT=1
   fi
-  local ud r ami out gpu bulk_tag= domain_tag= sgids=
+  local ud r ami out gpu bulk_tag= decide_tag= domain_tag= sgids=
   [ -n "$BULK_MODEL" ] && bulk_tag=",{Key=bulk-model,Value=$BULK_MODEL}"
+  if [ -n "$DECIDE_FILE" ]; then
+    # Checked before anything is launched, so a wrong path costs no instance.
+    [ -f "$DECIDE_GGUF" ] || die "no decision model at $DECIDE_GGUF (make decide-install puts it in the models folder)"
+    decide_tag=",{Key=decide-model,Value=$DECIDE_SERVED},{Key=decide-file,Value=$DECIDE_FILE}"
+  fi
   [ -n "$DOMAIN" ] && domain_tag=",{Key=domain,Value=$DOMAIN}"
   ud=$(mktemp); userdata > "$ud" || exit 1
   gpu=$(aws ec2 describe-instance-types --region "${REGIONS%%,*}" --instance-types "$TYPE" \
@@ -677,7 +863,7 @@ cmd_up() {
             --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":$DISK,\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]" \
             --user-data "file://$ud" \
             $( [ "$SPOT" = 1 ] && echo "--instance-market-options MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}" ) \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=bond-inference-$NAME},{Key=bond-inference,Value=$NAME},{Key=project,Value=bond-desktop},{Key=model,Value=$MODEL}$bulk_tag,{Key=persistent,Value=$PERSISTENT}$domain_tag]" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=bond-inference-$NAME},{Key=bond-inference,Value=$NAME},{Key=project,Value=bond-desktop},{Key=model,Value=$MODEL}$bulk_tag$decide_tag,{Key=persistent,Value=$PERSISTENT}$domain_tag]" \
             --query 'Instances[0].[InstanceId,Placement.AvailabilityZone]' --output text 2>&1)
     case "$out" in
       i-*) set -- $out; REGION=$r INSTANCE_ID=$1
@@ -692,8 +878,11 @@ cmd_up() {
   rm -f -- "$(state_file)"
   save_state REGION "$REGION"; save_state INSTANCE_ID "$INSTANCE_ID"; save_state SERVED_NAME "$SERVED"
   [ -n "$BULK_MODEL" ] && save_state BULK_SERVED_NAME "$BULK_SERVED"
-  ITYPE=$TYPE IMODEL=$MODEL IBULK=$BULK_MODEL
+  [ -n "$DECIDE_FILE" ] && save_state DECIDE_SERVED_NAME "$DECIDE_SERVED"
+  ITYPE=$TYPE IMODEL=$MODEL IBULK=$BULK_MODEL IDECIDE=${DECIDE_FILE:+$DECIDE_SERVED} IDECIDEFILE=$DECIDE_FILE
   wait_instance
+  # The GGUF goes up while the box pulls images; the boot script waits for it.
+  [ -n "$DECIDE_FILE" ] && upload_decide "$IP"
   # The address and the record go in before the boot is waited out, so DNS has
   # the whole weight download to propagate and the slots are restarted once.
   [ -n "$DOMAIN" ] && { ensure_eip "$REGION" "$NAME"; dns_note "$IP"; }
@@ -723,17 +912,61 @@ cmd_restart() {
   [ -n "$MODEL_SET" ] || { [ -n "${IMODEL:-}" ] && [ "$IMODEL" != None ] && MODEL=$IMODEL; :; }
   [ -n "$BULK_MODEL_SET" ] || { has_bulk && BULK_MODEL=$IBULK; :; }
   [ "$BULK_MODEL" = none ] && BULK_MODEL= || :
+  # The decide slot kept from the box: its file is already there (decide-file
+  # tag), so nothing is uploaded; its served name comes from the decide-model
+  # tag unless --decide-served was given.
+  local decide_keep=0
+  if [ -z "$DECIDE_SET" ] && has_decide; then
+    case "${IDECIDEFILE:-}" in ''|None|none) die "'$NAME' runs a decide slot but has no decide-file tag; give --decide-gguf PATH or --decide-gguf none" ;; esac
+    check_decide_file "$IDECIDEFILE" "the decide-file tag on $INSTANCE_ID"
+    DECIDE_FILE=$IDECIDEFILE; decide_keep=1
+    if [ -z "$DECIDE_SERVED_SET" ]; then
+      case "$IDECIDE" in *[!A-Za-z0-9._-]*) die "the decide-model tag on $INSTANCE_ID ($IDECIDE) is not a plain name; give --decide-served NAME" ;; esac
+      DECIDE_SERVED=$IDECIDE
+    fi
+  fi
+  # --decide-served renames a slot. With no --decide-gguf and no slot on the
+  # box to keep there is nothing to rename, and the flag would be dropped
+  # without a word.
+  if [ -n "$DECIDE_SERVED_SET" ] && [ -z "$DECIDE_SET" ] && [ "$decide_keep" = 0 ]; then
+    printf 'inference: --decide-served is ignored: %s runs no decide slot and --decide-gguf was not given\n' "$NAME" >&2
+  fi
   allow_my_ip "$REGION" "$INSTANCE_ID"
   log "restart $NAME ($INSTANCE_ID, $IP): $(describe_box)"
+  if [ -n "$DECIDE_FILE" ]; then
+    if [ "$decide_keep" = 1 ]; then
+      ssh_box "$IP" "test -f /opt/bond/decide/$DECIDE_FILE" \
+        || die "the box has no /opt/bond/decide/$DECIDE_FILE to keep; give --decide-gguf PATH"
+    else
+      upload_decide "$IP"
+    fi
+  fi
   { echo "set -uxo pipefail; exec >> /var/log/bond-inference.log 2>&1"
-    echo "docker rm -f vllm vllm-prose vllm-bulk 2>/dev/null; echo restarting > /opt/bond/stage"
+    echo "docker rm -f vllm vllm-prose vllm-bulk llama-decide 2>/dev/null; echo restarting > /opt/bond/stage"
     box_setup; } | ssh_box "$IP" 'sudo mkdir -p /opt/bond; sudo bash -c "cat > /opt/bond/restart.sh"; sudo nohup bash /opt/bond/restart.sh >/dev/null 2>&1 &' \
     || die "could not push the configuration to $IP"
-  aws ec2 create-tags --region "$REGION" --resources "$INSTANCE_ID" --tags "Key=model,Value=$MODEL" "Key=bulk-model,Value=${BULK_MODEL:-none}"
+  aws ec2 create-tags --region "$REGION" --resources "$INSTANCE_ID" --tags "Key=model,Value=$MODEL" "Key=bulk-model,Value=${BULK_MODEL:-none}" \
+    "Key=decide-model,Value=$( [ -n "$DECIDE_FILE" ] && echo "$DECIDE_SERVED" || echo none)" "Key=decide-file,Value=${DECIDE_FILE:-none}"
   save_state SERVED_NAME "$SERVED"
   if [ -n "$BULK_MODEL" ]; then save_state BULK_SERVED_NAME "$BULK_SERVED"; else save_state BULK_SERVED_NAME ""; fi
-  ITYPE=$ITYPE IMODEL=$MODEL IBULK=$BULK_MODEL
+  if [ -n "$DECIDE_FILE" ]; then save_state DECIDE_SERVED_NAME "$DECIDE_SERVED"; else save_state DECIDE_SERVED_NAME ""; fi
+  ITYPE=$ITYPE IMODEL=$MODEL IBULK=$BULK_MODEL IDECIDE=${DECIDE_FILE:+$DECIDE_SERVED} IDECIDEFILE=$DECIDE_FILE
   wait_serving
+  # A box persisted before the decide slot existed has a Caddyfile with no
+  # /decide route, so its hostname answers the catch-all there, and the
+  # tunnel test below cannot see that. install_caddy validates and then
+  # replaces the container, so writing the file again is harmless; the email
+  # the box was persisted with is read back rather than dropped.
+  if [ -n "$DECIDE_SET" ] && [ -n "$DECIDE_FILE" ]; then
+    local domain; domain=$(instance_tag domain)
+    if [ -n "$domain" ]; then
+      DOMAIN=$domain
+      [ -n "$ACME_EMAIL" ] || ACME_EMAIL=$(ssh_box "$IP" "sudo sed -n 's/^ACME_EMAIL=//p' /opt/bond/caddy.env 2>/dev/null" || :)
+      install_caddy "$IP"
+    else
+      log "decide: $NAME has no hostname, so there is no /decide route; 'persist' adds one"
+    fi
+  fi
   kill_tunnel; ensure_tunnel; test_slots && next_steps
 }
 
@@ -766,22 +999,24 @@ up_code() { case "$1" in 200|401) return 0 ;; *) return 1 ;; esac; }
 wait_serving() {
   local t0 last probe line elapsed want=1
   has_bulk && want=2
+  has_decide && want=$((want + 1))
   t0=$(date +%s); last=
   log "following the box (image pull → weights → compile → serve; $want slot(s))"
-  probe='st=$(cat /opt/bond/stage 2>/dev/null); mb=$(du -sm /opt/bond/hf 2>/dev/null | cut -f1); out="$st|$mb"; for s in prose bulk; do c=$(docker inspect -f "{{.State.Status}}" vllm-$s 2>/dev/null); m=$(docker logs vllm-$s 2>&1 | grep -E -o "Loading weights took [0-9.]+ s|torch.compile took [0-9.]+ s|GPU KV cache size: [0-9,]+ tokens|Application startup complete|CUDA out of memory|Traceback|ValueError: [^\n]{0,80}" | tail -1); p=8000; [ $s = bulk ] && p=8001; h=$(curl -s -o /dev/null -w "%{http_code}" localhost:$p/health); out="$out|$c|$m|$h"; done; echo "$out"'
+  probe='st=$(cat /opt/bond/stage 2>/dev/null); mb=$(du -sm /opt/bond/hf 2>/dev/null | cut -f1); out="$st|$mb"; for s in prose bulk decide; do n=vllm-$s; [ $s = decide ] && n=llama-decide; c=$(docker inspect -f "{{.State.Status}}" $n 2>/dev/null); m=$(docker logs $n 2>&1 | grep -E -o "Loading weights took [0-9.]+ s|torch.compile took [0-9.]+ s|GPU KV cache size: [0-9,]+ tokens|Application startup complete|CUDA out of memory|Traceback|ValueError: [^\n]{0,80}|model loaded|server is listening on [^ ]+|failed to load model|error: [^\n]{0,80}" | tail -1); p=8000; [ $s = bulk ] && p=8001; [ $s = decide ] && p=8002; h=$(curl -s -o /dev/null -w "%{http_code}" localhost:$p/health); out="$out|$c|$m|$h"; done; echo "$out"'
   while :; do
-    line=$(ssh_box "$IP" "$probe" 2>/dev/null) || line="?|?|?|ssh dropped|000|||000"
+    line=$(ssh_box "$IP" "$probe" 2>/dev/null) || line="?|?|?|ssh dropped|000|||000|||000"
     elapsed=$(( ($(date +%s) - t0) / 60 ))
     if [ "$line" != "$last" ]; then
-      IFS='|' read -r st mb c1 m1 h1 c2 m2 h2 <<EOF
+      IFS='|' read -r st mb c1 m1 h1 c2 m2 h2 c3 m3 h3 <<EOF
 $line
 EOF
       log "$(printf '%3d min  stage=%-13s weights=%5.1f GB  prose=%-8s%s' "$elapsed" "${st:-cloud-init}" "$(awk -v m="${mb:-0}" 'BEGIN{print m/1024}')" "${c1:-none}" "${m1:+ · $m1}")"
-      [ "$want" = 2 ] && [ -n "${c2:-}" ] && log "$(printf '%3d min  %-13s %-16s bulk=%-8s%s' "$elapsed" "" "" "$c2" "${m2:+ · $m2}")"
+      has_bulk && [ -n "${c2:-}" ] && log "$(printf '%3d min  %-13s %-16s bulk=%-8s%s' "$elapsed" "" "" "$c2" "${m2:+ · $m2}")"
+      has_decide && [ -n "${c3:-}" ] && log "$(printf '%3d min  %-13s %-16s decide=%-6s%s' "$elapsed" "" "" "$c3" "${m3:+ · $m3}")"
       last=$line
-      case "$c1$c2" in *exited*) die "a vLLM container exited — on the box: docker logs vllm-prose / vllm-bulk" ;; esac
-      if up_code "$h1" && { [ "$want" = 1 ] || up_code "${h2:-}"; }; then
-        log "serving: prose on the box's :8000${IBULK:+, bulk on :8001}"; return 0
+      case "$c1$c2$c3" in *exited*) die "a slot's container exited — on the box: docker logs vllm-prose / vllm-bulk / llama-decide" ;; esac
+      if up_code "$h1" && { ! has_bulk || up_code "${h2:-}"; } && { ! has_decide || up_code "${h3:-}"; }; then
+        log "serving: prose on the box's :8000$(has_bulk && echo ", bulk on :8001")$(has_decide && echo ", decide on :8002")"; return 0
       fi
     fi
     [ "$elapsed" -ge "$BOOT_TIMEOUT_MIN" ] && die "not serving after $BOOT_TIMEOUT_MIN min — on the box: cat /opt/bond/stage; docker logs vllm-prose"
@@ -847,10 +1082,47 @@ run_test() {  # run_test URL MODEL BEARER
   [ "$ok" = 1 ] && printf '  %-26s PASS\n' "result" || { printf '  %-26s FAIL\n' "result"; return 1; }
 }
 
-test_slots() {  # the box's prose slot, then its bulk slot when it has one
+# The decide slot's checks, the facts the app's DecisionClient relies on:
+# (1) /v1/embeddings with embd_normalize -1 answers a 1024-long vector that is
+# RAW, not unit length (the client refuses a norm within 1e-3 of 1.0, which is
+# what a server that ignored the field would send); (2) /tokenize, with the
+# model in the body, answers token ids (the client's path for an over-long
+# message). The key goes to curl in a 0600 config file, as in run_test.
+run_decide_test() {  # run_decide_test URL MODEL BEARER
+  local url=$1 model=$2 bearer=$3 r dim norm ntok ok=1 cfg=
+  if [ -n "$bearer" ]; then
+    cfg=$(mktemp) && chmod 600 "$cfg" || die "could not make a temporary file for the access key"
+    printf 'header = "Authorization: Bearer %s"\n' "$bearer" > "$cfg"
+  fi
+  trap '[ -n "$cfg" ] && rm -f -- "$cfg"; trap - RETURN' RETURN
+  printf '\n%-28s %s\n' "test: $url" "model $model (decision embeddings)"
+  r=$(curl -s --max-time 30 ${cfg:+--config "$cfg"} -H 'Content-Type: application/json' "$url/v1/embeddings" \
+        -d "$(jq -n --arg m "$model" '{model:$m, input:"hello", embd_normalize:-1}')")
+  dim=$(echo "$r" | jq -r '.data[0].embedding | length' 2>/dev/null)
+  norm=$(echo "$r" | jq -r '[.data[0].embedding[] | . * .] | add | sqrt' 2>/dev/null)
+  if [ "$dim" = 1024 ] && [ -n "$norm" ] && awk -v n="$norm" 'BEGIN{ d = n - 1; if (d < 0) d = -d; exit !(d > 0.001) }'; then
+    printf '  %-26s ok (1024 floats, L2 norm %.2f, so raw)\n' "embeddings, raw" "$norm"
+  elif [ "$dim" = 1024 ]; then
+    ok=0; printf '  %-26s FAIL: norm %s is unit length; the server ignored embd_normalize -1\n' "embeddings, raw" "$norm"
+  else
+    ok=0; printf '  %-26s FAIL: %s\n' "embeddings, raw" "$( [ -n "$dim" ] && [ "$dim" != null ] && echo "$dim floats, not 1024" || echo "$r" | cut -c1-200)"
+  fi
+  r=$(curl -s --max-time 30 ${cfg:+--config "$cfg"} -H 'Content-Type: application/json' "$url/tokenize" \
+        -d "$(jq -n --arg m "$model" '{model:$m, content:"hello", add_special:false}')")
+  ntok=$(echo "$r" | jq -r '.tokens | length' 2>/dev/null)
+  if [ -n "$ntok" ] && [ "$ntok" != null ] && [ "$ntok" -gt 0 ] 2>/dev/null; then
+    printf '  %-26s ok (%s token(s))\n' "tokenize" "$ntok"
+  else
+    ok=0; printf '  %-26s FAIL: %s\n' "tokenize" "$(echo "$r" | cut -c1-200)"
+  fi
+  [ "$ok" = 1 ] && printf '  %-26s PASS\n' "result" || { printf '  %-26s FAIL\n' "result"; return 1; }
+}
+
+test_slots() {  # the box's prose slot, then its bulk and decide slots when it has them
   load_state
   run_test "$URL" "${SERVED_NAME:-$SERVED}" "" || return 1
   has_bulk && { run_test "$BULK_URL" "${BULK_SERVED_NAME:-$BULK_SERVED}" "" || return 1; }
+  has_decide && { run_decide_test "$DECIDE_URL" "${DECIDE_SERVED_NAME:-$DECIDE_SERVED}" "" || return 1; }
   return 0
 }
 
@@ -865,7 +1137,13 @@ cmd_test() {
     fi
     # With --url, --model is the name the server routes on (default: the alias).
     local m=$SERVED; [ -n "$MODEL_SET" ] && m=$MODEL
-    run_test "${URL%/}" "$m" "$BEARER"
+    if [ "$TEST_DECIDE" = 1 ]; then
+      # --decide: URL is the slot's base (…/decide), not its /v1/embeddings.
+      [ -n "$MODEL_SET" ] || m=$DECIDE_SERVED
+      run_decide_test "${URL%/}" "$m" "$BEARER"
+    else
+      run_test "${URL%/}" "$m" "$BEARER"
+    fi
   else
     need aws ssh lsof
     find_instance || die "no endpoint named '$NAME' in [$REGIONS]; give --url for an arbitrary one"
@@ -884,10 +1162,12 @@ prose: $URL/v1/chat/completions   model: $served
 EOF
   has_bulk && { bserved=${BULK_SERVED_NAME:-$BULK_SERVED}; blabel="vllm-${ITYPE:-$TYPE}/$(basename "$IBULK")"
     echo "bulk:  $BULK_URL/v1/chat/completions   model: $bserved"; }
+  has_decide && echo "decide: $DECIDE_URL/v1/embeddings   model: ${DECIDE_SERVED_NAME:-$DECIDE_SERVED}   (DECIDE_URL for the app's hand-servers build)"
   if [ -n "$DOMAIN" ]; then
     echo "over TLS, which is the path the app takes:"
     echo "  https://$DOMAIN/prose/v1/chat/completions   model: $served"
     has_bulk && echo "  https://$DOMAIN/bulk/v1/chat/completions    model: ${BULK_SERVED_NAME:-$BULK_SERVED}"
+    has_decide && echo "  https://$DOMAIN/decide/v1/embeddings        model: ${DECIDE_SERVED_NAME:-$DECIDE_SERVED}   (the heads file stays on the Mac)"
   fi
   cat <<EOF
 (the tunnel closes with '$0 down' or when this machine sleeps; '$0 tunnel' reopens it)
@@ -906,14 +1186,14 @@ EOF
 cmd_status() {
   need aws jq
   whoami_aws
-  local r rows found=0 id ip type st launch name model bulk hours price when persist domain
+  local r rows found=0 id ip type st launch name model bulk hours price when persist domain decide
   printf '%-10s %-11s %-20s %-12s %-9s %-16s %6s %8s  %-17s %s\n' name region instance type state ip hours '$so-far' shutdown models
   for r in $(echo "$REGIONS" | tr , ' '); do
     rows=$(aws ec2 describe-instances --region "$r" --filters Name=tag-key,Values=bond-inference \
-             --query 'Reservations[].Instances[?State.Name!=`terminated`][].[Tags[?Key==`bond-inference`].Value|[0],InstanceId,InstanceType,State.Name,PublicIpAddress,LaunchTime,Tags[?Key==`model`].Value|[0],Tags[?Key==`bulk-model`].Value|[0],Tags[?Key==`persistent`].Value|[0],Tags[?Key==`domain`].Value|[0]]' \
+             --query 'Reservations[].Instances[?State.Name!=`terminated`][].[Tags[?Key==`bond-inference`].Value|[0],InstanceId,InstanceType,State.Name,PublicIpAddress,LaunchTime,Tags[?Key==`model`].Value|[0],Tags[?Key==`bulk-model`].Value|[0],Tags[?Key==`persistent`].Value|[0],Tags[?Key==`domain`].Value|[0],Tags[?Key==`decide-model`].Value|[0]]' \
              --output text 2>/dev/null)
     [ -n "$rows" ] || continue
-    while read -r name id type st ip launch model bulk persist domain; do
+    while read -r name id type st ip launch model bulk persist domain decide; do
       found=1
       hours=$(awk -v l="$(TZ=UTC date -j -f %Y-%m-%dT%H:%M:%S "${launch%%[.+]*}" +%s 2>/dev/null || date -u -d "$launch" +%s)" -v n="$(date +%s)" 'BEGIN{printf "%.1f", (n-l)/3600}')
       price=$(price_for "$type" "$r")
@@ -923,7 +1203,7 @@ cmd_status() {
       else when=$( [ "$st" = running ] && [ "$ip" != None ] && ssh_box "$ip" 'u=$(sed -n "s/^USEC=//p" /run/systemd/shutdown/scheduled 2>/dev/null); [ -n "$u" ] && date -u -d @$((u/1000000)) +%Y-%m-%dT%H:%MZ || echo none' 2>/dev/null </dev/null || echo "?"); fi
       printf '%-10s %-11s %-20s %-12s %-9s %-16s %6s %8s  %-17s %s\n' "$name" "$r" "$id" "$type" "$st" "$ip" "$hours" \
         "$( [ "$price" = "?" ] && echo "?" || awk -v h="$hours" -v p="$price" 'BEGIN{printf "%.2f", h*p}')" "$when" \
-        "$(basename "$model")$( [ -n "$bulk" ] && [ "$bulk" != None ] && [ "$bulk" != none ] && echo " + $(basename "$bulk")")$( [ -n "$domain" ] && [ "$domain" != None ] && echo " · https://$domain")"
+        "$(basename "$model")$( [ -n "$bulk" ] && [ "$bulk" != None ] && [ "$bulk" != none ] && echo " + $(basename "$bulk")")$( [ -n "$decide" ] && [ "$decide" != None ] && [ "$decide" != none ] && echo " + decide $decide")$( [ -n "$domain" ] && [ "$domain" != None ] && echo " · https://$domain")"
     done <<EOF
 $rows
 EOF
@@ -937,6 +1217,7 @@ cmd_tunnel() {
   [ "$STATE" = running ] || die "'$NAME' is $STATE"
   allow_my_ip "$REGION" "$INSTANCE_ID"; ensure_tunnel
   echo "$URL/v1/chat/completions"; has_bulk && echo "$BULK_URL/v1/chat/completions"
+  has_decide && echo "$DECIDE_URL/v1/embeddings"; :
 }
 
 cmd_extend() {
@@ -1053,6 +1334,9 @@ while [ $# -gt 0 ]; do
     --bulk-model) BULK_MODEL=$2 BULK_MODEL_SET=1; shift ;; --bulk-served) BULK_SERVED=$2; shift ;;
     --bulk-max-len) BULK_MAXLEN=$2; shift ;; --bulk-mem) BULK_MEM=$2; shift ;;
     --bulk-args) BULK_ARGS=$2; shift ;;
+    --decide-gguf) DECIDE_GGUF=$2 DECIDE_SET=1; shift ;;
+    --decide-served) DECIDE_SERVED=$2 DECIDE_SERVED_SET=1; shift ;;
+    --decide-image) DECIDE_IMAGE=$2; shift ;; --decide) TEST_DECIDE=1 ;;
     --disk) DISK=$2; shift ;;        --regions) REGIONS=$2; shift ;;
     --profile) PROFILE=$2; shift ;;  --account) ACCOUNT=$2; shift ;;
     --spot) SPOT=1 ;;                --ssh-key) SSH_KEY=$2; shift ;;
@@ -1066,6 +1350,16 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1 (see --help)" ;;
   esac; shift
 done
+# --decide-gguf none drops the slot (restart); a path names the file the box
+# will serve. Its name reaches a remote shell, a docker mount and a tag, so it
+# is held to a plain file name ending in .gguf; the heads JSON is refused
+# because it never leaves the Mac.
+case "$DECIDE_GGUF" in
+  '') ;;
+  none) DECIDE_GGUF= DECIDE_FILE= ;;
+  *) DECIDE_FILE=$(basename "$DECIDE_GGUF"); check_decide_file "$DECIDE_FILE" --decide-gguf ;;
+esac
+case "$DECIDE_SERVED" in ''|*[!A-Za-z0-9._-]*) die "--decide-served takes letters, digits, dot, dash and underscore only" ;; esac
 case "$CMD" in
   up) cmd_up ;; restart) cmd_restart ;; status) cmd_status ;; test) cmd_test ;; tunnel) cmd_tunnel ;;
   extend) cmd_extend ;; down) cmd_down ;; persist) cmd_persist ;; -h|--help|help) usage ;;

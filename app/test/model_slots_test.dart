@@ -5,13 +5,11 @@ import 'package:bond_inbox/services/llm/context_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The authored stage table, held against the pipeline it claims to describe.
@@ -25,9 +23,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// The `schemaName` of every task that makes a model call, built from real
 /// instances so a renamed schema fails this file rather than drifting.
 Set<String> taskSchemaNames() => {
-      const TriageTask().schemaName,
       const NeedsYouTask().schemaName,
-      const ExtractTask().schemaName,
+      const MessageTextTask().schemaName,
       const AttachmentDigestTask().schemaName,
       const ContextDigestTask().schemaName,
       const ContextBriefTask().schemaName,
@@ -37,7 +34,6 @@ Set<String> taskSchemaNames() => {
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
       const StorylineRecapTask().schemaName,
-      const ReplyDecisionTask().schemaName,
       const DraftTask().schemaName,
     };
 
@@ -60,6 +56,12 @@ void main() {
         expect(stage.id, 'embeddings');
         continue;
       }
+      // The decision model sends no chat schema either: it is an embedding
+      // call whose heads run in Dart.
+      if (stage.slot == ModelSlot.decide) {
+        expect(stage.id, 'decision');
+        continue;
+      }
       // `draft_improve` runs another stage's task — it sends `DraftTask` —
       // so it is a routing destination without a schema of its own, and the
       // second exception this containment allows.
@@ -72,103 +74,112 @@ void main() {
     expect(
       {
         for (final stage in pipelineStages)
-          if (stage.slot != ModelSlot.embed && !names.contains(stage.id))
+          if (stage.slot == ModelSlot.generative &&
+              !names.contains(stage.id))
             stage.id,
       },
       {'draft_improve'},
     );
   });
 
-  test('each stage names the slot it defaults to', () {
+  test('each stage names the role that does its work', () {
     Set<String> idsOn(ModelSlot slot) => {
           for (final stage in pipelineStages)
             if (stage.slot == slot) stage.id,
         };
 
-    // Literals, not a derivation: moving a stage between slots must force an
+    // Literals, not a derivation: moving a stage between roles must force an
     // edit here, and therefore an edit to docs/pipeline/10-model-routing.md.
-    // These are the DEFAULTS now — where a stage goes on one machine is a
-    // `stage_targets` entry, which `llm_targets_test.dart` covers.
-    expect(idsOn(ModelSlot.fast), {
-      'triage',
+    // Every text stage is the ONE generative model since the decision-model
+    // round (the fast and prose slots merged), and the decision model is a
+    // role of its own.
+    expect(idsOn(ModelSlot.generative), {
       'needs_you',
-      'extraction',
+      'message_text',
       'attachment_digest',
       'context_file_digest',
       'context_brief',
       'context_select',
       'storyline_membership',
-    });
-    expect(idsOn(ModelSlot.prose), {
       'storyline_group',
       'storyline_name',
       'storyline_refresh',
       'storyline_recap',
-      'reply_decision',
       'draft_reply',
       'draft_improve',
     });
+    expect(idsOn(ModelSlot.decide), {'decision'});
     expect(idsOn(ModelSlot.embed), {'embeddings'});
   });
 
-  test('stageSlot answers the table, and fast for anything else', () {
+  test('no reply-decision row: the decision model answers it at triage', () {
+    final ids = [for (final stage in pipelineStages) stage.id];
+    expect(ids, isNot(contains('reply_decision')));
+    expect(ids, containsAll(['draft_reply', 'draft_improve']));
+  });
+
+  test('one text row per message, where triage and extraction were', () {
+    final ids = [for (final stage in pipelineStages) stage.id];
+    expect(ids, isNot(contains('triage')));
+    expect(ids, isNot(contains('extraction')));
+    final text = pipelineStages.singleWhere((s) => s.id == 'message_text');
+    expect(text.label, 'Message text');
+    expect(text.description,
+        'Summary, action items, deadline, topics, project');
+    expect(text.slot, ModelSlot.generative);
+  });
+
+  test('the decision row comes first, and has no schema of its own', () {
+    // It runs on every kept message before any text call.
+    final first = pipelineStages.first;
+    expect(first.id, 'decision');
+    expect(first.label, 'Decision model');
+    expect(first.description, 'Sorts and flags every message');
+    expect(first.slot, ModelSlot.decide);
+    expect(taskSchemaNames(), isNot(contains('decision')));
+  });
+
+  test('stageSlot answers the table, and generative for anything else', () {
     for (final stage in pipelineStages) {
       expect(stageSlot(stage.id), stage.slot, reason: stage.id);
     }
 
-    // An id no row names is the cheap slot, not a throw: this runs on a
-    // drain's hot path, and a stray stage id must cost a request on the small
-    // server rather than the item.
-    expect(stageSlot('nope'), ModelSlot.fast);
+    // An id no row names is a text stage, not a throw: this runs on a
+    // drain's hot path, and every text stage is generative anyway.
+    expect(stageSlot('nope'), ModelSlot.generative);
     // No row is optional any more: `draft_improve` was the one that was, and
     // its entry was the feature being on, which the stage picker's deletion
     // would have made unreachable.
     expect(pipelineStages.where((stage) => stage.optional), isEmpty);
   });
 
-  test('a slot names its built-in target, and embeddings name none', () {
-    expect(defaultTargetIdFor(ModelSlot.fast), builtInFastId);
-    expect(defaultTargetIdFor(ModelSlot.prose), builtInProseId);
-    // Not a default but a bug in the caller: embeddings are not routed at
-    // all, because a vector carries the tag of the model that wrote it.
-    expect(() => defaultTargetIdFor(ModelSlot.embed), throwsArgumentError);
-  });
-
-  test('the three presets are the stage table, not a second copy of it', () {
-    Set<String> idsOn(ModelSlot slot) => {
-          for (final stage in pipelineStages)
-            if (stage.slot == slot) stage.id,
-        };
-
-    // `draft_improve` is in the prose preset since Round H: it stopped being
-    // optional, and a prose stage left out of the prose preset would be a
-    // stage the tier defaults could not reach on a Mac with no prose server.
-    expect(proseStageIds.toSet(), idsOn(ModelSlot.prose));
-    expect(proseStageIds, contains('draft_improve'));
-    expect(bulkStageIds.toSet(), idsOn(ModelSlot.fast));
-    expect(confirmStageIds, ['storyline_membership']);
-
-    for (final preset in [proseStageIds, confirmStageIds, bulkStageIds]) {
-      // No duplicates, and never the one row a preset must not write:
-      // `embeddings` is not routed at all.
-      expect(preset.toSet(), hasLength(preset.length));
-      expect(preset, isNot(contains('embeddings')));
-      for (final id in preset) {
-        expect(pipelineStages.map((s) => s.id), contains(id));
-      }
+  test('a stage names the model that does its work, one role per slot', () {
+    for (final stage in pipelineStages) {
+      final expected = switch (stage.slot) {
+        ModelSlot.generative => StageRole.generative,
+        ModelSlot.decide => StageRole.decision,
+        ModelSlot.embed => StageRole.embed,
+      };
+      expect(roleOfStage(stage.id), expected, reason: stage.id);
     }
+    // The storyline confirm is plain generative now; it was the one stage
+    // whose role depended on the placement.
+    expect(roleOfStage('storyline_membership'), StageRole.generative);
+    expect(roleOfStage('decision'), StageRole.decision);
+    expect(roleOfStage('embeddings'), StageRole.embed);
+    // An id the stage table does not name has no role at all.
+    expect(roleOfStage('nope'), isNull);
   });
 
   test('the drafting stages are every stage that writes in the owner\'s name',
       () {
-    // Not a preset — `draft_improve` is in none — but the same closed pair is
-    // what the consent gate, the preset's skip, the picker's gated note and
-    // the picker's consent prompt all ask about. Named once so a third
-    // drafting stage is not four things to remember.
+    // The closed pair the cloud-drafts target routes and the consent gate
+    // asks about. Named once so a third drafting stage is not several things
+    // to remember.
     expect(draftStageIds, ['draft_reply', 'draft_improve']);
     for (final id in draftStageIds) {
       expect(pipelineStages.map((s) => s.id), contains(id));
-      expect(stageSlot(id), ModelSlot.prose);
+      expect(stageSlot(id), ModelSlot.generative);
     }
   });
 
@@ -271,7 +282,6 @@ void main() {
       model: 'qwen3.8',
     );
     expect(local.isThirdParty, isFalse);
-    expect(local.isBuiltIn, isFalse);
 
     // The wire alone is enough: Converse is only served by one company.
     expect(local.copyWith(wire: LlmWire.bedrockConverse).isThirdParty, isTrue);
@@ -299,8 +309,7 @@ void main() {
       isTrue,
     );
 
-    // The id never moves, which is what the stage map and the keychain entry
-    // are keyed on.
+    // The id never moves, which is what the keychain entry is keyed on.
     expect(local.copyWith(name: 'Renamed').id, 'box');
   });
 
@@ -314,20 +323,14 @@ void main() {
     }
   });
 
-  test('the slot defaults are the compiled constants', () {
-    expect(fastSlotDefault.baseUrl, LlmClient.fastBaseUrl);
-    expect(fastSlotDefault.model, LlmClient.fastModel);
-    expect(proseSlotDefault.baseUrl, LlmClient.defaultBaseUrl);
-    expect(proseSlotDefault.model, LlmClient.defaultModel);
-    expect(embedSlotDefault.baseUrl, EmbeddingsClient.defaultBaseUrl);
-    expect(embedSlotDefault.model, EmbeddingsClient.modelTag);
-
-    // Two servers is the point — one slot accidentally aliasing the other
-    // would route every label back onto the 27B.
-    expect(fastSlotDefault, isNot(proseSlotDefault));
-    expect(slotDefaults[ModelSlot.fast], fastSlotDefault);
-    expect(slotDefaults[ModelSlot.prose], proseSlotDefault);
-    expect(slotDefaults[ModelSlot.embed], embedSlotDefault);
+  test('the compiled defaults are the clients\' constants', () {
+    expect(generativeSlotDefault.baseUrl, LlmClient.defaultBaseUrl);
+    expect(generativeSlotDefault.model, LlmClient.defaultModel);
+    // The hand-started `make decide` server, as `DecisionClient` names it.
+    expect(decideUrlDefault, 'http://127.0.0.1:8083/v1/embeddings');
+    expect(decideModelDefault, 'bond-decide');
+    expect(routerDecideId, 'bond-decide');
+    expect(EmbeddingsClient.modelTag, isNotEmpty);
   });
 
   group('the machine tier', () {
@@ -346,138 +349,32 @@ void main() {
       expect(measuredFloorBytes, 16 * gib);
     });
 
-    test('never answers remote, at any byte count', () {
-      // The remote tier is a PLACEMENT. Nothing about a machine's memory can
-      // say whether its owner points it at the shared GPU box, and a reading
-      // of the hardware that answered it would be inventing that fact.
-      for (final bytes in [-1, 0, 1, 8 * gib, 16 * gib, 40 * gib, 512 * gib]) {
-        expect(machineTierFor(bytes), isNot(MachineTier.remote),
-            reason: '$bytes');
-      }
-    });
-
-    test('the full tier writes nothing, so a fresh install stays as it was',
-        () {
-      expect(tierStageDefaults(MachineTier.full), isEmpty);
+    test('the draft policy follows the tier', () {
       expect(tierDraftPolicy(MachineTier.full), DraftPolicy.needsYou);
-    });
-
-    test('the inbox tier points every prose-slot stage at the fast built-in',
-        () {
-      final map = tierStageDefaults(MachineTier.inbox);
-      expect(map.keys.toSet(), proseStageIds.toSet());
-      expect(map.length, 7);
-      expect(map.values.toSet(), {builtInFastId});
-      // Improve a draft is one of them: it is a prose stage, and a Mac with no
-      // prose server must not be left dialling one.
-      expect(map['draft_improve'], builtInFastId);
-      expect(map.containsKey('storyline_membership'), isFalse);
-      for (final id in bulkStageIds) {
-        expect(map.containsKey(id), isFalse, reason: id);
-      }
       expect(tierDraftPolicy(MachineTier.inbox), DraftPolicy.onDemand);
+      expect(MachineTier.values, [MachineTier.full, MachineTier.inbox]);
     });
 
-    test('the remote tier writes no stage, so it cannot widen what a tier '
-        'clears', () {
-      // `applyTierDefaults` builds its governed set from the UNION of every
-      // tier's keys, so a stage named here would be cleared on a machine that
-      // has never seen the box. The placement RULE owns the box's stage map,
-      // and this is what keeps the two from fighting.
-      expect(tierStageDefaults(MachineTier.remote), isEmpty);
-      expect(tierDraftPolicy(MachineTier.remote), DraftPolicy.needsYou);
-    });
-
-    test('the two role lists are the stage table, split where the box splits '
-        'it', () {
-      // The placement rule's halves. `storyline_membership` is a fast-slot
-      // stage everywhere else and the big model's on the box, which is the
-      // one exception the rule carries, and these two lists are where it is
-      // written down. Pinned against `pipelineStages` the way the presets are,
-      // so neither can drift from the stage table.
-      expect(bigModelStageIds, [...proseStageIds, 'storyline_membership']);
-      expect(bigModelStageIds, contains('draft_improve'));
-      expect(
-        smallModelStageIds.toSet(),
-        bulkStageIds.toSet().difference({'storyline_membership'}),
-      );
-      // Order preserved, so the lists read as the stage table does.
-      expect(smallModelStageIds,
-          [for (final id in bulkStageIds) if (id != 'storyline_membership') id]);
-
-      // Together they cover every routable stage exactly once.
-      final both = [...bigModelStageIds, ...smallModelStageIds];
-      expect(both.toSet(), hasLength(both.length));
-      expect(
-        both.toSet(),
-        {
-          for (final stage in pipelineStages)
-            if (stage.slot != ModelSlot.embed) stage.id,
-        },
-      );
-    });
-
-    test('a stage names the model that does its work, not the slot it would '
-        'dial', () {
-      for (final id in bigModelStageIds) {
-        expect(roleOfStage(id), StageRole.big, reason: id);
-      }
-      for (final id in smallModelStageIds) {
-        expect(roleOfStage(id), StageRole.small, reason: id);
-      }
-      // A second pass over a reply is the big model's, like the pass that
-      // wrote it.
-      expect(roleOfStage('draft_improve'), StageRole.big);
-      expect(roleOfStage('embeddings'), StageRole.embed);
-      // An id the stage table does not name has no role at all.
-      expect(roleOfStage('nope'), isNull);
-    });
-
-    test('the placement rule answers every stage on both placements', () {
-      String? onBox(String id) => placementDefaultTargetId(
-            placement: ModelPlacement.box,
-            hasBox: true,
-            stageId: id,
-          );
-      String? onThisMac(String id) => placementDefaultTargetId(
-            placement: ModelPlacement.local,
-            hasBox: true,
-            stageId: id,
-          );
-
-      for (final stage in pipelineStages) {
-        final id = stage.id;
-        if (stage.slot == ModelSlot.embed) {
-          // Not routed at all: no default to give on either placement.
-          expect(onBox(id), isNull, reason: id);
-          expect(onThisMac(id), isNull, reason: id);
-          continue;
-        }
-        expect(onBox(id), bigModelStageIds.contains(id) ? boxProseId : boxBulkId,
-            reason: id);
-        expect(onThisMac(id), defaultTargetIdFor(stage.slot), reason: id);
-      }
-
-      // The confirm is the whole reason this is a rule rather than an ORDER of
-      // two preset calls: the big model on the box, the small one here.
-      expect(onBox('storyline_membership'), boxProseId);
-      expect(onThisMac('storyline_membership'), builtInFastId);
-
-      // No address to dial is the same answer as this Mac, whatever the
-      // placement says, because two targets nothing can reach would park every
-      // lane.
-      for (final stage in pipelineStages) {
-        if (stage.slot == ModelSlot.embed) continue;
-        expect(
-          placementDefaultTargetId(
-            placement: ModelPlacement.box,
-            hasBox: false,
-            stageId: stage.id,
-          ),
-          defaultTargetIdFor(stage.slot),
-          reason: stage.id,
-        );
-      }
+    test('the managed generative model is the tier\'s unless one was chosen',
+        () {
+      // '' follows the hardware.
+      expect(managedGenerativeIdFor(MachineTier.full, ''), routerProseId);
+      expect(managedGenerativeIdFor(MachineTier.inbox, ''), routerBulkId);
+      // The 4B may be chosen anywhere.
+      expect(managedGenerativeIdFor(MachineTier.full, routerBulkId),
+          routerBulkId);
+      expect(managedGenerativeIdFor(MachineTier.inbox, routerBulkId),
+          routerBulkId);
+      // The 27B only where the tier holds it: refused on the inbox tier.
+      expect(managedGenerativeIdFor(MachineTier.full, routerProseId),
+          routerProseId);
+      expect(managedGenerativeIdFor(MachineTier.inbox, routerProseId),
+          routerBulkId);
+      // Anything else reads as ''.
+      expect(managedGenerativeIdFor(MachineTier.full, 'bond-embed'),
+          routerProseId);
+      expect(managedGenerativeIdFor(MachineTier.inbox, 'nonsense'),
+          routerBulkId);
     });
 
     test('a build with no compiled address defaults to this Mac', () {
@@ -491,14 +388,28 @@ void main() {
       expect(placements, [ModelPlacement.local]);
     });
 
-    test('the box constants are the ids, names and models the derived specs '
-        'carry', () {
+    test('the fixed target constants are the ids, names and models the '
+        'derived specs carry', () {
       expect(boxProseId, 'box-prose');
-      expect(boxBulkId, 'box-bulk');
+      expect(boxDecideId, 'box-decide');
+      expect(cloudDraftsId, 'cloud-drafts');
+      expect(localGenerativeId, 'local-generative');
+      expect(localDecisionId, 'local-decision');
       expect(boxProseModel, 'qwen3.8');
-      expect(boxBulkModel, 'qwen3-4b');
+      expect(boxDecideModel, 'bond-decide-mbl-v2swap');
+      expect(localGenerativeName, 'This Mac · generative');
+      expect(boxProseName, 'Your server · generative');
+      expect(localDecisionName, 'This Mac · decision');
+      expect(boxDecideName, 'Your server · decision');
+      expect(cloudDraftsName, 'Cloud drafts');
       // User-facing, so no em-dash and no parenthetical.
-      for (final name in [boxProseName, boxBulkName]) {
+      for (final name in [
+        localGenerativeName,
+        boxProseName,
+        localDecisionName,
+        boxDecideName,
+        cloudDraftsName,
+      ]) {
         expect(name, isNot(contains('—')));
         expect(name, isNot(contains('(')));
       }
@@ -509,7 +420,7 @@ void main() {
 
     test('a typed box address is trimmed and loses every trailing slash', () {
       // One function rather than the same two lines in the wizard, the
-      // Settings page and `useBox`: three copies of the strip is three
+      // Settings page and the role writers: three copies of the strip is three
       // places for `https://box.example.com//prose/…` to come from.
       expect(normalizeBoxBaseUrl('  https://box.example.com/  '),
           'https://box.example.com');

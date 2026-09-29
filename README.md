@@ -39,15 +39,43 @@ The model's native context is 262K tokens. The `Makefile` caps it at 16K
 because 16K is what every measured row in `docs/model-bakeoff.md` was taken at.
 Raise it when a workload needs it.
 
+### The app's models
+
+The desktop inbox (below) uses three models, one per ROLE, and each role is
+placed on its own (Settings → Models, or the first-run wizard):
+
+- **Decision** — a fine-tuned ModernBERT-large classifier (`bond-decide`, an
+  F16 GGUF plus a heads file) that sorts and flags every kept message in one
+  forward pass of about 40 ms on this Mac: the learned gate, urgency,
+  category, the asks, needs-you, intent, importance, and whether a reply is
+  expected. It is served as a mean-pooled embedding model, and the app applies
+  its nine heads itself, so the heads file is needed on this Mac even when the
+  model runs elsewhere. It is not published yet: `make decide-install` copies
+  it, sha256-checked, from the training project's export (`DECIDE_SRC`) into
+  the app's models folder, where the app's own server (the managed router)
+  picks it up; `make decide` serves it by hand on `:8083`.
+- **Generative** — ONE chat model for every piece of text: each message's
+  summary, action items and deadline, the needs-you band, storylines, drafts.
+  By default the 27B on your box when the build names one (`BOND_BOX_URL`);
+  otherwise the 27B above on this Mac, or Qwen3-4B on a Mac under 40 GiB.
+- **Embeddings** — Qwen3-Embedding-0.6B, always on this Mac.
+
+The next round ships the models as bundles from a registry (JFrog
+Artifactory; the design is `docs/DESIGN-model-bundles.md` in the training
+project), which retires `make decide-install`.
+
 ## Requirements
 
 - Apple Silicon Mac. Every layer is offloaded to Metal (`-ngl 99`).
-- 48GB RAM or more recommended for all three servers; 32GB works with a
-  smaller `CTX_SIZE` in `local.mk`. Verified on an M1 Max with 64GB.
-- The shipped app decides for itself: at 40 GiB and up it downloads and starts
-  all three models, and below that it takes the embedding and inbox models only
-  (`docs/pipeline/10-model-routing.md`, "The manifest").
-- ~30GB free disk: ~24GB of weights across the three servers plus the app build.
+- 48GB RAM or more recommended for the 27B beside the decision and embedding
+  models; 32GB works with a smaller `CTX_SIZE` in `local.mk`. Verified on an
+  M1 Max with 64GB.
+- The shipped app decides for itself: at 40 GiB and up its own server runs the
+  27B as the generative model, and below that the 4B; the embedding and
+  decision models run here either way, and the generative model not at all
+  when it is placed on your own server (`docs/pipeline/10-model-routing.md`,
+  "The manifest").
+- ~30GB free disk: ~25GB of weights across the servers plus the app build.
 - [Homebrew](https://brew.sh), for `llama.cpp`.
 - Dart SDK on `PATH`. If you have Flutter installed you already have it.
 
@@ -165,22 +193,25 @@ mail comes from is a choice between two backends, and only the other one needs
 an Azure app registration on this machine: see
 [Microsoft backends](#microsoft-backends) below.
 
-**Three model servers, all optional.** `make model` is the main chat model on
-`:8080` — the careful reader that names storylines and writes draft replies.
-`make fast` is a much smaller model on `:8082` that does the bulk per-message
-work — triage and extraction — in seconds rather than tens of seconds, with
-several requests in flight at once. `make embed` is a third llama-server on
-`:8081` running `Qwen3-Embedding-0.6B`, which is what turns conversations into
-vectors so they can be clustered and searched — it needs its own process because
-`--embeddings` puts a server in embedding mode and one server cannot both chat
-and embed. With none of them running the inbox works fine and simply stays
-un-annotated; each missing server parks only the work that needs it, and the
-work resumes when the server comes up.
+**The app runs its own model server by default** — one llama-server router
+serving the decision model, the embeddings and, when it runs here, the
+generative model (see [The app's models](#the-apps-models)). A developer who
+would rather start them by hand sets `BOND_DEV_HAND_SERVERS = 1` in `local.mk`
+and runs three servers, all optional: `make decide` on `:8083` (the decision
+model, after `make decide-install`), `make model` on `:8080` (the generative
+model: the message text, the needs-you band, storylines and drafts) and
+`make embed` on `:8081` (`Qwen3-Embedding-0.6B`, which turns conversations
+into vectors so they can be clustered and searched). `make fast` on `:8082` is
+the benches' bulk slot; the app does not use it. With none of them running the
+inbox works fine and simply stays un-annotated; each missing server parks only
+the work that needs it, and the work resumes when the server comes up.
 
-Nothing about the mail ever leaves the machine at inference time. Both servers
-are local, and the only network calls the app makes are the ones that fetch the
-mail in the first place — to Microsoft Graph, or to the Bond server that holds
-the Microsoft grant on your behalf.
+Nothing about the mail leaves the machine at inference time unless you place
+a model on a server of your own (the box). Otherwise every server is local,
+and the only network calls the app makes are the ones that fetch the mail in
+the first place — to Microsoft Graph, or to the Bond server that holds the
+Microsoft grant on your behalf. Cloud drafts, an opt-in in Settings, is the
+one place a third-party service may be used, for drafting only.
 
 The left rail has four sections:
 
@@ -216,9 +247,10 @@ not worth a model call; the rest go through one at a time, newest first. A sync
 reaches back as far as the lookback set in Settings → Sync & data — one day by
 default, separately for mail and Teams — and the whole window is what the
 models read: the backlog queues 150 messages per pass, so a deep window drains
-over successive passes rather than being cut to its newest 150. On the fast
-server that backlog annotates itself in a few minutes, in the background, with
-a `Triaging N remaining…` counter in the rail.
+over successive passes rather than being cut to its newest 150. The decision
+model sorts that backlog in a fraction of a second a message, with a
+`Triaging N remaining…` counter in the rail, and the generative model writes
+each message's summary behind it, in the background.
 It survives a restart: work in flight is re-queued at the next launch.
 
 ### Microsoft backends
@@ -339,8 +371,11 @@ make logs                   # tail the server log
 make stop                   # stop the chat server on :8080
 make embed                  # start the embedding server on :8081
 make embed-stop             # stop it
-make fast                   # start the bulk-work model server on :8082
+make fast                   # start the bulk-work model server on :8082 (benches)
 make fast-stop              # stop it
+make decide-install         # copy the decision model into the app's models folder
+make decide                 # serve it by hand on :8083
+make decide-stop            # stop it
 make verify                 # SHA256 the downloaded weights (~1 min)
 make clean-model            # delete the cache, forcing a re-download
 make clean                  # rm tmp/logs
@@ -370,21 +405,24 @@ Knobs:
 
 - `LLAMA_URL` — read by the Dart client, full URL of the completions endpoint.
   Defaults to `http://localhost:8080/v1/chat/completions`. Point it at another
-  port or another machine.
-- `FAST_LLAMA_URL` and `EMBED_URL` — the same, for the bulk-work server
-  (`:8082`) and the embedding server (`:8081`).
-- `LLAMA_MODEL` and `FAST_LLAMA_MODEL` — the model name each request carries.
-  `llama-server` ignores it and serves whatever it loaded; an MLX-based server
-  routes on it, so a runtime holding several models needs it set.
+  port or another machine. That is the generative model on a hand-servers
+  build.
+- `DECIDE_URL` and `EMBED_URL` — the same, as FULL `/v1/embeddings` URLs, for
+  the decision server (`:8083`) and the embedding server (`:8081`).
+- `LLAMA_MODEL` and `DECIDE_MODEL` — the model name each request carries.
+  `llama-server` ignores it and serves whatever it loaded; a router or an
+  MLX-based server routes on it, so a runtime holding several models needs it
+  set.
 - All five are passed through by `make app-run` and `make app-build` only when
-  you set them: `make app-run FAST_LLAMA_URL=http://localhost:9000/v1/chat/completions`.
-  Unset means the app's own defaults, which is not the same as empty.
-- The two chat slots can also be repointed at runtime — **Settings → Models**
-  lets you change a slot's server URL and pick a model from what that server
-  lists, without a rebuild. The dart-defines stay the build's defaults, and
-  **Use build defaults** returns a slot to them. Embeddings is not switchable
-  (every stored vector is tagged with its model); see
-  [docs/settings.md](docs/settings.md).
+  you set them: `make app-run LLAMA_URL=http://localhost:9000/v1/chat/completions`.
+  Unset means the app's own defaults, which is not the same as empty. They
+  matter only on a `BOND_DEV_HAND_SERVERS` build; otherwise the app dials its
+  own router.
+- Where each role runs is also a runtime choice — **Settings → Models** puts
+  the decision model and the generative model each on **This Mac** or **Your
+  server** (an address, a key, and the model name the server lists), without a
+  rebuild. Embeddings always run on this Mac (every stored vector is tagged
+  with its model); see [docs/settings.md](docs/settings.md).
 - `MODEL_PORT` and `CTX_SIZE` are overridable per invocation:
   `make model CTX_SIZE=65536`, `make model MODEL_PORT=8081`.
 - `SETUP_WAIT` — how long `make setup` polls for `/health`. Default 1800s.
@@ -394,7 +432,7 @@ Knobs:
 ```sh
 make bench-verify           # does a target uphold the contract? (bulk slot)
 make bench-verify-prose     # the same, for the prose slot
-make bench                  # the corpus through triage + extraction, timed
+make bench                  # the corpus through the message-text call, timed
 make bench-prose            # storyline names + drafted replies, verbatim
 make ab                     # the same corpus on both servers, compared
 make ab-membership          # the membership eval set on both servers
@@ -415,8 +453,10 @@ nuance, because the queues treat an HTTP 400 as fatal and drop the message.
 `BENCH_VERIFY=0` skips it.
 
 A bench points wherever you tell it, so trying a candidate runtime is one
-command and no code edit. `BENCH_*` is the bulk slot (triage, extraction,
-membership); `PROSE_*` is the drafting slot `make bench-prose` and the A/B use:
+command and no code edit. `BENCH_*` is the bulk slot (the message text, the
+needs-you band, membership); `PROSE_*` is the drafting slot `make bench-prose`
+and the A/B use; the decision model is benched by `make golden-decision`
+against `make decide` (`DECIDE_URL`):
 
 ```sh
 make bench BENCH_URL=http://localhost:9000/v1/chat/completions \

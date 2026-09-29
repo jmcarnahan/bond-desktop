@@ -84,12 +84,12 @@ class ContextReconcileHandler extends WorkHandler {
   /// How many digests one pass may queue.
   ///
   /// A newly registered project of three thousand text files would otherwise
-  /// put three thousand fast-slot calls in front of every other kind in the
+  /// put three thousand generative calls in front of every other kind in the
   /// drain. The drain runs every handler to EXHAUSTION in registration
   /// order, and the three context kinds sit ahead of the storylines and the
-  /// drafts — so this number is not a rate, it is how many fast-slot calls
+  /// drafts — so this number is not a rate, it is how many generative calls
   /// one drain may spend on a project before the first reply gets its turn.
-  /// Forty is about a minute of fast-slot time, which is the sync cadence.
+  /// Forty is about a minute of generative time, which is the sync cadence.
   /// The backlog is worked off over the following passes, freshest edits
   /// first, which is the order [ContextStore.filesPendingDigest] returns.
   static const int maxDigestsPerPass = 40;
@@ -397,8 +397,8 @@ class ContextReconcileHandler extends WorkHandler {
     // One digest per file still owed one, freshest edit first and capped.
     // The worklist is `digest_status = 'pending'` across the WHOLE
     // directory rather than the files this pass touched: a backlog past the
-    // cap has to land on a later pass, and a park on the fast slot has to be
-    // picked up again by somebody.
+    // cap has to land on a later pass, and a park on the generative model has
+    // to be picked up again by somebody.
     //
     // One call, not two. `requeueWork` is an upsert on the work row's
     // primary key `(task_kind, source, entity_id)`: it inserts a missing

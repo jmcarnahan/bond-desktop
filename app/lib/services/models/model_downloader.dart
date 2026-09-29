@@ -322,8 +322,12 @@ class ModelDownloader {
     int? token;
     try {
       _ledger = await readLedger();
-      final ordered = [...(files ?? manifest.bySize)]
-        ..sort((a, b) => a.sizeBytes.compareTo(b.sizeBytes));
+      // A `source: local` entry is installed by hand (`make decide-install`)
+      // and has no URL to fetch, so it never enters a run.
+      final ordered = [
+        for (final file in files ?? manifest.bySize)
+          if (!file.isLocal) file,
+      ]..sort((a, b) => a.sizeBytes.compareTo(b.sizeBytes));
 
       // The whole list before the first byte, so a screen draws every row at
       // once rather than growing one line at a time.

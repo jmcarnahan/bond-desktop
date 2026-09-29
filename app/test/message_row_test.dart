@@ -356,6 +356,33 @@ void main() {
       expect(find.text('$when · triaging'), findsOneWidget);
     });
 
+    testWidgets('a triaging row that names the owner fits a beside pane',
+        (tester) async {
+      // A message parked in triage wears the suffix for as long as the model
+      // is down; beside the `@ you` marker in a ~360 px pane the stamp used
+      // to overflow the header instead of shortening.
+      await tester.binding.setSurfaceSize(const Size(420, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: SizedBox(
+              width: 200,
+              child: MessageRow(
+                message: _msg(triageStatus: 'pending'),
+                namesOwner: true,
+                collapsible: true,
+              ),
+            ),
+          ),
+        ),
+      ));
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(MessageRow.ownerMarkerKey), findsOneWidget);
+    });
+
     testWidgets('a summary renders as the model speaking', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));

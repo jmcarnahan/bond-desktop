@@ -377,7 +377,7 @@ void main() {
     testWidgets('without Chat.ReadWrite a file offers no Use in reply',
         (tester) async {
       // The preview would happily write a draft, and this pane has no box to
-      // show it in: the offer would spend a fast-slot call on words nobody
+      // show it in: the offer would spend a generative call on words nobody
       // ever sees.
       await seedChat('chat-1', withFile: true);
       await pumpScreen(tester, attachmentBytes: FakeAttachmentBytes());

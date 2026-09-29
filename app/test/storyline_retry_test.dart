@@ -89,14 +89,13 @@ class ScriptedHandler extends WorkHandler {
   }
 }
 
+/// The message-text stage's answer (the task behind the `extract` kind).
 Map<String, dynamic> extractAnswer() => {
-      'evidence': 'Sarah is asking whether the launch date holds.',
+      'summary': 'Sarah is asking whether the launch date holds.',
+      'action_items': const ['Confirm the launch date'],
+      'deadline': '',
       'topics': const ['launch date'],
-      'people': const ['Sarah Chen'],
-      'organizations': const ['Northline'],
       'project': 'Website redesign',
-      'intent': 'request',
-      'importance': 'high',
     };
 
 Map<String, dynamic> confirmAnswer() => const {
@@ -179,7 +178,7 @@ void main() {
     test('keeps the extraction and queues the storyline pass anyway', () async {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
-      final llm = scripted({'extraction': [extractAnswer()]});
+      final llm = scripted({'message_text': [extractAnswer()]});
 
       await workerWith(EmbedServer.down, llm).pump();
 
@@ -200,7 +199,7 @@ void main() {
       await store.enqueueWork('extract', 'email', 'm1');
       await store.enqueueWork('draft', 'email', 'conv-1');
       final draft = ScriptedHandler('draft');
-      final llm = scripted({'extraction': [extractAnswer()]});
+      final llm = scripted({'message_text': [extractAnswer()]});
 
       await workerWith(EmbedServer.down, llm, draft: draft).pump();
 
@@ -219,7 +218,7 @@ void main() {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
       final llm = scripted({
-        'extraction': [extractAnswer(), extractAnswer()],
+        'message_text': [extractAnswer(), extractAnswer()],
         'storyline_membership': [confirmAnswer()],
       });
       await workerWith(EmbedServer.down, llm).pump();
@@ -304,7 +303,7 @@ void main() {
     test('queues nothing — the next pass would only park again', () async {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
-      final llm = scripted({'extraction': [extractAnswer()]});
+      final llm = scripted({'message_text': [extractAnswer()]});
 
       await workerWith(EmbedServer.nonsense, llm).pump();
 

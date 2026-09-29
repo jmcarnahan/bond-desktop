@@ -145,7 +145,7 @@ class NeedsYouInput {
   final String? ownerName;
   final String? ownerAddress;
 
-  /// Injected for the same reason `TriageInput.now` is: so a test can pin the
+  /// Injected for the same reason `MessageTextInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
 
@@ -265,11 +265,9 @@ class NeedsYouTask implements JsonTask<NeedsYouResult> {
   /// llama-server build converts the schema into a grammar, and a schema it
   /// cannot convert fails the request outright.
   ///
-  /// `evidence` FIRST, the opposite of the reply decision's verdict-first
-  /// order, and the difference is the input. A reply decision is a yes/no with
-  /// a whole conversation in front of it and the cheap answer is the one worth
-  /// having; what gets here has already had the easy cases taken by the floor,
-  /// so it is exactly the ambiguous residue. Locating the sentence that points
+  /// `evidence` FIRST, the opposite of a verdict-first order, and the
+  /// difference is the input: what gets here has already had the easy cases
+  /// taken by the floor, so it is exactly the ambiguous residue. Locating the sentence that points
   /// at the owner IS the work, and the boolean should fall out of having
   /// written it — the same membership-style ordering the storyline tasks use.
   @override

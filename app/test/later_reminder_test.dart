@@ -11,6 +11,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// Later with a "when" in it.
 ///
@@ -68,18 +69,17 @@ void main() {
     if (deadline != null) {
       // The one path that writes a deadline: triage reads it out of the
       // message in the sender's own words.
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         '$key-m1',
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: 'the body',
-          needsAction: true,
-          actionItems: const [],
-          deadline: deadline,
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: 'the body',
+        needsAction: true,
+        actionItems: const [],
+        deadline: deadline,
       );
     }
   }

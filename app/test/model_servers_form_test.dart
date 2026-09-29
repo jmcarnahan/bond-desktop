@@ -3,42 +3,37 @@ import 'dart:async';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/widgets/model_servers_form.dart';
-import 'package:bond_inbox/widgets/probe_status.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The one form for servers a person names.
+/// The one form for a server a person names, one address per instance.
 ///
 /// Prop-only, so this file pumps it alone: there is no `InboxScreen` and
 /// therefore no sixty-second timer, which is what makes `pumpAndSettle` safe
-/// here. What it pins is the contract both hosts depend on: an address is
-/// refused before anything is asked, a name is DISCOVERED rather than typed,
-/// a server that lists several waits for a pick, and the access key reaches
-/// the two requests and the one call and nothing else.
+/// here. What it pins is the contract every host depends on: an address is
+/// refused before anything is asked (a decision address must be an
+/// embeddings endpoint), a name is DISCOVERED rather than typed, a server
+/// that lists several waits for a pick, a vendor never reaches a role, and a
+/// stored key rides only to the host it was typed for.
 ///
 /// The access key in these fixtures is `sk-fixture-…`, and several cases
 /// assert that no rendered `Text` carries it. `find.text` reads an
 /// `EditableText`'s controller rather than the bullets it draws, so the field
 /// itself is the one match allowed anywhere.
 
-const _bigUrl = 'https://box.example.com/prose/v1/chat/completions';
-const _smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+const _generativeUrl = 'https://box.example.com/prose/v1/chat/completions';
+const _decisionUrl = 'https://box.example.com/decide/v1/embeddings';
+const _otherUrl = 'https://other.example.com/prose/v1/chat/completions';
 const _localUrl = 'http://localhost:8080/v1/chat/completions';
+const _key = 'sk-fixture-not-a-real-token';
+const _stored = 'sk-fixture-not-a-real-stored-token';
 
-/// Somebody else's service, and the one place either name appears: the form
-/// has to recognise a vendor's address and a Converse one.
+/// Somebody else's service, and the one place either name appears.
 const _openAiUrl = 'https://api.openai.com/v1/chat/completions';
 const _bedrockUrl =
     'https://bedrock-runtime.us-east-1.amazonaws.com/model/example/converse';
 
-typedef Connected = ({
-  String bigUrl,
-  String smallUrl,
-  String bigModel,
-  String smallModel,
-  String? bigKey,
-  String? smallKey,
-});
+typedef Connected = ({String url, String model, String? key, bool clearKey});
 
 void main() {
   late List<(String, String?)> asked;
@@ -61,26 +56,16 @@ void main() {
 
   Future<void> open(
     WidgetTester tester, {
-    String bigUrl = _bigUrl,
-    String smallUrl = _smallUrl,
-    String bigModel = '',
-    String smallModel = '',
+    ServerFormRole role = ServerFormRole.generative,
+    String url = _generativeUrl,
+    String model = '',
     bool keyStored = false,
-    bool bigKeyStored = false,
-    bool smallKeyStored = false,
     Future<ModelProbeResult> Function(String, {String? bearer})? probe,
     String? Function(String)? storedBearer,
-    Future<void> Function({
-      required String bigUrl,
-      required String smallUrl,
-      required String bigModel,
-      required String smallModel,
-      String? bigKey,
-      String? smallKey,
-    })? onConnect,
+    ServerConnect? onConnect,
     Future<void> Function()? onRemoveKey,
     Future<void> Function(LlmTargetSpec, Future<void> Function())? onThirdParty,
-    bool wireThirdParty = true,
+    String? thirdPartyRefusal,
     String connectLabel = 'Connect',
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
@@ -89,36 +74,20 @@ void main() {
       home: Scaffold(
         body: SingleChildScrollView(
           child: ModelServersForm(
-            bigUrl: bigUrl,
-            smallUrl: smallUrl,
-            bigModel: bigModel,
-            smallModel: smallModel,
+            role: role,
+            url: url,
+            model: model,
             keyStored: keyStored,
-            bigKeyStored: bigKeyStored,
-            smallKeyStored: smallKeyStored,
             probe: probe ?? fake(const {}),
             storedBearer: storedBearer,
             onConnect: onConnect ??
-                ({
-                  required bigUrl,
-                  required smallUrl,
-                  required bigModel,
-                  required smallModel,
-                  bigKey,
-                  smallKey,
-                }) async =>
-                    connected.add((
-                      bigUrl: bigUrl,
-                      smallUrl: smallUrl,
-                      bigModel: bigModel,
-                      smallModel: smallModel,
-                      bigKey: bigKey,
-                      smallKey: smallKey,
-                    )),
+                ({required url, required model, key, required clearKey}) async =>
+                    connected.add(
+                      (url: url, model: model, key: key, clearKey: clearKey),
+                    ),
             onRemoveKey: onRemoveKey,
-            onThirdParty: wireThirdParty
-                ? (onThirdParty ?? (spec, resume) async => resume())
-                : null,
+            onThirdParty: onThirdParty,
+            thirdPartyRefusal: thirdPartyRefusal,
             connectLabel: connectLabel,
           ),
         ),
@@ -134,8 +103,11 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Future<void> connect(WidgetTester tester) =>
-      press(tester, find.byKey(ModelServersForm.connectKey));
+  Future<void> connect(
+    WidgetTester tester, [
+    ServerFormRole role = ServerFormRole.generative,
+  ]) =>
+      press(tester, find.byKey(ModelServersForm.connectKey(role)));
 
   Future<void> type(WidgetTester tester, Key key, String text) async {
     await tester.enterText(find.byKey(key), text);
@@ -149,65 +121,75 @@ void main() {
         for (final t in tester.widgetList<Text>(find.byType(Text))) t.data ?? '',
       ];
 
-  group('the fields', () {
-    testWidgets('open on the values the host resolved, and the key opens '
-        'empty', (tester) async {
-      await open(tester);
+  const gen = ServerFormRole.generative;
+  const dec = ServerFormRole.decision;
+  const cloud = ServerFormRole.cloudDrafts;
 
-      expect(fieldText(tester, ModelServersForm.bigUrlKey), _bigUrl);
-      expect(fieldText(tester, ModelServersForm.smallUrlKey), _smallUrl);
-      expect(fieldText(tester, ModelServersForm.keyKey), '');
-      expect(
-        tester
-            .widget<TextField>(find.byKey(ModelServersForm.keyKey))
-            .obscureText,
-        isTrue,
+  group('the keys', () {
+    test('are built on each role\'s prefix', () {
+      expect(ModelServersForm.urlKey(dec), const ValueKey('servers-decision-url'));
+      expect(ModelServersForm.keyKey(gen),
+          const ValueKey('servers-generative-key'));
+      expect(ModelServersForm.modelKey(gen),
+          const ValueKey('servers-generative-model'));
+      expect(ModelServersForm.connectKey(dec),
+          const ValueKey('servers-decision-connect'));
+      expect(ModelServersForm.errorKey(gen),
+          const ValueKey('servers-generative-error'));
+      expect(ModelServersForm.removeKeyKey(dec),
+          const ValueKey('servers-decision-remove-key'));
+      expect(ModelServersForm.urlKey(cloud), const ValueKey('cloud-drafts-url'));
+      expect(ModelServersForm.connectKey(cloud),
+          const ValueKey('cloud-drafts-connect'));
+    });
+  });
+
+  group('the fields', () {
+    testWidgets('open on the values the host resolved, one address, and the '
+        'key opens empty and obscured', (tester) async {
+      await open(tester, role: dec, url: _decisionUrl, keyStored: true);
+
+      expect(fieldText(tester, ModelServersForm.urlKey(dec)), _decisionUrl);
+      expect(find.text(ModelServersForm.urlLabel(dec)), findsOneWidget);
+      // One address per form: no second field for any other role.
+      expect(find.byKey(ModelServersForm.urlKey(gen)), findsNothing);
+      final key = tester.widget<TextField>(
+        find.byKey(ModelServersForm.keyKey(dec)),
       );
-      // One host is one operator and one key.
-      expect(find.byKey(ModelServersForm.smallKeyKey), findsNothing);
+      expect(key.obscureText, isTrue);
+      expect(key.controller!.text, isEmpty);
     });
 
     testWidgets('a stored key hints that typing replaces it', (tester) async {
-      await open(tester, keyStored: true, bigKeyStored: true);
+      await open(tester, keyStored: true);
+      expect(find.text(ModelServersForm.storedHint), findsOneWidget);
 
-      expect(
-        tester
-            .widget<TextField>(find.byKey(ModelServersForm.keyKey))
-            .decoration!
-            .hintText,
-        ModelServersForm.storedHint,
-      );
+      await open(tester, keyStored: false);
+      expect(find.text(ModelServersForm.storedHint), findsNothing);
     });
 
-    testWidgets('the second key field follows the two hosts as they are typed',
+    testWidgets('a new host says the stored key is for another server',
         (tester) async {
-      await open(tester);
-      expect(find.byKey(ModelServersForm.smallKeyKey), findsNothing);
+      await open(tester, keyStored: true);
 
-      await type(tester, ModelServersForm.smallUrlKey, _localUrl);
-      expect(find.byKey(ModelServersForm.smallKeyKey), findsOneWidget);
+      await type(tester, ModelServersForm.urlKey(gen), _otherUrl);
 
-      await type(tester, ModelServersForm.smallUrlKey, _smallUrl);
-      expect(find.byKey(ModelServersForm.smallKeyKey), findsNothing);
+      expect(find.text(ModelServersForm.otherHostHint), findsOneWidget);
+      expect(find.text(ModelServersForm.storedHint), findsNothing);
     });
 
     testWidgets('Remove key is offered only with a key stored and a host that '
-        'can forget one', (tester) async {
+        'can forget it', (tester) async {
       var removed = 0;
-      await open(tester);
-      expect(find.byKey(ModelServersForm.removeKeyKey), findsNothing);
+      await open(tester, keyStored: true, onRemoveKey: () async => removed++);
+      await press(tester, find.byKey(ModelServersForm.removeKeyKey(gen)));
+      expect(removed, 1);
+
+      await open(tester, keyStored: false, onRemoveKey: () async => removed++);
+      expect(find.byKey(ModelServersForm.removeKeyKey(gen)), findsNothing);
 
       await open(tester, keyStored: true);
-      expect(find.byKey(ModelServersForm.removeKeyKey), findsNothing);
-
-      await open(
-        tester,
-        keyStored: true,
-        onRemoveKey: () async => removed++,
-      );
-      await press(tester, find.byKey(ModelServersForm.removeKeyKey));
-
-      expect(removed, 1);
+      expect(find.byKey(ModelServersForm.removeKeyKey(gen)), findsNothing);
     });
   });
 
@@ -215,7 +197,7 @@ void main() {
     testWidgets('one with no scheme is refused under its field and nothing is '
         'asked', (tester) async {
       await open(tester);
-      await type(tester, ModelServersForm.bigUrlKey, 'box.example.com');
+      await type(tester, ModelServersForm.urlKey(gen), 'box.example.com');
       await connect(tester);
 
       expect(find.text(ModelServersForm.addressRefusalText), findsOneWidget);
@@ -223,84 +205,81 @@ void main() {
       expect(connected, isEmpty);
     });
 
-    testWidgets('an origin where an endpoint belongs says which endpoint',
+    testWidgets('a generative origin where an endpoint belongs says which',
         (tester) async {
       await open(tester);
-      await type(tester, ModelServersForm.bigUrlKey, 'https://box.example.com');
+      await type(tester, ModelServersForm.urlKey(gen), 'https://box.example.com');
       await connect(tester);
 
       expect(find.text(ModelServersForm.endpointRefusalText), findsOneWidget);
       expect(asked, isEmpty);
     });
 
+    testWidgets('a decision address must be an embeddings endpoint',
+        (tester) async {
+      await open(tester, role: dec, url: _generativeUrl);
+      await connect(tester, dec);
+
+      expect(
+        find.text(ModelServersForm.decisionEndpointRefusalText),
+        findsOneWidget,
+      );
+      expect(asked, isEmpty);
+
+      await type(tester, ModelServersForm.urlKey(dec), _decisionUrl);
+      await connect(tester, dec);
+      expect(find.text(ModelServersForm.decisionEndpointRefusalText),
+          findsNothing);
+      expect(asked.single.$1, _decisionUrl);
+      expect(connected.single.url, _decisionUrl);
+    });
+
     testWidgets('typing again clears the sentence', (tester) async {
       await open(tester);
-      await type(tester, ModelServersForm.bigUrlKey, 'box.example.com');
+      await type(tester, ModelServersForm.urlKey(gen), 'box.example.com');
       await connect(tester);
       expect(find.text(ModelServersForm.addressRefusalText), findsOneWidget);
 
-      await type(tester, ModelServersForm.bigUrlKey, _bigUrl);
-
+      await type(tester, ModelServersForm.urlKey(gen), _generativeUrl);
       expect(find.text(ModelServersForm.addressRefusalText), findsNothing);
     });
   });
 
   group('Connect', () {
-    testWidgets('asks both servers with the typed key and reports each',
+    testWidgets('asks the server with the typed key and writes what it listed',
         (tester) async {
       await open(
         tester,
         probe: fake(const {
-          _bigUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
-          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+          _generativeUrl:
+              ModelProbeResult(reachable: true, modelIds: ['qwen3.8-27b']),
         }),
       );
-      await type(
-        tester,
-        ModelServersForm.keyKey,
-        'sk-fixture-not-a-real-key',
-      );
+      await type(tester, ModelServersForm.keyKey(gen), _key);
       await connect(tester);
 
-      expect(asked, [
-        (_bigUrl, 'sk-fixture-not-a-real-key'),
-        (_smallUrl, 'sk-fixture-not-a-real-key'),
+      expect(asked, [(_generativeUrl, _key)]);
+      expect(connected, [
+        (url: _generativeUrl, model: 'qwen3.8-27b', key: _key, clearKey: false),
       ]);
-      expect(find.byType(ProbeStatus), findsNWidgets(2));
-      expect(find.text('Reachable · 1 model'), findsNWidgets(2));
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
+      // The key left the field the moment it reached the host.
+      expect(fieldText(tester, ModelServersForm.keyKey(gen)), isEmpty);
+      expect(rendered(tester), isNot(contains(_key)));
     });
 
-    testWidgets('one id per server is used with nobody picking anything',
-        (tester) async {
-      await open(
-        tester,
-        probe: fake(const {
-          _bigUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
-          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
-        }),
-      );
-      await type(
-        tester,
-        ModelServersForm.keyKey,
-        'sk-fixture-not-a-real-key',
-      );
+    testWidgets('a key no header can carry is refused under its field, and '
+        'nothing is asked or written', (tester) async {
+      await open(tester);
+      await type(tester, ModelServersForm.keyKey(gen), 'sk-fixture\u00e9key');
       await connect(tester);
 
-      expect(connected, [
-        (
-          bigUrl: _bigUrl,
-          smallUrl: _smallUrl,
-          bigModel: 'qwen3.8',
-          smallModel: 'qwen3-4b',
-          bigKey: 'sk-fixture-not-a-real-key',
-          smallKey: 'sk-fixture-not-a-real-key',
-        ),
-      ]);
-      expect(find.byKey(ModelServersForm.bigModelKey), findsNothing);
-      // The field is emptied the moment the key has reached the keychain.
-      expect(fieldText(tester, ModelServersForm.keyKey), '');
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
+      expect(find.text(accessKeyCharsText), findsOneWidget);
+      expect(asked, isEmpty);
+      expect(connected, isEmpty);
+
+      // Typing again clears the sentence.
+      await type(tester, ModelServersForm.keyKey(gen), _key);
+      expect(find.text(accessKeyCharsText), findsNothing);
     });
 
     testWidgets('a server that lists several waits for a pick, and the second '
@@ -308,65 +287,93 @@ void main() {
       await open(
         tester,
         probe: fake(const {
-          _bigUrl: ModelProbeResult(
-            reachable: true,
-            modelIds: ['qwen3.8', 'qwen3-27b-fp8'],
-          ),
-          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+          _generativeUrl:
+              ModelProbeResult(reachable: true, modelIds: ['first', 'second']),
         }),
       );
       await connect(tester);
-
-      // The picker is up with the first id filled in, and nothing was written.
-      final picker = find.byKey(ModelServersForm.bigModelKey);
-      expect(picker, findsOneWidget);
+      expect(connected, isEmpty);
+      expect(find.byKey(ModelServersForm.modelKey(gen)), findsOneWidget);
       expect(
-        tester.widget<DropdownButton<String>>(picker).value,
-        'qwen3.8',
-      );
-      expect(
-        find.textContaining(ModelServersForm.chooseModelText),
+        find.text('${ModelServersForm.chooseModelText}Connect again.'),
         findsOneWidget,
       );
-      expect(connected, isEmpty);
 
-      await press(tester, picker);
-      await press(tester, find.text('qwen3-27b-fp8').last);
+      await press(tester, find.byKey(ModelServersForm.modelKey(gen)));
+      await tester.tap(find.text('second').last);
+      await tester.pumpAndSettle();
       await connect(tester);
 
-      expect(connected.single.bigModel, 'qwen3-27b-fp8');
-      expect(connected.single.smallModel, 'qwen3-4b');
+      expect(connected.single.model, 'second');
     });
 
     testWidgets('a server that still lists the stored name connects on the '
-        'first press, with the picker showing it', (tester) async {
-      // A re-Connect on an install that already chose: the server offers
-      // several ids and one of them is the name this install uses, which is
-      // an answer rather than a question.
+        'first press', (tester) async {
       await open(
         tester,
-        bigModel: 'qwen3.8',
+        model: 'second',
         probe: fake(const {
-          _bigUrl: ModelProbeResult(
-            reachable: true,
-            modelIds: ['qwen3-8b', 'qwen3.8'],
-          ),
-          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
+          _generativeUrl:
+              ModelProbeResult(reachable: true, modelIds: ['first', 'second']),
         }),
       );
       await connect(tester);
 
-      expect(connected.single.bigModel, 'qwen3.8');
-      expect(connected.single.smallModel, 'qwen3-4b');
-      // The picker is still there, because the server still lists more than
-      // one, and it shows what was used.
-      final picker = find.byKey(ModelServersForm.bigModelKey);
-      expect(picker, findsOneWidget);
-      expect(tester.widget<DropdownButton<String>>(picker).value, 'qwen3.8');
-      expect(
-        find.textContaining(ModelServersForm.chooseModelText),
-        findsNothing,
+      expect(connected.single.model, 'second');
+    });
+
+    testWidgets('a decision server that lists several is taken at its first',
+        (tester) async {
+      await open(
+        tester,
+        role: dec,
+        url: _decisionUrl,
+        probe: fake(const {
+          _decisionUrl:
+              ModelProbeResult(reachable: true, modelIds: ['decide-a', 'b']),
+        }),
       );
+      await connect(tester, dec);
+
+      expect(find.byKey(ModelServersForm.modelKey(dec)), findsNothing);
+      expect(connected.single.model, 'decide-a');
+    });
+
+    testWidgets("a router's list is searched for the decision model, "
+        'wherever it sits', (tester) async {
+      await open(
+        tester,
+        role: dec,
+        url: _decisionUrl,
+        probe: fake(const {
+          _decisionUrl: ModelProbeResult(
+            reachable: true,
+            modelIds: ['bond-embed', 'bond-decide', 'bond-prose'],
+          ),
+        }),
+      );
+      await connect(tester, dec);
+
+      expect(find.byKey(ModelServersForm.modelKey(dec)), findsNothing);
+      expect(connected.single.model, 'bond-decide');
+    });
+
+    testWidgets('the name this install already uses counts too',
+        (tester) async {
+      await open(
+        tester,
+        role: dec,
+        url: _decisionUrl,
+        model: 'decide-mine',
+        probe: fake(const {
+          _decisionUrl: ModelProbeResult(
+            reachable: true,
+            modelIds: ['bond-embed', 'decide-mine'],
+          ),
+        }),
+      );
+      await connect(tester, dec);
+      expect(connected.single.model, 'decide-mine');
     });
 
     testWidgets('a server that did not answer connects nothing',
@@ -374,209 +381,146 @@ void main() {
       await open(
         tester,
         probe: fake(const {
-          _bigUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
-          _smallUrl: ModelProbeResult(
-            reachable: false,
-            error: 'Connection refused',
-          ),
+          _generativeUrl:
+              ModelProbeResult(reachable: false, error: 'Connection refused'),
         }),
       );
       await connect(tester);
 
-      expect(find.text('Connection refused'), findsOneWidget);
+      expect(asked, hasLength(1));
       expect(connected, isEmpty);
     });
 
-    testWidgets('two hosts send two keys, each to its own server',
-        (tester) async {
-      await open(tester);
-      await type(tester, ModelServersForm.smallUrlKey, _localUrl);
-      await type(
+    testWidgets('a blank key with one stored sends the stored one to the same '
+        'host, and never renders it', (tester) async {
+      final looked = <String>[];
+      await open(
         tester,
-        ModelServersForm.keyKey,
-        'sk-fixture-big-key',
+        role: dec,
+        url: _decisionUrl,
+        keyStored: true,
+        storedBearer: (id) {
+          looked.add(id);
+          return _stored;
+        },
       );
-      await type(
-        tester,
-        ModelServersForm.smallKeyKey,
-        'sk-fixture-small-key',
-      );
-      await connect(tester);
+      await connect(tester, dec);
 
-      expect(asked, [
-        (_bigUrl, 'sk-fixture-big-key'),
-        (_localUrl, 'sk-fixture-small-key'),
-      ]);
-      expect(connected.single.bigKey, 'sk-fixture-big-key');
-      expect(connected.single.smallKey, 'sk-fixture-small-key');
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
+      expect(looked, [boxDecideId]);
+      expect(asked, [(_decisionUrl, _stored)]);
+      // Null keeps the stored key, and the host is the same: nothing to forget.
+      expect(connected.single.key, isNull);
+      expect(connected.single.clearKey, isFalse);
+      expect(rendered(tester), isNot(contains(_stored)));
     });
 
-    testWidgets('a key field left blank with one stored sends the stored one '
-        'and writes no key at all', (tester) async {
+    testWidgets('a NEW host with the key field blank sends no stored key and '
+        'asks the host to forget it', (tester) async {
       await open(
         tester,
         keyStored: true,
-        bigKeyStored: true,
-        smallKeyStored: true,
-        storedBearer: (id) => 'sk-fixture-stored-$id',
+        storedBearer: (_) => _stored,
       );
+      await type(tester, ModelServersForm.urlKey(gen), _otherUrl);
       await connect(tester);
 
-      expect(asked, [
-        (_bigUrl, 'sk-fixture-stored-$boxProseId'),
-        (_smallUrl, 'sk-fixture-stored-$boxBulkId'),
-      ]);
-      // Null, not the empty string: the host reads that as "keep what is
-      // stored" and writes no keychain entry.
-      expect(connected.single.bigKey, isNull);
-      expect(connected.single.smallKey, isNull);
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
+      expect(asked, [(_otherUrl, null)]);
+      expect(connected.single.url, _otherUrl);
+      expect(connected.single.key, isNull);
+      expect(connected.single.clearKey, isTrue);
+    });
+
+    for (final (label, moved) in [
+      ('https to http on the same host', 'http://box.example.com/prose/v1/chat/completions'),
+      ('a port change on the same host', 'https://box.example.com:8443/prose/v1/chat/completions'),
+    ]) {
+      testWidgets('$label counts as another server', (tester) async {
+        await open(tester, keyStored: true, storedBearer: (_) => _stored);
+        await type(tester, ModelServersForm.urlKey(gen), moved);
+        expect(find.text(ModelServersForm.otherHostHint), findsOneWidget);
+        await connect(tester);
+
+        expect(asked, [(moved, null)]);
+        expect(connected.single.clearKey, isTrue);
+      });
+    }
+
+    testWidgets('the default port spelled out is the same server',
+        (tester) async {
+      const spelled = 'https://box.example.com:443/prose/v1/chat/completions';
+      await open(tester, keyStored: true, storedBearer: (_) => _stored);
+      await type(tester, ModelServersForm.urlKey(gen), spelled);
+      await connect(tester);
+
+      expect(asked, [(spelled, _stored)]);
+      expect(connected.single.clearKey, isFalse);
+    });
+
+    testWidgets('a new host with a typed key sends that key and forgets '
+        'nothing', (tester) async {
+      await open(tester, keyStored: true, storedBearer: (_) => _stored);
+      await type(tester, ModelServersForm.urlKey(gen), _otherUrl);
+      await type(tester, ModelServersForm.keyKey(gen), _key);
+      await connect(tester);
+
+      expect(asked, [(_otherUrl, _key)]);
+      expect(connected.single.key, _key);
+      expect(connected.single.clearKey, isFalse);
+    });
+
+    testWidgets('a server on this machine connects with no key at all',
+        (tester) async {
+      await open(tester, url: _localUrl);
+      await connect(tester);
+
+      expect(asked, [(_localUrl, null)]);
+      expect(connected.single.url, _localUrl);
     });
 
     testWidgets('a refusal from the host is shown under the form',
         (tester) async {
       await open(
         tester,
-        onConnect: ({
-          required bigUrl,
-          required smallUrl,
-          required bigModel,
-          required smallModel,
-          bigKey,
-          smallKey,
-        }) async =>
-            throw ArgumentError.value(
-              bigUrl,
-              'bigUrl',
-              'a third-party server needs cloud drafts consent first',
-            ),
+        onConnect: ({required url, required model, key, required clearKey}) =>
+            throw ArgumentError.value(url, 'url', 'not this one'),
       );
+      await type(tester, ModelServersForm.keyKey(gen), _key);
       await connect(tester);
 
-      expect(find.byKey(ModelServersForm.errorKey), findsOneWidget);
-      expect(
-        find.text('a third-party server needs cloud drafts consent first'),
-        findsOneWidget,
-      );
+      expect(find.byKey(ModelServersForm.errorKey(gen)), findsOneWidget);
+      expect(find.text('not this one'), findsOneWidget);
+      // The key stays for another try, and is still never rendered.
+      expect(fieldText(tester, ModelServersForm.keyKey(gen)), _key);
+      expect(rendered(tester), isNot(contains(_key)));
     });
 
     testWidgets('a write that fails for a reason nobody typed still says so',
         (tester) async {
-      // `useBox` ends in a keychain write, which answers with a
-      // `PlatformException` on a locked keychain or a denied prompt. Caught
-      // as nothing, that left the key field full and the screen silent.
       await open(
         tester,
-        onConnect: ({
-          required bigUrl,
-          required smallUrl,
-          required bigModel,
-          required smallModel,
-          bigKey,
-          smallKey,
-        }) async =>
+        onConnect: ({required url, required model, key, required clearKey}) =>
             throw StateError('keychain locked'),
       );
       await connect(tester);
 
-      expect(find.byKey(ModelServersForm.errorKey), findsOneWidget);
       expect(find.text(ModelServersForm.saveFailedText), findsOneWidget);
-      // Nothing about the failure names the machinery that failed.
-      expect(find.textContaining('StateError'), findsNothing);
-    });
-
-    testWidgets('a write outlived by an edit clears no key and says nothing',
-        (tester) async {
-      final hold = Completer<void>();
-      await open(
-        tester,
-        onConnect: ({
-          required bigUrl,
-          required smallUrl,
-          required bigModel,
-          required smallModel,
-          bigKey,
-          smallKey,
-        }) =>
-            hold.future,
-      );
-      await type(tester, ModelServersForm.keyKey, 'sk-fixture-first-key');
-      await tester.tap(find.byKey(ModelServersForm.connectKey));
-      await tester.pumpAndSettle();
-
-      // The person gave up waiting and started typing a replacement.
-      await type(tester, ModelServersForm.keyKey, 'sk-fixture-second-key');
-
-      hold.complete();
-      await tester.pumpAndSettle();
-
-      // The typing survives the old press landing: the clear belongs to the
-      // press that was current, and no sentence about the old one lands
-      // either.
-      expect(
-        fieldText(tester, ModelServersForm.keyKey),
-        'sk-fixture-second-key',
-      );
-      expect(find.byKey(ModelServersForm.errorKey), findsNothing);
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
+      expect(find.textContaining('keychain'), findsNothing);
     });
 
     testWidgets('a press outlived by an edit writes nothing', (tester) async {
       final hold = Completer<ModelProbeResult>();
-      await open(tester, probe: (url, {bearer}) {
-        asked.add((url, bearer));
-        return hold.future;
-      });
+      await open(tester, probe: (url, {bearer}) => hold.future);
 
-      await tester.tap(find.byKey(ModelServersForm.connectKey));
+      await tester.tap(find.byKey(ModelServersForm.connectKey(gen)));
       await tester.pump();
-      expect(find.text('Checking…'), findsNWidgets(2));
-
-      await type(tester, ModelServersForm.bigUrlKey, _localUrl);
-      // The busy lines come off with the edit.
-      expect(find.text('Checking…'), findsNothing);
-
+      await tester.enterText(find.byKey(ModelServersForm.urlKey(gen)), _otherUrl);
+      await tester.pump();
       hold.complete(
         const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
       );
       await tester.pumpAndSettle();
 
       expect(connected, isEmpty);
-      expect(find.textContaining('Reachable'), findsNothing);
-    });
-
-    testWidgets('editing an address after a Connect drops the listing and the '
-        'picker it belonged to', (tester) async {
-      await open(
-        tester,
-        probe: fake(const {
-          _bigUrl: ModelProbeResult(
-            reachable: true,
-            modelIds: ['qwen3.8', 'qwen3-8b'],
-          ),
-          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
-        }),
-      );
-      await connect(tester);
-
-      // Two ids, so the first press discovered a list and waited.
-      expect(find.byKey(ModelServersForm.bigModelKey), findsOneWidget);
-      expect(find.text('Reachable · 2 models'), findsOneWidget);
-
-      await type(tester, ModelServersForm.bigUrlKey, _localUrl);
-
-      // The listing belonged to the old address, and so did the picker.
-      expect(find.byKey(ModelServersForm.bigModelKey), findsNothing);
-      expect(find.textContaining('Reachable'), findsNothing);
-      expect(connected, isEmpty);
-
-      await connect(tester);
-
-      // The name written is the one the NEW server listed.
-      expect(connected.single.bigUrl, _localUrl);
-      expect(connected.single.bigModel, 'a-model');
-      expect(connected.single.smallModel, 'qwen3-4b');
     });
 
     testWidgets('a probe landing after the form is gone does nothing',
@@ -584,10 +528,8 @@ void main() {
       final hold = Completer<ModelProbeResult>();
       await open(tester, probe: (url, {bearer}) => hold.future);
 
-      await tester.tap(find.byKey(ModelServersForm.connectKey));
+      await tester.tap(find.byKey(ModelServersForm.connectKey(gen)));
       await tester.pump();
-
-      // The host took the form off screen while both servers were being asked.
       await tester.pumpWidget(const SizedBox());
       hold.complete(
         const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
@@ -597,122 +539,119 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(connected, isEmpty);
     });
+
+    testWidgets('no probe, no Connect', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: ModelServersForm(
+            role: gen,
+            onConnect: ({required url, required model, key, required clearKey})
+                async {},
+          ),
+        ),
+      ));
+      final button = tester.widget<FilledButton>(
+        find.byKey(ModelServersForm.connectKey(gen)),
+      );
+      expect(button.onPressed, isNull);
+    });
   });
 
   group('somebody else’s service', () {
-    testWidgets('a vendor on the small address is refused outright, and the '
-        'host is not asked', (tester) async {
-      var asks = 0;
+    testWidgets('a vendor on the generative field is refused with the host\'s '
+        'sentence, and nothing is sent to it', (tester) async {
       await open(
         tester,
-        smallUrl: _openAiUrl,
-        onThirdParty: (spec, resume) async => asks++,
+        keyStored: true,
+        storedBearer: (_) => _stored,
+        thirdPartyRefusal: ModelServersForm.generativeThirdPartyRefusalText,
       );
-      await type(tester, ModelServersForm.keyKey, 'sk-fixture-vendor-key');
-      await tester.tap(find.byKey(ModelServersForm.connectKey));
-      await tester.pumpAndSettle();
-
-      // Refused under its own field before any server is asked: the consent
-      // pane covers drafts on the big model, and nothing covers inbox work
-      // leaving for a vendor.
-      expect(
-        find.text(ModelServersForm.smallThirdPartyRefusalText),
-        findsOneWidget,
-      );
-      expect(asks, 0);
-      expect(asked, isEmpty);
-      expect(connected, isEmpty);
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
-    });
-
-    testWidgets('a vendor on the big address asks the host first, and the '
-        'connect is its callback', (tester) async {
-      final asks = <LlmTargetSpec>[];
-      Future<void> Function()? resumed;
-      await open(
-        tester,
-        bigUrl: _openAiUrl,
-        probe: fake(const {
-          _openAiUrl: ModelProbeResult(reachable: true, modelIds: ['gpt-x']),
-          _smallUrl: ModelProbeResult(reachable: true, modelIds: ['qwen3-4b']),
-        }),
-        onThirdParty: (spec, resume) async {
-          asks.add(spec);
-          resumed = resume;
-        },
-      );
-      await type(tester, ModelServersForm.keyKey, 'sk-fixture-not-a-real-key');
+      await type(tester, ModelServersForm.urlKey(gen), _openAiUrl);
       await connect(tester);
 
-      expect(asks.single.isThirdParty, isTrue);
-      expect(asks.single.id, boxProseId);
-      expect(asks.single.url, _openAiUrl);
-      expect(asks.single.model, 'gpt-x');
-      expect(asks.single.hasBearer, isTrue);
-      expect(asks.single.parallel, 1);
-      // Nothing is written until the person has read the pane and said yes.
+      expect(
+        find.text(ModelServersForm.generativeThirdPartyRefusalText),
+        findsOneWidget,
+      );
+      expect(asked, isEmpty);
       expect(connected, isEmpty);
-
-      await resumed!();
-      await tester.pumpAndSettle();
-
-      expect(connected.single.bigUrl, _openAiUrl);
-      expect(connected.single.bigModel, 'gpt-x');
     });
 
-    testWidgets('a host with no pane to open refuses the address instead',
-        (tester) async {
+    testWidgets('a vendor on the decision field is refused with the decision '
+        'sentence', (tester) async {
       await open(
         tester,
-        bigUrl: _openAiUrl,
-        wireThirdParty: false,
-        probe: fake(const {
-          _openAiUrl: ModelProbeResult(reachable: true, modelIds: ['gpt-x']),
-        }),
+        role: dec,
+        url: 'https://api.openai.com/v1/embeddings',
+        thirdPartyRefusal: ModelServersForm.decisionThirdPartyRefusalText,
       );
+      await connect(tester, dec);
+
+      expect(
+        find.text(ModelServersForm.decisionThirdPartyRefusalText),
+        findsOneWidget,
+      );
+      expect(asked, isEmpty);
+    });
+
+    testWidgets('the wizard\'s sentence is the default', (tester) async {
+      await open(tester, url: _openAiUrl, connectLabel: 'Continue');
       await connect(tester);
 
       expect(find.text(ModelServersForm.thirdPartyRefusalText), findsOneWidget);
       expect(connected, isEmpty);
     });
 
-    testWidgets('a Converse service is typed into rather than asked',
+    testWidgets('cloud drafts asks the host first, and the resume writes',
         (tester) async {
-      await open(tester, bigUrl: _bedrockUrl);
+      LlmTargetSpec? askedAbout;
+      Future<void> Function()? resume;
+      await open(
+        tester,
+        role: cloud,
+        url: _openAiUrl,
+        probe: fake(const {
+          _openAiUrl: ModelProbeResult(reachable: true, modelIds: ['gpt-x']),
+        }),
+        onThirdParty: (spec, go) async {
+          askedAbout = spec;
+          resume = go;
+        },
+      );
+      await type(tester, ModelServersForm.keyKey(cloud), _key);
+      await connect(tester, cloud);
 
-      // Nothing to list, so nothing to probe and no picker: a Model field.
-      expect(find.byKey(ModelServersForm.bigModelTextKey), findsOneWidget);
-      expect(find.byKey(ModelServersForm.smallModelTextKey), findsNothing);
-
-      await connect(tester);
-
-      expect(find.text(ModelServersForm.modelNeededText), findsOneWidget);
-      expect(asked, [(_smallUrl, null)]);
+      expect(askedAbout!.id, cloudDraftsId);
+      expect(askedAbout!.model, 'gpt-x');
+      expect(askedAbout!.hasBearer, isTrue);
       expect(connected, isEmpty);
 
-      await type(
-        tester,
-        ModelServersForm.bigModelTextKey,
-        'us.example.big-model',
-      );
-      await connect(tester);
-
-      expect(connected.single.bigModel, 'us.example.big-model');
-      expect(connected.single.smallModel, 'a-model');
+      await resume!();
+      await tester.pumpAndSettle();
+      expect(connected.single,
+          (url: _openAiUrl, model: 'gpt-x', key: _key, clearKey: false));
     });
 
-    testWidgets('a Converse address prefills the model it was handed',
+    testWidgets('a Converse service is typed into rather than asked',
         (tester) async {
       await open(
         tester,
-        bigUrl: _bedrockUrl,
-        bigModel: 'us.example.big-model',
+        role: cloud,
+        url: _bedrockUrl,
+        onThirdParty: (spec, go) => go(),
       );
+      await connect(tester, cloud);
+      expect(find.text(ModelServersForm.modelNeededText), findsOneWidget);
+      expect(asked, isEmpty);
 
-      expect(
-        fieldText(tester, ModelServersForm.bigModelTextKey),
+      await type(
+        tester,
+        ModelServersForm.modelTextKey(cloud),
         'us.example.big-model',
       );
+      await connect(tester, cloud);
+      expect(asked, isEmpty);
+      expect(connected.single.model, 'us.example.big-model');
     });
   });
 }

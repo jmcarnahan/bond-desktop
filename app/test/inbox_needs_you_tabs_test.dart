@@ -2,7 +2,6 @@
 // the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -22,7 +21,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The five lenses on the Needs You overview, wired to a real store.
 ///
@@ -63,6 +64,8 @@ void main() {
 
   tearDown(() => db.close());
 
+  final urgencyBySubject = <String, String>{};
+
   Future<void> seedThread(
     String key,
     String subject, {
@@ -72,6 +75,10 @@ void main() {
     String? deadline,
     String urgency = 'normal',
   }) async {
+    // What the decision model will say about this message when triage
+    // reaches it: the thread's own urgency, so the fold does not overwrite
+    // the loudness the fixture gave the thread.
+    urgencyBySubject[subject] = urgency;
     await store.upsertMessage({
       'source': 'email',
       'source_message_id': '$key-m1',
@@ -84,18 +91,17 @@ void main() {
       'body_text': 'the hero paragraph',
     });
     if (deadline != null) {
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         '$key-m1',
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: subject,
-          needsAction: true,
-          actionItems: const [],
-          deadline: deadline,
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: subject,
+        needsAction: true,
+        actionItems: const [],
+        deadline: deadline,
       );
     }
     await store.upsertConversation({
@@ -130,6 +136,14 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
+      // The keeping fake's answers, with each thread's own urgency (see
+      // `seedThread`).
+      decisionClientProvider.overrideWithValue(FakeDecisionClient(
+        (input) => fakeDecision(fakeAnswers(
+          needsYou: 0.5,
+          urgency: urgencyBySubject[input.subject] ?? 'normal',
+        )),
+      )),
       initialSectionProvider.overrideWithValue(RailSection.needsYou),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),

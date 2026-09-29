@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// A message that lands DURING a sync reaches the open transcript on the same
@@ -166,6 +167,13 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        // A decision that reads the message as asking for a reply, so the
+        // thread stays in Needs You once triage has spoken (the keeping
+        // fake's quiet booleans would file it out of the pile this test
+        // opens it from).
+        decisionClientProvider.overrideWithValue(FakeDecisionClient.fixed(
+          fakeAnswers(needsAction: 0.8, replyExpected: 0.8, needsYou: 0.5),
+        )),
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),

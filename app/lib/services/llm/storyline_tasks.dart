@@ -9,7 +9,7 @@ import 'prompt_guard.dart';
 /// group, naming the group once it exists, re-describing it once its
 /// membership has moved, and saying where it stands as messages arrive.
 ///
-/// All five follow `extract_task.dart` exactly — const system prompt, a schema
+/// All five follow `message_text_task.dart` exactly — const system prompt, a schema
 /// with no ref or defs in it to resolve, `evidence` first where there is one, a
 /// validator that never throws and re-checks every enum in Dart. See
 /// [JsonTask.systemPrompt] for why one changed character in a prompt costs
@@ -907,7 +907,7 @@ class StorylineRecapTask implements JsonTask<RecapResult> {
   String get schemaName => 'storyline_recap';
 
   /// Flat, with arrays of plain strings and no `$defs` — the same shape
-  /// `triage_task.dart` proves this server's grammar converter handles.
+  /// `message_text_task.dart` proves this server's grammar converter handles.
   /// `evidence` is first for the reason it is first everywhere else: a grammar
   /// emits fields in schema order, so naming the newest development before
   /// writing the recap makes the recap follow from something.

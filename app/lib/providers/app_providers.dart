@@ -37,6 +37,8 @@ import '../services/context/context_reconcile_handler.dart';
 import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
 import '../services/cloud_drafts.dart';
+import '../services/decision/decision_client.dart';
+import '../services/decision/decision_heads_file.dart';
 import '../services/draft_handler.dart';
 import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
@@ -314,29 +316,40 @@ final machineTierProvider = FutureProvider<MachineTier>((ref) async {
   return answer.future;
 });
 
-/// What this install actually runs, placement included.
+/// What this Mac SERVES on its managed router, under the role placements:
+/// the embedding model always, the decision model when it runs here, and the
+/// managed generative model (the 27B or the 4B, by `managedGenerativeIdFor`)
+/// when that runs here. The hardware tier's view, so a Mac under the full
+/// tier's floor is never asked for the 27B.
 ///
-/// [machineTierProvider] answers what this MAC could run, off its memory
-/// alone, and stays the right question for the Settings fact line and for its
-/// two callers, the wizard's Finish and `usePlacement(local, hardwareTier:)`.
-/// This one answers what it WILL run: on
-/// [ModelPlacement.box] the inbox and writing stages are on the box and only
-/// the embedding model is served here, which is [MachineTier.remote]. The
-/// manifest resolves to one file, so the downloader fetches one, the managed
-/// server starts one, and the gate asks for one.
+/// [machineTierProvider] still answers what this MAC could hold and stays the
+/// question for the Settings fact line and the wizard. This one answers what
+/// it WILL serve, and the supervisor's preset is built from it.
 ///
-/// Composed rather than folded into [machineTierProvider] so that provider
-/// stays a pure reading of the hardware, and so nothing downstream has to
-/// know both facts.
-/// Watched through a `select` on the one field: [AppPrefs] has no `==`, so
-/// watching the whole object would re-derive this on every preference write in
-/// the app, and each re-derivation hands the supervisor and the gate a new
-/// future to await.
-final effectiveTierProvider = FutureProvider<MachineTier>((ref) async {
-  final placement =
-      ref.watch(appPrefsProvider.select((prefs) => prefs.modelPlacement));
-  if (placement == ModelPlacement.box) return MachineTier.remote;
-  return ref.watch(machineTierProvider.future);
+/// Watched through `select`s on the three facts it needs: [AppPrefs] has no
+/// `==`, so watching the whole object would re-derive this on every
+/// preference write in the app, and each re-derivation hands the supervisor a
+/// new future to await.
+final managedManifestProvider = FutureProvider<ModelManifest>((ref) async {
+  final manifest = ref.watch(modelManifestProvider);
+  final decisionManaged = ref.watch(
+    appPrefsProvider.select((p) => p.decisionSpec.id == localDecisionId),
+  );
+  final generativeManaged = ref.watch(
+    appPrefsProvider.select(
+      (p) => p.managedServer && p.generativeSpec.id == localGenerativeId,
+    ),
+  );
+  final storedGenerative =
+      ref.watch(appPrefsProvider.select((p) => p.generativeManagedModel));
+  final tier = await ref.watch(machineTierProvider.future);
+  return manifest.forRoles(
+    hardwareTier: tier,
+    decisionManaged: decisionManaged,
+    generativeManagedId: generativeManaged
+        ? managedGenerativeIdFor(tier, storedGenerative)
+        : null,
+  );
 });
 
 /// Every folder the app owns. `main()` OVERRIDES this with the located
@@ -393,19 +406,32 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     runner: const SystemProcessRunner(),
     supportDir: paths.support,
     binaryPath: LlamaBinary.resolve,
-    // The manifest RESOLVED for this Mac, so a machine under the full tier's
-    // floor starts the two models it downloaded rather than refusing on a
-    // writing model it never fetched. Asked freshly each start, like the
-    // folder and the port beside it, and awaited rather than guessed: the
-    // tier is a future and a preset written before it answered would name the
-    // wrong set.
-    // The EFFECTIVE tier, so the box placement starts the embedding model
-    // alone: the two chat models drop out of memory, which is the whole point
-    // of pointing the inbox and the writing stages at the box.
-    buildPreset: () async => ref
-        .read(modelManifestProvider)
-        .forTier(await ref.read(effectiveTierProvider.future))
-        .toPreset(ref.read(appPrefsProvider).effectiveModelsFolder(paths)),
+    // The ROLES' manifest ([managedManifestProvider]): the models this Mac
+    // serves under the two placements, out of the hardware tier's view, so a
+    // role on the owner's server drops its model out of memory here. Asked
+    // freshly each start, like the folder and the port beside it, and
+    // awaited rather than guessed.
+    //
+    // It is also where the prefs LEARN the machine tier (`setMachineTier`):
+    // the managed generative target's model id depends on it, and this build
+    // precedes every request the managed router can answer. And an entry
+    // whose files are missing (the decision model before `make
+    // decide-install`, a chosen generative model not yet downloaded) is left
+    // out, because the server refuses to start with a preset file missing and
+    // that must not cost the other models: that role parks on its own.
+    buildPreset: () async {
+      final tier = await ref.read(machineTierProvider.future);
+      ref.read(appPrefsProvider.notifier).setMachineTier(tier);
+      final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+      final served = (await ref.read(managedManifestProvider.future))
+          .withPresentFiles(folder);
+      // What the router will serve, so a managed target naming a model left
+      // out (not downloaded, not installed) parks rather than 400s.
+      ref.read(appPrefsProvider.notifier).setServedManagedIds({
+        for (final model in served.models) model.id,
+      });
+      return served.toPreset(folder);
+    },
     routerPort: () => ref.read(appPrefsProvider).routerPort,
     // A port the app had to move to is REMEMBERED, and remembered before the
     // child is spawned: the preference is what the clients dial and what the
@@ -462,15 +488,33 @@ final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
 
-/// The three models this Mac would run, with what each costs and whether it
-/// is on disk.
+/// Where `make decide-install` must put the decision model for this app to
+/// read it, when that is not the Makefile's `DECIDE_DIR` default: the decide
+/// entry's folder inside a models folder the wizard moved. Null while the
+/// models folder is the default one, where the plain command already lands —
+/// and then the manifest is never read, so a host that did not override it
+/// still builds.
+final decideInstallDirProvider = Provider<String?>((ref) {
+  final paths = ref.watch(appPathsProvider);
+  final folder = ref.watch(
+    appPrefsProvider.select((prefs) => prefs.effectiveModelsFolder(paths)),
+  );
+  if (p.equals(folder, paths.models.path)) return null;
+  final decide =
+      ref.watch(modelManifestProvider).byRoleOrNull(ModelRole.decide);
+  if (decide == null) return null;
+  return p.dirname(p.join(folder, decide.relativePath));
+});
+
+/// The three role models this Mac would run, with what each costs and
+/// whether it is on disk.
 ///
-/// The Managed block's three rows are this plus one live fact, and the live
-/// fact is not here: `ServerLoading.loaded` moves while somebody is looking at
-/// the page, so the widget joins it from [serverStateProvider] and this future
-/// stays a reading of the DISK. Three `stat` calls per invalidation, not per
-/// frame, which is why the ledger check keeps its `existsSync` — a file can be
-/// deleted under a row the ledger still calls done.
+/// The Managed block's rows are this plus one live fact, and the live fact is
+/// not here: `ServerLoading.loaded` moves while somebody is looking at the
+/// page, so the widget joins it from [serverStateProvider] and this future
+/// stays a reading of the DISK. A few `stat` calls per invalidation, not per
+/// frame, which is why the ledger check keeps its `existsSync` — a file can
+/// be deleted under a row the ledger still calls done.
 ///
 /// Re-read on exactly two events: **Set up again**, through
 /// [setupRestartProvider], because a download can have re-run; and the server
@@ -478,13 +522,13 @@ final serverStateProvider = StreamProvider<ServerState>(
 /// have certainly been read. Watched through a `select` onto a bool so the
 /// states on the way there — one per model as each loads — do not re-run it.
 ///
-/// The list is this MACHINE's tier, and [ManagedModelStatus.inUse] says which
-/// of those files the placement actually serves: two models on a machine under
-/// the full tier's floor, and under the user-defined placement all three rows
-/// with the embedding one alone in use, since the other two run on somebody's
-/// server while their weights stay on this disk. The inbox tier has no writing
-/// model, so the big row describes the file that does the writing there, which
-/// is the small one.
+/// Three rows keyed `decision`, `generative` and `embed`. The generative row
+/// is the managed model this Mac's tier would serve (the 27B on the full
+/// tier unless the owner chose the 4B; the 4B on the inbox tier).
+/// [ManagedModelStatus.inUse] says whether the placements actually serve it:
+/// a role on the owner's server keeps its weights on this disk and holds none
+/// of them in memory. The decision row is hand-installed: on disk means the
+/// GGUF AND its heads file are in the models folder, with no ledger.
 final managedModelsStatusProvider =
     FutureProvider<List<ManagedModelStatus>>((ref) async {
   ref.watch(setupRestartProvider);
@@ -492,14 +536,14 @@ final managedModelsStatusProvider =
     serverStateProvider.select((state) => state.valueOrNull is ServerReady),
   );
   final paths = ref.watch(appPathsProvider);
+  final master = ref.watch(modelManifestProvider);
+  final storedGenerative =
+      ref.watch(appPrefsProvider.select((p) => p.generativeManagedModel));
   final tier = await ref.watch(machineTierProvider.future);
-  final manifest = ref.watch(modelManifestProvider).forTier(tier);
-  // What the placement's own preset is built from. The same manifest under the
-  // effective tier, which answers `remote` on the user-defined placement, so
-  // the ids it lists are exactly the files this Mac is asked to hold.
-  final served = ref
-      .watch(modelManifestProvider)
-      .forTier(await ref.watch(effectiveTierProvider.future))
+  final manifest = master.forTier(tier);
+  // What the placements' own preset is built from, so the ids it lists are
+  // exactly the files this Mac is asked to serve.
+  final served = (await ref.watch(managedManifestProvider.future))
       .models
       .map((file) => file.id)
       .toSet();
@@ -507,26 +551,38 @@ final managedModelsStatusProvider =
   final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
 
   final rows = <ManagedModelStatus>[];
-  // The router id is the FILE's own id: the same resolved manifest builds the
-  // router preset, so `ServerLoading.loaded` is keyed by exactly these. On the
-  // inbox tier the big row's file is the bulk file, and its id has to be the
-  // bulk id or the row would read "not loaded" for ever on every small Mac.
+  // The router id is the FILE's own id: the same manifest builds the router
+  // preset, so `ServerLoading.loaded` is keyed by exactly these.
   void add(String roleId, ModelFile? file) {
     if (file == null) return;
+    final local = file.isLocal;
     rows.add(ManagedModelStatus(
       roleId: roleId,
       displayName: file.displayName,
-      bytes: file.downloadBytes,
-      onDisk: ledger.isCurrent(file) &&
-          File(p.join(folder, file.relativePath)).existsSync(),
+      bytes: local
+          ? file.sizeBytes + (file.heads?.sizeBytes ?? 0)
+          : file.downloadBytes,
+      onDisk: local
+          ? ModelManifest.localInstalled(file, folder)
+          : ledger.isCurrent(file) &&
+              File(p.join(folder, file.relativePath)).existsSync(),
       routerId: file.id,
       inUse: served.contains(file.id),
+      local: local,
+      headsOnDisk: switch (file.headsRelativePath) {
+        null => true,
+        final heads => File(p.join(folder, heads)).existsSync(),
+      },
     ));
   }
 
-  final bulk = manifest.byRoleOrNull(ModelRole.bulk);
-  add('big', manifest.byRoleOrNull(ModelRole.prose) ?? bulk);
-  add('small', bulk);
+  final generativeId = managedGenerativeIdFor(tier, storedGenerative);
+  ModelFile? generative;
+  for (final file in manifest.models) {
+    if (file.id == generativeId) generative = file;
+  }
+  add('decision', manifest.byRoleOrNull(ModelRole.decide));
+  add('generative', generative ?? manifest.byRoleOrNull(ModelRole.bulk));
   add('embed', manifest.byRoleOrNull(ModelRole.embed));
   return rows;
 });
@@ -886,33 +942,22 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
 /// One chat client per pipeline stage. Constructing one opens nothing — the
 /// first call is what discovers whether a server is listening.
 ///
-/// **Routing is data.** Which server and model a stage dials is resolved at
-/// the top of every request from `stage_targets` and the target list, so
-/// pointing a stage somewhere is a setting rather than an edit here. What this
-/// file still decides is the stage's COMPILED fallback — the slot's default,
-/// which is what the client answers with if the resolver ever throws — and its
-/// timeout.
+/// **Routing is a rule.** Which server and model a stage dials is resolved at
+/// the top of every request by `AppPrefs.specForStage` — every text stage on
+/// the ONE generative model, the two draft stages on the optional cloud-drafts
+/// target when it is set and allowed — so moving a role is a setting rather
+/// than an edit here. What this file still decides is the stage's COMPILED
+/// fallback, which is what the client answers with if the resolver ever
+/// throws, and its timeout.
 ///
-/// **Two servers, and why.** The 27B answers a triage call in about thirteen
-/// seconds; the small model answers the same call in about two. Everything on
-/// a fast-slot stage is a LABEL under a tight schema that Dart re-validates
-/// afterwards — triage, extraction, storyline membership — and none of it
-/// needs 27B judgement to come out right. The prose-slot stages are the prose:
-/// drafted replies, storyline titles, the reply decision, where the difference
-/// between the two models is something a person reads. That split is now the
-/// `slot` column of `pipelineStages` and the two built-in targets it names.
-///
-/// **Down is down, per server.** A call to a server that is not running throws
+/// **Down is down.** A call to a server that is not running throws
 /// [LlmUnavailableException] and the drain parks, exactly as it always has.
-/// There is deliberately no fallback to another target — silently answering
-/// bulk work on the 27B would turn "the fast server is off" into "the app got
-/// mysteriously slow".
+/// There is deliberately no fallback to another target.
 ///
-/// **One activity log for all of them.** Most of the app's model calls are
-/// bulk ones, and a log that only saw the prose stages would show a mailbox
-/// that apparently triaged itself for free.
+/// **One activity log for all of them**, so a log shows every call the
+/// pipeline paid for.
 ///
-/// It watches ONLY the activity log. The stage map, the specs and the bearer
+/// It watches ONLY the activity log. The placements, the specs and the bearer
 /// are reached by `ref.read` of the NOTIFIER — not the state — INSIDE the
 /// resolver closure, on the precedent [embeddingsClientProvider] set: the
 /// callback outlives this body, the client guards the read itself, and a
@@ -922,22 +967,26 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
 final stageLlmClientProvider = Provider.family<LlmClient, String>(
   (ref, stageId) {
     final slot = stageSlot(stageId);
-    final fallback = slotDefaults[slot]!;
+    // What a resolver that threw falls back to. Every text stage is
+    // generative now, so the one compiled generative default serves them all.
+    const fallback = generativeSlotDefault;
     return LlmClient(
       baseUrl: fallback.baseUrl,
       // Its own name as well as its own URL: a runtime that serves more than
-      // one model routes on this field, so a bulk stage's client must say
-      // which of them it is asking for rather than inherit the big server's
-      // answer.
+      // one model routes on this field, so a stage's client must say which
+      // of them it is asking for.
       model: fallback.model,
       resolveTarget: () =>
           ref.read(appPrefsProvider.notifier).targetForStage(stageId),
       onCall: ref.watch(activityLogProvider).noteLlmCall,
       // Sized to the longest draft this app can legitimately ask for; see
-      // [LlmClient.proseTimeout] for the arithmetic. A bulk stage keeps the
-      // generic 120, where the number only ever describes how long a dead
-      // server is waited on.
-      timeout: slot == ModelSlot.prose ? LlmClient.proseTimeout : null,
+      // [LlmClient.proseTimeout] for the arithmetic. EVERY generative stage
+      // gets it since the decision-model round: one generative model does
+      // the short calls and the drafts alike, and on the 27B a short call
+      // behind a draft in the same slot can wait that long. Anything else
+      // (no stage reaches here with another slot today) keeps the generic
+      // 120.
+      timeout: slot == ModelSlot.generative ? LlmClient.proseTimeout : null,
     );
   },
 );
@@ -945,12 +994,20 @@ final stageLlmClientProvider = Provider.family<LlmClient, String>(
 /// The FAST lane's gate: the triage drain and the fast worker, and nothing
 /// else.
 ///
-/// It keeps those two drains from running at once, because both send their
-/// bulk work to the fast server: overlapping them would double-book its slots
-/// and have each drain's byte-identical system prompt evict the other's from
-/// the KV prefix cache. It deliberately does NOT serialize the handful of
-/// requests one drain has in flight — those are batched by the server on
-/// purpose, and are what the slot count is sized for.
+/// It keeps those two drains from running at once. Since the decision-model
+/// round's Phase 6 triage no longer calls the generative server (its one
+/// model is the decision model), so the old reason — two drains
+/// double-booking one server's slots — no longer holds for triage. It still
+/// shares the gate for ORDERING: triage speaks before the worker claims a
+/// message's needs-you and text work, the yield ticket lets a newly arrived
+/// message's triage cut into a long worker drain, and `onDrained` hands the
+/// worker the refs triage just wrote. The cost is that a triage pump waits
+/// for the worker item already in flight (a text call can be seconds). A
+/// separate triage gate — ordering kept by the claim's untriaged guard and
+/// `onDrained` alone — is a follow-up round candidate. It deliberately does NOT
+/// serialize the handful of requests one drain has in flight — those are
+/// batched by the server on purpose, and are what the slot count is sized
+/// for.
 ///
 /// One instance for the app, or it would serialize nothing — see [DrainGate].
 final fastDrainGateProvider = Provider<DrainGate>((ref) => DrainGate());
@@ -1000,14 +1057,12 @@ final gateRepairServiceProvider = Provider<GateRepairService>(
 final triageQueueProvider = Provider<TriageQueue>((ref) {
   final queue = TriageQueue(
     ref.watch(messageStoreProvider),
-    // Bulk work by default: the fast server. See [stageLlmClientProvider].
-    ref.watch(stageLlmClientProvider('triage')),
     // Triage fetches its own bodies rather than waiting for a human to open
     // the thread. Taken off [MailSync], so this stays typed to the interface
     // a test can override.
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
-    // The FAST lane's gate: this drain and the fast worker share the fast
-    // server, and nothing else is on it.
+    // The FAST lane's gate, shared with the fast worker for ordering (see
+    // [fastDrainGateProvider]); triage itself calls only the decision model.
     gate: ref.watch(fastDrainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
@@ -1037,6 +1092,13 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     onGated: (source, id) => ref
         .read(gateRepairServiceProvider)
         .afterGate(source, id, reason: 'extracted_then_gated'),
+    // The decision model: the ONLY model triage calls — the text is the
+    // message-text stage's, on the fast lane. Late-bound (its target resolves
+    // per call), so a prefs write rebuilds no queue.
+    decisionClient: ref.watch(decisionClientProvider),
+    // The decision state's owner line. Asked without waiting (see the
+    // queue's `_askOwner`), so a keychain read never holds a claim.
+    owner: _ownerLookup(ref),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -1080,6 +1142,80 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
   ),
 );
 
+/// The decision model's heads file, cached (see [DecisionHeadsFile]).
+///
+/// The path is `<models folder>/<the decide entry's heads path>`, asked on
+/// every call because the folder is a preference; READ, never watched, on
+/// [modelServerSupervisorProvider]'s rule. A manifest with no decide entry
+/// (a test fixture) resolves to a path that is never there, which reads as
+/// not installed.
+///
+/// The manifest is READ inside the path closure rather than watched: the
+/// triage queue holds the decision client, so a container that never loaded
+/// a manifest (a widget test that builds the queue and never triages) must
+/// still be able to build it. An unreadable manifest reads as not installed.
+final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
+  final paths = ref.watch(appPathsProvider);
+  return DecisionHeadsFile(() {
+    final ModelManifest manifest;
+    try {
+      manifest = ref.read(modelManifestProvider);
+    } catch (_) {
+      return '';
+    }
+    final heads = manifest.byRoleOrNull(ModelRole.decide)?.headsRelativePath;
+    if (heads == null) return '';
+    return p.join(
+      ref.read(appPrefsProvider).effectiveModelsFolder(paths),
+      heads,
+    );
+  });
+});
+
+/// The decision model's client, on the triage path: [triageQueueProvider]
+/// runs one decision per kept inbound message before the text call.
+///
+/// Late-bound on [stageLlmClientProvider]'s rule: the target is resolved
+/// through the NOTIFIER at the top of every call — the managed router's
+/// `/v1/embeddings` under `bond-decide`, the owner's decision server with its
+/// own key, or the hand-started `make decide` server — so a prefs write
+/// rebuilds nothing. The heads come off this Mac's disk whichever server
+/// embeds, and a missing heads file is a [DecisionUnavailableException],
+/// which parks the pass rather than failing it.
+final decisionClientProvider = Provider<DecisionClient>((ref) {
+  final heads = ref.watch(decisionHeadsProvider);
+  return DecisionClient(
+    resolveTarget: () =>
+        ref.read(appPrefsProvider.notifier).targetForStage('decision'),
+    heads: heads.current,
+    onCall: ref.watch(activityLogProvider).noteLlmCall,
+  );
+});
+
+/// A decision Connect's last question before it writes: is the server at
+/// [url] the decision model? `/v1/models` cannot say — llama-server lists
+/// whatever name it was started with — so this is the client's own identity
+/// probe, with the key the write would store: the typed one, else the stored
+/// one unless the host changed ([clearKey]). Throws the sentence as an
+/// [ArgumentError], which the form draws under its field, and nothing is
+/// written. Settings and the wizard both call it, so neither says Connected
+/// over the embedding model's port.
+Future<void> refuseWrongDecisionServer(
+  DecisionClient client,
+  AppPrefsNotifier prefs, {
+  required String url,
+  required String model,
+  String? key,
+  required bool clearKey,
+}) async {
+  final refusal = await client.checkServer(
+    url: url,
+    model: model,
+    bearer: key ?? (clearKey ? null : prefs.bearerFor(boxDecideId)),
+  );
+  if (refusal != null) throw ArgumentError(refusal);
+}
+
 /// Semantic search over messages.
 ///
 /// A plain `Provider` because it holds nothing: it is the pairing of the
@@ -1119,10 +1255,9 @@ final contextRetrieverProvider = Provider<ContextRetriever>(
     ref.watch(messageStoreProvider),
     ref.watch(contextStoreProvider),
     ref.watch(embeddingsClientProvider),
-    // Bulk work on the fast server: one small structured call per
-    // directory-fed draft, which is the slot every other per-item call in
-    // this app already lands on — [stageLlmClientProvider].
-    fastClient: ref.watch(stageLlmClientProvider('context_select')),
+    // One small structured call per directory-fed draft, on the generative
+    // model like every other text stage — [stageLlmClientProvider].
+    selectClient: ref.watch(stageLlmClientProvider('context_select')),
     // `ref.read` inside the closure, never `watch`, in the `lookbackDays`
     // shape above and for its reason: watching would rebuild this provider —
     // and the worker holding it, mid-drain — the moment somebody moved the
@@ -1192,12 +1327,12 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// directly and six read this provider; the fast lane is what every one of
 /// them means by "the worker".
 ///
-/// Its own load on the fast server is one kind at a time at K=3 — needs-you,
-/// then extraction — and the gate it shares with the triage drain is what
-/// keeps that K=3 off the back of triage's. The fourth slot is the STORYLINE
-/// lane's: that lane is on a gate of its own and its membership confirms are
-/// fast-server calls, so the worst case at that server is three plus one,
-/// which is `FAST_SLOTS`.
+/// Its own load on the generative server is one kind at a time at K=3 —
+/// needs-you, then extraction — and the gate it shares with the triage drain
+/// orders the two (triage itself calls only the decision model since the
+/// decision-model round; see [fastDrainGateProvider]). The storyline and
+/// draft lanes are on gates of their own and dial the same generative model,
+/// so the SERVER queues whatever they add.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
   // Named before it is built, because one handler below has to reach it: the
   // digest's requeue wakes the drain it is running inside, and a `ref.read` of
@@ -1219,7 +1354,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // written yet.
       NeedsYouHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        // The generative model, like every text stage. See
+        // [stageLlmClientProvider].
         ref.watch(stageLlmClientProvider('needs_you')),
         activityLog: ref.watch(activityLogProvider),
         // A verdict this pass CHANGES has to move the chip beside it, and
@@ -1235,14 +1371,15 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // most builds of this provider never drain.
         ownerDomains: _ownerDomainsLookup(ref),
       ),
-      // Extraction next, and it drains completely before either storyline
-      // handler starts. That order is the point: extraction is what writes the
-      // embeddings both storyline passes compare, so running them alongside it
-      // would have them clustering a mailbox half of which has no vector yet.
+      // The message-text stage next (kind `extract`), and it drains completely
+      // before either storyline handler starts. That order is the point: it is
+      // what writes the embeddings both storyline passes compare, so running
+      // them alongside it would have them clustering a mailbox half of which
+      // has no vector yet.
       ExtractHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
-        ref.watch(stageLlmClientProvider('extraction')),
+        // The message-text stage: the one generative call per kept message.
+        ref.watch(stageLlmClientProvider('message_text')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),
@@ -1271,11 +1408,12 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         draftPolicy: () => ref.read(appPrefsProvider).draftPolicy,
       ),
       // After extraction and before the storylines. After, because the summary
-      // it embeds is triage's and the drain order keeps the fast server's slots
-      // for extraction while there is extraction left to do. Before, because it
-      // talks to no model at all: a park here is a park on the embedding
-      // server, and it parks only its own kind, so a missing `make embed` must
-      // never be allowed to sit in front of the storyline queue.
+      // it embeds is the text stage's and the drain order keeps the
+      // generative server's slots for extraction while there is extraction
+      // left to do. Before, because it talks to no model at all: a park here
+      // is a park on the embedding server, and it parks only its own kind,
+      // so a missing `make embed` must never be allowed to sit in front of
+      // the storyline queue.
       EmbedHandler(
         ref.watch(messageStoreProvider),
         ref.watch(embeddingsClientProvider),
@@ -1299,7 +1437,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       ),
       AttachmentDigestHandler(
         ref.watch(messageStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        // The generative model, like every text stage. See
+        // [stageLlmClientProvider].
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
@@ -1334,7 +1473,8 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // drain reads a brief that already knows what changed this morning.
       ContextDigestHandler(
         ref.watch(contextStoreProvider),
-        // Bulk work by default: the fast server. See [stageLlmClientProvider].
+        // The generative model, like every text stage. See
+        // [stageLlmClientProvider].
         ref.watch(stageLlmClientProvider('context_file_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
@@ -1410,13 +1550,13 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
 /// require, behind a gate of their own.
 ///
 /// All six in ONE worker, and that is the decision rather than an accident of
-/// where they were. They are mixed-slot — assignment, the audit, the recruit
-/// and the sweep's confirms are fast-server calls; the sweep's naming, the
-/// refresh and the recap are the 27B's — so neither server is the thing that
-/// groups them. What groups them is that they mutate shared membership, and
-/// the ordering arguments below only hold while they run one after another in
-/// this list: refresh before recruit, audit between them, recap after the
-/// sweep.
+/// where they were. They were mixed-slot when there were two generating
+/// servers (confirms on the 4B, naming and recaps on the 27B); every pass is
+/// on the one generative model now, and the server was never the thing that
+/// groups them anyway. What groups them is that they mutate shared
+/// membership, and the ordering arguments below only hold while they run
+/// one after another in this list: refresh before recruit, audit between
+/// them, recap after the sweep.
 ///
 /// Off the fast lane entirely, which is the point: a twelve-to-twenty-three
 /// second recap used to sit in front of the next message's triage.
@@ -1489,7 +1629,7 @@ final cloudDraftLedgerProvider = Provider<CloudDraftLedger>(
 /// object. One instance for both, so the routing closures and the ledger can
 /// only ever say one thing.
 ///
-/// It watches the store, its three stage clients, the recorder, the two
+/// It watches the store, its two stage clients, the recorder, the two
 /// retrievers, the embedder, progress, the bus and the ledger — and NEVER
 /// `appPrefsProvider`. That omission is the whole of why pointing a stage
 /// somewhere else rebuilds no worker and aborts no drain.
@@ -1508,10 +1648,6 @@ final draftHandlerProvider = Provider<DraftHandler>((ref) {
   return DraftHandler(
     ref.watch(messageStoreProvider),
     ref.watch(stageLlmClientProvider('draft_reply')),
-    // Its own stage, and its own client: the decision is a yes/no under a
-    // tight schema and the draft is prose, so a machine with a second
-    // server can put the cheap half of a prefetch somewhere else.
-    decisionClient: ref.watch(stageLlmClientProvider('reply_decision')),
     activityLog: ref.watch(activityLogProvider),
     attachments: ref.watch(attachmentRetrieverProvider),
     contextDirs: ref.watch(contextRetrieverProvider),
@@ -1786,11 +1922,10 @@ final parkedProvider = StreamProvider.autoDispose<ParkedFact>((ref) {
 /// be harmless — it is a provider because the handlers and the notifier must
 /// agree on the same store.
 ///
-/// The one place the routing split runs through a single object: five of the
-/// six storyline passes carry their own client, each on its own stage, so
-/// membership can sit on the fast server while naming, refresh, recap and the
-/// dark grouping sit on the prose one — and any of the five can be pointed
-/// somewhere else from Settings without touching the other four.
+/// Five of the six storyline passes carry their own client, each on its own
+/// stage, so the activity log labels each call by its stage. Every stage
+/// resolves to the one generative model since the decision-model round
+/// ([stageLlmClientProvider]).
 ///
 /// The same embedding client the extraction handler holds, deliberately: a
 /// thread whose embed failed there is one this service re-embeds itself when

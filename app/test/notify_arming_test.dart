@@ -1,11 +1,11 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The one thing standing between this feature and a first launch that
 /// announces an entire mailbox: **nothing is admitted until a sync of THIS
@@ -65,18 +65,17 @@ void main() {
     // than a work row, so a candidate with none stays open to its deadline.
     await store.writeNeedsYouVerdict('email', id, verdict: true,
         reason: 'seeded');
-    await store.writeTriage(
+    await writeTriaged(
+      store,
       'email',
       id,
       status: 'triaged',
-      result: const TriageResult(
-        urgency: 'high',
-        category: 'work',
-        summary: 'needs an answer',
-        needsAction: true,
-        actionItems: [],
-        replyExpected: true,
-      ),
+      urgency: 'high',
+      category: 'work',
+      summary: 'needs an answer',
+      needsAction: true,
+      actionItems: [],
+      replyExpected: true,
     );
     // The stages the pipeline would have written by now. Completeness reads
     // `message_progress`, not the work queue.

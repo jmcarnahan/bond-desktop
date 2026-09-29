@@ -73,7 +73,12 @@ void main() {
     );
 
     expect(
-      find.textContaining('These are the rules the model reads'),
+      find.textContaining('These are the rules the generative model reads'),
+      findsOneWidget,
+    );
+    // Saving rules costs the decision model's verdict, and the blurb says so.
+    expect(
+      find.textContaining("the decision model's verdict is not used"),
       findsOneWidget,
     );
     expect(find.text('Anything about the budget needs me.'), findsOneWidget);

@@ -13,8 +13,9 @@ import 'fixtures/prose_cases.dart';
 
 /// The other half of the bakeoff: what the PROSE slot costs and what it writes.
 ///
-/// `llm_bench_live_test.dart` times triage and extraction on the bulk slot,
-/// which is most of the app's model calls and none of its visible output. This
+/// `llm_bench_live_test.dart` times the one message-text call a kept message
+/// costs, which is most of the app's model calls and none of its visible
+/// output. This
 /// times the three tasks a person actually reads — the storyline title on a
 /// card, the recap the storyline screen leads with, and the reply waiting in a
 /// composer — because a candidate runtime that halves latency and writes worse

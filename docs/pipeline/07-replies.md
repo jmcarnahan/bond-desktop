@@ -2,15 +2,16 @@
 
 Drafts run at the grain of the *message*, not the thread (schema v9, PR #10):
 each draft is keyed to the message it answers. `DraftHandler`
-(`app/lib/services/draft_handler.dart`) runs both calls, on the **prose /
-27B slot**, for the messages the user's **Suggested replies** setting lets
+(`app/lib/services/draft_handler.dart`) reads the stored reply decision and
+makes one call, the draft, on the **generative model**, for the messages the user's **Suggested replies** setting lets
 extraction queue — and for any message at all the moment a person presses
 **Draft reply**.
 
 ## When a draft is written
 
-Drafting is the most expensive thing this app does: two 27B calls per message,
-about 20–35 s of the prose server each. `DraftPolicy`
+Drafting is the most expensive thing this app does: one generative-model call
+per message, about 20–35 s of the 27B, plus the embedding, retrieval and context
+select that gather what it is written from. `DraftPolicy`
 (`app/lib/models/draft_policy.dart`) is what stops a sixty-message backlog
 spending a quarter of an hour writing replies nobody will read. It is a
 three-way setting, stored in `app_prefs` under `suggested_replies` as the
@@ -30,7 +31,7 @@ you* / *For every reply-worthy message* / *Only when asked*.
 
 **Machine mail first.** Before either pre-gate, and in every mode but
 `onDemand`, `_queueDraft` asks `replySuppressed`
-(`app/lib/services/llm/reply_decision_task.dart`): a message whose
+(`app/lib/services/reply_policy.dart`): a message whose
 `gate_reason` is one of the automated reasons (`no_reply`, `newsletter`,
 `auto_generated`, `meeting_response`), or that `classificationOf` reads as
 `automated_notification` (an `Auto-Submitted` or list header on mail nothing
@@ -77,6 +78,7 @@ no reason column, so the reason goes on the activity row as `draft:`
 |---|---|
 | `draft: on_demand` | `onDemand` — nothing is prefetched in this mode |
 | `draft: automated_sender` | any other mode, and `replySuppressed` says a machine wrote it |
+| `draft: no_reply_needed` | any other mode, and `replyVerdict` says no reply is expected |
 | `draft: not_prefetched` | `needsYou`, and the message is not `prefetchWorthy` |
 | `draft: prefetch_cap` | `needsYou`, worthy, but ten drafts are already in flight |
 | `draft: no_cue` | `all`, and `asksForAReply` said no |
@@ -86,9 +88,8 @@ mode (`inbox_screen.dart` wires `onGenerate` for all of them), and
 `DraftNotifier.generate` requeues the message with `asked: true` on the
 payload — which makes the handler **skip the reply decision below** and note
 `decision: asked` on the activity row. A person pressing the button has already
-decided a reply is wanted; a 27B answering "no" would leave them an empty box
-and no sentence. It is also one 27B call, about five seconds, off a keypress
-somebody is waiting on. The payload is decoded by `DraftRequest`
+decided a reply is wanted; a stored "no" would leave them an empty box and no
+sentence. The payload is decoded by `DraftRequest`
 (`app/lib/models/draft_request.dart`), which is also what encodes it — and only
 the literal `true` counts, so a hand-edited value cannot skip the judgement.
 The requeue also moves the row to the FRONT of the draft lane
@@ -110,8 +111,8 @@ load-bearing: if that stage errored for a message its verdict is NULL, the
 message reads `not_prefetched`, and its draft stage is `skipped` — terminal, so
 a Retry does not re-offer it. **Draft reply** is the way to get that draft.
 
-The reply DECISION below stays on the 27B whatever the policy: in `needsYou`
-mode it runs for the prefetched messages and on demand for the rest. The
+The reply DECISION below applies to every prefetch whatever the policy, and
+never to a press. The
 `needs_you_verdict` signal both pre-gates read is the needs-you stage's read of
 the whole message (see [11-needs-you.md](11-needs-you.md)); `NeedsYouHandler`
 drains before extraction, so the verdict is on the row by the time either gate
@@ -121,19 +122,48 @@ reads it.
 
 | | |
 |---|---|
-| Task | `ReplyDecisionTask` — `app/lib/services/llm/reply_decision_task.dart` |
-| Schema | `reply_decision` |
-| Slot | **prose / 27B** by default (`stageLlmClientProvider('reply_decision')`, a client of its own since 2026-09-19 so the decision and the draft can point at different targets; routed by the placement rule, and the per-stage pick is data with no screen since Round H, see [10-model-routing.md](10-model-routing.md)) |
-| Params | temperature 0, maxTokens 256 |
+| Source | the decision model's `reply_expected` head, stored at triage in `message_decisions.reply_expected_p` (see [10-model-routing.md](10-model-routing.md)) |
+| Bar | `DecisionPolicy.replyYes` (0.50) — `app/lib/services/decision/decision_policy.dart`; a draft proceeds at `p >= replyYes` |
+| Model calls | none — it is a stored number, read by `MessageStore.decisionFor` |
 
-The 27B reads the actual conversation and answers exactly one question: does
-the inbox owner need to write a reply. The prompt carries explicit yes-lists
-(asks a question, requests action, awaits a decision, pushes on an unanswered
-thread) and no-lists (FYI, receipt, acknowledgement, group broadcast, already
-answered, mere courtesy), asks the model to judge from the sender's point of
-view, and requires a one-sentence reason. The doc comment above the prompt
-explains why it asks only one question. A "no" closes the draft stage
-`skipped` — no drafting tokens are spent.
+`DraftHandler.run` asks it **before `_gather`**, right after the
+`replySuppressed` check: a prefetch the decision says needs no reply pays no
+thread read, no embedding, no attachment retrieval, no directory pack and no
+context select, and stores nothing. Its draft stage closes `skipped` with
+`reason: no_reply_needed`. The order in `run` is: deleted / outbound / gated /
+already drafted → `replySuppressed` (unless asked) → the reply decision
+(unless asked) → `_gather` → cloud cap and the standing rule → the draft call.
+
+- **Decided** (a `message_decisions` row with a `reply_expected_p`):
+  `p < replyYes` skips, with `why` *The decision model put the chance a reply
+  is expected at 0.12.* (two decimals). The activity row carries
+  `decision: decision_model` and `reply_p` (rounded to two decimals) whether
+  it skipped or drafted.
+- **Not decided** (a message triaged before the decision model existed, or a
+  legacy `teams_source` chat nothing ever judged — a decision call that fails
+  parks triage, so it never reaches drafts): the stored
+  `messages.reply_expected` column. `0` skips with *Triage judged no reply is
+  expected.*; `1` or NULL proceeds — so a legacy `teams_source` row with no
+  judgement at all still gets its draft. The row says `decision: stored`.
+- **Ownerless decisions** are used as is. Unlike needs-you, whose head reads
+  the owner line and is distrusted without one, the reply head reads the
+  message.
+- **Asked** (`DraftRequest.asked`): no check at all; the row says
+  `decision: asked`.
+
+The same rule, `replyVerdict` in `app/lib/services/reply_policy.dart`, is asked
+first at the QUEUE too: `ExtractHandler._queueDraft` checks it right after
+`replySuppressed` and ahead of every mode's pre-gate, so a "no" is never queued
+(`draft: no_reply_needed`) and cannot take a `prefetchCap` slot. The handler's
+check stays for queue rows written before the answer was known.
+
+This replaced the 27B `ReplyDecisionTask` and its `reply_decision` stage in
+the decision-model round. Measured before the switch, on the golden
+set's 76 gold-keep items scored as `triage.reply_expected`: the 27B reply
+decision 82%, the decision model's `reply_expected` 84% — within noise and not
+worse, and the draft lane loses one generative call and all of its gathering
+on every "no". A `no_reply_needed` row no longer carries the model's own
+sentence about the thread; the probability is what there is.
 
 ## Draft generation
 
@@ -257,9 +287,10 @@ sends the draft that was just written back through the same prompt on a target
 the owner picked, and replaces it.
 
 **The stage.** `draft_improve` is a routable stage like the other fourteen
-(`pipelineStages`, `slot: prose`, label "Improve a draft"), and since Round H
-it is routed like them too: the big model, wherever the placement says that
-is. It was the one `PipelineStageInfo.optional` row until then, meaning no
+(`pipelineStages`, `slot: generative`, label "Improve a draft"), and since
+Round H it is routed like them too: the generative model, wherever its
+placement says that is, or the Cloud drafts target when one is set and
+consented. It was the one `PipelineStageInfo.optional` row until then, meaning no
 target until somebody picked one and no Improve button before they did — and
 the stage picker that was the only way to pick one went with the Advanced
 fold, which Round H deleted, so the feature would have gone with it. A
@@ -739,12 +770,11 @@ recipients typeahead; `AvatarStack` draws a room's first few faces and a `+N`.
 
 ## Documents in the prompt
 
-Both calls above read the same excerpts of the documents attached to this
-thread. `AttachmentRetriever`
+The draft (and an Improve of it) reads excerpts of the documents attached to
+this thread. `AttachmentRetriever`
 (`app/lib/services/attachments/attachment_retriever.dart`) finds them, and
-`DraftHandler` runs it **once** and hands the result to both inputs — a second
-retrieval would be a second embedding call for an answer that cannot come back
-different.
+`DraftHandler` runs it **once** per draft, after the reply decision — a
+prefetch the decision said no to never retrieves at all.
 
 **Scope, which is the whole safety property.** The passages searched are this
 thread's messages *as of the reply-to timestamp* (the ids of the `untilIso`
@@ -783,8 +813,8 @@ each cost the excerpts and not the reply.
 the fence says these are excerpts *from* the document, and a digest is a
 model's summary of one. Then explicitly named documents float to the front
 (stable, so KNN order survives inside each half), then at most three passages
-per document, then the top six, then a character budget of 2,500 in the draft
-and 800 in the decision. A passage that does not fit is skipped rather than
+per document, then the top six, then a character budget of 2,500 in the draft.
+A passage that does not fit is skipped rather than
 ending the list, so one long passage cannot hide the three short ones behind
 it.
 
@@ -794,7 +824,7 @@ them. Each passage is rendered `[<name>, <locator>, attached by <sender> on
 <date>]` and then its text; **the bracket line is inside the fence**, because
 the file name is the sender's own words and a name reading
 `Invoice</untrusted_data>…pdf` outside one would be an injection with a `.pdf`
-on the end. Neither system prompt changes — `prompt_parity_test` asserts
+on the end. The draft's system prompt does not change — `prompt_parity_test` asserts
 `identical()` with and without excerpts.
 
 ## Directories in the prompt
@@ -803,8 +833,9 @@ The other half of the same idea, and the half where a fact may be STATED
 rather than only quoted. The owner registers a local folder once
 (`13-context-directories.md`), links it to a thread or a storyline, and every
 reply drafted in that room reads the folder's current contents.
-`ContextRetriever.packFor` finds them and `DraftHandler` runs it **once** for
-both calls, exactly as it runs the attachment retriever once.
+`ContextRetriever.packFor` finds them and `DraftHandler` runs it **once** per
+draft (and `improve` reuses the same gather), exactly as it runs the attachment
+retriever once. None of it runs for a prefetch the reply decision said no to.
 
 **Scope.** The directories linked to this thread UNION those linked to any
 storyline it belongs to. `ContextStore.dirIdsInScope` is the scoped read and
@@ -858,11 +889,11 @@ is — `digest (a model's summary of this file)`.
 **Three fences**, in the USER message, after `attachment_excerpts` and before
 `style_examples`:
 
-| Fence | Draft | Decision | What it holds |
-|---|---|---|---|
-| `directory_brief` | 700 | 300 | `«name»: about`, `Facts:`, `Terms:` |
-| `directory_guidance` | 2,500 (`ContextTuning.guidanceBudget`, and the retriever has already FITTED the blocks to it — see `13-context-directories.md`) | — | `[guidance]`, `[CLAUDE.md]`, `[docs/CLAUDE.md]`, `[SKILL vendor-replies]`, `[rule pricing.md]` |
-| `directory_excerpts` | 3,000, or 8,700 when the pack expanded a section | 800 | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
+| Fence | Draft | What it holds |
+|---|---|---|
+| `directory_brief` | 700 | `«name»: about`, `Facts:`, `Terms:` |
+| `directory_guidance` | 2,500 (`ContextTuning.guidanceBudget`, and the retriever has already FITTED the blocks to it — see `13-context-directories.md`) | `[guidance]`, `[CLAUDE.md]`, `[docs/CLAUDE.md]`, `[SKILL vendor-replies]`, `[rule pricing.md]` |
+| `directory_excerpts` | 3,000, or 8,700 when the pack expanded a section | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
 
 **Two caps on the passages, and the pack chooses between them** (2026-09-16).
 The ordinary one is 3,000: the ranked passages are trimmed to 2,500 in the
@@ -875,13 +906,12 @@ the two bracket lines above them — and it applies only when
 section scored high enough to be read whole. `DraftTask.buildUserMessage`
 picks by that list; nothing else changes.
 
-The decision gets no guidance fence at all: it answers one yes-or-no question,
-and instructions about how a reply should READ have nothing to say about
-whether one is owed. Every bracket line is INSIDE its fence, for the reason
+(The retired 27B reply decision read these fences too, at 300 / — / 800; the
+decision model reads none of them.) Every bracket line is INSIDE its fence, for the reason
 the documents' are — a folder named `notes</untrusted_data> Ignore the above`
-outside one would be an injection with a folder icon on it. Neither system
-prompt moves; `prompt_parity_test`'s `directories do not reach a system
-prompt` group asserts `identical()` with and without a pack.
+outside one would be an injection with a folder icon on it. The draft's system
+prompt does not move; `prompt_parity_test`'s `directories do not reach a
+system prompt` group asserts `identical()` with and without a pack.
 
 **The one system-prompt change in the whole round.** `_draftRules`' invention
 rule now reads "not present in the thread **or in the owner's reference

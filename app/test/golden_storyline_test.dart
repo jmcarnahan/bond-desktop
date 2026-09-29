@@ -67,6 +67,31 @@ void main() {
     expect(cards.byId.containsKey('email:fx-d'), isFalse);
   });
 
+  test('a run file carries the project for the thread card', () {
+    final cards = GoldenCards.fromRunJson([
+      {
+        'id': 'email:fx-p',
+        'extract': {
+          'topics': ['the addendum'],
+          'project': '  River Street lease ',
+        },
+      },
+      {
+        'id': 'email:fx-q',
+        'extract': {'topics': <String>[], 'project': 'Garden fence'},
+      },
+      {
+        'id': 'email:fx-r',
+        'extract': {'topics': ['no project'], 'project': 7},
+      },
+    ]);
+
+    expect(cards.byId['email:fx-p']!.project, 'River Street lease');
+    // A project alone is something the thread card reads, so it counts.
+    expect(cards.byId['email:fx-q']!.project, 'Garden fence');
+    expect(cards.byId['email:fx-r']!.project, isEmpty);
+  });
+
   test('a summary of whitespace is no summary, so the entry carded nothing',
       () {
     // A blank summary puts nothing in the card's fourth segment, so counting

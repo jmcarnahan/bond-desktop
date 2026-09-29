@@ -28,6 +28,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/vec_test_db.dart';
 
@@ -77,7 +78,7 @@ class _Handler extends WorkHandler {
 /// wants to stop the drain mid-flight returns a completer's future from it.
 ScriptedLlm _triageLlm({Future<void> Function()? hold}) => ScriptedLlm(
       answers: const {
-        'triage': {
+        'decision': {
           'urgency': 'normal',
           'category': 'work',
           'summary': 'Sarah asks about the launch date.',
@@ -246,7 +247,7 @@ void main() {
     });
   }
 
-  /// A row in every one of the sixteen derived tables and all seven synced
+  /// A row in every one of the seventeen derived tables and all seven synced
   /// ones, so "emptied" and "kept" are both assertions about rows that were
   /// actually there. The awkward five go in as raw INSERTs: their writers take
   /// a reconcile pass or a notification sweep, and what this test is about is
@@ -387,6 +388,14 @@ void main() {
       variables: args([fresh()]),
     );
 
+    // The decision model's answers for the one message.
+    await db.customUpdate(
+      'INSERT INTO message_decisions (source, source_message_id, model, '
+      'qhash, answers_json, gate_p, needs_you_p, decided_at) '
+      "VALUES ('email', 'm1', 'decide-test', 'q', '{}', 0.1, 0.9, ?)",
+      variables: args([fresh()]),
+    );
+
     // The owner's own vocabulary and one thread filed under it. Kept, like a
     // sender rule: the words are theirs, not the model's. `messages.label` is
     // the model's verdict and lives in a derived table.
@@ -426,7 +435,7 @@ void main() {
       expect(classified.toSet(), equals(declared));
       // Pairwise disjoint, which the set comparison above cannot see.
       expect(classified.length, classified.toSet().length);
-      expect(MessageStore.derivedTables, hasLength(16));
+      expect(MessageStore.derivedTables, hasLength(17));
       expect(MessageStore.syncedTables, hasLength(7));
       expect(MessageStore.keptTables, hasLength(5));
     });
@@ -615,6 +624,56 @@ void main() {
       // The mail header gate writes the same word the Teams bot gate does, so
       // the `source` half of the predicate is what tells them apart.
       await expectRepended('auto-1');
+    });
+
+    test('re-pends a learned drop, even under an ingest word', () async {
+      // The decision model maps its own `outbound` (and, on a chat,
+      // `auto_generated`) onto the ingest words. Its decision row is the tell,
+      // read before the reset empties that table.
+      Future<void> learned(String source, String id) => store.writeDecision(
+            source,
+            id,
+            fakeDecision(fakeAnswers(gateDrop: 0.9, dropReason: 'outbound')),
+            qhash: 'test',
+            ownerKnown: true,
+          );
+      await seedMessage('learned-out',
+          conversationKey: 'conv-lo',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+      await learned('email', 'learned-out');
+      await seedMessage('learned-bot',
+          source: 'teams',
+          conversationKey: 'chat-lb',
+          triageStatus: 'skipped',
+          gateReason: 'auto_generated');
+      await learned('teams', 'learned-bot');
+      // An ingest `outbound`, which no decision ever read.
+      await seedMessage('ingest-out',
+          direction: 'outbound',
+          conversationKey: 'conv-io',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+      // The owner's Ignore on a message the model had kept stays theirs.
+      await seedMessage('ignored-decided', conversationKey: 'conv-id');
+      await learned('email', 'ignored-decided');
+      expect(await store.dropMessage('email', 'ignored-decided'), isTrue);
+
+      await store.clearDerived();
+
+      for (final (source, id) in [
+        ('email', 'learned-out'),
+        ('teams', 'learned-bot'),
+      ]) {
+        final row = await messageRow(id, source: source);
+        expect(row['triage_status'], 'pending', reason: id);
+        expect(row['gate_reason'], isNull, reason: id);
+      }
+      final ingest = await messageRow('ingest-out');
+      expect(ingest['triage_status'], 'skipped');
+      expect(ingest['gate_reason'], 'outbound');
+      expect((await messageRow('ignored-decided'))['gate_reason'], 'user');
+      expect(await rows('message_decisions'), 0);
     });
 
     test('leaves a message the owner ignored ignored', () async {
@@ -1294,7 +1353,7 @@ void main() {
         first = false;
         return held.future;
       });
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       addTearDown(queue.dispose);
 
       final drain = queue.pump();
@@ -1359,7 +1418,7 @@ void main() {
         first = false;
         return held.future;
       });
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       addTearDown(queue.dispose);
 
       final drain = queue.pump();
@@ -1434,7 +1493,7 @@ void main() {
         first = false;
         return held.future;
       });
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       addTearDown(queue.dispose);
 
       final drain = queue.pump();

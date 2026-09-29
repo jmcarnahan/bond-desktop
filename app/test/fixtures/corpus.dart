@@ -20,8 +20,8 @@ import 'package:bond_inbox/models/message_models.dart';
 /// turns that entry into an ordinary email.
 const String userAddress = 'alex.rivera@rivermail.example.com';
 
-/// Mirrors `TriageTask._bodyCap`, which is private. Only the quoted-thread
-/// monster depends on the exact number.
+/// Mirrors `message_block.dart`'s body cap, which is private. Only the
+/// quoted-thread monster depends on the exact number.
 const int bodyCap = 4000;
 
 /// Sits past [bodyCap] in `quoted-thread-monster`'s body and nowhere else, so
@@ -49,7 +49,7 @@ class CorpusEmail {
   /// The exact `gateFor` reason, or null when this mail must reach the model.
   final String? expectedGate;
 
-  /// One of `TriageTask`'s categories. Null when the message never reaches
+  /// One of the triage categories (the decision model's). Null when the message never reaches
   /// the model.
   final String? expectedCategory;
 

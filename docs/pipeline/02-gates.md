@@ -4,8 +4,10 @@ Gates exist to skip what is not worth a model call. They run in two tiers
 around the body fetch, because the cheap signals arrive with the delta and the
 header signals only arrive with the full message.
 
-**No model call in any of this** — gates are pure functions over sender
-strings and headers.
+**No model call in the rules gates** — they are pure functions over sender
+strings and headers. After them comes one LEARNED gate, the decision model
+(see [The learned gate](#the-learned-gate)), which drops what the rules kept
+only when it is sure.
 
 ## Tier 1 — sender-only, on delta fields
 
@@ -77,6 +79,42 @@ exactly as it always was.
 With headers in hand, the list/auto-generated checks run: `List-Unsubscribe`
 / `List-Id`, `Precedence: bulk|list|junk|auto_reply`, `Auto-Submitted`, and
 `X-Auto-Response-Suppress`. Also in `gates.dart`.
+
+## The learned gate
+
+After both rules tiers, the thread load and before any language-model call,
+`TriageQueue._triageClaimed` runs the decision pass (see
+[03-triage.md](03-triage.md)). Its `gate` head drops a rules-kept message
+when p(gate = drop) ≥ `DecisionPolicy.gateDrop` (0.70,
+`app/lib/services/decision/decision_policy.dart`); `learnedGateReason` is
+the rule. The `gate_reason` is the model's `drop_reason`, reusing the rules'
+words where they mean the same thing (`newsletter`, `no_reply`,
+`auto_generated`, `monitoring`, `machine_sender`, `outbound`, `empty`), plus
+four of its own — `ticket_system` ("Ticket system"), `identity_service`
+("Sign-in notice"), `share_notification` ("Shared file notice"), `digest`
+("Digest") — and `model_other` ("Automated") for its catch-all. The words
+are in `homeDropLabels`; the four machine senders are also in
+`automatedGateReasons`, so no reply is ever offered on them.
+
+`cold_outreach` NEVER gates, however sure the head is: a human writing to the
+owner stays kept, and the needs-you pass holds a stranger's first approach to
+its higher bar instead. A Teams 1:1 or @mention (`needsYouFloor`) is never
+learned-gated: somebody wrote to the owner by name, and no gate took one
+before the decision model. A restored message (`gate_override = 'user'`) is
+never gated by the model either — Restore bypasses every gate.
+
+A learned drop takes the tier-2 path (`skipped` → `refoldThreadState` →
+`onGated`), and unlike a rules gate it DOES write a `triage` activity row
+(status `skipped`, detail `{reason, gate, learned: true, gate_p,
+decision_ms}` — `reason` is what the activity panel prints on a skipped row),
+because a model was consulted. Provenance lives there and in
+`message_decisions.gate_p`, not in a new word. Clear AI results re-judges
+learned drops like every derived gate: `clearDerived`'s `keptGate` keeps only
+the ingest verdicts and the owner's Ignore, and a message with a
+`message_decisions` row is never an ingest verdict even when the model's word
+is an ingest word (`outbound`, a chat's `auto_generated`). That table is read
+before the reset empties it. The Why panel names the gate in the
+label's words, lower-cased ("Skipped by the gate: sign-in notice.").
 
 ## Meeting responses
 
@@ -177,8 +215,8 @@ A gate verdict is a derivation, re-run on every triage claim — so clearing
 `gate_reason` alone would last exactly one sync. Restore instead stamps
 `messages.gate_override` (schema v12, tri-state: `NULL` = the pipeline's
 call stands, `'user'` = the owner restored this message), and the stamp is
-durable: both `gateFor` calls in `_triageClaimed` are skipped for a stamped
-row, and `capPendingTriage` exempts it from the backlog demotion a first-run
+durable: both `gateFor` calls and the learned gate in `_triageClaimed` are
+skipped for a stamped row, and `capPendingTriage` exempts it from the backlog demotion a first-run
 sync would otherwise apply. The gate functions in `gates.dart` stay pure —
 the override lives at the call site, because it is a fact about what the
 user did, not a judgement about the message.

@@ -90,8 +90,8 @@ class ContextSelection {
   bool get isEmpty => read.isEmpty && skills.isEmpty;
 }
 
-/// Asks the fast slot which one or two sections of the owner's own files
-/// should be read in full before a reply is written.
+/// Asks the generative model which one or two sections of the owner's own
+/// files should be read in full before a reply is written.
 ///
 /// Six passages of a thousand characters can miss the one section that
 /// carries the number. This is the step that can say so — and it is cheap

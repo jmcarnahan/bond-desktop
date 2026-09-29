@@ -114,6 +114,8 @@ Future<DiskPreflight> checkDisk({
 }) async {
   var needed = 0;
   for (final model in manifest.models) {
+    // A hand-installed entry costs no download.
+    if (model.isLocal) continue;
     // PER FILE, not per entry: a checkpoint whose weights are here and whose
     // sidecar is not costs only the sidecar, and `isCurrent` — which wants
     // both — could not say that.

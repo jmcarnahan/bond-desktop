@@ -1,58 +1,68 @@
 import 'package:flutter/material.dart';
 
+import '../../providers/setup_provider.dart' show SetupController;
 import '../../services/llm/model_probe.dart' show ModelProbeResult;
-import '../../services/llm/model_slots.dart' show ModelPlacement;
+import '../../services/llm/model_slots.dart'
+    show ModelPlacement, hostPort, routerBulkId, routerProseId;
 import '../../theme/tokens.dart';
 import '../../widgets/model_servers_form.dart';
+import '../../widgets/settings_segments.dart';
 import 'setup_controls.dart';
 
-/// Where the models run: Bond's own, or the user's.
+/// Where the models run, one role at a time.
 ///
-/// Two cards and nothing else. Managed means Bond downloads the models and
-/// runs them on this Mac; User defined means the person names their own
-/// servers, and under that card this step renders the ONE user-defined form
-/// the Settings page renders, with **Continue** as its word.
+/// Two questions, the same two the Settings Models page asks: where the
+/// **Decision model** runs and where the **Generative model** runs, each
+/// answered by two cards, **This Mac** or **Your server**. Embeddings always
+/// run on this Mac and are not a question.
 ///
-/// There is no consent pane behind a wizard, so [ModelServersForm.onThirdParty]
-/// is null here and a vendor's address is refused with the form's own
-/// sentence: cloud services stay a Settings decision, taken once, after the
-/// install works at all.
+/// Your server renders the ONE form the Settings page renders, for that
+/// role. There is no consent pane behind a wizard, so
+/// [ModelServersForm.onThirdParty] is null here and a vendor's address is
+/// refused with the form's own sentence: cloud services stay a Settings
+/// decision, taken once, after the install works at all.
 ///
-/// There is also NO second Continue under User defined. The form's press is
-/// the way forward: it refuses per field, asks both servers what they serve,
-/// takes the names they list and writes, and the host advances the step from
-/// inside that same press. Two buttons both reading Continue, one of which
-/// wrote nothing, is the confusion this round exists to remove.
+/// The way forward is at the foot: the generative form's own **Continue**
+/// under Your server (it refuses, asks the server what it serves, writes, and
+/// the host advances from inside that same press), or the step's Continue
+/// under This Mac. The decision form sits above it and says **Connect**: it
+/// writes its role at once and stays on the step, so the one press at the
+/// foot is always the one that moves on.
 ///
-/// PROP-ONLY, the settings bodies' discipline: the host resolves the four
-/// prefilled values and takes the write back as a closure. The ACCESS KEY is
-/// not among them and never will be — it lives in the form's own controllers,
-/// is handed to [onConnect] by value and is in no `SetupState`, because state
-/// is what gets stored and a stored key would be a secret in `setup_state`.
+/// PROP-ONLY, the settings bodies' discipline. The ACCESS KEY is in no prop:
+/// it lives in each form's own controller and is handed to the write by
+/// value, never into `SetupState`.
 ///
-/// No dialogs: the choice is two cards in the flow and the form is a block
+/// No dialogs: the choices are cards in the flow and the forms are blocks
 /// under them rather than anything that floats.
 class SetupWhereBody extends StatelessWidget {
-  /// The choice so far, or null while nothing has been picked. Null renders
-  /// both cards unselected and leaves the way forward disabled.
+  /// The generative choice so far, or null while nothing has been picked.
+  /// Null leaves the way forward disabled.
   final ModelPlacement? placement;
 
-  /// The four EFFECTIVE values, to prefill the form: the stored ones where
-  /// there are stored ones, the build's otherwise. Never a key.
-  final String bigUrl;
-  final String smallUrl;
-  final String bigModel;
-  final String smallModel;
+  /// The decision choice.
+  final ModelPlacement decisionPlacement;
 
-  /// Whether a key is in the keychain for one server or for the other, so
-  /// the field it belongs to can say that typing replaces it. Presence flags,
-  /// never the token. The form's third flag, the one that offers **Remove
-  /// key**, is not taken here: a wizard has no Remove key.
-  final bool bigKeyStored;
-  final bool smallKeyStored;
+  /// The managed generative model this Mac would take, resolved against the
+  /// tier: `bond-prose` or `bond-bulk`.
+  final String generativeManagedId;
 
-  /// Asks a server what it serves, handed down to the form for Connect's
-  /// discovery. Null takes the form's button off.
+  /// This Mac is on the inbox tier, where the 27B is not offered.
+  final bool inboxTier;
+
+  /// The EFFECTIVE values each form opens on. Never a key.
+  final String generativeUrl;
+  final String generativeModel;
+  final bool generativeKeyStored;
+  final String decisionUrl;
+  final String decisionModel;
+  final bool decisionKeyStored;
+
+  /// Whether the decision model already runs on the owner's server, which is
+  /// what its form's Connect writes. The step's way forward waits for it
+  /// while Your server is chosen for that role.
+  final bool decisionConnected;
+
   final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
 
   /// Looks up one target's stored token for a probe made with the key field
@@ -60,62 +70,137 @@ class SetupWhereBody extends StatelessWidget {
   final String? Function(String targetId)? storedBearer;
 
   final ValueChanged<ModelPlacement> onChoose;
+  final ValueChanged<ModelPlacement> onChooseDecision;
+  final ValueChanged<String> onChooseManaged;
 
-  /// The step's own Continue, under Managed. The other card has none.
+  /// The step's own Continue, under This Mac for the generative model.
   final VoidCallback onContinueManaged;
 
-  /// The form's press, under User defined: the write AND the way forward.
-  /// Returned rather than forgotten, so a refused write comes back to the
-  /// form, which is the thing that can draw it.
-  final Future<void> Function({
-    required String bigUrl,
-    required String smallUrl,
-    required String bigModel,
-    required String smallModel,
-    String? bigKey,
-    String? smallKey,
-  }) onConnect;
+  /// The generative form's press: the write AND the way forward. Returned
+  /// rather than forgotten, so a refused write comes back to the form.
+  final ServerConnect onConnect;
+
+  /// The decision form's press: writes the role and stays on the step.
+  final ServerConnect onConnectDecision;
 
   const SetupWhereBody({
     super.key,
     required this.placement,
-    required this.bigUrl,
-    required this.smallUrl,
-    required this.bigModel,
-    required this.smallModel,
-    this.bigKeyStored = false,
-    this.smallKeyStored = false,
+    this.decisionPlacement = ModelPlacement.local,
+    this.generativeManagedId = routerProseId,
+    this.inboxTier = false,
+    this.generativeUrl = '',
+    this.generativeModel = '',
+    this.generativeKeyStored = false,
+    this.decisionUrl = '',
+    this.decisionModel = '',
+    this.decisionKeyStored = false,
+    this.decisionConnected = false,
     this.probe,
     this.storedBearer,
     required this.onChoose,
+    required this.onChooseDecision,
+    required this.onChooseManaged,
     required this.onContinueManaged,
     required this.onConnect,
+    required this.onConnectDecision,
   });
 
-  /// The two cards, by key, so a walk of the wizard reads the same as the
-  /// page it grew out of.
+  /// The generative cards, by the keys the walk of the wizard has always
+  /// read, and the decision cards beside them.
   static const Key managedCardKey = ValueKey('setup-where-managed');
   static const Key customCardKey = ValueKey('setup-where-custom');
+  static const Key decisionManagedCardKey =
+      ValueKey('setup-where-decision-managed');
+  static const Key decisionCustomCardKey =
+      ValueKey('setup-where-decision-custom');
+  static const Key generativeModelKey =
+      ValueKey('setup-where-generative-model');
+  static const Key decisionConnectedKey =
+      ValueKey('setup-where-decision-connected');
+
+  static const String decisionTitle = 'Decision model';
+  static const String decisionCaption = 'Sorts and flags every message.';
+  static const String generativeTitle = 'Generative model';
+  static const String generativeCaption =
+      'Writes summaries, drafts and storylines.';
 
   /// The word recommended rides a middle dot rather than a parenthesis:
   /// user-facing strings carry neither parentheticals nor em-dashes.
-  static const String managedTitle = 'Managed · recommended';
+  static const String managedTitle = 'This Mac · recommended';
   static const String managedBlurb =
-      'Bond downloads the models and runs them on this Mac. Nothing leaves '
-      'the machine.';
-  static const String customTitle = 'User defined';
+      'Bond downloads the model and runs it on this Mac. Nothing leaves the '
+      'machine.';
+  static const String customTitle = 'Your server';
   static const String customBlurb =
-      'Your own servers, on this Mac or on a machine you name. Message text '
-      'and drafts travel to them. The embedding model always runs on this '
-      'Mac.';
+      'A server of your own, on this Mac or on a machine you name. Message '
+      'text and drafts travel to it.';
+  static const String decisionManagedBlurb =
+      'Runs on this Mac in a few milliseconds a message. It is installed '
+      'with make decide-install.';
+  static const String decisionCustomBlurb =
+      'A server of your own that serves the decision model. Every message '
+      'travels to it.';
+  static const String embedNote =
+      'The embedding model always runs on this Mac.';
+
+  static const String model27bLabel = 'Qwen3.8 27B';
+  static const String model4bLabel = 'Qwen3 4B';
+  static const String managedCaption =
+      'The 27B writes better. The 4B is smaller and faster.';
+  static const String inboxTierCaption =
+      'This Mac has too little memory for the 27B.';
 
   @override
   Widget build(BuildContext context) {
-    final custom = placement == ModelPlacement.box;
+    final generativeOnServer = placement == ModelPlacement.box;
+    final decisionOnServer = decisionPlacement == ModelPlacement.box;
+    final decisionWaiting = decisionOnServer && !decisionConnected;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
+        _heading(decisionTitle, decisionCaption),
+        _card(
+          cardKey: decisionManagedCardKey,
+          title: managedTitle,
+          blurb: decisionManagedBlurb,
+          selected: !decisionOnServer,
+          onTap: () => onChooseDecision(ModelPlacement.local),
+        ),
+        const SizedBox(height: BondSpacing.s12),
+        _card(
+          cardKey: decisionCustomCardKey,
+          title: customTitle,
+          blurb: decisionCustomBlurb,
+          selected: decisionOnServer,
+          onTap: () => onChooseDecision(ModelPlacement.box),
+        ),
+        if (decisionOnServer) ...[
+          const SizedBox(height: BondSpacing.s16),
+          ModelServersForm(
+            role: ServerFormRole.decision,
+            url: decisionUrl,
+            model: decisionModel,
+            keyStored: decisionKeyStored,
+            probe: probe,
+            storedBearer: storedBearer,
+            onConnect: onConnectDecision,
+            // No consent pane behind a wizard, and no vendor ever serves the
+            // decision model, so the sentence is that role's own.
+            thirdPartyRefusal: ModelServersForm.decisionThirdPartyRefusalText,
+          ),
+          if (decisionConnected) ...[
+            const SizedBox(height: BondSpacing.s8),
+            Text(
+              key: decisionConnectedKey,
+              'Connected · $decisionModel at ${hostPort(decisionUrl)}',
+              style: BondType.small,
+            ),
+          ],
+        ],
+        const SizedBox(height: BondSpacing.s24),
+        _heading(generativeTitle, generativeCaption),
         _card(
           cardKey: managedCardKey,
           title: managedTitle,
@@ -128,18 +213,18 @@ class SetupWhereBody extends StatelessWidget {
           cardKey: customCardKey,
           title: customTitle,
           blurb: customBlurb,
-          selected: custom,
+          selected: generativeOnServer,
           onTap: () => onChoose(ModelPlacement.box),
         ),
-        if (custom) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text(embedNote, style: BondType.caption),
+        if (generativeOnServer) ...[
           const SizedBox(height: BondSpacing.s16),
           ModelServersForm(
-            bigUrl: bigUrl,
-            smallUrl: smallUrl,
-            bigModel: bigModel,
-            smallModel: smallModel,
-            bigKeyStored: bigKeyStored,
-            smallKeyStored: smallKeyStored,
+            role: ServerFormRole.generative,
+            url: generativeUrl,
+            model: generativeModel,
+            keyStored: generativeKeyStored,
             probe: probe,
             storedBearer: storedBearer,
             onConnect: onConnect,
@@ -150,16 +235,52 @@ class SetupWhereBody extends StatelessWidget {
             connectLabel: 'Continue',
           ),
         ] else ...[
+          if (placement == ModelPlacement.local) ...[
+            const SizedBox(height: BondSpacing.s16),
+            SettingsSegments<String>(
+              key: generativeModelKey,
+              segments: const [
+                (value: routerProseId, label: model27bLabel),
+                (value: routerBulkId, label: model4bLabel),
+              ],
+              selected: generativeManagedId,
+              disabled: inboxTier ? const {routerProseId} : const {},
+              onChanged: onChooseManaged,
+              caption: inboxTier ? inboxTierCaption : managedCaption,
+            ),
+          ],
+          if (decisionWaiting) ...[
+            const SizedBox(height: BondSpacing.s16),
+            Text(
+              SetupController.decisionFirstText,
+              style: BondType.caption,
+            ),
+          ],
           const SizedBox(height: BondSpacing.s24),
           SetupPrimaryButton(
             label: 'Continue',
-            onPressed:
-                placement == ModelPlacement.local ? onContinueManaged : null,
+            onPressed: placement == ModelPlacement.local && !decisionWaiting
+                ? onContinueManaged
+                : null,
           ),
         ],
       ],
     );
   }
+
+  Widget _heading(String title, String caption) => Padding(
+        padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            ),
+            Text(caption, style: BondType.caption),
+          ],
+        ),
+      );
 
   Widget _card({
     required Key cardKey,

@@ -1,957 +1,747 @@
 # 10 · Model routing, failure policy, and the prompt fence
 
-## Routing is data: every stage names a target, resolved per call
+Since the decision-model round (2026-09-27) the app talks to THREE models, one
+per role, and which server a stage dials is a RULE over the role placements
+rather than a stored map:
 
-Since Round E (2026-09-19) the stage→server mapping is a preference, not
-wiring. Every stage that dials a model gets its own `LlmClient` from
-`stageLlmClientProvider(stageId)` (`app/lib/providers/app_providers.dart`),
-constructed on that stage's compiled DEFAULT and resolving
-`AppPrefsNotifier.targetForStage(stageId)` at the top of every request — so
-pointing a stage at another server moves its next request without rebuilding
-the client or anything watching it (see **Runtime overrides** below).
+| Role | What it does | Where it can run |
+|------|--------------|------------------|
+| **Decision** | The fine-tuned ModernBERT classifier: one embedding call per message, nine heads applied in Dart | this Mac (Managed) or Your server |
+| **Generative** | Every piece of text: summaries, digests, briefs, storyline names and recaps, needs-you in the band, drafts | this Mac (Managed: the 27B or the 4B) or Your server |
+| **Embeddings** | Clustering and search vectors | this Mac, always; not a choice |
 
-| Stage | Default target | Which server that is by default |
-|-------|----------------|---------------------------------|
-| `triage` | `Local fast` | `make fast` |
-| `needs_you` | `Local fast` | `make fast` |
-| `extraction` | `Local fast` | `make fast` |
-| `attachment_digest` | `Local fast` | `make fast` |
-| `context_file_digest` | `Local fast` | `make fast` |
-| `context_brief` | `Local fast` | `make fast` |
-| `context_select` | `Local fast` | `make fast` |
-| `storyline_membership` | `Local fast` | `make fast` |
-| `storyline_group` | `Local prose` | `make model` |
-| `storyline_name` | `Local prose` | `make model` |
-| `storyline_refresh` | `Local prose` | `make model` |
-| `storyline_recap` | `Local prose` | `make model` |
-| `reply_decision` | `Local prose` | `make model` |
-| `draft_reply` | `Local prose` | `make model` |
-| `draft_improve` | `Local prose` | `make model` |
-| `embeddings` | not routed | `make embed` |
+Plus one optional target that is not a role: **cloud drafts**, the one place a
+third-party service may serve, and only the two draft stages.
 
-**A small Mac starts from a different map.** The table above is the FULL tier,
-which is a machine with 40 GiB of memory or more, and also a machine whose
-memory could not be read at all: `machineTierFor` answers `full` for zero bytes,
-the never-refuse rule `HardwareInfo.unknown` states, so nothing is withheld over
-a fact the app failed to read. Below the threshold the machine is the INBOX
-tier: the writing model is neither downloaded nor started, and all seven
-prose-slot rows above start on `Local fast` instead, meaning `storyline_group`,
-`storyline_name`, `storyline_refresh`, `storyline_recap`, `reply_decision`,
-`draft_reply` and `draft_improve`. `draft_improve` joined them in Round H, when
-it stopped being optional: a prose stage left behind would be dialling a
-writing server this tier never starts.
-`AppPrefsNotifier.applyTierDefaults` is the one writer of
-that map, called by the wizard's Finish on the Managed placement and by every
-`usePlacement(local, hardwareTier:)` — which is what the Models page's
-**Managed** segment and the wizard's **Managed** card call. It writes the way a
-preset does, so an entry equal to a stage's own default is removed rather than
-stored and a fresh install on a big Mac still holds an empty object.
+The code is `app/lib/services/llm/model_slots.dart` (the stage table, the ids,
+the host rules) and `AppPrefs` in `app/lib/providers/prefs_provider.dart` (the
+resolution). The words on screen are in `docs/settings.md`.
 
-**The shared GPU box is a PLACEMENT, and since Round H it is the DEFAULT one.**
-`ModelPlacement` (`box` or `local`, stored in `model_placement`) is a machine
-preference, not a reading of the hardware: the same Mac can be pointed at the
-box today and at its own servers tomorrow. `AppPrefs.modelPlacement` defaults
-to `defaultModelPlacement`, which is `box` in any build compiled with a
-`BOND_BOX_URL` and `local` in every build without one, the test suite included.
-The address is prefilled and the access key is typed once; nothing secret is
-compiled into a build. On the box placement the map above is replaced
-wholesale:
+## Three roles, one rule
 
-| Stage group | Target | Model |
-|-------------|--------|-------|
-| the seven bulk stages | `Your server · small model` (`box-bulk`) | the small server's own model |
-| the seven prose stages | `Your server · big model` (`box-prose`) | the big server's own model |
-| `storyline_membership`, the confirm | `Your server · big model` (`box-prose`) | the big server's own model |
-| `embeddings` | not routed, and stays on this Mac | `make embed` |
+Every stage that dials a model has a row in `pipelineStages`, and the row's
+`slot` is its role (`ModelSlot { generative, decide, embed }`;
+`roleOfStage` maps it to `StageRole { decision, generative, embed }`):
 
-`storyline_membership` appears twice on purpose: it is a fast-slot stage
-everywhere else, and on the box it goes to the writing model. That is the row
-of record, 84 of 98 with 8% wrong accepts against the 4B's, and the box has the
-27B sitting idle between drafts, so the better answer is also the free one.
-Until Round H the outcome depended on the ORDER of two preset calls, because
-the stage is in both `bulkStageIds` and `confirmStageIds`; it is now a rule
-nothing can reorder.
+| Stage | Role |
+|-------|------|
+| `decision` | Decision |
+| `needs_you`, `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
+| `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
+| `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
+| `embeddings` | Embeddings, not routed |
 
-**The placement rule.** Nothing in the table above is stored. The pair is
-DERIVED from four preferences — `box_big_url` and `box_small_url`, two
-chat-completions URLs, and `box_big_model` and `box_small_model`, the model
-names DISCOVERED from each server's own `/v1/models` — by
-`AppPrefs.boxProseSpec` and `AppPrefs.boxBulkSpec`, exactly as the two
-built-ins are derived from the four slot prefs. An empty value means "follow
-the build": the compiled `BOND_BOX_URL` still derives both URLs under `/prose`
-and `/bulk`, and the two constants that box serves are the model names, so a
-tester who pastes only a key is where they always were. `hasBox` is both URLs
-resolving non-empty, because a rule that sent the big stages to an address and
-the small ones nowhere would park half the pipeline. The WIRE is read off each
-host (`wireForHost`), so a Bedrock endpoint speaks Converse without anybody
-choosing a protocol, and the request WIDTH is four for an address that follows
-the build — the compiled box is two vLLM servers started with four sequences
-each — and one for any stored address, because a one-slot llama-server queues
-the other three past the prose client's ninety-second ceiling and reads as
-broken.
+There is no reply-decision stage: whether a prefetched draft is wanted is the
+decision model's `reply_expected` probability, stored at triage and read by
+`DraftHandler` before it gathers anything (see
+[07-replies.md](07-replies.md#reply-decision--should-we-spend-drafting-time-at-all)).
 
-Which target a stage resolves to when nothing is stored for it is
-`placementDefaultTargetId(placement:, hasBox:, stageId:)` in `model_slots.dart`:
-on the box with an address to dial, `bigModelStageIds` answer `box-prose` and
-`smallModelStageIds` answer `box-bulk`; everywhere else the answer is the
-slot's built-in. `bigModelStageIds` is the seven prose stages plus the confirm,
-`smallModelStageIds` is the other seven bulk stages, and `model_slots_test`
-pins both against `pipelineStages` so neither can drift from the stage table.
+`AppPrefs.specForStage(stageId)` is the whole routing rule:
 
-What IS stored is an override: a `stage_targets` entry outranks the rule, so
-picking `box-bulk` for the confirm on the box writes an entry and picking
-`box-prose` there removes one. Switching placement with
-`AppPrefsNotifier.usePlacement` drops every entry whose value is one the app
-itself could have written, either box id, a slot's built-in or an inbox-tier
-pick, and keeps everything else, because a hand-picked target is a choice
-somebody made.
+1. `embeddings` → null. The embedding client has its own request target
+   (`embedRequestTarget`, below) and is never moved.
+2. `decision` → `decisionSpec`.
+3. `draft_reply` / `draft_improve` (`draftStageIds`, the one place the pair is
+   named) → `cloudDraftsSpec` when one is set AND it is either the owner's own
+   host or `cloud_drafts_consent` stands; otherwise `generativeSpec`.
+4. Every other stage → `generativeSpec`.
 
-Since Round H there is no screen that WRITES one, and none that SHOWS one: the
-stage picker went with the Advanced fold, which Round H's second half deleted
-along with the slot editors, the targets list and the Local server card. The
-entries a person could have stored are the ones a migration cleared:
-`stage_targets_cleared = 1` empties the map once, and `llm_targets` rows are
-left where they are, inert because nothing names them.
+The consent is checked HERE, where the target is resolved, and not only on the
+screen that records it, so prefs restored from a backup or edited by hand
+cannot route a draft off the machine on their own. `specById` answers the
+fixed ids back (the composer's "Improved with <name>" reads it off a draft
+row).
 
-`AppPrefsNotifier.read` carries three one-shots, in this order and no other.
-`box_targets_derived = 1` lifts a Round G install's two `llm_targets` rows into
-the `box_url` origin and drops the pair. `box_servers_derived = 1` splits that
-origin into `box_big_url` and `box_small_url` and empties `box_url`, which is
-kept as a constant for these two migrations and written by nothing.
-`stage_targets_cleared = 1` empties the map. All three are plain prefs and
-deliberately not in `MessageStore.derivedOneShotPrefs`: that list is what a
-wipe re-runs, and none of them guards a corpus. The keychain is untouched
-throughout: the entries are still `llm_target_bearer:box-prose` and
-`:box-bulk`, which is what the derived specs ask for, so nobody types a key
-again.
+**Classification is the decision model's; text is one generative call
+(Phases 5–6).** The triage queue runs one decision pass per kept inbound
+message and makes NO language-model call: the learned gate, urgency,
+category, the two booleans, the needs-you verdict outside its band and the
+intent/importance filed into the extraction blob come from it (see
+[03-triage.md](03-triage.md) and [11-needs-you.md](11-needs-you.md)). The
+message's text is ONE generative call, the `message_text` stage
+(`MessageTextTask`, run by `ExtractHandler` under work kind `extract`: summary,
+action items, deadline, topics, project — see
+[04-extraction.md](04-extraction.md)). The retired `triage` and `extraction`
+stage rows are gone from `pipelineStages`; a per-message pipeline now costs
+the decision pass, the needs-you band when the decision is unsure, and one
+`message_text` call (plus the draft, when one is written). The label a call
+records (`LlmCallRecord.label`) is its schema: `decision`, `message_text`,
+`needs_you`, …
 
-**What travels, on that placement.** Message text, attachment text and drafts
-go to the owner's own AWS instance over TLS, keyed with an api-key that lives
-in this Mac's keychain. The embedding model stays here, so every vector is
-written on this machine. That is the whole of what leaves, and it is why the
-box is not a third-party target: it is a machine this install's owner rents,
-pays for and runs.
+Why one generative model: the decision model answers every classification
+field in one forward pass of tens of milliseconds, so what is left for a chat
+model is text a person reads, and one server for all of it is one prompt cache,
+one timeout and one placement. The fast/prose split existed to put labels on
+the 4B and prose on the 27B; with the labels gone the split has nothing to do.
 
-The map is only half of what `applyTierDefaults` writes. The other half is the
-draft policy: the `inbox` tier gets `DraftPolicy.onDemand`, because the inbox
-model's drafts are unmeasured and nobody should pay for one unasked, and the
-`full` tier gets `needsYou`, which is the shipped default. That is the setting
-under **Suggested replies**, so a press moves a control the reader can see. The
-tier itself is read from the machine's memory every time it is asked for and is
-stored nowhere.
+## Where each role runs
 
-The two built-in targets are the two slots this app has always had, named:
+Each role has its own placement (`ModelPlacement { box, local }`; `box` is
+"Your server" in code, a historical word, and `local` is this Mac):
 
-| Built-in | Compiled default | Served by |
-|----------|------------------|-----------|
-| `Local prose` (`local-prose`) | `LLAMA_URL` → `http://localhost:8080/v1/chat/completions`, `LLAMA_MODEL` → `qwen3.8` | `make model` (Qwen3.8-27B) |
-| `Local fast` (`local-fast`) | `FAST_LLAMA_URL` → `http://localhost:8082/v1/chat/completions`, `FAST_LLAMA_MODEL` → `qwen3.8` | `make fast` (Qwen3-4B-Instruct) — note **8082**, not 8081 |
-| embeddings (`embeddingsClientProvider`) | `EMBED_URL` → `http://localhost:8081/v1/embeddings` | `make embed` (Qwen3-Embedding-0.6B, `--pooling last`) |
+| Role | Placement key | Default |
+|------|---------------|---------|
+| Generative | `model_placement` (Round H's key, reused) | `box` in a build compiled with `BOND_BOX_URL`, `local` otherwise (`defaultModelPlacement`) |
+| Decision | `decision_placement` | `local` whatever the build: it reads every message, and a local pass beats any network hop |
 
-All are `--dart-define`-overridable. The two chat slots' overrides survive as
-DATA — the four slot prefs `fast_llm_url`, `fast_llm_model`, `prose_llm_url`
-and `prose_llm_model` — and no screen has written them since Round H, when the
-slot editors went; `BOND_DEV_HAND_SERVERS` is how a dev build says the servers
-are started by hand. Adopting a bakeoff winner is config in `local.mk`, not
-code (see `docs/model-bakeoff.md`).
-llama-server ignores the model name field, but MLX-style runtimes route on it
-— which is why each target carries its own name (`model_slots.dart`).
+Each role's spec resolves in the same order, per call:
 
-Why that split: everything defaulting to `Local fast` is a LABEL under a tight
-schema that Dart re-validates afterwards, and the 4B answers those in about
-two seconds where the 27B takes thirteen. Everything defaulting to `Local
-prose` is text a person reads. `storyline_group` is the sweep's model-read
-grouping and runs only under `StorylineTuning.groupingMode ==
-GroupingMode.model`, which is not what ships — it has a stage row, a client
-and a default so that pointing it somewhere is a setting rather than a code
-change the day it does (see [06-storylines.md](06-storylines.md#grouping)).
-`draft_improve` is routed like every other prose stage since Round H. It runs
-`DraftTask` rather than a task of its own, which is why `model_slots_test`
-exempts it from the check that every row has a task behind it, and the Improve
-button is always there. It was OPTIONAL until Round H — no target until
-somebody picked one, its entry being the feature turned on — and the only way
-to write that entry was the stage picker the same round deleted.
+1. **Your server**, when the placement is `box` AND an address resolves AND it
+   is the owner's own (not third party, not the Converse wire).
+2. **The managed router**, when the app runs its own server
+   (`managedServer`, true unless the build says `BOND_DEV_HAND_SERVERS`).
+3. **The hand-started server** of a `BOND_DEV_HAND_SERVERS` build.
 
-Changing a stage's DEFAULT is one row in `pipelineStages`
-(`app/lib/services/llm/model_slots.dart`) and an edit here; changing where a
-stage goes on one machine is the PLACEMENT, Managed or User defined, on the
-Models page, and the per-stage picks under it are data the tests and the
-benches write.
-`model_slots_test.dart` is what keeps the table honest against the handler
-list and against the three presets.
+| | Generative (`generativeSpec`) | Decision (`decisionSpec`) |
+|---|---|---|
+| Your server: id | `box-prose` | `box-decide` |
+| Your server: URL | `box_big_url`, else `$BOND_BOX_URL/prose/v1/chat/completions` | `decision_url`, else `$BOND_BOX_URL/decide/v1/embeddings` |
+| Your server: model | `box_big_model` (discovered), else `qwen3.8` (`boxProseModel`) | `decision_model` (discovered), else `bond-decide-mbl-v2swap` (`boxDecideModel`) |
+| Your server: width | 4 when the URL follows the build, 1 for a stored address | 1 |
+| Managed: id, URL | `local-generative`, `<router>/v1/chat/completions` | `local-decision`, `<router>/v1/embeddings` |
+| Managed: model | `managedGenerativeIdFor(tier, generative_managed_model)`: `bond-prose` (27B) or `bond-bulk` (4B) | `bond-decide` |
+| Hand servers | `LLAMA_URL` / `LLAMA_MODEL` (`:8080`, `qwen3.8`) | `DECIDE_URL` / `DECIDE_MODEL` (`:8083`, `bond-decide`, `make decide`) |
+
+- **Empty means "follow the build".** `box_big_url`, `box_big_model`,
+  `decision_url` and `decision_model` are stored EMPTY whenever the value
+  equals what the build derives; the writers compare against
+  `$BOND_BOX_URL/prose/v1/chat/completions` and `…/decide/v1/embeddings` and
+  store `''` on a match. A model default is a fact about the build, and
+  freezing today's value into the database would hide a changed define. The
+  compiled box serves both under one origin: `/prose` is its vLLM 27B and
+  `/decide` its llama.cpp decision slot (`tools/inference.sh --decide-gguf`,
+  `docs/inference-endpoint.md`).
+- **The width.** The compiled box's prose slot is vLLM with several sequences,
+  so a URL that follows the build is four wide; a stored address is one at a
+  time, because a one-slot llama-server queues the rest past the generative
+  client's ninety-second ceiling. The managed generative width is
+  `prose_parallel` (1–8, default 1).
+- **The managed generative model.** `generative_managed_model` is `''` (by
+  hardware tier: the 27B on the full tier, the 4B on the inbox tier),
+  `bond-prose` or `bond-bulk`. The 27B on the inbox tier is refused by
+  `managedGenerativeIdFor` itself and reads as the 4B, because that machine
+  never downloads it. The tier is not stored: `AppPrefs.machineTier` is told by
+  `setMachineTier`, from the supervisor's preset build and from
+  `useGenerative`, and is `full` until told.
+- **The wire** is read off the host (`wireForHost`): a Bedrock runtime host
+  speaks Converse, everything else OpenAI. Nobody picks a protocol.
+
+**Third-party hosts are refused for both roles.** Both read every message, so
+neither may run at a vendor. `isThirdPartyHost` is a Bedrock runtime host
+(`bedrock…amazonaws.com`) or `anthropic.com`, `openai.com`, `deepseek.com` and
+their subdomains. AWS as a whole is NOT third party: the owner's GPU box is an
+EC2 instance they rent and run, reached by a Route 53 name, an EC2 public name
+or an `ssh` tunnel at `localhost:18100`. Loopback is not a signal either way.
+The writers throw `ArgumentError` on such an address
+(`AppPrefsNotifier.generativeThirdPartyRefusal`: "the generative model reads
+every message; a third-party service can serve cloud drafts only";
+`decisionThirdPartyRefusal`: "the decision model reads every message; it runs
+on this Mac or a server of your own"), and the specs refuse it again at
+resolution (`_ownServer`), so a hand-edited row falls back to this Mac rather
+than routing every message to a vendor.
+
+**Cloud drafts** (`cloudDraftsSpec`, id `cloud-drafts`) is set only when both
+`cloud_drafts_url` and `cloud_drafts_model` are non-empty. It may be a third
+party; `useCloudDrafts` refuses one while `cloud_drafts_consent` is false (the
+consent pane records the acknowledgement first), and the owner's own host
+needs no consent. `clearCloudDrafts` forgets the address, the model and the
+key, and the draft stages fall back to the generative model at once. The
+standing rule and the daily cap are the draft lane's, in
+[07-replies.md](07-replies.md).
+
+**The writers.** `useGenerative({placement, managedModel?, url?, model?, key?,
+hardwareTier})`, `useDecision({placement, url?, model?, key?})`,
+`useCloudDrafts({url, model, key?})` and `clearCloudDrafts()`. Each validates
+everything before writing anything, so a refusal leaves the install as it was;
+a null URL or model keeps what is stored, and a blank key keeps the stored
+token. The three setters also take `clearKey`, which the forms pass when the
+address moved to another HOST: a key typed with it replaces the old one as
+usual, and a blank key with it FORGETS the old host's token (`clearRoleKey`)
+rather than sending it to a machine it was never meant for. `useGenerative` also sets the draft policy: on this Mac with the 4B,
+the tier's (`tierDraftPolicy`: on demand on the inbox tier); the 27B and any
+remote keep the shipped `needsYou`. The Models page and the wizard then call
+`ModelServerSupervisor.ensurePreset()`, which restarts the router only when
+the preset's hash changed.
+
+**What travels.** On Your server, message text, attachment text and drafts go
+to the owner's own machine over TLS with an api-key from this Mac's keychain;
+the decision model's input there is the rendered message state. The heads run
+here either way, and so does the embedding model. That is why Your server is
+not a third-party target and asks for no consent.
+
+**Keys.** Every routing key is machine configuration and survives `wipeAll`:
+
+| Key | Meaning |
+|-----|---------|
+| `model_placement` | generative placement |
+| `box_big_url`, `box_big_model` | generative remote address and discovered model |
+| `generative_managed_model` | `''`, `bond-prose` or `bond-bulk` |
+| `decision_placement`, `decision_url`, `decision_model` | decision placement, remote `/v1/embeddings` URL, discovered model |
+| `cloud_drafts_url`, `cloud_drafts_model`, `cloud_drafts_consent` | the cloud-drafts target and its consent |
+| `prose_parallel`, `router_port`, `models_folder` | managed width, port, folder |
+| `box_small_url`, `box_small_model`, `llm_targets`, `stage_targets`, `box_url`, `fast_llm_*`, `prose_llm_*` | INERT; read only by the frozen one-shots below |
+
+The bearers live in the keychain as `llm_target_bearer:<id>` for the three
+keyed ids: `box-prose` (generative remote), `box-decide` (decision remote) and
+`cloud-drafts`. The Round H small-server id `box-bulk` is read only by the
+role-split migration.
 
 ## Runtime overrides
 
-The tables above are what a build is COMPILED with. The routing DATA below —
-`stage_targets`, `llm_targets` and the four slot prefs — still resolves exactly
-as described, and the notifier API still writes it without a restart and
-without interrupting work in flight. Since Round H no SCREEN writes any of it:
-what a person changes at runtime is the placement, Managed or User defined, and
-the pair of addresses a user-defined install names.
+Nothing about routing is fixed at build time except the defaults. What a
+person changes at runtime is a role's placement and address, and a change
+reaches the next request without a restart and without interrupting work in
+flight.
 
-- **Per stage, from data.** Targets are a LIST: `llm_targets` holds the specs
-  the user added (`LlmTargetSpec {id, name, url, model, wire, bearer,
-  parallel, streams}`, JSON), and the two built-ins `local-fast` /
-  `local-prose` are DERIVED from the four slot prefs below and never stored —
-  one source of truth, which is what kept the slot editors and the managed
-  router meaning the same thing while both existed. The map `stage_targets`
-  (stage id → target id)
-  holds NON-DEFAULT entries only, so a fresh install is an empty object and
-  resolves byte-identically to the two-slot app. An entry naming a target that
-  no longer exists, or a row that does not parse, falls back to the stage's
-  default rather than throwing; a removed target takes its stage entries with
-  it in the same write. The three presets `applyPreset` writes — prose stages,
-  storyline confirm, all bulk stages — are `proseStageIds`,
-  `confirmStageIds` and `bulkStageIds` in `model_slots.dart`; they are an API
-  and a test fixture now, because the add screen that offered them went in
-  Round H. `embeddings` is in none of them because it is not routed at all.
-- **A bearer lives in the keychain.** `llm_target_bearer:<id>` via
-  `SecureTokenStore`; the JSON carries only the boolean `bearer`, a presence
-  flag. It is read once per launch into a private cache on `AppPrefsNotifier`
-  (the resolver is synchronous and runs on a drain's hot path) and reaches the
-  wire as the `Authorization` header and nowhere else — never `app_prefs`,
-  never an `LlmCallRecord`, never an exception message, never
-  `LlmTarget.toString()`. A keychain that refuses costs the header on the next
-  request, never the launch and never the write of the spec.
-- **Third-party drafts sit behind one consent.** A target is THIRD PARTY when
-  it speaks the Converse wire, or its host is under `anthropic.com`,
-  `openai.com` or `deepseek.com`, or it is a Bedrock runtime host — `bedrock`
-  at the front and `.amazonaws.com` at the end (`isThirdPartyHost`). AWS as a
-  whole is NOT the test, and was until Round G: the shared GPU box is an EC2
-  instance the owner rents and runs, whether it is reached by a Route 53 name
-  or by the public name AWS gave it, and mail going there is not mail going to
-  a vendor. Loopback is deliberately not the test either: the box also arrives
-  on an `ssh` tunnel at `localhost:18100`. Such a target on `draft_reply` or
-  `draft_improve` needs `cloud_drafts_consent`; without it both resolve to
-  `AppPrefs.draftFallbackSpec`, which is the user-defined big model on that
-  placement and `Local prose` here — and never a third-party address, since
-  that is the operator the consent just refused. The
-  check lives in `AppPrefs.specForStage`, where the target is RESOLVED, so a
-  stage map restored from a backup cannot route a draft off the machine on its
-  own. Every other stage may be pointed anywhere without asking.
-- **Late binding.** `LlmClient` holds an optional `LlmTarget Function()` and
-  resolves it ONCE at the top of every request, so the URL, the model name,
-  the wire and the token can never come from two different settings. The stage
-  clients therefore still watch only `activityLogProvider`, and the resolver
-  reads `appPrefsProvider.notifier` — the notifier, not the state, which
-  subscribes to nothing: a settings change rebuilds no client and no worker,
-  and a drain already running finishes on the server it started with, request
-  by request.
-- **Where it is stored.** Seven prefs in `app_prefs`. Four define the
-  built-ins — `fast_llm_url`, `fast_llm_model`, `prose_llm_url`,
-  `prose_llm_model`, read into `AppPrefs` and composed by `AppPrefs.fastTarget`
-  / `proseTarget`, which `fastSpec` / `proseSpec` are a second view of.
-  **Empty means "follow the build"**, deliberately unlike `mcp_server_url`,
-  which resolves its default on read: a model default is a fact about this
-  machine's `local.mk`, and freezing today's value into the database would make
-  a changed dart-define invisible. Three more carry the routing:
-  `llm_targets`, `stage_targets` and `cloud_drafts_consent`. All seven survive
-  `wipeAll` for the same reason the backend mode does — machine configuration,
-  not one account's data.
-- **Discovery.** `ModelServerProbe` (`app/lib/services/llm/model_probe.dart`)
-  turns a completions URL into its `/v1/models` listing and GETs it with a 5 s
-  timeout. It never throws: reachable means HTTP 200 with a readable list.
-  llama-server answers with the single model it loaded; MLX-style runtimes list
-  several, which is what makes the model NAME worth setting.
+- **Late binding.** Every stage's `LlmClient` comes from
+  `stageLlmClientProvider(stageId)` (`app/lib/providers/app_providers.dart`)
+  with an `LlmTarget Function()` that calls
+  `AppPrefsNotifier.targetForStage(stageId)` ONCE at the top of every request,
+  so the URL, the model name, the wire and the token come from one setting.
+  The resolver reads the NOTIFIER, which subscribes to nothing: a settings
+  change rebuilds no client and no worker, and a drain already running
+  finishes on the server it started with, request by request
+  (`llm_routing_test.dart` pins it). The decision client is built the same
+  way (`decisionClientProvider`, resolving `targetForStage('decision')`).
+- **A bearer lives in the keychain.** `targetForStage` threads the token in
+  from a private cache on `AppPrefsNotifier`, filled once per launch by
+  `_loadBearers` (the resolver is synchronous and the keychain is not). The
+  specs carry only a presence flag (`boxBigKeyStored`, `decisionKeyStored`,
+  `cloudDraftsKeyStored`), false until the prefetch answers, so a first drain
+  that beats it sends no half-claimed key. The token reaches the wire as the
+  `Authorization` header and nowhere else: never `app_prefs`, never an
+  `LlmCallRecord`, never an exception message, never `LlmTarget.toString()`.
+  A keychain that refuses costs the header on the next request (a 401 park the
+  owner can see), never the launch.
+- **Discovery.** `ModelServerProbe` (`model_probe.dart`) turns a completions or
+  embeddings URL into its `/v1/models` listing, 5 s timeout, never throws. The
+  Models page's Check and the form's Connect use it (with the stored key, via
+  `bearerFor`), and the discovered name is what `box_big_model` /
+  `decision_model` store. A runtime that routes on the name answers HTTP 400
+  for one it lacks, and a 400 is fatal (below), which is why names are
+  discovered rather than typed.
 - **Embeddings are not switchable.** Stored vectors are tagged
-  `Qwen3-Embedding-0.6B/clustering-v3` and `…/document` and are only comparable
-  within a tag, so the embed slot is displayed and probed but never moved. The
-  `-v3` is 2026-09-19, when the clustering vector moved to Qwen: a change to
-  the model a corpus is embedded with, or to the text it is embedded from, is a
-  tag bump and a one-shot re-embed, and `05-embeddings.md` has both. The two
-  retired tags are still named in `embeddings_client.dart`, because a mailbox
-  embedded under either has to be recognised before it is re-embedded.
-- **What a wrong model name costs.** A runtime that routes on the name answers
-  HTTP 400 for one it does not have, and a 400 is fatal — never retried (see
-  below). Pick from the probe's list rather than typing.
-- **A note on the KV cache.** Switching a target's server sends the next
-  request's byte-identical system prompt to a cold prefix cache — one slower
-  call per task, then back to normal. Pointing BOTH slots at one server is
-  worse and permanent: two prompts evicting each other, which is the thing the
-  split exists to avoid. Pointing several STAGES at one target is the same
-  trade at finer grain — each stage's prompt is its own prefix, so a target
-  serving six of them holds six, and a single-slot server evicts on every
-  switch between them. A GPU-served target with room for the lot is where the
-  presets are aimed.
+  `Qwen3-Embedding-0.6B/clustering-v3` and `…/document` and are comparable
+  only within a tag, so the embedding model never moves.
+  `AppPrefs.embedRequestTarget` is what the wire carries: `bond-embed` at the
+  router under managed mode, the literal `embed` at `EMBED_URL` (`:8081`)
+  otherwise. `EmbeddingsClient` resolves it per request, and its
+  `describeUnavailable` says `is not running — see Settings, Models` under
+  managed mode and `run: make embed` otherwise.
+- **The KV cache.** Every generative stage now shares one server, so each
+  stage's byte-identical system prompt is its own prefix on it. A one-slot
+  server evicts on every switch between stages; a GPU-served target with room
+  for all of them is where Your server is aimed. Moving a role to another
+  server costs one cold call per prompt, then back to normal.
 
-Every call records which model answered it: `LlmCallRecord` carries `model` and
-`baseUrl`, and the activity log folds the model into the row as `llm_model`
-(shown on the `t/s` cell's tooltip and in the expanded detail). A streamed call
-also reports how long the box stayed empty: the log keeps the FIRST non-null
-`LlmCallRecord.firstTokenMs` a row saw and writes it into `detail_json` as
-`first_token_ms`, only when there was one. Only the draft path streams, so the
-key rides the draft rows and stays off every triage row rather than printing a
-dash on all of them. The record's `outcome` is decided after the answer has
-been made usable: a constrained call whose content is not the JSON object it
-asked for is recorded as `format`, never as `ok` — the decode runs inside the
-same instrumented try as the request, so a model that overran its budget mid-
-object counts as a failed
-call in every table built from these records.
+Every call records which model answered it: `LlmCallRecord` carries `model`
+and `baseUrl`, and the activity log folds the model into the row as
+`llm_model`. A streamed call also reports `firstTokenMs`, written into
+`detail_json` as `first_token_ms` only when there was one (only the draft
+streams). A constrained call whose content is not the JSON object it asked for
+is recorded as `format`, never `ok`. The decision client reports ONE record per
+decision or batch, labelled `decision`, however many HTTP requests it took.
 
-**Two wires, one client.** `LlmClient` can also carry a bearer token and speak
-Bedrock's Converse wire (`LlmWire.bedrockConverse`) alongside the OpenAI one.
-On Converse a JSON answer is a forced tool call rather than a
-`response_format`, `temperature` is not sent, and the response carries no
-server timings.
+**Two wires, one client.** `LlmClient` speaks the OpenAI wire and Bedrock's
+Converse (`LlmWire.bedrockConverse`). On Converse a JSON answer is a forced
+tool call rather than a `response_format`, `temperature` is not sent, and the
+response carries no server timings. The wire and the bearer arrive on the
+RESOLVED TARGET in `lib/` (`LlmTarget.wire`, `.bearer`; null means "follow the
+client's own") and on the constructor in the benches
+(`app/test/fixtures/bench_target.dart`). Only cloud drafts can resolve to
+Converse now, since both roles refuse it.
 
-Either can arrive two ways. On the CONSTRUCTOR, which fixes them for the life
-of the client and is the bench's path (`app/test/fixtures/bench_target.dart`,
-`docs/model-bakeoff.md`, "Bedrock as a target"); or on the RESOLVED TARGET,
-which is what `lib/` uses since Round E. `LlmTarget` carries an optional
-`wire` and an optional `bearer`, and `_wireOf` / `_bearerOf` prefer the
-target's over the constructor's — so a user's Converse target puts a Converse
-body and path out of a client every provider built on the OpenAI wire. Null on
-the target means "follow the client's own", which is what an OpenAI target
-resolves to and why the bench path is unchanged. `LlmWire` itself now lives in
-`model_slots.dart`, beside the target that carries it, and `llm_client.dart`
-re-exports it.
+**One streamed call.** `LlmClient.completeJsonStreamed` is the same request
+with `"stream": true` and `"stream_options": {"include_usage": true}`, read as
+server-sent events. It exists for the draft ([07-replies.md](07-replies.md))
+and shares everything but the delivery with the plain path: the same status
+mapping, the same timeout over the whole read, the same decode at the end, one
+record. Streaming is OpenAI-wire only; on Converse the call degrades to one
+plain POST.
 
-**One streamed call.** `LlmClient.completeJsonStreamed` is the same request with
-`"stream": true` and `"stream_options": {"include_usage": true}`, read back as
-server-sent events and handed to the caller delta by delta. It exists for one
-caller — the draft, see [07-replies.md](07-replies.md) — and it is a separate
-METHOD rather than a flag on `completeJson` because twenty-two test doubles
-override that method with its exact signature. Everything but the delivery is
-shared with the plain path: the same status mapping (5xx and 429 park, anything
-else non-200 is fatal), the same timeout over the WHOLE read rather than just
-the headers, the same `usage` and `timings` readers, the same reasoning
-tripwire, the same decode at the end — so a stream that stopped mid-object is
-the format failure a truncated plain answer is, and the observer sees exactly
-one record. That record carries one field the plain path leaves null:
-`firstTokenMs`. Streaming is OpenAI-wire only; on Converse the call degrades to
-one plain POST.
+## The decision client
+
+`DecisionClient` (`app/lib/services/decision/decision_client.dart`) renders a
+message's state (`decision_state.dart`, a byte-exact port of the training
+renderer), embeds it, and applies the heads (`decision_heads.dart`). The
+server is a stock llama-server serving the encoder as a mean-pooled embedding
+model: the managed router's `bond-decide`, `make decide` on `:8083`, or a
+box's `/decide/` slot.
+
+- **The identity probe.** Before the first embedding a target gets, the
+  client `POST`s `<prefix>/tokenize {"model", "content": "a", "add_special":
+  true}` with the same key, and anything but a non-empty list starting with
+  `[CLS]` 50281 and ending with `[SEP]` 50282 is a server of the wrong kind
+  (`The server at <origin> is not the decision model: its tokenizer is not
+  ModernBERT's.`). The vector checks below cannot tell: the embedding model
+  also answers 1024 raw numbers, and llama-server echoes the request's
+  `model` back. A 404 or 405 from `/tokenize`, here or on the token path, is
+  the same park (`… does not offer /tokenize, which the decision model
+  needs`). Only a pass is cached, per client and per `baseUrl|model`, so a
+  failed probe is asked again on the next call; `decide`, `decideBatch` and
+  `decideStates` probe once each. A decision **Connect** in Settings or the
+  wizard asks the same probe (`DecisionClient.checkServer`, through
+  `refuseWrongDecisionServer`) before it writes, and draws the sentence under
+  the form instead of connecting; the form also takes the decision model's
+  own name from a router's `/v1/models` (`bond-decide`, the box's served
+  name, this build's, or the stored one) before the first id.
+- **The request.** `POST <url> {"model", "input", "embd_normalize": -1}` with
+  `Authorization: Bearer` when the target has a key. `input` is a string for
+  one state, an array for a batch, or a flat int array for a token path.
+- **Raw vectors.** llama-server L2-normalises by default, and the heads were
+  trained on the RAW pooled vector (a linear layer with a bias is not
+  scale-invariant), so every request sends `embd_normalize: -1`. A vector
+  whose norm is within 1e-3 of 1.0 is refused as a format error: the belt
+  against a server that ignored the field. A vector whose length is not the
+  heads' `hidden` (1024) is refused the same way.
+- **Truncation.** llama-server refuses an input longer than its context (HTTP
+  500, `input (N tokens) is too large to process`) rather than cutting it, and
+  the model was trained on states truncated at 2048 tokens. That 500 is a
+  SIGNAL, not a failure: the client then `POST`s `<prefix>/tokenize
+  {"content", "add_special": false, "model"}` (the `model` field is required
+  by the router, which routes `/tokenize` on it), keeps the first
+  `maxTokens - 2` = 2046 ids and sends `[CLS] 50281 + ids + [SEP] 50282` as an
+  int array, which gives the vector HF truncation gave. A state longer than
+  6000 UTF-16 code units skips the text request and goes straight to the token
+  path. `tokenizeUrlFor` keeps any path prefix, so a box tokenizes under
+  `/decide/tokenize`. The refused text call is never retried as text, never
+  parks and never counts as an attempt.
+- **Batches.** `decideBatch` sends the short states in array requests of up to
+  16 (`batchChunk`); a chunk the server refuses as too large is re-sent one
+  state at a time so only the long one pays for the token path.
+- **Timeout.** 15 s per HTTP request, not per decision, so the token path can
+  take up to three requests.
+- **The heads file.** `decide-heads.json` in
+  `<models folder>/local_bond-decide/`, installed by `make decide-install`
+  beside the GGUF. `decisionHeadsProvider` loads it through
+  `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
+  needed even when the decision server is remote**, because the heads run
+  here. Missing, it throws `DecisionNotInstalledException` with "The
+  decision model is not installed. Run: make decide-install" (never cached,
+  so an install is seen at the next claim). A file this build refuses (not
+  JSON, another schema or question set) throws
+  `DecisionMisconfiguredException`, and that failure IS cached on the file's
+  mtime, so a bad file is parsed once rather than once per claim. Settings'
+  **Check** does not drop the cache: rebuilding it would rebuild the decision
+  client and the triage queue under it mid-drain.
+
+What goes wrong, and what the owner sees:
+
+| Failure | Exception | Park reason | Rail |
+|---------|-----------|-------------|------|
+| Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
+| Heads file refused (not JSON, schema, question set); the identity probe finds another tokenizer, or `/tokenize` answers 404 or 405; the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+| 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
+| Any other 4xx | `LlmFormatException` | none: counted against the item | none |
+
+Every fault that would fail every message alike parks: counting it per
+message would error the backlog and let each row flow on to its text with no
+decision. The one per-message fault is a 4xx the server gives this request.
+The activity log's words for the reasons are in `activity_log_panel.dart`
+(`decision model unreachable`, `decision model not installed`, `decision
+server misconfigured`, `the decision server refused the access key`), and the
+Models page
+carries the same park as one status line (`docs/settings.md`). The
+unreachable sentences name `make decide`, the hand-server fix; the URL in any
+of them is taken out by `redactEndpoints` wherever it is written.
+
+## The one-shot migrations
+
+`AppPrefsNotifier.read` runs four one-shots, in this order and no other. All
+are plain prefs, deliberately NOT in `MessageStore.derivedOneShotPrefs` (that
+list is what a wipe re-runs, and none of these guards a corpus).
+
+1. `box_targets_derived` lifts a Round G install's two `llm_targets` box rows
+   into the `box_url` origin.
+2. `box_servers_derived` splits `box_url` into `box_big_url` and
+   `box_small_url`.
+3. `stage_targets_cleared` empties the per-stage picks.
+4. `model_roles_derived` splits Round H's big/small pair into the roles.
+
+**`model_roles_derived`.** The keys were REUSED (`model_placement`,
+`box_big_url`, `box_big_model` and the `box-prose` keychain entry already mean
+the generative remote), so it is a no-op for every install but one shape: a
+THIRD-PARTY `box_big_url` (a vendor host or the Converse wire), which Round H
+used as its cloud-drafts mechanism and which the generative role may no longer
+use. `planModelRoles` decides, as a pure function:
+
+- **Adoption.** The vendor address becomes the cloud-drafts target
+  (`cloud_drafts_url`/`_model`) ONLY when the owner was actually using and had
+  agreed to it: the effective generative placement was `box`, consent stood,
+  and a model name had been discovered. Anything else is an address the owner
+  walked away from, and it is dropped with its key.
+- **The generative role then** goes to the owner's own stored small server
+  (its URL and model into `box_big_*`, except that a box's `/bulk` slot, the
+  4B, becomes its `/prose` sibling with `box_big_model` emptied so the build's
+  name is asked for); else follows the build when the small server did
+  (`box_big_*` emptied, placement kept); else comes home
+  (`model_placement = local`).
+- **The keychain moves**, in order: the `box-prose` key moves to
+  `cloud-drafts` (adopted) or is deleted (dropped); then, unless the role came
+  home, the `box-bulk` key moves to `box-prose`.
+
+The flag has three values: absent (not run), `1` (done), or
+`pending:<moves>`. The pending value is written BEFORE the preference moves,
+so a crash between them re-runs only the keychain half. `finishModelRoles`
+runs the moves, advancing the flag past each only after a read-back confirms
+it; it never throws and never logs. `main()`'s preload has no token store, so
+there the flag is left pending and the notifier finishes the moves before it
+loads the bearers. While any move is owed, the notifier attaches NO `box-prose`
+token (it might still be the vendor's): a 401 park the owner can fix rather
+than a vendor key sent to their own server. A key typed for the generative
+remote over a pending flag settles it, but only after a read-back shows the
+keychain really holds the typed key.
 
 ## Managed mode: one router
 
-Everything above describes the app talking to servers somebody else started.
-It can also start its own — ONE llama-server in router mode, serving every
-model this Mac's tier wants — and since Round H that is what a build with
-nothing changed does: `managedServerDefault` is `!handServersBuild`, so the
-router is ON unless the build passed
-`--dart-define=BOND_DEV_HAND_SERVERS=1`. See **On unless the BUILD says
-otherwise** below, which is the same fact from the supervisor's side.
+With `managedServer` true (every build but a `BOND_DEV_HAND_SERVERS` one) the
+app starts ONE llama-server in router mode serving every model this Mac's
+roles want.
 
 - **The supervisor.** `ModelServerSupervisor`
   (`app/lib/services/server/model_server_supervisor.dart`), behind
   `modelServerSupervisorProvider`. It writes a preset, spawns the binary
-  `LlamaBinary.resolve()` found, watches the child's output for the listening
-  line, polls `/models` and `/health` until every model the preset declares is
-  resident, and reports a `ServerState`. `ServerBootstrap`
-  (`app/lib/widgets/server_bootstrap.dart`) wraps the whole app and calls
-  `ensureRunning()` once at launch — a no-op while the preference is off.
-- **The router follows the placement at RUNTIME, not only at launch.** The
-  preset is a function of the placement: Managed asks for this Mac's whole
-  tier, User defined for the embedding model alone. `ensureRunning` answers "it
-  is already up" whatever a live server is serving, which is right at launch
-  and wrong after a switch, so `ensurePreset()` is what the placement writers
-  call — `SettingsHost` after either write and the wizard's `finish()`. It
-  starts a server that is down, leaves one whose preset hash still matches
-  alone, and restarts anything else. Without it, Managed → User defined left
-  about 22 GB of chat models mapped and User defined → Managed parked the work
-  until the next relaunch.
-- **The restart budget is per failing launch, not per session.** A crash is
-  retried on a 1 / 4 / 16 s backoff and then reported as `failed` with the log
-  tail. Reaching ready RESETS the count: a launch that came up has proved it
-  can, so a server that crashes once a week and recovers gets the whole ladder
-  every time rather than being given up on for good on its fourth crash. A
-  `couldn't bind` line is not retried at any backoff — no amount of waiting
-  frees a port somebody else is holding — but it IS retried once on a fresh
-  port, which is the race the preflight cannot close: the port answered free
-  and was taken by the time the child bound it. A second bind failure is
-  `ServerPortInUse`, the one case that state survives for.
-- **Three ids, one origin.** The preset names its models for the ROLE rather
-  than the checkpoint — `bond-prose`, `bond-bulk`, `bond-embed`
-  (`model_slots.dart`) — because the router routes on the model name alone.
-  Swapping which GGUF fills a role is then a change to the preset and to
-  nothing else: no stored target, no request and no test learns the new
-  checkpoint's name.
-- **How `targetFor` routes.** With the app running its own server, a slot whose
-  override is EMPTY — both the URL and the model — answers
-  `http://127.0.0.1:<router_port>/v1/chat/completions` with its router id.
-  A slot with a stored override keeps it. That asymmetry is deliberate: an
-  override is somebody deliberately pointing the app at a server they run, and
-  the app's own server must not silently take it away. Clearing the
-  override is what hands the slot back to the router. `AppPrefs.slotBaseline`
-  still answers that router target under managed mode and the compiled URL
-  otherwise, so whatever reads a slot's baseline follows the router across a
-  port change; nothing on screen reaches it now.
-- **Embeddings, two targets.** The embed slot is still not switchable, and it
-  now has two targets that are never the same thing.
-  `targetFor(ModelSlot.embed)` is for DISPLAY and its model is the corpus tag
-  (`EmbeddingsClient.modelTag`); `AppPrefs.embedRequestTarget` is what the wire
-  carries — `bond-embed` at the router in managed mode, and the literal
-  `embed` (`EmbeddingsClient.requestModel`) at `EMBED_URL` otherwise.
-  `EmbeddingsClient` resolves it through the same late-binding
-  `LlmTarget Function()` the chat client uses, once per request.
-- **Whose job it is to start it.** `EmbeddingsClient` also takes a
-  `describeUnavailable` closure. Unmanaged, a refused connection reads
-  `is not reachable — run: make embed`; managed, it reads
-  `is not running — see Settings, Models`, because naming a Makefile target
-  would send the user back to a workflow they have opted out of.
-- **`LLAMA_CACHE`.** The child is pointed at an EMPTY directory
-  (`servers/empty-cache`). `--no-models-autoload` stops the router loading
-  models it was not asked for, but it still LISTS everything in the Hugging
-  Face cache, so a developer with a dozen GGUFs downloaded would have the
-  readiness check waiting forever for models this app never asked for. An
-  empty cache makes the listing exactly the preset.
+  `LlamaBinary.resolve()` found, watches for the listening line, polls
+  `/models` and `/health` until every model the preset declares is resident,
+  and reports a `ServerState`. `ServerBootstrap` calls `ensureRunning()` once
+  at launch.
+- **The preset follows the placements at runtime.** Its `buildPreset` reads
+  `managedManifestProvider` (below), tells the prefs the machine tier, and
+  serves only the entries whose files are on disk (`withPresentFiles`).
+  `ensurePreset()` is what the placement writers' callers use: it starts a server that is down, leaves one whose preset hash
+  still matches alone, and restarts anything else. So moving the generative
+  role to Your server drops the chat model out of memory, and running
+  `make decide-install` while the app runs is picked up by the next
+  `ensurePreset` (a new hash) rather than by a relaunch.
+- **Four ids, one origin.** `bond-embed`, `bond-decide`, `bond-bulk` (the 4B),
+  `bond-prose` (the 27B), named for the role and not the checkpoint, because
+  the router routes on the model name alone: swapping which GGUF fills a role
+  is a preset change and nothing else. The generative role asks for
+  `bond-prose` or `bond-bulk` at `<router>/v1/chat/completions`; the decision
+  role for `bond-decide` at `<router>/v1/embeddings` (and `/tokenize`, with
+  the same `model`).
+- **The restart budget is per failing launch.** A crash is retried on a
+  1 / 4 / 16 s backoff and then reported `failed` with the log tail; reaching
+  ready resets the count. A `couldn't bind` is retried once on a fresh port
+  and is otherwise `ServerPortInUse`.
+- **`LLAMA_CACHE`** points at an empty directory (`servers/empty-cache`), so
+  the router's listing is exactly the preset and a developer's Hugging Face
+  cache cannot keep the readiness check waiting.
 - **The pid file and the quit hooks.** `servers/router.json` holds the pid, the
-  port, the preset hash and the binary path — JSON rather than a bare pid
-  because numbers are reused and the number alone is not evidence that the
-  process is ours. It is what the next launch reaps and what the Runner's
-  `applicationWillTerminate` reads. Dart's own hook is
-  `ServerBootstrap`'s `AppLifecycleListener.onExitRequested`, which stops the
-  server with a 4 s grace and then exits regardless; the Swift reaper is the
-  second line of defence, because a child started with
-  `ProcessStartMode.normal` still outlives a parent that dies without running
-  it (flutter#134255). That reaper compares the record's `binaryPath` against
-  the process's own executable (symlinks resolved on both sides) rather than
-  testing that the name ends in `llama-server`, so a pid the kernel has since
-  handed to a hand-started `make model` server is never signalled on quit.
-- **Adoption takes FOUR agreements**, and every one of them has been the wrong
-  answer on its own: the pid is alive, the recorded `presetHash` is the one
-  this build writes, the recorded `binaryPath` is the binary this build would
-  spawn (symlinks resolved, so `/opt/homebrew/bin/llama-server` and its Cellar
-  target are one answer), and the recorded `port` is the one `router_port`
-  names. Anything else falls through to the reap-then-start path, which kills
-  only when the process's command line carries both `llama-server` AND the
-  preset file this app wrote. The binary check is what stops a packaged build
-  adopting the Homebrew server a `BOND_LLAMA_SERVER` session left behind and
-  reporting Ready for it; the port check is what stops a record written before
-  a port change being adopted while every client dials the new one.
-- **On unless the BUILD says otherwise.** `AppPrefs.managedServer` stopped
-  being a preference in Round H: there is no `managed_server` row, no setter
-  and no switch. It defaults to `managedServerDefault` in `model_slots.dart`,
-  which is true unless the build passed
-  `--dart-define=BOND_DEV_HAND_SERVERS=1` — read as a VALUE, on
-  `BOND_DEV_SKIP_SETUP`'s precedent, so `=0` means what somebody who wrote it
-  meant. That define is for the engineers who run `make model fast embed` by
-  hand: with it, the compiled slot defaults stay `localhost:8080` / `8082` /
-  `8081` and the three-server workflow is byte-identical. The Makefile passes
-  it exactly as it passes the skip. The port (`router_port`, default 8080) and
-  the models folder (`models_folder`, empty = the app's own
-  `~/Library/Application Support/com.bondinbox.app/models`) survive `wipeAll`
-  with the four slot prefs and for the same reason. A port that is BUSY is not
-  a question for the user: the supervisor asks the runner for a free one, tells
-  the host through `onPortMoved` — wired to `setRouterPort` and awaited, so the
-  preference, the pid record and the clients agree — and starts there.
+  port, the preset hash and the binary path. `ServerBootstrap`'s
+  `onExitRequested` stops the server with a 4 s grace; the Runner's
+  `applicationWillTerminate` reaper is the second line, and it compares the
+  recorded binary path against the process's own executable so a pid reused by
+  a hand-started server is never signalled.
+- **Adoption takes four agreements**: the pid is alive, the recorded preset
+  hash is this build's, the recorded binary is the one this build would spawn
+  (symlinks resolved), and the recorded port is `router_port`. Anything else
+  falls through to reap-then-start, which kills only a process whose command
+  line carries both `llama-server` and this app's preset file.
+- **On unless the BUILD says otherwise.** `managedServerDefault` is
+  `!handServersBuild`; `BOND_DEV_HAND_SERVERS` is read as a value (`0`,
+  `false`, `no` mean off). With it the roles resolve to the hand-started
+  servers: `make model` (`:8080`), `make decide` (`:8083`), `make embed`
+  (`:8081`). A busy `router_port` is not a question for the user: the
+  supervisor takes a free port and `onPortMoved` records it before the child
+  is spawned.
 
 ### The manifest
 
-`app/assets/models/manifest.json` is the ONLY place the three checkpoints are
-named, and since Round F (2026-09-20) it is `version: 2` and names the machine
-tiers beside them. Phase 2's Dart trio (`RouterPreset.defaultTrio`) is gone; the
-preset's sections are now `ModelManifest.toPreset(folder)`, and `RouterPreset`
-knows how to write an INI and nothing about which models belong in one. That
-is the whole point of the file: bumping a model must not be a code change, and
-the diff of one bump must be legible on its own — three fields in one JSON
-file (see `docs/distribution.md`, **Bumping a model**).
-
-One entry per model, in FILE ORDER, which is also the order the INI's sections
-take and the order the router loads them in: smallest first, so the embedding
-model — the one the ingestion pipeline blocks on — is resident while the
-twenty-seven-billion-parameter prose model is still being mapped.
+`app/assets/models/manifest.json` (`version: 2`) is the ONLY place the
+checkpoints are named, and `RouterPreset` knows how to write an INI and nothing
+about which models belong in one. One entry per model, in file order, which is
+the INI's section order and the router's load order: smallest first, so the
+embedding model is resident while the 27B is still mapping.
 
 | Field | What it is |
 |-------|------------|
-| `id` | The router id — `bond-embed` / `bond-bulk` / `bond-prose`, from `model_slots.dart`. |
-| `role` | `embed`, `bulk` or `prose`. Exactly one model per role; the parser refuses anything else, because the app asks for a role and the router routes on the id. |
-| `repo`, `file` | The Hugging Face repo and the artefact in it. Kept apart because the resolve URL wants both halves and so does the on-disk layout (`<repo with '/' → '_'>/<file>`, the same rule as `RouterPreset.modelPath`). |
-| `revision` | A 40-character COMMIT SHA, never `main`. A branch is a moving target: the file behind `main` can be replaced upstream, and a download resolved through it would fetch bytes that no longer match `sha256` — a checksum failure the user cannot act on and this app would have caused. |
-| `sizeBytes`, `sha256` | The measured size and the LFS oid. Both are checked against the hub's `X-Linked-Size` / `X-Linked-ETag` on the redirect, so a manifest that is wrong about a file is caught before eighteen gigabytes are spent. |
-| `minRamBytes` | What the machine must have. 0 when it always fits. Nothing refuses on it: which checkpoints a Mac takes is the tier's answer, and this is the number the wizard quotes when it says why the writing model is not among them. |
-| `license`, `licenseUrl`, `notice` | What the first-run screen shows. `notice` is null for the permissive ones, so a screen can skip the line entirely rather than render an empty string. |
-| `sidecar` | Optional. A SECOND file the entry cannot be served without — today the writing model's MTP head — as `file`, `revision`, `sha256` and `sizeBytes`. No `repo` of its own: it lives in the parent's, which is also the folder it downloads into. Validated by the same rules as the entry's own fields, with the messages prefixed `sidecar.`. |
-| `serverArgs` | llama-server's long flags with the leading dashes stripped — the spelling the preset INI wants. Values are strings; the INI writer prints them verbatim. |
-| `tiers` | The machine ladder, one entry per tier: `id` (a `MachineTier` name), `minRamBytes`, the `models` that tier downloads and starts, and optional `serverArgs` overrides per id, merged onto the entry's own. |
+| `id` | The router id: `bond-embed`, `bond-decide`, `bond-bulk`, `bond-prose`. |
+| `role` | `embed`, `decide`, `bulk` or `prose` (`ModelRole`). One model per role; the generative ROLE can be filled by either `bulk` or `prose`. |
+| `source` | Absent for a Hugging Face download; `local` for a model installed by hand (the decision model). A local entry has no `revision`, is never downloaded, and is served only once its files are present. |
+| `repo`, `file` | The Hugging Face repo and file (`local/bond-decide` for the local entry). On disk: `<repo with '/' → '_'>/<file>`. |
+| `revision` | A 40-character commit sha, never `main`, for every downloaded entry. |
+| `sizeBytes`, `sha256` | Measured size and LFS oid, checked against the hub's headers on the redirect. For the local entry, the installed file's. |
+| `heads` | The decide entry only: `file`, `sha256`, `sizeBytes` of `decide-heads.json`. `RouterPreset` ignores it; it is what the app reads. |
+| `minRamBytes` | What the machine must have; informational (the tier decides). |
+| `license`, `licenseUrl`, `notice` | What the first-run screen shows. |
+| `sidecar` | Optional second file an entry cannot be served without: the 27B's MTP head. |
+| `serverArgs` | llama-server long flags without dashes, as the INI wants them. |
+| `tiers` | The memory ladder: `id`, `minRamBytes`, `models`, optional per-id `serverArgs` overrides. |
 
-**The tiers, and what a resolved manifest is.** Two rungs chosen from
-`hw.memsize` alone and stored nowhere, and one that is not a rung at all:
+**The tiers.** Two rungs from `hw.memsize`, stored nowhere
+(`machineTierFor`; unknown memory is `full`, the never-refuse rule):
 
-| tier | starts at | models | what differs |
-|---|---|---|---|
-| `full` | 40 GiB | the embedding model, the inbox model, the writing model | nothing; this is the manifest as written |
-| `inbox` | 0 | the embedding model, the inbox model | the writing model is neither downloaded nor started, and the inbox model runs at `c = 16384` over `parallel = 2` |
-| `remote` | not a memory rung | the embedding model | the inbox and writing stages are on the shared GPU box, so this Mac downloads and starts one model |
+| tier | starts at | models it can hold |
+|---|---|---|
+| `full` | 40 GiB | embeddings, decision, the 4B, the 27B |
+| `inbox` | 0 | embeddings, decision, the 4B (at `c = 16384` over `parallel = 2`) |
 
-`remote` is what the box PLACEMENT resolves to, not what a machine's memory
-says: `machineTierFor` never returns it at any byte count, and
-`effectiveTierProvider` answers it whenever `model_placement` is `box`. Its
-`minRamBytes` must be 0 and the parser refuses anything else, because the
-ladder that decides which memory rung a Mac is on is built over the other two
-and a second zero in it would make "the lowest tier" a coin toss.
-`tierStageDefaults(remote)` is empty and must stay empty:
-`applyTierDefaults` builds the set of stages it governs from the union of every
-tier's keys, so a stage named there would be cleared on a machine that never
-saw the box. `applyTierDefaults` returns at once on `remote` for the same
-reason from the other side: the placement rule owns that placement's stage
-map, and `usePlacement` is the one door that moves between the two.
+The tier constrains the MANAGED generative choice (the 27B only on `full`); it
+no longer says where anything runs. There is no `remote` tier: Round H's
+"everything on the box" tier is now simply "neither role is managed".
 
-`ModelManifest.forTier(MachineTier)` returns a RESOLVED manifest: the same
-class, holding only that tier's entries with its overrides merged in. The
-wizard's device step, its models rows and total, the disk preflight, the
-download run, the ledger check and the preset the supervisor writes all read
-the resolved view, so a Mac under the floor downloads 4.6 GB rather than 23.8,
-starts two servers rather than three, and is never sent back through the wizard
-for a file its tier never wanted. A resolved view may have no prose model, which
-is what `byRoleOrNull` is for; `byRole` still throws, and the master list still
-carries exactly one model per role.
+**What this Mac serves** is `ModelManifest.forRoles(hardwareTier,
+decisionManaged, generativeManagedId)`: the tier's view, keeping the embedding
+model always, the decision model when the decision spec is local, and the one
+managed generative model when the generative spec is local. It is
+`managedManifestProvider` in `app_providers.dart`, watched through `select`s on
+exactly those facts. Its `.downloadable` view (every entry but `source:
+local`) is what the wizard downloads and what `SetupGate` checks the ledger
+against, so a full-tier Mac on Managed downloads the embedding model and the
+27B, and the 4B only if chosen. The supervisor serves
+`forRoles(…).withPresentFiles(folder)`: any entry whose files (weights,
+sidecar, heads, whichever it has) are not all in the folder is left out of the
+preset, except the embedding model, which every stage needs and whose absence
+should fail the start with the preflight's own sentence. The server refuses to
+start with a file the preset names missing, and one missing model must not
+take the others down with it: a decision model not yet installed by
+`make decide-install`, or a chosen generative model not yet downloaded, leaves
+the preset and that role parks on its own reason while the rest run. The park
+is the CLIENT's, not the router's: `buildPreset` tells the prefs which managed
+ids it served (`setServedManagedIds`), and a managed target whose model is not
+among them resolves with an `LlmTarget.unavailable` sentence ("The Qwen3 4B is
+not downloaded on this Mac. Set up again to download it.", "The decision model
+is not installed. Run: make decide-install"), so `LlmClient` and
+`DecisionClient` throw their unavailable exception before any HTTP call. Asking
+the router for a model it does not serve would answer 400, and a 400 is fatal
+in both drains, so every message would end in error instead of waiting. The
+next `ensurePreset` after the file lands sees a new hash and restarts.
 
-The parser refuses a ladder it cannot trust: a tier id that is not a
-`MachineTier` name, a rung named twice, a rung missing, a model id the manifest
-does not ship, a tier without the embedding model, a tier other than `remote`
-without the inbox model, a `remote` tier with a memory floor, a ladder that
-does not start at zero, and a `full` tier whose `minRamBytes` is not the
-`fullTierMinBytes` this build was compiled with. The last one is what keeps the
-JSON and `model_slots.dart` from drifting apart about where the writing model
-begins.
+The flags that are not preferences, recorded here because JSON has no
+comments:
 
-The 40 GiB floor is a size, not a measurement: the three servers hold about
-26.4 GB resident together at 16K context, which leaves a 36 GB Mac no room for
-the app and the system. The `inbox` tier's `parallel = 2` is sized the same
-way, so the inbox model's KV cache stays under 3 GB on a 16 GB Mac. Both are
-sized rather than measured, and `docs/model-bakeoff.md` says which rows are
-which. Below 16 GiB there is no third tier: the wizard adds one sentence saying
-triage will be slower than any row in the ledger.
-
-JSON has no comments, so the three flags that are not preferences are recorded
-here instead:
-
-- **`pooling = last`** on the embedding model is not a taste. The embed role is
-  `Qwen/Qwen3-Embedding-0.6B-GGUF`, file `Qwen3-Embedding-0.6B-Q8_0.gguf`, and
-  its `serverArgs` are `{"embedding": "true", "pooling": "last",
-  "load-on-startup": "true"}`. Last-token pooling is the one flag llama.cpp
-  does not read off this model's GGUF, so a server left on the old `mean` would
-  answer plausible numbers in a different space from the vectors the app
-  stored. The flag moved from `mean` to `last` in Round E Phase 2 with the
-  vector itself (see [05-embeddings.md](05-embeddings.md)).
-- **`parallel = 4`** on the bulk model because the bulk slot is what the drain
-  hammers: triage, needs-you, extraction and the digests all queue against it.
-- **`parallel = 1`** on the prose model because it is the memory ceiling on
-  this machine, and a second concurrent context would double its KV cache.
-- **`c = 16384`** on both chat models since Round F, which is what every ledger
-  row since round 0 (2026-09-16) was measured at: 16K for the prose slot at one
-  slot, 4K a slot for the bulk one at four. The Makefile's `CTX_SIZE` default is
-  the same number, and `app/test/manifest_makefile_parity_test.dart` is what
-  says the two cannot drift.
-- **`spec-type = draft-mtp`, and the sidecar that makes it legal.** Since Round
-  G the prose entry carries a `sidecar` — `mtp-Qwen3.8-27B-Q4_0.gguf`, 1.6 GB,
-  at the same commit as the weights — and its `serverArgs` carry the flag. The
-  two travel together and neither is safe alone: `draft-mtp` is worth about
-  4 tok/s of decode on the maintainer's machine, and a `draft-mtp` with no head
-  to load is the one thing a first run cannot survive.
-
-  `make model` gets the head for free, because llama-server resolves it from
-  the repo an `-hf` download came from. The managed preset names a local PATH,
-  so it has to say where the head is, and `RouterPreset.toIni` writes it:
-
-  ```
-  [bond-prose]
-  model = <folder>/ggml-org_Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
-  model-draft = <folder>/ggml-org_Qwen3.8-27B-GGUF/mtp-Qwen3.8-27B-Q4_0.gguf
-  c = 16384
-  parallel = 1
-  load-on-startup = true
-  spec-type = draft-mtp
-  ```
-
-  The draft line sits immediately after `model` and before the flags, unquoted
-  for the same reason `model` is: llama-server's INI parser reads a value to
-  end of line, and a helpfully quoted path arrives with its quotes still in it.
-  The path is DERIVED from the manifest, never a literal in `serverArgs` — the
-  downloader's folder and the preset's are the same rule in one place.
-
-  **`model-draft` as a per-model key in a `--models-preset` INI is the expected
-  spelling of llama-server's `--model-draft` flag, and it is UNVERIFIED.** The
-  INI writer prints every key as that model's flag and nothing in this repo
-  names this one; the bundled build is b10896 (reporting 0.4.0-dev); and the
-  gate cannot run llama-server. It stays unverified until the managed server
-  has been started with the sidecar on disk and its log names a draft model.
-  A wrong key fails loudly at startup rather than quietly, which is why it is
-  safe to ship in this state and not safe to assume.
-
-  **Why it is nested rather than a fourth entry.** Every item in `models` is a
-  section in the preset, a role the router serves and a file the supervisor
-  waits for, and the parser allows exactly one model per role. A fourth entry
-  would need a fourth `ModelRole` that rule forbids, and it would raise
-  `--models-max`. Nested, the head is one more FILE on an entry that already
-  has one: the downloader fetches it after its parent under the ledger row
-  `bond-prose.draft`, the preflight budgets its bytes, `DownloadLedger.isCurrent`
-  wants both rows before it calls the checkpoint current, and the wizard draws
-  one bar and one row that says `+ MTP head, 1.6 GB` under the size.
+- **`bond-decide`: `embedding`, `pooling = mean`, `c = ub = b = 2048`,
+  `parallel = 1`.** The measured parity command (`make decide` runs the same
+  set). The micro-batch must hold a whole 2048-token state, because
+  llama-server refuses rather than truncates, and the client's truncation cuts
+  to exactly that. `app/test/manifest_makefile_parity_test.dart` keeps it and
+  the Makefile's `DECIDE_*` in step.
+- **`bond-embed`: `pooling = last`.** The one flag llama.cpp does not read off
+  this model's GGUF; `mean` would answer plausible vectors in a different
+  space from the stored ones (see [05-embeddings.md](05-embeddings.md)).
+- **`bond-bulk`: `parallel = 4`**, `c = 16384` (4K a slot); on the inbox tier
+  `parallel = 2`, so its KV cache stays under 3 GB on a 16 GB Mac.
+- **`bond-prose`: `parallel = 1`, `c = 16384`**, the memory ceiling on this
+  machine.
+- **`spec-type = draft-mtp` and its sidecar.** The 27B's entry carries the MTP
+  head as a `sidecar` (`mtp-Qwen3.8-27B-Q4_0.gguf`, 1.6 GB, same commit) and
+  `RouterPreset.toIni` writes it as `model-draft = <path>` straight after
+  `model`, unquoted. The two travel together: `draft-mtp` with no head to load
+  is a server that does not start. **`model-draft` as a per-model INI key is
+  the expected spelling of `--model-draft` and is UNVERIFIED** against a
+  running router; a wrong key fails loudly at startup. Nested rather than a
+  fourth entry because each entry is a role, and the head is one more file on
+  a role that already has one.
 
 ### The downloader
 
-`ModelDownloader` (`app/lib/services/models/model_downloader.dart`), behind
-`modelDownloaderProvider`. It fills the models folder the preset points at, and
-Phase 4 draws the wizard on top of it.
+`ModelDownloader` (`app/lib/services/models/model_downloader.dart`) fills the
+models folder with the `.downloadable` set.
 
-- **One stream at a time, smallest first.** The bottleneck is the link, not the
-  server, so four concurrent transfers only make every one of them finish
-  later; smallest first means the two small models land early and the wizard's
-  bars show real progress within minutes. It does NOT open the inbox early:
-  the wizard's Continue and the server both wait for every file THIS MACHINE's
-  tier asked for — three on a full Mac, two on an inbox one — because the
-  preset names every file and `_launch` refuses to start with one missing
-  (`ModelManifest.usableIds` is informational). And a digest that MOVED is
-  noticed at the next launch — `DownloadLedger.matches` fails, the gate shows
-  the wizard again and it opens on its download step.
-- **A failure moves on.** A prose model that 404s must not hide an embedding
-  model that finished, so a file's failure is an event on the stream and the
-  run continues to the next file. The stream itself never carries an error.
-- **`.part` beside the destination, HTTP Range resume.** The part sits next to
-  the finished name so the rename onto it is not a cross-device copy. **The
-  part's own length is the resume offset, never the ledger's** — the ledger is
-  written at most every couple of seconds and a crash can lose the last write;
-  the file cannot lie about how many bytes it holds. A server that answers 200
-  to a ranged request has ignored the Range, and the part is truncated rather
-  than appended to.
-- **Re-resolve on expiry, and no URL is ever stored.** Hugging Face answers a
-  resolve with a redirect to a signed CDN address that expires in about an
-  hour. A 403 mid-transfer means the signature aged out, not that access was
-  refused: the app asks the hub again, immediately, without a backoff.
-- **sha256 on the platform side.** `SystemInfo.sha256` (CryptoKit) because a
-  pure-Dart digest over twenty-three gigabytes takes minutes on the isolate
-  that draws the UI. The Dart fallback is what runs under `flutter test`, where
-  there is no channel behind the method call. One checksum mismatch is retried
-  from zero — a flipped bit in flight is worth one more try; a second is the
-  wrong file, and leaves neither a part nor a destination behind.
-- **The ledger lives in `setup_state['download']`.** One JSON value per run,
-  holding a status, a byte count and the manifest sha each part belongs to — a
-  bumped manifest therefore invalidates a stale `.part` rather than resuming
-  into bytes from another checkpoint. It holds no URL and no host.
-- **A disk preflight with 10 GiB of headroom** (`disk_preflight.dart`) over
-  what is still to be downloaded. Free space that cannot be asked is NOT a
-  refusal: the download hits ENOSPC and keeps its part, and refusing on
-  ignorance would block a volume that simply cannot be asked.
-- **The failure vocabulary** is closed and lives in `DownloadError`:
-  `disk_full`, `checksum`, `network`, `gated`, `manifest_mismatch`,
-  `missing_folder`, and `http_<code>` for everything else. Words rather than an
-  enum, so a ledger written by another build stays readable.
+- **One stream at a time, smallest first**; the wizard's Continue and the
+  server both wait for every file the set names.
+- **A failure moves on**: one file's failure is an event, the run continues.
+- **`.part` beside the destination, HTTP Range resume**, the part's own length
+  being the offset; a 200 to a ranged request truncates the part.
+- **Re-resolve on expiry**: a 403 mid-transfer is an aged-out CDN signature,
+  and the hub is asked again at once. No URL is ever stored.
+- **sha256 on the platform side** (`SystemInfo.sha256`, CryptoKit); one
+  mismatch is retried from zero, a second is the wrong file.
+- **The ledger** is `setup_state['download']`: status, bytes and the manifest
+  sha each part belongs to; no URL, no host.
+- **A disk preflight with 10 GiB of headroom**; free space that cannot be
+  asked is not a refusal.
+- **The failure words**: `disk_full`, `checksum`, `network`, `gated`,
+  `manifest_mismatch`, `missing_folder`, `http_<code>`.
+
+The decision model is not downloaded this round: `make decide-install` copies
+the GGUF and the heads file from the training export, sha256-pinned, into
+`local_bond-decide/`. Distributing it is an open packaging question.
 
 ### First run
 
-The wizard that fills the folder in the first place. Three gates, outermost
-first: `ServerBootstrap` → `SetupGate` → `AuthGate` (`app/lib/main.dart`). The
-bootstrap is above everything because the server is wanted signed in or out
-and set up or not; `SetupGate`
-(`app/lib/screens/setup/setup_gate.dart`) is above the auth gate because
-setting the machine up comes before signing in — the wizard has a sign-in step
-of its own, and meeting a bare sign-in screen before anything has explained
-what Bond is would be the app asking for credentials as its opening line.
-
-- **One stored word.** `setup_state['setup']` holds a `SetupStep.name`;
-  `'done'` is the only value that lets the app through. An unknown word — one
-  written by another build — reads as `welcome`, and so does a store read that
-  throws, on `AuthGate`'s reasoning about an unreadable keychain: the wizard is
-  the recoverable answer. The step is written BEFORE the step is entered, so a
-  quit mid-probe resumes on the screen the user was looking at; a write that
-  fails costs one step, not the button press.
-- **Nine steps.** Welcome, Your Mac, Where the models run, Models, Storage,
-  Download, Sign in, Notifications, All set. `docs/settings.md` (**First run**)
-  has the table and
-  the strings; `docs/install.md` is the same walk for a non-engineer.
-- **Continue on the download step waits for EVERY file**, not for
-  `ModelManifest.usableIds`. `_launch` refuses to start while any file the
-  preset names is missing, so a partial set could not serve the inbox anyway —
-  and finishing early would leave a non-engineer looking at an idle inbox with
-  no progress bar left to explain it. The rest of the app still uses
-  `usableIds`; this is the wizard's rule, not the router's.
-- **Finish applies this Mac's tier defaults, and is the only thing that writes
-  `'done'`.** Arriving at All set records `notifications`, the step before it:
-  `'done'` is the gate's sentinel, and a quit on the last screen would
-  otherwise let the next launch past the gate with no wizard left to walk.
-  `SetupController.finish` applies the tier defaults on the Managed placement
-  only, records `setup = 'done'`, and returns whether that landed — nothing
-  writes `managedServer`, which has been a build define since Round H. A false
-  answer keeps the
-  wizard on the screen with `Setup could not be saved. Try Finish again.`
-  rather than handing over an inbox whose setup is not on disk. Only a finish
-  that saved asks for the server, FIRE-AND-FORGET on `ServerBootstrap`'s
-  reasoning: adopting or spawning a server can take tens of seconds against a
-  twenty-seven-billion-parameter model, and the inbox has to open now. It is
-  `restart()` rather than `ensureRunning()` when the models folder moved during
-  the run — `ensureRunning` returns at once on a server that is already up, and
-  the router would go on mmap'ing the copies in the old folder. It never
-  throws.
-- **`--dart-define=BOND_DEV_SKIP_SETUP=1`** skips the wizard entirely. For the
-  three-server `make model | fast | embed` workflow, whose models live in the
-  Homebrew cache rather than this app's folder. A define rather than a
-  preference because it describes the build; `local.mk` passes it through.
-- **"Set up again"** (Settings → Models, the link at the foot of the section,
-  key `settings-set-up-again`) clears `setup_state`
-  except `SetupStore.keptOnRestart` — the migration record and the download
-  ledger — and bumps the counter the gate watches. The models stay on disk and
-  the session stays signed in, so those two steps are a Continue each.
+Three gates, outermost first: `ServerBootstrap` → `SetupGate` → `AuthGate`
+(`app/lib/main.dart`). `setup_state['setup']` holds a `SetupStep.name`, and
+`'done'` is the only value that lets the app through; an unknown word or a
+failed read is `welcome`. The steps, the Where step's role cards and their
+strings are in `docs/settings.md` (**First run**). Finish writes what the
+Where step chose through the role writers above, then records `'done'`, and
+only a finish that saved asks for the server, fire-and-forget: `restart()`
+when the folder moved or weights landed during the run, `ensurePreset()`
+otherwise. `BOND_DEV_SKIP_SETUP=1` skips the wizard. "Set up again" (Settings
+→ Models) clears `setup_state` except the migration record and the download
+ledger.
 
 ## Failure policy: park, never fall back
 
 - **No fallback between servers.** A down server throws
-  `LlmUnavailableException`; `AiWorker` (`app/lib/services/ai_worker.dart`)
-  parks only that *kind* of work, and a dead session parks the whole drain.
-  Work resumes when the server comes up.
-- Per-request timeout, per slot (`llm_client.dart`): **90 s on the prose
-  client** (`LlmClient.proseTimeout`), **120 s on the bulk one**. 5xx →
-  unavailable/park;
-  429 (a throttled cloud server) → unavailable/park as well; **401 and 403 →
-  unavailable/park too**, as `LlmUnauthorizedException`, since Round G; timeout →
-  counted against the item; HTTP 400 → fatal, never retried — which
-  is what a model name the server does not have looks like.
-- **A refused key parks rather than spending the backlog.** A wrong api-key
-  answers every item identically, so counting it against each one would burn
-  the whole queue's attempts in seconds and fill the activity log with one
-  error a hundred times. `LlmUnauthorizedException` is a subclass of
-  `LlmUnavailableException`, so every existing `on LlmUnavailableException` arm
-  catches it unchanged; what the subclass buys is the reason the drains record.
-  Its sentence reads `The model server at <url> refused the access key. Check
-  it in Settings, Models.`, and `redactEndpoints` takes the URL out of every
-  row it is written into.
+  `LlmUnavailableException` (or a subclass); `AiWorker` parks only that kind
+  of work, and the triage drain (whose one model is the decision model)
+  parks whole. Work resumes when the server
+  comes back. There is no LLM fallback for the decision model and no second
+  server for the generative one.
+- **Status mapping** (`LlmClient`, and the decision client's own):
+  connection failure, 5xx and 429 → unavailable, park; 401 and 403 →
+  `LlmUnauthorizedException`, park; timeout → counted against the item on the
+  chat client, park on the decision client; HTTP 400 → fatal, never retried,
+  which is what a model name the server lacks looks like.
+- **A refused key parks rather than spending the backlog.** A wrong key
+  answers every item identically, so counting it per item would burn the
+  queue's attempts in seconds. `LlmUnauthorizedException` is a subclass of
+  `LlmUnavailableException`, so every existing `on LlmUnavailableException`
+  arm catches it; the subclass buys the reason. Its sentence ("The model
+  server at <url> refused the access key. Check it in Settings, Models.") has
+  its URL removed by `redactEndpoints` wherever it is written.
+- **Which server died is in the type.** `EmbedUnavailableException` and
+  `DecisionUnavailableException` are subclasses too, because the three
+  servers are placed apart and "model server unreachable" would send a person
+  to a server that is answering fine. `parkReasonFor` maps the closed set to
+  one word each, subclasses first. `ModelNotInstalledException` (thrown by
+  `LlmClient` for a managed generative target carrying
+  `LlmTarget.unavailable`) is `not_installed`; the decision client's own
+  `DecisionNotInstalledException` is `decision_not_installed`, because its fix
+  is a command rather than a download; `DecisionMisconfiguredException` is
+  `decision_misconfigured`, because waiting fixes neither of its causes (the
+  address or the heads file), so its sentence claims no retry;
+  `DecisionUnauthorizedException` is
+  `decision_unauthorized`, named for the decision server rather than worded by
+  the generative placement. A failed TLS handshake (`TlsException`, e.g. an
+  expired certificate) parks on both clients like a refused connection, at
+  the handshake or mid-stream.
+- **A key no header can carry is refused, never sent.** The writers
+  (`useGenerative`/`useDecision`/`useCloudDrafts`) throw an `ArgumentError`
+  and the form says so under the field for a key outside printable ASCII
+  (`isUsableAccessKey`); a stored one that slips through is refused by both
+  clients before the request (and a `FormatException`/`ArgumentError` raised
+  while sending maps the same way) as an unauthorized park whose sentence
+  never includes the key. Error-body snippets blank the key in both clients.
 - **Parking is VISIBLE, and nothing polls for it.** Both drains carry the
-  reason on their progress streams — `WorkProgress.parkedReason` and
-  `TriageProgress.parkedReason`, one of `model_unavailable`, `unauthorized` or
-  `session` — and `parkedProvider` merges them. Triage keeps one slot and the
-  worker lanes keep ONE SLOT PER KIND, because `AiWorkers` forwards three lanes
-  onto one stream and a drain emits per handler even when that handler had no
-  rows: a single slot would let the storyline lane's empty emit erase the fast
-  lane's park a microsecond after it happened. The reason is triage's, else the
-  first non-null across the kinds in a stable order; the count is triage plus
-  the sum over the kinds. The inbox rail renders one sentence from it:
+  reason on their progress streams (`TriageProgress.parkedReason`,
+  `WorkProgress.parkedReason`, merged by `parkedProvider`); triage keeps one
+  slot and the worker lanes one per kind, so an empty emit from one lane
+  cannot erase another's park. The inbox rail renders one sentence
+  (`railProgressLine`):
 
-  | reason | placement | sentence |
+  | reason | generative placement | sentence |
   |---|---|---|
-  | `model_unavailable` | box | `Your server is not answering · N waiting · retrying each minute` |
-  | `model_unavailable` | local | `Model server unreachable · N waiting · retrying each minute` |
-  | `unauthorized` | box | `Your server refused the access key · N waiting` |
-  | `unauthorized` | local | `Model server refused the access key · N waiting` |
-  | `session` | either | today's `Triaging N remaining…` |
+  | `model_unavailable` | Your server | `Your server is not answering · N waiting · retrying each minute` |
+  | `model_unavailable` | this Mac | `Model server unreachable · N waiting · retrying each minute` |
+  | `unauthorized` | Your server | `Your server refused the access key · N waiting` |
+  | `unauthorized` | this Mac | `Model server refused the access key · N waiting` |
+  | `embed_unavailable` | either | `Embedding server unreachable · N waiting · retrying each minute` |
+  | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
+  | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
+  | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+  | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+  | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
+  | `session` | either | `Triaging N remaining…` |
 
-  Processing being off still wins over all five. The Models page carries the
-  same fact as one line, but not all of it and not under both modes: under
-  **User defined** it answers all three parks in its own words, and under
-  **Managed** it answers the embedding one alone, because the other two are
-  about a server whose own state sentence is the next thing on that page.
-  **What clears it is the next pump**: the reason is dropped at the top of
-  `pump()` and again on the first item that gets through, so the line goes
-  away because work got done rather than on a timer. Pumps come from the
-  inbox's own sixty-second poll and from
-  `ModelServerSupervisor.onReady`, which is the only cadence the sentence
-  claims. A refused key claims no retry at all, because retrying will not help
-  until somebody fixes it. `N` is the WHOLE pipeline's backlog, triage and the
-  three lanes together, so a parked worker queue is still reported once triage
-  itself has nothing left.
-- `TriageQueue` and the FAST `AiWorker` share one `DrainGate`
-  (`app/lib/services/drain_gate.dart`) so those two drains never compete for
-  the fast server's slots. The storyline and draft lanes hold their own gates
-  — see **Three drains** below. The worker's header comment explains handler
-  ordering as a data dependency and per-kind vs whole-drain parking.
+  Processing being off wins over all of them. The Models page carries the
+  same fact as its status line (`docs/settings.md`). **What clears it is the
+  next pump**: the reason is dropped at the top of `pump()` and on the first
+  item that gets through. Pumps come from the inbox's sixty-second poll and
+  from `ModelServerSupervisor.onReady`, the only cadence the sentence claims.
+  A refused key claims no retry, nor does a misconfigured decision server,
+  though the next pump still asks again, so a fixed address recovers without
+  a Check. `N` is the whole pipeline's backlog.
 
 ## Three drains
 
-Since Round C (2026-09) there are three `AiWorker` instances, not one, and
-three gates. One list behind one gate meant the 27B's work sat both in front
-of the 4B's and behind it: a message that arrived while a recap was being
-written waited for the recap, and a draft a person asked for waited for the
-whole pass to come round.
+Three `AiWorker` instances and three gates, so a person's draft never waits
+behind a recap and a new message never waits behind either:
 
 | Lane | Kinds, in drain order | Server(s) | Gate | Provider |
 |---|---|---|---|---|
-| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | fast + embed | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
-| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | fast (membership) + prose (naming, refresh, recap) | `storylineDrainGateProvider` | `storylineWorkerProvider` |
-| Draft | `draft` | prose | `draftDrainGateProvider` | `draftWorkerProvider` |
+| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
+| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative | `storylineDrainGateProvider` | `storylineWorkerProvider` |
+| Draft | `draft` | generative, or cloud drafts | `draftDrainGateProvider` | `draftWorkerProvider` |
 
-The cut is where the constraints are, not where the servers are. The fast lane
-is the critical path for a new message and holds nothing that dials the 27B.
-Its own load on the fast server is one kind at a time at K=3 — needs-you, then
-extraction — and the gate it shares with the triage drain is what stops that
-K=3 landing on top of triage's. The fourth slot is the STORYLINE lane's: it is
-on a gate of its own, and its membership confirms are fast-server calls, so the
-worst case at that server is three plus one, which is `FAST_SLOTS`.
-The storyline six stay together because their ORDER is an argument
-(`06-storylines.md`) and they mutate shared membership — splitting them by
-server would break it. The draft is alone because it is the one kind a person
-sits and waits for. Where the two prose lanes genuinely contend the SERVER
-queues them, so the worst case for an asked-for draft is one recap rather than
-a drain pass.
+The lanes were cut when the fast lane had a 4B of its own. With one generative
+server they are still the right cut for ORDER (the storyline six mutate shared
+membership in an order that is an argument, see
+[06-storylines.md](06-storylines.md); the draft is the one kind a person
+waits for), but they now contend at one server, which queues them. On a
+managed full-tier Mac that server is the 27B with one slot, so today every
+lane's calls take turns there; that is the cost the decision pass (Phase 5)
+began to remove and the one-call-per-message task (Phase 6) finishes.
 
-**The newest message goes first.** Since Round G the fast gate carries one
-flag as well as its queue. A triage pump that finds something waiting asks for
-a yield and enqueues its own drain in the same step. The fast worker reads
-that flag only where it is about to claim its next item, so the item already
-at the server is never abandoned and the pass simply ends there. The gate goes
-back to the queue, triage runs, and the worker walks again from the top. The
-ask is a ticket rather than a latch: the drain queued at or after it clears it
-as its body starts, so the flag cannot outlive one handoff and neither side
-can starve the other. The messages triage just decided on then run ahead of
-the backlog, and they do not wait for the current pass to end. Those pairs
-ride the `onDrained` callback into `pump`, and the worker serves them at its
-next claim boundary, which is the moment before it would have taken another
-backlog row. The priority pass claims each of them through every fast handler
-in the walk's own order and then the walk carries on with the kind it was
-part way through. Serving them only at the top of the next pass was measured
-on the shared box and was not enough: a named message's extraction still
-waited behind every needs-you in the backlog. A message that arrives
-mid-backlog therefore costs its own triage, its own needs-you and its own
-extraction, plus whatever item was in flight when it landed, instead of a full
-pass over everybody else's. The claim behind the pass repeats the untriaged
-guard verbatim, so a named message that triage has not yet spoken about is
-refused and the ordinary walk collects it once the verdict lands. The pass
-itself reads no yield, because it is the work a yield was asked for and
-stopping inside it would starve the very message that prompted the ask. At
-most eight messages ride one pass; the rest are ordinary pending rows a moment
-later. Nothing here touches the draft lane or the storyline lane, which hold
-gates of their own, and nothing changes the sixty-second poll.
+**Triage still holds the fast gate (Phase 6).** Triage no longer calls the
+generative server, but it shares `fastDrainGateProvider` with the fast worker
+for ORDERING — the yield ticket and `onDrained` below — so a triage pump can
+wait behind a message-text call already in flight. A separate triage gate is
+a follow-up round candidate.
 
-**What the lane is worth, measured 2026-09-21.** `make bench-pipeline` upserts
-one extra message at the moment the prose server starts its first draft and
-times it to its own extraction finishing, over 48 ungated messages at policy
-`all` and width 1 in the `lanes` shape. Both slots on the box means bulk on the
-box 4B-FP8 and prose on the box 27B-FP8, reached over TLS.
+**The newest message goes first.** A triage pump that finds work asks the fast
+gate for a yield. The fast worker reads the flag only where it is about to
+claim its next item, so the item at the server is never abandoned; triage
+runs, and the messages it just decided on ride `onDrained` into a PRIORITY
+pass that claims each through every fast handler before the walk resumes.
+The ask is a ticket, cleared by the drain queued at or after it, so neither
+side can starve the other; at most eight messages ride one pass. Measured on
+Round G's two-slot routing (2026-09-21, `make bench-pipeline`), a message
+arriving mid-backlog was extracted 7.2 s after it landed on the box, against
+32 s before; the lanes' behaviour is unchanged, the servers behind them are
+not, and the number has not been re-taken on one generative model.
 
-| tree and placement | needs-you at | extraction done at |
-|---|---|---|
-| Round F, both slots on the box | not taken | 32 s |
-| Round G Phase 3 tip, both slots on the box | 5.6 s | 22.8 s |
-| Round G final tree, both slots on the box, pass 1 | 5.1 s | 6.9 s |
-| Round G final tree, both slots on the box, pass 2 | 5.4 s | 7.2 s |
-| Round G Phase 3 tip, all local, under load | 10.9 s | 72.4 s |
-| Round G final tree, all local, under swap | 10.1 s | 13.2 s |
-| Round F, all local | not taken | 91.4 s |
+**…and one switch.** Model work runs only while **AI processing** is on
+(`processingProvider`, remembered in `processing_on`, default on). It reaches
+each drain as one `enabled` closure read on every launch decision; an off
+`pump()` returns at once but still EMITS the waiting count for the rail's
+`Processing is off · N waiting`. Off stops the queue and the three lanes; on
+runs `pumpTriageThenWorkersQuietly` once. Sync, read-acks, the Models page's
+Check and Connect, and the Find field's query embedding keep running. The
+composer's **Draft reply** is disabled with `Processing is off`.
 
-The Phase 3 tip is the row that explains the shape of the fix. The yield alone
-took the late arrival from 32 s to 22.8 s, and the stage split says the
-priority pass never actually served that message: its needs-you ran early only
-by claim order, and its extraction waited behind every needs-you in the
-backlog, because refs handed to a pass that had already started with an empty
-priority list were consumed only at the next pass top. Serving them at every
-handler boundary and before every claim is what closes it, and it is the same
-shape on both machines, which is why the local row is quoted here although its
-walls were taken under load and are not comparable. On the final tree the same
-message is extracted 7.2 s after it lands, against 22.8 s before the fix and
-32 s before the round, and the backlog's own walls do not move. The local
-final-tree pass falls the same way, 13.2 s against 72.4 s under comparable
-load, although its own walls were taken with the machine in swap.
-
-**…and one switch.** Model work runs only while **AI processing** is on. The
-switch is the first row of the sidebar's list header (`InboxScreen._listHeader`,
-keyed `processing-toggle`) and its state is `processingProvider`, seeded from
-the remembered `processing_on` preference, which defaults ON since Round H: the
-default server is the right one by rule, and a wrong or missing server parks
-with a sentence rather than spending attempts. A tester who turns it off finds
-it off after a relaunch. It reaches the pipeline
-as ONE `enabled` closure per drain: `AiWorker` and `TriageQueue` each take
-`bool Function()? enabled` and read it on every launch decision, so an off
-lands on the item after the one already at the server. `pump()` returns at once
-while off — no gate is taken, no claim is made, and `onDrained` does not fire,
-which is what stops an off session re-arming the storyline sweep on every
-poll. The one thing an off pump still does is EMIT: `TriageQueue.pump` reads
-the waiting count and puts it on its progress stream, because that stream is
-what the rail's `Processing is off · N waiting` caption reads and nothing else
-ever puts a first snapshot on it. Turning it off calls `stop()` on the queue
-and on the three lanes through `AiWorkers.stopAll()`; turning it on runs
-`pumpTriageThenWorkersQuietly` once. An on that lands while a drain is still
-finishing its last item lifts the stop rather than waiting for the next poll:
-`pump()` clears the flag on its way in, which is what `stop()` has always
-promised.
-
-What keeps running while it is off: mail and Teams sync, the read-ack queue,
-Settings → Models → **Check** on a role row, or **Connect** on the form (a
-probe, not a pump, and it is how a server gets checked in the first place), and
-the query embedding behind the Find field, which a person is waiting on. The composer's **Draft reply** is disabled
-with the tooltip `Processing is off`, because asking while off writes a work
-row that nothing would claim. The switch writes one activity row, kind
-`processing`, status `on` or `off`.
-
-**Order across lanes is enqueue-and-pump, not list position.** A fast handler
-writes the `storyline*` or `draft` row and something wakes the lane that owns
-it: `AiWorker.onDrained` fires after every completed drain, empty ones
-included (the fast lane wakes the other two; the storyline lane wakes the
-draft lane), and `ExtractHandler.onDraftQueued` wakes the draft lane as each
-row is written, so a prefetch starts seconds after its extraction rather than
-at the end of the fast drain. The fast lane also re-arms the storyline sweep
-through `MessageStore.requeueSweep()` before it wakes that lane, and only after
-a drain whose `AiWorker.lastDrainCount` is above zero, so a settled fast lane is
-what schedules the sweep and an idle pump schedules nothing.
-`AiWorkers.pumpAll()` — fast, THEN the other two
-together — is what a caller outside the pipeline pumps, and its chained shape
-is what keeps "the sync's pump completed" meaning "and the drafts are done".
+**Order across lanes is enqueue-and-pump.** A fast handler writes the
+`storyline*` or `draft` row and wakes the owning lane: `AiWorker.onDrained`
+after every drain (fast wakes the other two; storyline wakes draft), and
+`ExtractHandler.onDraftQueued` per row. The fast lane re-arms the storyline
+sweep through `MessageStore.requeueSweep()` only after a drain that did work.
+`AiWorkers.pumpAll()` is fast, then the other two together.
 
 **How wide the draft lane runs is a property of the draft TARGET.**
-`DraftHandler.concurrency` is a closure over
-`AppPrefs.specForStage('draft_reply')?.parallel`, and `AiWorker` re-reads it on
-every launch decision — so pointing the stage somewhere else moves the next
-draft rather than the next launch. On the built-in prose target that width IS
-`AppPrefs.proseParallel` (`prose_parallel`, 1–8, default 1), so a machine that
-has added no target reads exactly the number it always read; a draft pointed
-at a user-defined server reads that spec's own width, which is four only for
-an address that follows the build and one for any stored address. Since Round
-H no screen shows the number: **Drafts in flight** went with the Advanced
-fold, and the width is the server's rather than a preference anybody is asked
+`DraftHandler.concurrency` reads `AppPrefs.specForStage('draft_reply')
+?.parallel` on every launch decision: `prose_parallel` on this Mac, 4 on Your
+server following the build, 1 on a stored address or cloud drafts. A second
+closure, `streams`, lets a target that cannot stream (Converse) make the plain
+call. Recaps and refreshes stay at one because each writes the storyline it is
 about.
-`DraftHandler` takes a second closure beside it, `streams`, over the same
-resolved spec: a target that cannot stream — one on the Converse wire has
-nothing to stream at all — makes the plain call and publishes nothing to the
-draft bus. One per slot the prose server was started with (`SLOTS` in
-`local.mk`, `--max-num-seqs` on vLLM); extra requests queue at the server
-rather than fail. Drafts only: a recap and a refresh both write the storyline
-they are about and stay at one. Measured 2026-09-17: a second local slot on
-this Mac's 27B did not pay (width 2 slower end to end than width 1); the
-default stays 1 locally, and 4 is the measured value for a GPU-served target.
 
-**Two writers ride the storyline gate** because the single gate used to
-serialise them by accident:
-
-- `GateRepairService.afterGate` is called from inside the triage drain. Its
-  message-side writes stay awaited; its three storyline writes
-  (`evictGatedThread`, `clearConversationEmbedding`,
-  `deletePendingWork('storyline', …)`) go through the storyline lane's gate,
-  unawaited, and write their own activity row when they land. The sharp one is
-  the delete: landing while the lane holds that row's claim it would miss it,
-  and the assign pass would file the thread straight back after the eviction.
-- `ContextBriefHandler.onBriefChanged` → `StorylineService
-  .offerDirectoryCharters` writes `charterSuggestion`, and the refresh pass
-  writes the same column. The offer is dispatched onto the storyline gate,
-  unawaited — so the brief handler (fast lane) never waits on a sweep, and the
-  activity row for a brief no longer carries `charters_offered`.
-
-The one-shot `GateRepairService.repairAll` stays inline: it runs once per
-install, from the sync, before the storylines it would race have anything to
-do.
-
-`make bench-pipeline` measures both shapes — `PIPE_SHAPE=single` is the
-pre-Round-C single worker, `lanes` is what ships. See `docs/model-bakeoff.md`.
+**Two writers ride the storyline gate**: `GateRepairService.afterGate`'s three
+storyline writes (evict, clear the conversation embedding, delete the pending
+`storyline` row) and `ContextBriefHandler.onBriefChanged`'s charter offer, both
+unawaited, so the fast lane never waits on a sweep. The one-shot
+`GateRepairService.repairAll` stays inline.
 
 ## Every prompt is fenced
 
 Every task's system prompt is `rules + untrustedDataClause`
 (`app/lib/services/llm/prompt_guard.dart`), and all sender-supplied text is
 wrapped by `wrapUntrusted` with `&`-first escaping so a message body cannot
-forge a closing tag. A new task must compose its prompt the same way — no
-raw interpolation of message content into a prompt, ever.
+forge a closing tag. A new task must compose its prompt the same way — no raw
+interpolation of message content into a prompt, ever. The decision model's
+input is not a prompt: it is the rendered state the classifier was trained on
+(`decision_state.dart`), and it carries no instructions to fence.
 
 ## Task plumbing
 
 Every chat task implements `JsonTask` (`app/lib/services/llm/json_task.dart`):
-a schema-constrained call whose defaults are temperature 0.2 / maxTokens 512,
-overridden per call site (see each stage's page). Decoding is
-grammar-constrained; `make bench-verify` asserts the server honours the
-schema before any bench run trusts it. `runTask(onText:)` is what picks the
-streamed method instead of the plain one, and `DraftHandler` is the only caller
-in `lib/` that passes it — every other stage, every test double and every bench
-goes through `completeJson` unchanged.
+a schema-constrained call, temperature 0.2 / maxTokens 512 by default,
+overridden per call site. Decoding is grammar-constrained; `make bench-verify`
+asserts a server honours the schema before any bench trusts it.
+`runTask(onText:)` picks the streamed method, and `DraftHandler` is its only
+caller in `lib/`.
 
-**The two timeouts are one number each, sized to the longest legitimate call
-on that slot.** The prose client gets 90 s, and there are two worst cases to
-clear. An ordinary directory-fed draft with every input at its cap is about
-14K characters of prompt, prefilling in roughly 26 s, plus 768 generated
-tokens in roughly 43 s with speculative decoding: 69 s. A draft whose pack
-expanded a section is larger — the passages take their 8,700 ceiling and the
-storyline summary its 600 — about 20K characters, roughly 5K tokens, so
-roughly 37 s of prefill and the same 43 s of generation: about 80 s. Both fit
-under 90, with about ten seconds of headroom on the expanded case, and 60
-would cut BOTH off mid-sentence. The fast client keeps the generic 120: its
-calls answer in seconds, so the number only ever describes how long a dead
-server is waited on, and there is nothing to be gained by tightening it. The
-bench clients pass no timeout at all and so inherit that same 120
-(`app/test/fixtures/bench_target.dart`), which is deliberate: a prose bench
-can pass where the app itself would have given up at 90, and a candidate
-runtime slower than the app's ceiling shows up as a p50 above about 90 s in
-the table rather than as a failed run.
+**Timeouts.** Every generative stage's client gets `LlmClient.proseTimeout`,
+90 s, since the decision-model round: one generative model does the short
+calls and the drafts alike, and on the 27B a short call behind a draft in the
+same slot can wait that long. The number is sized to the longest legitimate
+draft: about 14K characters of prompt at every input's cap (26 s of prefill
+plus 43 s for 768 tokens with speculative decoding, 69 s), or about 20K when a
+section is expanded (roughly 80 s), with ten seconds of headroom. The generic
+120 s (`_defaultTimeout`) is what a client built without one gets, including
+every bench client (`app/test/fixtures/bench_target.dart`), so a candidate
+runtime slower than the app's ceiling shows as a p50 above 90 s rather than as
+a failed run. The decision client's is 15 s per HTTP request.

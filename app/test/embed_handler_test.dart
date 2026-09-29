@@ -3,7 +3,6 @@ import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/embed_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart'
     show messageCardBodyCap;
@@ -16,6 +15,7 @@ import 'package:http/testing.dart';
 
 import 'fixtures/fake_embed_server.dart' show embedDims;
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// A fake embedding server that counts what it was asked.
 ///
@@ -95,17 +95,16 @@ void main() {
       await store.writeTriage(source, id,
           status: 'skipped', gateReason: gateReason);
     } else if (summary != null) {
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         source,
         id,
         status: 'triaged',
-        result: TriageResult(
-          urgency: 'high',
-          category: 'work',
-          summary: summary,
-          needsAction: true,
-          actionItems: const ['Ship on Thursday'],
-        ),
+        urgency: 'high',
+        category: 'work',
+        summary: summary,
+        needsAction: true,
+        actionItems: const ['Ship on Thursday'],
       );
     }
   }
@@ -180,17 +179,16 @@ void main() {
       await runOne(EmbedHandler(store, server.client));
       final firstHash = (await vectorRow('m1'))!['embedded_hash'];
 
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm1',
         status: 'triaged',
-        result: const TriageResult(
-          urgency: 'high',
-          category: 'work',
-          summary: 'Sarah wants the ship date confirmed today.',
-          needsAction: true,
-          actionItems: [],
-        ),
+        urgency: 'high',
+        category: 'work',
+        summary: 'Sarah wants the ship date confirmed today.',
+        needsAction: true,
+        actionItems: [],
       );
       await runOne(EmbedHandler(store, server.client));
 

@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -30,7 +31,7 @@ const Map<String, dynamic> launchAnswer = {
 
 /// A client that answers at once. The held ones are built in the tests that
 /// need them, because the latches they hold belong to those tests.
-ScriptedLlm fastLlm() => ScriptedLlm(answers: const {'triage': launchAnswer});
+ScriptedLlm fastLlm() => ScriptedLlm(answers: const {'decision': launchAnswer});
 
 /// A store whose result writes fail — a disk that filled, a database closed
 /// under a teardown. The one way an item can finish without ever clearing its
@@ -182,13 +183,13 @@ void main() {
       final started = Completer<void>();
       final release = Completer<void>();
       final llm = ScriptedLlm(
-        answers: const {'triage': launchAnswer},
+        answers: const {'decision': launchAnswer},
         onCall: (_) {
           if (!started.isCompleted) started.complete();
           return release.future;
         },
       );
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
 
       final pumping = queue.pump();
       await started.future;
@@ -210,7 +211,7 @@ void main() {
     test('hands back a claim whose result could not be written', () async {
       await seedMessage('1');
       final broken = BrokenStore(db);
-      final queue = TriageQueue(broken, fastLlm(), concurrency: 1);
+      final queue = TriageQueue(broken, decisionClient: ScriptedDecisionClient(fastLlm()), concurrency: 1);
 
       await expectLater(queue.pump(), throwsA(isA<StateError>()));
       // The row is stranded: the claim was taken and nothing ever cleared it.
@@ -228,13 +229,13 @@ void main() {
 
     test('and a fresh queue over the same store picks it up', () async {
       await seedMessage('1');
-      final queue = TriageQueue(BrokenStore(db), fastLlm(), concurrency: 1);
+      final queue = TriageQueue(BrokenStore(db), decisionClient: ScriptedDecisionClient(fastLlm()), concurrency: 1);
       await expectLater(queue.pump(), throwsA(isA<StateError>()));
       await queue.dispose();
 
       // What a backend switch does: the old queue goes, a new one over the
       // same rows arrives, and the work is where it was.
-      final replacement = TriageQueue(store, fastLlm(), concurrency: 1);
+      final replacement = TriageQueue(store, decisionClient: ScriptedDecisionClient(fastLlm()), concurrency: 1);
       await replacement.pump();
       await replacement.dispose();
 
@@ -253,14 +254,14 @@ void main() {
       final release = [Completer<void>(), Completer<void>()];
       var nth = 0;
       final llm = ScriptedLlm(
-        answers: const {'triage': launchAnswer},
+        answers: const {'decision': launchAnswer},
         onCall: (_) {
           final i = nth++;
           started[i].complete();
           return release[i].future;
         },
       );
-      final queue = TriageQueue(held, llm, concurrency: 2);
+      final queue = TriageQueue(held, decisionClient: ScriptedDecisionClient(llm), concurrency: 2);
 
       final pumping = queue.pump();
       // Newest first: call 0 is message 2, and the claim for message 1 is now
@@ -295,7 +296,7 @@ void main() {
     });
 
     test('is safe with nothing claimed, and twice', () async {
-      final queue = TriageQueue(store, fastLlm());
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(fastLlm()));
 
       await queue.dispose();
       await queue.dispose();

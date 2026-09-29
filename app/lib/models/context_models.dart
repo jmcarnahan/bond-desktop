@@ -344,7 +344,7 @@ class ContextChunkHit {
       );
 }
 
-/// What the fast model made of ONE file in a registered directory.
+/// What the generative model made of ONE file in a registered directory.
 ///
 /// Written by the digest handler, read by the brief's file map, by the
 /// Settings row's progress clause and — as a passage of the file like any

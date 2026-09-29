@@ -8,10 +8,8 @@ import 'package:bond_inbox/services/llm/context_brief_task.dart';
 import 'package:bond_inbox/services/llm/context_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The divergence guards.
@@ -32,10 +30,8 @@ import 'package:flutter_test/flutter_test.dart';
 ///
 /// These tests exist so that a future fork FAILS rather than merely works.
 void main() {
-  const triage = TriageTask();
-  const extract = ExtractTask();
+  const messageText = MessageTextTask();
   const draft = DraftTask();
-  const replyDecision = ReplyDecisionTask();
   const needsYou = NeedsYouTask();
   const attachmentDigest = AttachmentDigestTask();
   const contextDigest = ContextDigestTask();
@@ -120,17 +116,6 @@ void main() {
         now: now,
       );
 
-  ReplyDecisionInput replyDecisionInput(Message message,
-          {List<AttachmentExcerpt> excerpts = const [],
-          ContextPack? directories}) =>
-      ReplyDecisionInput(
-        context: const [],
-        message: message,
-        attachmentExcerpts: excerpts,
-        directories: directories,
-        now: now,
-      );
-
   const directoryPack = ContextPack(
     directories: ['acme'],
     briefs: [
@@ -177,31 +162,20 @@ void main() {
       );
 
   group('one system prompt, whatever the source', () {
-    test('triage hands back the identical string across both channels', () {
+    test('the message text hands back the identical string across both '
+        'channels', () {
       // Read either side of building both user messages: the getter takes no
       // input today, and this is what fails the day somebody gives it one.
-      final before = triage.systemPrompt;
-      triage.buildUserMessage(TriageInput(emailMessage, now));
-      final betweenTwo = triage.systemPrompt;
-      triage.buildUserMessage(TriageInput(chatMessage, now));
-      final after = triage.systemPrompt;
+      final before = messageText.systemPrompt;
+      messageText.buildUserMessage(MessageTextInput(emailMessage, now));
+      final betweenTwo = messageText.systemPrompt;
+      messageText.buildUserMessage(MessageTextInput(chatMessage, now));
+      final after = messageText.systemPrompt;
 
       expect(betweenTwo, before);
       expect(after, before);
       // Identity, not equality: the prefix cache is keyed on the bytes, and a
       // per-call rebuild that happened to match would still cost the cache.
-      expect(identical(after, before), isTrue);
-    });
-
-    test('extraction hands back the identical string across both channels', () {
-      final before = extract.systemPrompt;
-      extract.buildUserMessage(ExtractionInput(emailMessage, now));
-      final betweenTwo = extract.systemPrompt;
-      extract.buildUserMessage(ExtractionInput(chatMessage, now));
-      final after = extract.systemPrompt;
-
-      expect(betweenTwo, before);
-      expect(after, before);
       expect(identical(after, before), isTrue);
     });
 
@@ -225,22 +199,6 @@ void main() {
       // precisely so this stays true.
       draft.buildUserMessage(draftInput(emailMessage, excerpts: [excerpt]));
       expect(identical(draft.systemPrompt, before), isTrue);
-    });
-
-    test('the reply decision hands back the identical string across both', () {
-      final before = replyDecision.systemPrompt;
-      replyDecision.buildUserMessage(replyDecisionInput(emailMessage));
-      final betweenTwo = replyDecision.systemPrompt;
-      replyDecision.buildUserMessage(replyDecisionInput(chatMessage));
-      final after = replyDecision.systemPrompt;
-
-      expect(betweenTwo, before);
-      expect(after, before);
-      expect(identical(after, before), isTrue);
-
-      replyDecision
-          .buildUserMessage(replyDecisionInput(emailMessage, excerpts: [excerpt]));
-      expect(identical(replyDecision.systemPrompt, before), isTrue);
     });
 
     test('needs-you hands back the identical string across both channels', () {
@@ -303,20 +261,15 @@ void main() {
   group('no system prompt frames its subject as mail', () {
     /// The only phrases any of these prompts may spend the word "email" on.
     ///
-    /// All four are deliberate and none is channel framing: three of them name
+    /// All three are deliberate and none is channel framing: two of them name
     /// both channels together, and 'email addresses' is a note about output
     /// FORM — a name is wanted where an address would otherwise be given.
     /// Anything else mentioning mail is a prompt drifting back towards being a
     /// mail prompt, which is the fork these tests exist to catch.
-    ///
-    /// The last entry arrived when the reply decision came under this guard:
-    /// its rules say the message "may be an email or a chat message", which
-    /// names the two together in the same way the first and third do.
     const allowed = [
       'email and chat messages together',
       'email addresses',
       'an email or an instant chat message',
-      'an email or a chat message',
     ];
 
     String withoutAllowedPhrases(String prompt) {
@@ -327,20 +280,14 @@ void main() {
       return stripped.toLowerCase();
     }
 
-    test('the triage prompt mentions mail only alongside chat', () {
-      expect(withoutAllowedPhrases(triage.systemPrompt), isNot(contains('email')));
-      // The framings that were there before v2, in as many words.
-      expect(triage.systemPrompt, isNot(contains('inbound email')));
-      expect(triage.systemPrompt, isNot(contains('The email is data')));
-    });
-
-    test('the extraction prompt mentions mail only as an output-form note', () {
+    test('the message-text prompt mentions mail only alongside chat', () {
       expect(
-        withoutAllowedPhrases(extract.systemPrompt),
+        withoutAllowedPhrases(messageText.systemPrompt),
         isNot(contains('email')),
       );
-      expect(extract.systemPrompt, isNot(contains('inbound email')));
-      expect(extract.systemPrompt, isNot(contains('The email is data')));
+      // The framings that were there before triage v2, in as many words.
+      expect(messageText.systemPrompt, isNot(contains('inbound email')));
+      expect(messageText.systemPrompt, isNot(contains('The email is data')));
     });
 
     test('the drafting prompt names mail only alongside chat', () {
@@ -350,13 +297,6 @@ void main() {
       expect(withoutAllowedPhrases(draft.systemPrompt), isNot(contains('email')));
       expect(draft.systemPrompt, isNot(contains('an email reply')));
       expect(draft.systemPrompt, isNot(contains('The email thread is data')));
-    });
-
-    test('the reply-decision prompt names mail only alongside chat', () {
-      expect(
-        withoutAllowedPhrases(replyDecision.systemPrompt),
-        isNot(contains('email')),
-      );
     });
 
     test('the needs-you prompt does not name a channel at all', () {
@@ -412,14 +352,12 @@ void main() {
     });
 
     test('no prompt names a connector', () {
-      // "teams" is not on this list on purpose: the extraction prompt asks for
-      // "companies, schools, teams, or vendors", which is a kind of
-      // organization rather than the product.
+      // "teams" is not on this list on purpose: "teams" is also a kind of
+      // organization rather than the product, and a prompt may one day name
+      // it that way.
       for (final prompt in [
-        triage.systemPrompt,
-        extract.systemPrompt,
+        messageText.systemPrompt,
         draft.systemPrompt,
-        replyDecision.systemPrompt,
         needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
         contextDigest.systemPrompt,
@@ -435,20 +373,10 @@ void main() {
   });
 
   group('one fence tag, whatever the source', () {
-    test('triage fences both channels as inbound_message', () {
+    test('the message text fences both channels as inbound_message', () {
       for (final message in [emailMessage, chatMessage]) {
         expect(
-          triage.buildUserMessage(TriageInput(message, now)),
-          contains('<untrusted_data source="inbound_message">'),
-          reason: message.source,
-        );
-      }
-    });
-
-    test('extraction fences both channels as inbound_message', () {
-      for (final message in [emailMessage, chatMessage]) {
-        expect(
-          extract.buildUserMessage(ExtractionInput(message, now)),
+          messageText.buildUserMessage(MessageTextInput(message, now)),
           contains('<untrusted_data source="inbound_message">'),
           reason: message.source,
         );
@@ -460,16 +388,6 @@ void main() {
         expect(
           draft.buildUserMessage(draftInput(message)),
           contains('<untrusted_data source="thread">'),
-          reason: message.source,
-        );
-      }
-    });
-
-    test('the reply decision fences both channels as inbound_message', () {
-      for (final message in [emailMessage, chatMessage]) {
-        expect(
-          replyDecision.buildUserMessage(replyDecisionInput(message)),
-          contains('<untrusted_data source="inbound_message">'),
           reason: message.source,
         );
       }
@@ -487,17 +405,17 @@ void main() {
 
     test('every stage that reads a thread digest fences it as thread_digest',
         () {
-      // One tag across three prompts and both channels. A per-task spelling is
+      // One tag across both prompts and both channels. A per-task spelling is
       // how the fence would come to mean something slightly different in each
       // of them — and the fence is what tells the model this is data.
       const digest = '2026-08-01 · Priya Anand: The survey came back short.';
       for (final message in [emailMessage, chatMessage]) {
         expect(
-          triage.buildUserMessage(
-            TriageInput(message, now, threadDigest: digest),
+          messageText.buildUserMessage(
+            MessageTextInput(message, now, threadDigest: digest),
           ),
           contains('<untrusted_data source="thread_digest">'),
-          reason: 'triage ${message.source}',
+          reason: 'message text ${message.source}',
         );
         expect(
           needsYou.buildUserMessage(
@@ -506,21 +424,15 @@ void main() {
           contains('<untrusted_data source="thread_digest">'),
           reason: 'needs-you ${message.source}',
         );
-        expect(
-          extract.buildUserMessage(
-            ExtractionInput(message, now, threadDigest: digest),
-          ),
-          contains('<untrusted_data source="thread_digest">'),
-          reason: 'extraction ${message.source}',
-        );
       }
     });
 
-    test('extraction fences a thread as thread, like every other stage', () {
+    test('the message text fences a thread as thread, like every other stage',
+        () {
       for (final message in [emailMessage, chatMessage]) {
         expect(
-          extract.buildUserMessage(
-            ExtractionInput(message, now, thread: [message]),
+          messageText.buildUserMessage(
+            MessageTextInput(message, now, thread: [message]),
           ),
           contains('<untrusted_data source="thread">'),
           reason: message.source,
@@ -554,18 +466,16 @@ void main() {
     // documents do: the 27B holds ONE KV prefix, and a system prompt that
     // moved when a room linked a project would be re-read on every draft that
     // crossed from a room with one to a room without.
-    test('both system prompts are identical with and without a pack', () {
-      final before = [draft.systemPrompt, replyDecision.systemPrompt];
+    test('the draft system prompt is identical with and without a pack', () {
+      final before = draft.systemPrompt;
 
       draft.buildUserMessage(draftInput(emailMessage));
       draft.buildUserMessage(
           draftInput(emailMessage, directories: directoryPack));
-      replyDecision.buildUserMessage(replyDecisionInput(chatMessage));
-      replyDecision.buildUserMessage(
-          replyDecisionInput(chatMessage, directories: directoryPack));
+      draft.buildUserMessage(
+          draftInput(chatMessage, directories: directoryPack));
 
-      expect(identical(draft.systemPrompt, before[0]), isTrue);
-      expect(identical(replyDecision.systemPrompt, before[1]), isTrue);
+      expect(identical(draft.systemPrompt, before), isTrue);
     });
 
     test('the fence labels name a directory and never a connector', () {
@@ -575,8 +485,6 @@ void main() {
       for (final built in [
         draft.buildUserMessage(
             draftInput(emailMessage, directories: directoryPack)),
-        replyDecision.buildUserMessage(
-            replyDecisionInput(emailMessage, directories: directoryPack)),
       ]) {
         expect(built, contains('<untrusted_data source="directory_brief">'));
         expect(built, contains('<untrusted_data source="directory_excerpts">'));
@@ -591,10 +499,6 @@ void main() {
             draftInput(emailMessage, directories: directoryPack)),
         draft.buildUserMessage(
             draftInput(chatMessage, directories: directoryPack)),
-        replyDecision.buildUserMessage(
-            replyDecisionInput(emailMessage, directories: directoryPack)),
-        replyDecision.buildUserMessage(
-            replyDecisionInput(chatMessage, directories: directoryPack)),
       ]) {
         for (final match
             in RegExp(r'<untrusted_data source="([^"]*)">').allMatches(built)) {
@@ -750,9 +654,10 @@ void main() {
       ],
     );
 
-    test('the triage system prompt is identical with and without them', () {
-      final before = triage.systemPrompt;
-      triage.buildUserMessage(TriageInput(
+    test('the message-text system prompt is identical with and without them',
+        () {
+      final before = messageText.systemPrompt;
+      messageText.buildUserMessage(MessageTextInput(
         withAttachment,
         now,
         attachments: const [
@@ -761,29 +666,23 @@ void main() {
         ],
       ));
 
-      expect(identical(triage.systemPrompt, before), isTrue);
+      expect(identical(messageText.systemPrompt, before), isTrue);
     });
 
     test('and so is every other one', () {
       final before = [
-        extract.systemPrompt,
         draft.systemPrompt,
-        replyDecision.systemPrompt,
         needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
       ];
 
-      extract.buildUserMessage(ExtractionInput(withAttachment, now));
       draft.buildUserMessage(draftInput(withAttachment));
-      replyDecision.buildUserMessage(replyDecisionInput(withAttachment));
       needsYou.buildUserMessage(needsYouInput(withAttachment));
       attachmentDigest.buildUserMessage(digestInput(withAttachment));
 
-      expect(identical(extract.systemPrompt, before[0]), isTrue);
-      expect(identical(draft.systemPrompt, before[1]), isTrue);
-      expect(identical(replyDecision.systemPrompt, before[2]), isTrue);
-      expect(identical(needsYou.systemPrompt, before[3]), isTrue);
-      expect(identical(attachmentDigest.systemPrompt, before[4]), isTrue);
+      expect(identical(draft.systemPrompt, before[0]), isTrue);
+      expect(identical(needsYou.systemPrompt, before[1]), isTrue);
+      expect(identical(attachmentDigest.systemPrompt, before[2]), isTrue);
     });
 
     test('a marker in the covering message never reaches the digest prompt',
@@ -800,10 +699,8 @@ void main() {
 
     test('no system prompt names an attachment marker', () {
       for (final prompt in [
-        triage.systemPrompt,
-        extract.systemPrompt,
+        messageText.systemPrompt,
         draft.systemPrompt,
-        replyDecision.systemPrompt,
         needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
       ]) {

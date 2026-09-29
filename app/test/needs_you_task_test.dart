@@ -83,7 +83,7 @@ void main() {
 
   group('schema', () {
     test('the evidence, then the verdict that follows from it', () {
-      // Evidence-first, the opposite of the reply decision's order: what
+      // Evidence-first, the opposite of a verdict-first order: what
       // reaches this call is the residue the floor could not settle, so
       // locating the sentence that points at the owner IS the work.
       final properties = task.schema['properties'] as Map<String, dynamic>;

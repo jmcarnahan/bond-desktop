@@ -3,12 +3,12 @@ import 'dart:math' as math;
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/attention.dart';
 import 'package:bond_inbox/services/attention_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 void main() {
   late BondDatabase db;
@@ -85,19 +85,18 @@ void main() {
       });
     }
     if (replyExpected != null) {
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         source,
         '$key-m1',
         status: 'done',
-        result: TriageResult(
-          urgency: 'normal',
-          category: 'other',
-          summary: key,
-          needsAction: needsAction,
-          actionItems: const [],
-          replyExpected: replyExpected,
-          deadline: deadline,
-        ),
+        urgency: 'normal',
+        category: 'other',
+        summary: key,
+        needsAction: needsAction,
+        actionItems: const [],
+        replyExpected: replyExpected,
+        deadline: deadline,
       );
     }
     if (intent == null && importance == null) return;

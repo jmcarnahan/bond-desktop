@@ -2,18 +2,20 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import '../models/draft_policy.dart';
+import '../models/extraction_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attention.dart';
 import 'clustering_card.dart';
+import 'conversation_cta.dart';
 import 'conversation_state.dart';
 import 'embed_handler.dart';
 import 'llm/embeddings_client.dart';
-import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
-import 'llm/reply_decision_task.dart' show replySuppressed;
+import 'llm/message_text_task.dart';
+import 'reply_policy.dart' show replySuppressed, replyVerdict;
 import 'pipeline_progress.dart';
 
 // The card builders moved to `clustering_card.dart` in Round E Phase 1, and
@@ -28,13 +30,27 @@ import 'pipeline_progress.dart';
 // and imports the module by name.
 export 'clustering_card.dart' show buildClusteringCard, buildConversationCard;
 
-/// Extracts structured facts from one message, then refreshes its thread's
-/// embedding if the thread now reads differently.
+/// The MESSAGE-TEXT stage: writes one kept message's text, then files it,
+/// refreshes its thread's card and embedding, and queues its draft.
 ///
-/// The two halves are deliberately unequal. The extraction is the work and its
-/// failure is the item's failure; the embedding is an optimisation on top, and
-/// an embedding server that is down must never cost a message the extraction
-/// that already succeeded.
+/// One generative call per kept message, [MessageTextTask]: the summary, the
+/// reader's action items and the deadline (onto `messages`), and the topics
+/// and project (into `extraction_json`, beside the decision model's intent
+/// and importance). It runs AFTER triage, which since the decision model is
+/// no language-model call at all — so the rail, notify-worthy and filing have
+/// the row state within ~100 ms and the text fills in here.
+///
+/// **The work kind is still `extract`**, and the class keeps its name. A
+/// rename would need a work-kind migration of every queued row and a requeue,
+/// and would move the activity kind, the progress stage (`extract_state`, which
+/// the settle machine waits on) and the activity panel's words with it — all
+/// for a label. The kind names the stage's slot in the pipeline, not the task
+/// it runs.
+///
+/// The halves are deliberately unequal. The text is the work and its failure
+/// is the item's failure; the embedding is an optimisation on top, and an
+/// embedding server that is down must never cost a message the text that
+/// already succeeded.
 class ExtractHandler extends WorkHandler {
   static const String _source = 'email';
 
@@ -107,9 +123,10 @@ class ExtractHandler extends WorkHandler {
   /// and the storyline requeue is idempotent by construction (`requeueWork`
   /// on a key that is already queued is the same row).
   ///
-  /// Three and not more: it is the batch the fast server is started with slots
-  /// for (`FAST_SLOTS`), and past a small batch each individual request slows
-  /// down enough that the first result takes longer to reach the screen.
+  /// Three and not more: past a small batch each individual request slows
+  /// down enough that the first result takes longer to reach the screen. (It
+  /// was sized to the 4B server's `FAST_SLOTS` when there was one; the one
+  /// generative model queues whatever its slots cannot take.)
   @override
   int get concurrency => 3;
 
@@ -176,34 +193,97 @@ class ExtractHandler extends WorkHandler {
       ));
     }
 
-    final result = await runTask(
+    // The context the retired triage call read — the attachment names and
+    // the thread tail before this message — so the summary can say what an
+    // unanswered question a few messages back is still asking.
+    final attachments = await _store.attachmentsForMessage(source, id);
+    final key = row['conversation_key'] as String?;
+    var thread = const <Message>[];
+    if (key != null && key.isNotEmpty) {
+      final loaded = await _store.loadThread(key, sources: [source]);
+      final receivedAt = message.receivedAt ?? '';
+      thread = [
+        for (final m in loaded)
+          if (m.id != message.id &&
+              (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
+            m,
+      ];
+    }
+
+    final text = await runTask(
       _client,
-      const ExtractTask(),
-      ExtractionInput(message, DateTime.now()),
+      const MessageTextTask(),
+      MessageTextInput(
+        message,
+        DateTime.now(),
+        thread: thread,
+        attachments: attachments,
+      ),
       // Zero, not the default: the same email must yield the same facts twice,
-      // or a re-extraction would move a conversation between clusters for no
-      // reason a human could see.
+      // or a re-run would move a conversation between clusters for no reason
+      // a human could see.
       temperature: 0,
     );
+    await _store.writeMessageText(
+      source,
+      id,
+      summary: text.summary,
+      actionItems: text.actionItems,
+      deadline: text.deadline,
+    );
+    // Intent and importance are the decision model's (the triage pass stored
+    // its answers); a message decided before this build has none, and reads
+    // the quiet middle, exactly as a failed extraction used to.
+    final decision = await _store.decisionFor(source, id);
+    final decided = decision?.answers.fields;
+    final result = ExtractionResult(
+      topics: text.topics,
+      project: text.project,
+      intent: decided?['intent']?.choice ?? 'fyi',
+      importance: decided?['importance']?.choice ?? 'normal',
+    );
     await _store.writeExtraction(source, id, jsonEncode(result.toJson()));
-    // After the write and before the two optional passes below: the facts are
-    // stored, so the stage is done however the bucket filing and the embedding
-    // refresh go.
+
+    // Every reader below reads the ROW — the card, the message embedding,
+    // the draft pre-gates — so it is read again now the text is on it.
+    final written = await _store.getMessageRow(source, id) ?? row;
+
+    // The ask lands on the conversation the moment the text does. Only on a
+    // row triage decided: an `error` row has no urgency to fold with.
+    if (written['triage_status'] == 'triaged') {
+      await foldCtaUp(
+        _store,
+        source,
+        written,
+        urgency: written['urgency'] as String? ?? 'normal',
+        category: written['category'] as String?,
+        needsAction: written['needs_action'] == 1,
+        summary: text.summary,
+        actionItems: text.actionItems,
+        deadline: text.deadline,
+      );
+    }
+
+    // After the writes and before the optional passes below: the text is
+    // stored, so the stage is done however the bucket filing and the
+    // embedding refresh go.
     await _pipeline.noteExtract(source, id, state: 'done');
     // Enough of the answer to make the activity row readable without opening
-    // the extraction itself. Five topics, because the row is one line.
+    // the message. Counts and labels, never the summary.
     _log.note({
       'intent': result.intent,
       'importance': result.importance,
       'topics': result.topics.take(5).toList(),
       if (result.project.isNotEmpty) 'project': result.project,
+      'action_items': text.actionItems.length,
+      if (text.deadline.isNotEmpty) 'deadline': text.deadline,
     });
 
-    await _fileBucket(source, row, result);
-    await _refreshCard(source, row);
-    await _queueRecap(source, row);
-    await _embedMessage(source, row);
-    await _queueDraft(source, id, row);
+    await _fileBucket(source, written, result);
+    await _refreshCard(source, written);
+    await _queueRecap(source, written);
+    await _embedMessage(source, written);
+    await _queueDraft(source, id, written);
   }
 
   /// Wakes the running recap of every storyline this message's thread is
@@ -285,6 +365,20 @@ class ExtractHandler extends WorkHandler {
       return _skipDraft(source, id, 'automated_sender');
     }
 
+    // The reply decision, ahead of every mode for the same reason: it is the
+    // judgement the draft handler would apply first, so a message it says
+    // needs no reply is never queued — it cannot take a
+    // [DraftPolicy.prefetchCap] slot or cost a queue row. [replyVerdict] is the one rule;
+    // the handler asks it again for queue rows written before this existed.
+    // A person's **Draft reply** never comes through here.
+    final verdict = replyVerdict(
+      replyExpectedP: (await _store.decisionFor(source, id))?.replyExpectedP,
+      storedReplyExpected: row['reply_expected'],
+    );
+    if (verdict.skipWhy != null) {
+      return _skipDraft(source, id, 'no_reply_needed');
+    }
+
     if (policy == DraftPolicy.all) {
       if (!asksForAReply(row)) return _skipDraft(source, id, 'no_cue');
       return _enqueueDraft(source, id);
@@ -350,10 +444,11 @@ class ExtractHandler extends WorkHandler {
   /// unreachable server until `make embed` is running, so queueing anything
   /// from here would only be a second name for the same wait.
   ///
-  /// The summary it embeds is TRIAGE's, not this handler's extraction output.
-  /// That is deliberate: the card has to be buildable from the message row
-  /// alone, or [EmbedHandler] could not produce the same card without
-  /// re-running an extraction to get it.
+  /// The summary it embeds is the one this handler just wrote onto the
+  /// message ROW, read back from the row rather than taken from the result in
+  /// hand: the card has to be buildable from the message row alone, or
+  /// [EmbedHandler] could not produce the same card without re-running the
+  /// text call to get it.
   Future<void> _embedMessage(String source, Map<String, Object?> row) async {
     final outcome = await embedMessageRow(_store, _embeddings, source, row);
     if (outcome == MessageEmbedOutcome.unavailable) {
@@ -483,7 +578,7 @@ class ExtractHandler extends WorkHandler {
     // changed. One thread has one card.
     final card = clusteringCardForConversationRow(
       conversation,
-      await _store.newestInboundCardData(source, key),
+      await _store.clusteringCardData(source, key),
     );
     final hash = cardHash(card);
 
@@ -560,10 +655,10 @@ class ExtractHandler extends WorkHandler {
 /// might have to answer.
 ///
 /// This is [DraftPolicy.all]'s pre-gate — one of three policies, and the
-/// widest of them. It is a PRE-GATE and nothing more: the verdict that decides
-/// whether a suggestion is written comes from the big model behind the draft
-/// queue, which reads the whole conversation, and this only decides which
-/// messages are worth asking about. [prefetchWorthy] is the narrower gate
+/// widest of them. It is a PRE-GATE and nothing more: whether a suggestion is
+/// written is the decision model's reply probability ([replyVerdict], asked in
+/// `_queueDraft` before this and again by the draft handler), and this only
+/// decides which of the messages it let through are worth drafting for. [prefetchWorthy] is the narrower gate
 /// [DraftPolicy.needsYou] uses, and under [DraftPolicy.onDemand] neither runs.
 /// If this proves too tight for someone who has chosen `all`, this is the line
 /// to widen: the false negatives are silent, and a message it drops is never
@@ -573,7 +668,7 @@ class ExtractHandler extends WorkHandler {
 /// message and called it the user's to answer, the sender is waiting, the
 /// reader has to do something, the message is loud, or it names a date. Read
 /// off the row rather than re-judged, because the point is to be cheap — the
-/// expensive judgement is the model call this gate decides whether to spend.
+/// expensive work is the draft this gate decides whether to spend.
 ///
 /// The first is the odd one out: the other four are the fast triage's fields
 /// ABOUT the message, while `needs_you_verdict` is the needs-you stage's answer
@@ -614,9 +709,9 @@ bool asksForAReply(Map<String, Object?> row) {
 /// messages a person would have opened first anyway, which is exactly the set
 /// worth having an answer ready for before they ask.
 ///
-/// It is not a second opinion about whether a reply is warranted; the big
-/// model still decides that behind the queue. It decides which messages get
-/// asked about without anyone having pressed a button.
+/// It is not a second opinion about whether a reply is warranted; the decision
+/// model's reply probability decides that ([replyVerdict]). It decides which
+/// messages get a draft written without anyone having pressed a button.
 ///
 /// [asksForAReply]'s disciplines, for its reasons: outbound answers false, and
 /// the flags are INTEGERs compared against 1 rather than trusted to be truthy.

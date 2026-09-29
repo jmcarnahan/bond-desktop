@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -114,7 +115,7 @@ void main() {
     await seedPendingMessage('m1');
     await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];
-    final triage = TriageQueue(store, loggingLlm(log));
+    final triage = TriageQueue(store, decisionClient: ScriptedDecisionClient(loggingLlm(log)));
     final worker = AiWorker(
       store,
       handlers: [LoggingHandler('extract', log, 'ai')],
@@ -189,7 +190,7 @@ void main() {
     await store.writeAttentionScore('email', 'conv-1', 0.9);
 
     final log = <String>[];
-    final triage = TriageQueue(store, loggingLlm(log));
+    final triage = TriageQueue(store, decisionClient: ScriptedDecisionClient(loggingLlm(log)));
     final worker = AiWorker(
       store,
       handlers: [

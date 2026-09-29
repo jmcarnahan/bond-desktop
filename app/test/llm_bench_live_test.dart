@@ -2,13 +2,11 @@
     'flutter test test/llm_bench_live_test.dart --run-skipped)')
 library;
 
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_report.dart';
-import 'fixtures/bench_stats.dart';
 import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
 
@@ -17,26 +15,34 @@ import 'fixtures/corpus.dart';
 /// Skipped by default for the same reason `llm_live_test.dart` is — it needs a
 /// server the CI box does not have — but it exists for a different job. That
 /// file asks whether the model answers at all; this one asks how long it takes
-/// to answer the same seventeen emails, every time, so two phases' numbers can
-/// be put next to each other and mean something.
+/// to answer the same corpus, every time, so two phases' numbers can be put
+/// next to each other and mean something.
+///
+/// It times the ONE generative call a kept message costs: [MessageTextTask]
+/// (summary, action items, deadline, topics, project), as `ExtractHandler`
+/// runs it. Triage and extraction used to be two calls here; since the
+/// decision model, everything a classifier can answer — category, urgency,
+/// needs_action, reply_expected, intent, importance, the gate — is the
+/// decision model's (an embedding model plus Dart heads, `make decide`), not
+/// this slot's. So the old category / label / needs_action scorecards are
+/// gone: none of those fields is the generative model's answer any more, and
+/// the decision model is benched against the golden set instead
+/// (`make golden-decision`).
 ///
 /// It runs against [BenchTarget.bulk] — by default the FAST server on :8082,
-/// not the 27B, because since phase 3 that is where triage and extraction
-/// actually happen. Benching them on the server the app no longer uses for
-/// them would compare a phase's number against a path nobody takes; `make ab`
-/// is where two servers are put side by side deliberately. Point it elsewhere
-/// with `make bench BENCH_URL=… BENCH_LABEL=…` to bench a candidate runtime
-/// without editing anything here.
+/// not the 27B, because that is where the message text is written. Point it
+/// elsewhere with `make bench BENCH_URL=… BENCH_LABEL=…` to bench a candidate
+/// runtime without editing anything here; `make ab` is where two servers are
+/// put side by side deliberately.
 ///
-/// It prints rather than asserts, almost entirely on purpose. A small model's
-/// category is a judgement, and a test that pinned it would fail on the next
-/// model swap for no defect. What is asserted is shape — a result that came
-/// back empty is a broken call, not a debatable label — and the one thing that
-/// is never a judgement call: that `enable_thinking: false` was honoured.
+/// It prints rather than asserts, almost entirely on purpose. What is asserted
+/// is shape — a summary that came back empty is a broken call, not a debatable
+/// answer — and the one thing that is never a judgement call: that
+/// `enable_thinking: false` was honoured.
 
 void main() {
   test(
-    'the corpus through triage and extraction, timed',
+    'the corpus through the message text call, timed',
     () async {
       // Every number in the table below comes from the client's own call
       // records rather than from a stopwatch wrapped around the call site.
@@ -64,25 +70,17 @@ void main() {
       for (var i = 0; i < BenchTarget.warmup; i++) {
         await runTask(
           warmupClient,
-          const TriageTask(),
-          TriageInput(emails.first.message, DateTime.now()),
+          const MessageTextTask(),
+          MessageTextInput(emails.first.message, DateTime.now()),
           // Warmed the way the run itself will be measured: a candidate that
           // needs BENCH_THINK would 400 here otherwise, and a warmup that
           // failed would leave the first timed call cold.
+          temperature: 0,
           think: BenchTarget.allowReasoning,
         );
       }
 
       final startedAt = DateTime.now();
-
-      // Where the model disagreed with the corpus. Scored and printed, not
-      // asserted: a category and a label are judgements, and pinning them
-      // would fail the bench on the next model swap for no defect. An entry
-      // the corpus has no opinion about is never judged at all, so a rate is
-      // over what was asked rather than over the corpus's annotation coverage.
-      final categoryCard = Scorecard('category (exact)');
-      final labelCard = Scorecard('label (contains)');
-      final needsActionCard = Scorecard('needs_action (exact)');
 
       // The table prints even when a call fails mid-run. A later phase points
       // this bench at an experimental server config, and a failure on the
@@ -92,89 +90,45 @@ void main() {
       try {
         for (final entry in emails) {
           current = entry.id;
-          final now = DateTime.now();
 
-          final triage = await runTask(
+          final text = await runTask(
             client,
-            const TriageTask(),
-            TriageInput(entry.message, now),
+            const MessageTextTask(),
+            MessageTextInput(entry.message, DateTime.now()),
+            // As the handler runs it: the same email twice must be the same
+            // facts, or a phase's "improvement" is just sampling noise.
+            temperature: 0,
             // Off unless BENCH_THINK says this candidate cannot be told to
             // stop reasoning, in which case the body stops asking it to.
             think: BenchTarget.allowReasoning,
           );
 
-          final extraction = await runTask(
-            client,
-            const ExtractTask(),
-            ExtractionInput(entry.message, now),
-            // As the handler runs it: the same email twice must be the same
-            // facts, or a phase's "improvement" is just sampling noise.
-            temperature: 0,
-            think: BenchTarget.allowReasoning,
-          );
+          final textMs = collector.lastFor('message_text')!.durationMs;
 
-          final triageMs = collector.lastFor('triage')!.durationMs;
-          final extractMs = collector.lastFor('extraction')!.durationMs;
-
-          // What the corpus says this message is, next to what the model said
-          // it is. `expectedLabel` is a loose fragment on purpose — "dinner
-          // plans" and "friday dinner" are both right — so the match is
-          // `contains`, and a miss is printed rather than thrown.
-          final categoryMiss = entry.expectedCategory != null &&
-              entry.expectedCategory != triage.category;
-          final labelMiss = entry.expectedLabel != null &&
-              !triage.label.toLowerCase().contains(entry.expectedLabel!);
-          if (entry.expectedCategory != null) {
-            categoryCard.judge(
-              current,
-              matched: entry.expectedCategory == triage.category,
-              detail: 'category '
-                  '${entry.expectedCategory} != ${triage.category}',
-            );
-          }
-          if (entry.expectedLabel != null) {
-            labelCard.judge(
-              current,
-              matched: triage.label.toLowerCase().contains(entry.expectedLabel!),
-              detail: 'label '
-                  '"${entry.expectedLabel}" not in "${triage.label}"',
-            );
-          }
-          if (entry.expectsNeedsAction != null) {
-            needsActionCard.judge(
-              current,
-              matched: entry.expectsNeedsAction == triage.needsAction,
-              detail: 'needs_action '
-                  '${entry.expectsNeedsAction} != ${triage.needsAction}',
-            );
-          }
-
+          // Counts, not content: how much the model wrote, never what. The
+          // corpus is fictional, so the topics are printed too — they are
+          // the short labels the clustering card reads, and a glance at them
+          // is how a broken grammar shows.
           lines.add(
             '${entry.id.padRight(26)} '
-            'triage ${triageMs.toString().padLeft(6)}ms  '
-            'extract ${extractMs.toString().padLeft(6)}ms  '
-            '${triage.category}${categoryMiss ? '!' : ''}/${triage.urgency}/'
-            'needs_action=${triage.needsAction}  '
-            'label="${triage.label}"${labelMiss ? '!' : ''}  '
-            '${extraction.intent}/${extraction.importance}',
+            'message_text ${textMs.toString().padLeft(6)}ms  '
+            'summary ${text.summary.length.toString().padLeft(3)} chars  '
+            'action_items=${text.actionItems.length}  '
+            'deadline=${text.deadline.isNotEmpty}  '
+            'topics=${text.topics.length} ${text.topics}',
           );
 
-          // Shape, not quality: an empty field is a call that went wrong,
-          // while the words inside it are the model's judgement and are only
-          // printed.
-          expect(triage.category, isNotEmpty, reason: entry.id);
-          expect(triage.urgency, isNotEmpty, reason: entry.id);
-          expect(triage.label, isNotEmpty, reason: entry.id);
-          expect(extraction.intent, isNotEmpty, reason: entry.id);
-          expect(extraction.importance, isNotEmpty, reason: entry.id);
+          // Shape, not quality: an empty summary is a call that went wrong,
+          // while the words inside it are the model's judgement.
+          expect(text.summary, isNotEmpty, reason: entry.id);
 
           // The one entry worth reading by hand: whether the model treated the
-          // instruction in the body as data or as an instruction.
+          // instruction in the body as data or as an instruction. Fictional
+          // corpus, so printed verbatim.
           if (entry.id == 'prompt-injection') {
             lines.add(
-              '  injection summary: ${triage.summary}\n'
-              '  injection action items: ${triage.actionItems}\n'
-              '  injection evidence: ${extraction.evidence}',
+              '  injection summary: ${text.summary}\n'
+              '  injection action items: ${text.actionItems}',
             );
           }
         }
@@ -186,13 +140,15 @@ void main() {
         print(
           '\n${collector.banner}\n'
           '\n${collector.table()}\n'
-          '\n${lines.join('\n')}\n'
-          '\n${scorecardBlock([categoryCard, labelCard, needsActionCard])}\n',
+          '\n${lines.join('\n')}\n',
         );
+        // `accuracy` is empty: nothing this call answers has a right answer
+        // in the corpus's annotations any more — those were classifier
+        // fields, and they are the decision model's now.
         final path = await writeBenchResult(
-          bench: 'triage-extract',
+          bench: 'message-text',
           collectors: [collector],
-          accuracy: [categoryCard, labelCard, needsActionCard],
+          accuracy: const [],
           startedAt: startedAt,
         );
         // ignore: avoid_print

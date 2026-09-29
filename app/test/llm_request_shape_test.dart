@@ -1,6 +1,6 @@
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/corpus.dart';
@@ -26,12 +26,12 @@ const Map<String, dynamic> _probeSchema = {
   'additionalProperties': false,
 };
 
-Map<String, dynamic> _triageAnswer() => {
-      'urgency': 'high',
-      'category': 'work',
+Map<String, dynamic> _textAnswer() => {
       'summary': 'Sarah is asking about the lock.',
-      'needs_action': true,
       'action_items': const ['Call Sarah about the lock'],
+      'deadline': '',
+      'topics': const ['lock'],
+      'project': '',
     };
 
 void main() {
@@ -89,12 +89,12 @@ void main() {
     });
 
     test('runTask keeps it off for every task the app runs', () async {
-      fake.scriptFor('triage', [_triageAnswer()]);
+      fake.scriptFor('message_text', [_textAnswer()]);
 
       await runTask(
         client,
-        const TriageTask(),
-        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+        const MessageTextTask(),
+        MessageTextInput(corpus.first.message, DateTime(2026, 8, 31)),
       );
 
       // Asserted at the runTask seam and not only at completeJson's, because
@@ -108,15 +108,15 @@ void main() {
     });
 
     test('runTask drops it entirely when a bench asks for thinking', () async {
-      fake.scriptFor('triage', [_triageAnswer()]);
+      fake.scriptFor('message_text', [_textAnswer()]);
 
       // What BENCH_THINK buys: an always-reasoning candidate has no
       // `enable_thinking` to honour, so the request stops asking for one
       // rather than asking and being ignored.
       await runTask(
         client,
-        const TriageTask(),
-        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+        const MessageTextTask(),
+        MessageTextInput(corpus.first.message, DateTime(2026, 8, 31)),
         think: true,
       );
 
@@ -126,12 +126,12 @@ void main() {
 
   group('the request body', () {
     test('carries the strict json_schema envelope the grammar needs', () async {
-      fake.scriptFor('triage', [_triageAnswer()]);
+      fake.scriptFor('message_text', [_textAnswer()]);
 
       await runTask(
         client,
-        const TriageTask(),
-        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+        const MessageTextTask(),
+        MessageTextInput(corpus.first.message, DateTime(2026, 8, 31)),
       );
 
       final format =
@@ -139,8 +139,8 @@ void main() {
       expect(format['type'], 'json_schema');
       final schema = format['json_schema'] as Map<String, dynamic>;
       expect(schema['strict'], isTrue);
-      expect(schema['name'], 'triage');
-      expect(schema['schema'], const TriageTask().schema);
+      expect(schema['name'], 'message_text');
+      expect(schema['schema'], const MessageTextTask().schema);
     });
 
     test('sends max_tokens and temperature as given', () async {
@@ -184,15 +184,15 @@ void main() {
     });
 
     test('holds the system prompt byte-identical across two emails', () async {
-      fake.scriptFor('triage', [_triageAnswer()]);
+      fake.scriptFor('message_text', [_textAnswer()]);
       final emails = nonGatedCorpus.take(2).toList();
       final now = DateTime(2026, 8, 31);
 
       for (final entry in emails) {
         await runTask(
           client,
-          const TriageTask(),
-          TriageInput(entry.message, now),
+          const MessageTextTask(),
+          MessageTextInput(entry.message, now),
         );
       }
 

@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io' show SocketException;
+import 'dart:io' show HandshakeException, SocketException;
 
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -30,6 +30,103 @@ void main() {
   test('any 5xx is the server\'s condition, not the request\'s', () {
     expect(ask(clientAnswering(500)), throwsA(isA<LlmUnavailableException>()));
     expect(ask(clientAnswering(502)), throwsA(isA<LlmUnavailableException>()));
+  });
+
+  test('a failed TLS handshake parks on the plain and the streamed path',
+      () async {
+    // An expired certificate on your server: the same request will succeed
+    // once the certificate is renewed, so it must park rather than spend one
+    // attempt per message. The decision client already maps it this way.
+    final client = LlmClient(
+      baseUrl: 'https://box.example.test/v1/chat/completions',
+      httpClient: MockClient(
+          (_) async => throw const HandshakeException('certificate expired')),
+    );
+    await expectLater(
+      ask(client),
+      throwsA(isA<LlmUnavailableException>()
+          .having((e) => e, 'not a key problem',
+              isNot(isA<LlmUnauthorizedException>()))
+          .having((e) => parkReasonFor(e), 'park word', 'model_unavailable')),
+    );
+    await expectLater(
+      client.completeJsonStreamed(
+        system: 's',
+        user: 'u',
+        schema: const {'type': 'object'},
+        onText: (_) {},
+      ),
+      throwsA(isA<LlmUnavailableException>()),
+    );
+  });
+
+  test('a key no header can carry is refused before anything is sent, on '
+      'both paths', () async {
+    for (final bad in ['sk-line\nbreak', 'sk-caf\u00e9', 'sk key']) {
+      var sent = 0;
+      final client = LlmClient(
+        baseUrl: 'https://box.example.test/v1/chat/completions',
+        bearerToken: bad,
+        httpClient: MockClient((_) async {
+          sent++;
+          return http.Response('{}', 200);
+        }),
+      );
+      final matcher = throwsA(isA<LlmUnauthorizedException>()
+          .having((e) => e.message, 'message', accessKeyCharsText)
+          .having((e) => e.message, 'never the key', isNot(contains(bad)))
+          .having((e) => parkReasonFor(e), 'park word', 'unauthorized'));
+      await expectLater(ask(client), matcher, reason: bad);
+      await expectLater(
+        client.completeJsonStreamed(
+          system: 's',
+          user: 'u',
+          schema: const {'type': 'object'},
+          onText: (_) {},
+        ),
+        matcher,
+        reason: bad,
+      );
+      expect(sent, 0, reason: bad);
+    }
+  });
+
+  test('a header refused while the request is sent reads as the key',
+      () async {
+    for (final error in <Object>[
+      const FormatException('Invalid HTTP header field value'),
+      ArgumentError('header'),
+    ]) {
+      final client = LlmClient(
+        baseUrl: 'https://box.example.test/v1/chat/completions',
+        bearerToken: 'sk-fixture-fine',
+        httpClient: MockClient((_) async => throw error),
+      );
+      await expectLater(
+        ask(client),
+        throwsA(isA<LlmUnauthorizedException>()
+            .having((e) => e.message, 'message', accessKeyCharsText)),
+      );
+    }
+  });
+
+  test('an error body that echoes the key has it blanked', () async {
+    const key = 'sk-fixture-echoed-key';
+    for (final status in [500, 429, 400]) {
+      final client = LlmClient(
+        baseUrl: 'http://127.0.0.1:1/v1/chat/completions',
+        bearerToken: key,
+        httpClient: MockClient((_) async =>
+            http.Response('bad header Authorization: Bearer $key', status)),
+      );
+      try {
+        await ask(client);
+        fail('expected a throw');
+      } on LlmException catch (e) {
+        expect(e.message, isNot(contains(key)), reason: '$status');
+        expect(e.message, contains('<key>'), reason: '$status');
+      }
+    }
   });
 
   test('a 401 and a 403 park, and say the key was refused', () async {

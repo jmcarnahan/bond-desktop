@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
+import '../models/attachment_models.dart' show decodeAttachmentDigest;
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'attachments/attachment_digest_lines.dart';
@@ -9,6 +10,7 @@ import 'external_sender.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'attention.dart';
+import 'decision/decision_policy.dart';
 import 'llm/needs_you_task.dart';
 import 'needs_you.dart';
 import 'owner_lookup.dart';
@@ -28,9 +30,15 @@ import 'pipeline_progress.dart';
 /// 0 is a judgement that the message does not need the owner, and 1 that it
 /// does. The work row, not the NULL, is what says whether a message was
 /// judged. The deterministic floor
-/// ([needsYouFloor]) only ever RAISES it, and so does the model below it: what
-/// the floor is silent about is read by [NeedsYouTask], which is the only
-/// thing here that can write a 0.
+/// ([needsYouFloor]) only ever RAISES it. What the floor is silent about is
+/// settled by the decision model's stored p(needs_you = yes) against
+/// [DecisionPolicy]'s bars (yes at 0.65, 0.85 for a cold approach; no below
+/// 0.35), with a templated reason; the band between, a message whose owner
+/// saved custom rules, one with an attachment digest that carries an ask (a
+/// digest that asks nothing adds nothing), one decided with no owner line in
+/// its state and one decided before the decision model existed are read by
+/// [NeedsYouTask]. Those two are the
+/// only things here that can write a 0.
 ///
 /// The owner's `needs_you_rules` pref REPLACES the default body of the system
 /// prompt outright — an empty pref is the default body. It is read per item,
@@ -206,7 +214,69 @@ class NeedsYouHandler extends WorkHandler {
       return;
     }
 
-    // Below the floor, which settles nothing: the model reads the text.
+    // What the files on this message say, when any of them have been read.
+    // Keyed on this message alone and not the thread: the judgement is about
+    // what THIS message asks of the owner, and a contract attached three turns
+    // ago is context the thread text already carries.
+    //
+    // The digest handler requeues this kind once a document lands an ask, so a
+    // message judged before its attachments were read is judged again with
+    // this block filled in.
+    final digests = (await _store.digestsForMessages(source, [id]))[id] ??
+        const <Map<String, Object?>>[];
+
+    // Read per item rather than held, like [DraftHandler]'s about-me: someone
+    // who edits their rules mid-drain wants the rest of the drain to use them.
+    final rules = await _store.getPref(needsYouRulesKey);
+
+    // Below the floor, the decision model's probability settles everything
+    // outside the band — unless something the model never read has a say.
+    // Owner-written rules (a trained head cannot follow them) and an
+    // attachment digest WITH an ask (the model read the message, not its
+    // files; a digest that asks nothing has nothing to add, per D6) both send
+    // the message to the language model, as does a message decided before
+    // the decision model existed and one decided with no owner line in its
+    // state (the head was trained with that line, so its number is not
+    // trusted without it).
+    final filesAsk = digests.any(
+      (row) =>
+          (decodeAttachmentDigest(row['digest_json'] as String?)
+                  ?.asks
+                  .isNotEmpty ??
+              false),
+    );
+    if (!_hasCustomRules(rules) && !filesAsk) {
+      final stored = await _store.decisionFor(source, id);
+      final p = stored?.needsYouP;
+      if (stored != null &&
+          stored.ownerKnown &&
+          p != null &&
+          stored.answers.fields.isNotEmpty) {
+        // A stranger's first approach is held to the higher bar, for the
+        // reason the language model's confidence bar moves below.
+        final bar =
+            cold ? DecisionPolicy.needsYouYesCold : DecisionPolicy.needsYouYes;
+        final bool? decided = p >= bar
+            ? true
+            : (p < DecisionPolicy.needsYouNo ? false : null);
+        if (decided != null) {
+          await _store.writeNeedsYouVerdict(
+            source,
+            id,
+            verdict: decided,
+            reason: decided
+                ? needsYouYesReason(stored.answers)
+                : needsYouNoReason,
+          );
+          _log.note({'verdict': decided, 'source': 'decision', 'p': p});
+          await _followChip(source, id, previous: previous, verdict: decided);
+          return;
+        }
+        // The band: the language model reads it, exactly as before.
+      }
+    }
+
+    // The model reads the text.
     var message = Message.fromRow(row);
     final key = row['conversation_key'] as String? ?? '';
     // Hydrated only when the row says there is something to hydrate —
@@ -227,20 +297,6 @@ class NeedsYouHandler extends WorkHandler {
       for (final earlier in thread)
         if (earlier.id != message.id) earlier,
     ];
-    // What the files on this message say, when any of them have been read.
-    // Keyed on this message alone and not the thread: the judgement is about
-    // what THIS message asks of the owner, and a contract attached three turns
-    // ago is context the thread text already carries.
-    //
-    // The digest handler requeues this kind once a document lands an ask, so a
-    // message judged before its attachments were read is judged again with
-    // this block filled in.
-    final digests = (await _store.digestsForMessages(source, [id]))[id] ??
-        const <Map<String, Object?>>[];
-
-    // Read per item rather than held, like [DraftHandler]'s about-me: someone
-    // who edits their rules mid-drain wants the rest of the drain to use them.
-    final rules = await _store.getPref(needsYouRulesKey);
     final owner = await _owner();
 
     final result = await runTask(
@@ -379,6 +435,13 @@ class NeedsYouHandler extends WorkHandler {
 
   /// The stored verdict as it sits on the row: 0, 1, or null for never judged.
   static int? _int(Object? value) => (value as num?)?.toInt();
+
+  /// Whether the owner saved rules of their own — the same reading
+  /// [_taskFor] makes: blank or the default text is no rules.
+  static bool _hasCustomRules(String? rules) {
+    final body = rules?.trim() ?? '';
+    return body.isNotEmpty && body != needsYouDefaultRules.trim();
+  }
 
   /// The task for one pref reading, built at most once per distinct text.
   ///

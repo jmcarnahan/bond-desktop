@@ -113,11 +113,16 @@ class ActivityLogPanel extends StatefulWidget {
   /// disappearing.
   static const Map<String, String> _reasons = {
     'model_unavailable': 'model server off',
-    // The other two park words a drain can record. They say WHICH slot and
+    // The other park words a drain can record. They say WHICH slot and
     // WHY, so a reader scanning a column of parked rows can tell a server
     // nobody started from a key somebody rotated.
     'unauthorized': 'the access key was refused',
     'embed_unavailable': 'embedding server unreachable',
+    'decision_unavailable': 'decision model unreachable',
+    'not_installed': 'model not downloaded',
+    'decision_not_installed': 'decision model not installed',
+    'decision_misconfigured': 'decision server misconfigured',
+    'decision_unauthorized': 'the decision server refused the access key',
     'session': 'signed out',
     'no_scope': 'not connected',
     'deleted': 'message deleted',
@@ -468,6 +473,14 @@ class ActivityLogPanel extends StatefulWidget {
     final folded = detail['folded'];
     if (folded is num && folded > 0) {
       sentence = '$sentence, ${folded.toInt()} folded';
+    }
+    // The clusters a pass left alone because a live possible storyline
+    // already holds most of their threads. Said, because it is the one reason
+    // a pass writes a row with nothing proposed, and a row with no reason
+    // reads as a pass that did nothing for nothing.
+    final overlaps = detail['overlaps_possible'];
+    if (overlaps is num && overlaps > 0) {
+      sentence = '$sentence, ${overlaps.toInt()} left for a possible storyline';
     }
     return expiredText.isEmpty ? sentence : '$sentence, $expiredText';
   }

@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart' show SqliteException;
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// A messages row with everything the NOT NULL columns need, overridable.
 Map<String, Object?> messageRow({
@@ -207,17 +208,16 @@ void main() {
 
     test('a completed triage survives a re-sync of the same message', () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm1',
         status: 'done',
-        result: const TriageResult(
-          urgency: 'urgent',
-          category: 'closing',
-          summary: 'Sign by Thursday',
-          needsAction: true,
-          actionItems: ['Sign the CD'],
-        ),
+        urgency: 'urgent',
+        category: 'closing',
+        summary: 'Sign by Thursday',
+        needsAction: true,
+        actionItems: ['Sign the CD'],
       );
       await store.upsertMessage(messageRow(id: 'm1', isRead: 1));
 
@@ -257,17 +257,19 @@ void main() {
     test('a re-sync leaves the triage v2 columns where triage put them',
         () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage('email', 'm1',
-          status: 'triaged',
-          result: const TriageResult(
-            urgency: 'normal',
-            category: 'work',
-            summary: 'Wants the CD by Friday',
-            needsAction: true,
-            actionItems: [],
-            replyExpected: true,
-            deadline: 'Friday',
-          ));
+      await writeTriaged(
+        store,
+        'email',
+        'm1',
+        status: 'triaged',
+        urgency: 'normal',
+        category: 'work',
+        summary: 'Wants the CD by Friday',
+        needsAction: true,
+        actionItems: [],
+        replyExpected: true,
+        deadline: 'Friday',
+      );
 
       await store.upsertMessage(messageRow(id: 'm1', isRead: 1));
 
@@ -531,27 +533,31 @@ void main() {
         // worklist, and rounding them down would hide brand new mail.
         expect((await load()).replyExpected, isNull);
 
-        await store.writeTriage('email', 'm1',
-            status: 'done',
-            result: const TriageResult(
-              urgency: 'normal',
-              category: 'other',
-              summary: 'An FYI.',
-              needsAction: false,
-              actionItems: [],
-            ));
+        await writeTriaged(
+          store,
+          'email',
+          'm1',
+          status: 'done',
+          urgency: 'normal',
+          category: 'other',
+          summary: 'An FYI.',
+          needsAction: false,
+          actionItems: [],
+        );
         expect((await load()).replyExpected, isFalse);
 
-        await store.writeTriage('email', 'm1',
-            status: 'done',
-            result: const TriageResult(
-              urgency: 'normal',
-              category: 'other',
-              summary: 'Asks for a date.',
-              needsAction: true,
-              actionItems: ['Confirm the date'],
-              replyExpected: true,
-            ));
+        await writeTriaged(
+          store,
+          'email',
+          'm1',
+          status: 'done',
+          urgency: 'normal',
+          category: 'other',
+          summary: 'Asks for a date.',
+          needsAction: true,
+          actionItems: ['Confirm the date'],
+          replyExpected: true,
+        );
         expect((await load()).replyExpected, isTrue);
       });
 
@@ -640,16 +646,18 @@ void main() {
           conversationKey: 'c-new',
           receivedAt: ago(3),
         ));
-        await store.writeTriage('email', 'followup',
-            status: 'done',
-            result: const TriageResult(
-              urgency: 'normal',
-              category: 'other',
-              summary: 'Chases the date.',
-              needsAction: true,
-              actionItems: [],
-              replyExpected: true,
-            ));
+        await writeTriaged(
+          store,
+          'email',
+          'followup',
+          status: 'done',
+          urgency: 'normal',
+          category: 'other',
+          summary: 'Chases the date.',
+          needsAction: true,
+          actionItems: [],
+          replyExpected: true,
+        );
         await store.upsertMessage(messageRow(
           id: 'bot',
           fromAddress: 'noreply@vendor.example.net',
@@ -804,8 +812,12 @@ void main() {
       await store
           .upsertMessage(messageRow(id: 'b', receivedAt: '2026-08-27T10:00:00Z'));
 
-      await store.writeTriage('email', 'a',
-          status: 'done', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'email',
+        'a',
+        status: 'done',
+      );
       expect((await store.nextPendingTriage())?['source_message_id'], 'b');
 
       await store.writeTriage('email', 'b', status: 'gated', gateReason: 'bulk');
@@ -909,18 +921,17 @@ void main() {
 
     test('writeTriage records a result as columns, bools as 0/1', () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm1',
         status: 'done',
-        result: const TriageResult(
-          urgency: 'high',
-          category: 'work',
-          summary: 'Approve or push the date',
-          needsAction: true,
-          actionItems: ['Confirm the venue', 'Send the invite'],
-        ),
         attempts: 1,
+        urgency: 'high',
+        category: 'work',
+        summary: 'Approve or push the date',
+        needsAction: true,
+        actionItems: ['Confirm the venue', 'Send the invite'],
       );
 
       final row = (await db.customSelect('SELECT * FROM messages').get()).single;
@@ -939,19 +950,18 @@ void main() {
 
     test('writeTriage round-trips reply_expected and the deadline', () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm1',
         status: 'triaged',
-        result: const TriageResult(
-          urgency: 'normal',
-          category: 'work',
-          summary: 'Needs the signed CD',
-          needsAction: true,
-          actionItems: [],
-          replyExpected: true,
-          deadline: 'Friday',
-        ),
+        urgency: 'normal',
+        category: 'work',
+        summary: 'Needs the signed CD',
+        needsAction: true,
+        actionItems: [],
+        replyExpected: true,
+        deadline: 'Friday',
       );
 
       final message = (await store.loadThread('conv-1')).single;
@@ -962,8 +972,12 @@ void main() {
     test('a deadline the model did not offer is stored as NULL, not empty',
         () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage('email', 'm1',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'email',
+        'm1',
+        status: 'triaged',
+      );
 
       final row = (await store.getMessageRow('email', 'm1'))!;
       // The same rule `label` takes: a blank column and a column nobody wrote
@@ -976,17 +990,19 @@ void main() {
 
     test('a status-only write leaves an earlier reply_expected alone', () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage('email', 'm1',
-          status: 'triaged',
-          result: const TriageResult(
-            urgency: 'normal',
-            category: 'work',
-            summary: '',
-            needsAction: false,
-            actionItems: [],
-            replyExpected: true,
-            deadline: 'Monday',
-          ));
+      await writeTriaged(
+        store,
+        'email',
+        'm1',
+        status: 'triaged',
+        urgency: 'normal',
+        category: 'work',
+        summary: '',
+        needsAction: false,
+        actionItems: [],
+        replyExpected: true,
+        deadline: 'Monday',
+      );
       await store.writeTriage('email', 'm1', status: 'stale');
 
       final row = (await store.getMessageRow('email', 'm1'))!;
@@ -1023,8 +1039,12 @@ void main() {
 
     test('a status-only write leaves an earlier result in place', () async {
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeTriage('email', 'm1',
-          status: 'done', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'email',
+        'm1',
+        status: 'done',
+      );
       await store.writeTriage('email', 'm1', status: 'stale');
 
       final row = (await db.customSelect('SELECT * FROM messages').get()).single;
@@ -1106,8 +1126,12 @@ void main() {
       await store.writeNeedsYouVerdict('email', 'm1',
           verdict: true, reason: 'teams_direct');
 
-      await store.writeTriage('email', 'm1',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'email',
+        'm1',
+        status: 'triaged',
+      );
 
       final row = (await store.getMessageRow('email', 'm1'))!;
       expect(row['needs_you_verdict'], 1);
@@ -1200,8 +1224,12 @@ void main() {
 
     test('a message v2 has already judged is never asked again', () async {
       await judgedByV1('judged');
-      await store.writeTriage('email', 'judged',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'email',
+        'judged',
+        status: 'triaged',
+      );
 
       expect(
         await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
@@ -1251,8 +1279,12 @@ void main() {
       );
 
       // What the triage worker does with the row this pass queued.
-      await store.writeTriage('email', 'm1',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'email',
+        'm1',
+        status: 'triaged',
+      );
 
       expect(
         await store.rejudgeStaleTriage(source: 'email', sinceIso: window),

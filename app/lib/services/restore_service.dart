@@ -108,9 +108,10 @@ class RestoreService {
     // absent on purpose — the extract handler chains it.
     //
     // `refreshCreatedAt`: a Restore is the owner asking for this message now,
-    // and [MessageStore.claimPendingWork] drains `created_at DESC` — a revived
-    // row that kept the old stamp would be claimed behind every message that
-    // has arrived since.
+    // and [MessageStore.claimPendingWork] drains `created_at DESC` (for
+    // `extract`, a freshly stamped item jumps its priority keys:
+    // `MessageStore.textClaimRequestedWithin`) — a revived row that kept the
+    // old stamp would be claimed behind every message that has arrived since.
     for (final kind in const ['extract', 'needs_you', 'embed_message']) {
       await _store.requeueWork(
         kind,

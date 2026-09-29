@@ -20,7 +20,7 @@ import '../services/draft_stream.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
-import '../services/llm/reply_decision_task.dart' show replySuppressed;
+import '../services/reply_policy.dart' show replySuppressed;
 import '../services/mail_echo.dart' show firstLine, mailEchoRow, nowSecondsZ;
 import '../services/outbound_chat.dart'
     show queueRecapFor, writeOutboundChatRow;
@@ -269,7 +269,7 @@ class DraftState {
   final String? inFlightBody;
 
   /// Whether a machine wrote the message this pane would answer — see
-  /// `replySuppressed` in `services/llm/reply_decision_task.dart`, which is the
+  /// `replySuppressed` in `services/reply_policy.dart`, which is the
   /// one authority on the question and is asked here at READ time.
   ///
   /// Read through [suggestable], which is what both of the inbox's suggest
@@ -816,9 +816,9 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// The payload carries only the keys that have something in them, so a
   /// consulted file and a pinned document never have to be asked for together
   /// to be asked for at all — and it always carries `asked`, which is what
-  /// tells the handler to skip the reply DECISION. A person pressing this
-  /// button has already decided a reply is wanted, and a model that came back
-  /// "no" would leave them an empty box.
+  /// tells the handler to skip the reply DECISION (the decision model's stored
+  /// reply probability). A person pressing this button has already decided a
+  /// reply is wanted, and a stored "no" would leave them an empty box.
   Future<void> generate({
     List<String> pinnedAttachmentIds = const [],
     List<int> contextFileIds = const [],

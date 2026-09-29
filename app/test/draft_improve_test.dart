@@ -16,6 +16,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_auth_session.dart';
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -31,17 +32,16 @@ import 'fixtures/test_db.dart';
 /// the standing rule, and a prefetch whose draft stage points off this
 /// machine.
 
-/// A client scripted by TASK rather than by position: the decision call and
-/// the draft call are two schemas, and the handler asks for them in that
-/// order. The improve call's schema is `draft_reply` too, because it IS the
-/// draft task, so an improve client scripts [draft] alone.
+/// A client scripted by TASK rather than by position. The handler's one call
+/// is `draft_reply` — whether a reply is wanted comes from the stored
+/// decision — and the improve call's schema is `draft_reply` too, because it
+/// IS the draft task.
 ///
 /// The fixture records `schemaNames`, `systems` and `users` per call, which
 /// is what the phase's whole claim rests on: an improve sends exactly what
 /// the local draft sent.
-ScriptedLlm draftClient({Object? decision, Object? draft}) {
+ScriptedLlm draftClient({Object? draft}) {
   final llm = ScriptedLlm();
-  if (decision != null) llm.answer('reply_decision', decision);
   if (draft != null) llm.answer('draft_reply', draft);
   return llm;
 }
@@ -66,10 +66,6 @@ class _Recorder extends ActivityLog {
   @override
   void note(Map<String, Object?> detail) => notes.addAll(detail);
 }
-
-/// The reply-decision call's answer, first in every prefetch's script.
-Map<String, dynamic> decision() =>
-    {'needs_reply': true, 'reason': 'Robin is waiting on a date.'};
 
 Map<String, dynamic> answer({
   String evidence = 'Robin is asking whether the review still lands Thursday.',
@@ -232,7 +228,7 @@ void main() {
       // through the queue, then the button rewrites it — and the two draft
       // prompts are one string, system and user alike.
       await seedInbound();
-      final draftLlm = draftClient(decision: decision(), draft: answer());
+      final draftLlm = draftClient(draft: answer());
       final improveLlm =
           draftClient(draft: answer(replyBody: 'The better answer.'));
       final handler = DraftHandler(
@@ -248,7 +244,7 @@ void main() {
         'entity_id': 'm1',
         'payload_json': DraftRequest().encode(),
       });
-      expect(draftLlm.schemaNames, ['reply_decision', 'draft_reply']);
+      expect(draftLlm.schemaNames, ['draft_reply']);
 
       expect(await handler.improve('email', 'm1'), isNull);
 
@@ -503,9 +499,7 @@ void main() {
       final log = _Recorder();
       final handler = DraftHandler(
         store,
-        // An asked-for draft makes no decision call, so its script is the
-        // draft answer alone.
-        draftClient(decision: asked ? null : decision(), draft: answer()),
+        draftClient(draft: answer()),
         improveClient: improveLlm,
         activityLog: log,
         routes: routes(
@@ -620,7 +614,7 @@ void main() {
         'improve_error on the row, never a failure of the draft', () async {
       await seedInbound(needsYou: true, urgency: 'high');
       final log = _Recorder();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       var reads = 0;
       final handler = DraftHandler(
         store,
@@ -645,7 +639,7 @@ void main() {
         'payload_json': DraftRequest().encode(),
       });
 
-      expect(llm.calls.length, 2);
+      expect(llm.calls.length, 1);
       expect(log.notes['improve_error'], 'other');
       expect(log.notes.containsKey('improved'), isFalse);
       final draft = await store.getDraftForMessage('email', 'm1');
@@ -658,7 +652,7 @@ void main() {
         'notes it, and still writes the local draft', () async {
       await seedInbound(needsYou: true, urgency: 'high');
       final log = _Recorder();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       final handler = DraftHandler(
         store,
         llm,
@@ -677,7 +671,7 @@ void main() {
         'payload_json': DraftRequest().encode(),
       });
 
-      expect(llm.calls.length, 2);
+      expect(llm.calls.length, 1);
       expect(log.notes['improve'], 'unwired');
       expect(log.notes.containsKey('improved'), isFalse);
       final draft = await store.getDraftForMessage('email', 'm1');
@@ -691,18 +685,12 @@ void main() {
       required bool asked,
       required CloudDraftLedger ledger,
       required ScriptedLlm llm,
-      ScriptedLlm? decisionLlm,
     }) async {
       await seedInbound();
       final log = _Recorder();
       final handler = DraftHandler(
         store,
         llm,
-        // Its own stage and its own client, as the app builds it. The cap is
-        // checked AFTER the decision on purpose: the decision is a cheap
-        // yes/no that usually runs on a local server, and the thing the cap
-        // is about is the prose prompt that would leave.
-        decisionClient: decisionLlm,
         activityLog: log,
         routes: routes(draft: cloudTarget, ledger: ledger),
       );
@@ -723,7 +711,6 @@ void main() {
         asked: false,
         ledger: ledgerOf(1),
         llm: llm,
-        decisionLlm: draftClient(decision: decision()),
       );
 
       expect(llm.calls.length, 0);
@@ -742,6 +729,50 @@ void main() {
       expect(await store.getDraftForMessage('email', 'm1'), isNotNull);
     });
 
+    test('a prefetch the reply decision refuses never reads the ledger',
+        () async {
+      // The decision is asked before anything about the target: a "no" costs
+      // no ledger read, no cloud count and no call.
+      await seedInbound();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(replyExpected: 0.1)),
+        qhash: 'test',
+        ownerKnown: true,
+      );
+      var capReads = 0;
+      final llm = draftClient(draft: answer());
+      final log = _Recorder();
+      final handler = DraftHandler(
+        store,
+        llm,
+        activityLog: log,
+        routes: routes(
+          draft: cloudTarget,
+          // `refusal()` reads the cap first, so a cap never read is a ledger
+          // never asked.
+          ledger: CloudDraftLedger(store, cap: () {
+            capReads++;
+            return 5;
+          }),
+        ),
+      );
+
+      await handler.run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm1',
+        'payload_json': DraftRequest().encode(),
+      });
+
+      expect(capReads, 0);
+      expect(llm.calls, isEmpty);
+      expect(log.notes['reason'], 'no_reply_needed');
+      expect(log.notes.containsKey('cloud'), isFalse);
+      expect(await store.getDraftForMessage('email', 'm1'), isNull);
+    });
+
     test('a ledger that cannot be read skips the prefetch, not the item into '
         'a retry', () async {
       await seedInbound();
@@ -750,7 +781,6 @@ void main() {
       final handler = DraftHandler(
         store,
         llm,
-        decisionClient: draftClient(decision: decision()),
         activityLog: log,
         routes: routes(
           draft: cloudTarget,
@@ -781,7 +811,6 @@ void main() {
       final handler = DraftHandler(
         store,
         llm,
-        decisionClient: draftClient(decision: decision()),
         activityLog: log,
         // A third-party draft target and NO ledger: the wiring bug fails
         // closed as a skip, so the item is done rather than parked.

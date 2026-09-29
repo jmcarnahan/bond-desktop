@@ -27,12 +27,21 @@ import 'golden_set.dart';
 
 // ── the cards a candidate is judged as ─────────────────────────────────
 
-/// The two enriched fields of one item's card, out of a bulk run file.
+/// The enriched fields of one item's card, out of a bulk run file.
+///
+/// [project] is read for the `thread` clustering card only (decision-model
+/// round, Phase 8); every other card ignores it, and the storyline replay's
+/// candidate card never read it. Empty when the run file has none.
 class GoldenCard {
   final List<String> topics;
   final String? summary;
+  final String project;
 
-  const GoldenCard({required this.topics, required this.summary});
+  const GoldenCard({
+    required this.topics,
+    required this.summary,
+    this.project = '',
+  });
 }
 
 /// A bulk run file, read for nothing but its cards.
@@ -72,8 +81,11 @@ class GoldenCards {
           ? null
           : rawSummary;
 
-      if (topics.isEmpty && summary == null) continue;
-      byId[id] = GoldenCard(topics: topics, summary: summary);
+      final rawProject = asMap(entry['extract'])['project'];
+      final project = rawProject is String ? rawProject.trim() : '';
+
+      if (topics.isEmpty && summary == null && project.isEmpty) continue;
+      byId[id] = GoldenCard(topics: topics, summary: summary, project: project);
     }
     return GoldenCards(byId);
   }

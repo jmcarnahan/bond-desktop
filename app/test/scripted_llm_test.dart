@@ -362,7 +362,7 @@ void main() {
     test('a plain call beside a streamed one leaves streamedCalls alone',
         () async {
       final llm = ScriptedLlm(fallback: const {'ok': true});
-      await ask(llm, 'reply_decision');
+      await ask(llm, 'message_text');
       expect(llm.streamedCalls, 0);
       expect(llm.calls.single.streamed, isFalse);
     });

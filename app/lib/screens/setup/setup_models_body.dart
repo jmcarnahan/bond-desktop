@@ -17,6 +17,9 @@ import 'setup_controls.dart';
 /// sentence, so a person on a small Mac is told what is coming before the
 /// rows say it and before the total is a number they have to compare.
 ///
+/// The decision model, when it runs here, heads the list with its install
+/// state rather than a size: it is installed by hand and never downloaded.
+///
 /// The rows are in MANIFEST order (embed, bulk, prose) rather than by size,
 /// because this screen is about what each model does and that order is the
 /// pipeline's. The download step is the one that sorts by size.
@@ -31,9 +34,19 @@ class SetupModelsBody extends StatelessWidget {
 
   final VoidCallback onContinue;
 
+  /// The decision model's entry when it runs on this Mac, or null. It is
+  /// installed by hand and never downloaded, so it is listed apart from the
+  /// downloads and counts toward neither the sentence nor the total.
+  final ModelFile? decisionModel;
+
+  /// Whether [decisionModel]'s files are already in the models folder.
+  final bool decisionInstalled;
+
   const SetupModelsBody({
     super.key,
     required this.manifest,
+    this.decisionModel,
+    this.decisionInstalled = false,
     required this.onOpenLicense,
     required this.onContinue,
   });
@@ -65,9 +78,17 @@ class SetupModelsBody extends StatelessWidget {
   /// new sentence.
   static String roleSentence(ModelRole role) => switch (role) {
         ModelRole.embed => 'Finds related messages',
-        ModelRole.bulk => 'Reads and sorts your mail',
-        ModelRole.prose => 'Writes drafts and replies',
+        ModelRole.bulk || ModelRole.prose =>
+          'Writes summaries, drafts and storylines',
+        ModelRole.decide => 'Sorts and flags every message',
       };
+
+  static const Key decisionRowKey = ValueKey('setup-models-decision');
+
+  /// What the decision model's row says in place of a size.
+  static const String installedText = 'Installed';
+  static const String notInstalledText =
+      'Not installed · run make decide-install';
 
   /// What a checkpoint's second file adds, under its size. Named here so a
   /// test can pin the sentence rather than rebuild it.
@@ -86,6 +107,34 @@ class SetupModelsBody extends StatelessWidget {
           style: BondType.body.copyWith(color: BondColors.inkSecondary),
         ),
         const SizedBox(height: BondSpacing.s16),
+        if (decisionModel case final decide?) ...[
+          Row(
+            key: decisionRowKey,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      decide.displayName,
+                      style: BondType.body.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(roleSentence(decide.role), style: BondType.caption),
+                  ],
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s12),
+              Text(
+                decisionInstalled ? installedText : notInstalledText,
+                style: BondType.small,
+              ),
+            ],
+          ),
+          const SizedBox(height: BondSpacing.s16),
+        ],
         for (final model in manifest.models) ...[
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,

@@ -5,27 +5,36 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart'
+    show rawEmbeddingsText;
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/owner_lookup.dart' show OwnerIdentity;
 import 'package:bond_inbox/services/triage_queue.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
-/// A [ScriptedLlm] that answers the triage schema from a script and never
-/// opens a socket.
+/// A [ScriptedLlm] that answers the DECISION model's calls from a script and
+/// never opens a socket — handed to the queue through
+/// [ScriptedDecisionClient], which turns each step's map into the nine
+/// answers ([scriptedAnswers]) and renders the decision state as the call's
+/// user message.
 ///
 /// It records concurrency as well as calls: how many requests the drain has in
-/// flight is the number this phase is about, and a fake that only counted
+/// flight is the number this file is about, and a fake that only counted
 /// calls could not tell a serial drain from a three-at-a-time one. Both
 /// numbers are `maxInFlight` and `userMessages` on the shared fixture.
 ///
-/// [TriageQueue] runs one task, so one schema name carries the whole script.
-/// A request that has to be HELD open while the drain gets on with the others
-/// is a COMPUTED step returning a completer's future — see [heldAnswer].
+/// Triage makes one model call per message, the decision, so one schema name
+/// carries the whole script. A request that has to be HELD open while the
+/// drain gets on with the others is a COMPUTED step returning a completer's
+/// future — see [heldAnswer].
 ScriptedLlm fakeLlm(List<Object> script) =>
-    ScriptedLlm()..scriptFor('triage', script);
+    ScriptedLlm()..scriptFor('decision', script);
 
 /// A step that answers with whatever [held] is eventually completed with,
 /// which is how a request stays at the server while the drain launches its
@@ -141,8 +150,10 @@ void main() {
     String? bodyText,
     String? bodyPreview,
     Map<String, String>? headers,
+    bool addressedMe = false,
   }) async {
     await store.upsertMessage({
+      if (addressedMe) 'addressed_me': 1,
       'source': source,
       'source_message_id': id,
       'conversation_key': conversationKey,
@@ -206,13 +217,546 @@ void main() {
   Future<Map<String, Object?>> conversationRow([String key = 'conv-1']) async =>
       (await store.getConversationRow('email', key))!;
 
+  group('decision pass', () {
+    Future<Map> triageDetail(String status) async {
+      final row = (await store.recentActivity(limit: 20)).firstWhere(
+        (r) => r['kind'] == 'triage' && r['status'] == status,
+      );
+      return jsonDecode(row['detail_json'] as String) as Map;
+    }
+
+    test('is the only model call, and the row is written from it alone',
+        () async {
+      await seedMessage(id: 'm1', bodyText: 'Please sign the lease today.');
+      await seedConversation();
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(
+          urgency: 'low',
+          category: 'notification',
+          needsAction: 0.8,
+          replyExpected: 0.7,
+          needsYou: 0.66,
+        ),
+      );
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await TriageQueue(
+        store,
+        activityLog: log,
+        decisionClient: decision,
+        owner: () async => (name: 'Ada Park', address: 'ada@example.com'),
+      ).pump();
+
+      expect(decision.calls, hasLength(1));
+      expect(decision.calls.single.owner, contains('ada@example.com'));
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      // The decision model's four fields...
+      expect(row['urgency'], 'low');
+      expect(row['category'], 'notification');
+      expect(row['needs_action'], 1);
+      expect(row['reply_expected'], 1);
+      // ...and no text: the message-text stage writes that, later.
+      expect(row['summary'], isNull);
+      expect(row['action_items_json'], isNull);
+      expect(row['deadline'], isNull);
+      expect(row['label'], isNull);
+      // The fold carries the decision's urgency and category, and no ask
+      // until the text lands.
+      final conversation = await conversationRow();
+      expect(conversation['cta_urgency'], 'low');
+      expect(conversation['category'], 'notification');
+      expect(conversation['cta_text'], isNull);
+
+      final stored = (await store.decisionFor('email', 'm1'))!;
+      expect(stored.model, 'bond-decide-fake');
+      expect(stored.needsYouP, closeTo(0.66, 1e-9));
+      expect(stored.needsActionP, closeTo(0.8, 1e-9));
+      expect(stored.answers['urgency'].choice, 'low');
+      expect(stored.ownerKnown, isTrue);
+
+      final detail = await triageDetail('ok');
+      expect(
+        detail['decision'],
+        'gate=keep urgency=low category=notification na=0.80 re=0.70 '
+        'ny=0.66 (42 ms)',
+      );
+      expect(detail['urgency'], 'low');
+      expect(detail['category'], 'notification');
+      expect(detail['needs_action'], true);
+      expect(detail['reply_expected'], true);
+      // The text keys went with the text call.
+      expect(detail.containsKey('action_items'), isFalse);
+      expect(detail.containsKey('deadline'), isFalse);
+    });
+
+    test('a decision made before the owner is known says so', () async {
+      await seedMessage(id: 'm1');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      await TriageQueue(
+        store,
+        decisionClient: decision,
+        // An account that has not answered: no owner line in the state.
+        owner: () async => null,
+      ).pump();
+
+      expect(decision.calls.single.owner, isNull);
+      expect((await store.decisionFor('email', 'm1'))!.ownerKnown, isFalse);
+    });
+
+    test('a claim waits a moment for an owner lookup still in flight',
+        () async {
+      await seedMessage(id: 'm1');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      await TriageQueue(
+        store,
+        decisionClient: decision,
+        // The keychain answering just after launch.
+        owner: () async {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return (name: 'Ada Park', address: 'ada@example.com');
+        },
+      ).pump();
+
+      expect(decision.calls.single.owner, contains('ada@example.com'));
+      expect((await store.decisionFor('email', 'm1'))!.ownerKnown, isTrue);
+    });
+
+    test('a lookup that never answers is waited for once, then the drain '
+        'goes on ownerless', () async {
+      for (var i = 0; i < 3; i++) {
+        await seedMessage(
+          id: 'm$i',
+          conversationKey: 'conv-$i',
+          receivedAt: '2026-08-29T10:0$i:00Z',
+        );
+      }
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      final sw = Stopwatch()..start();
+      await TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: decision,
+        owner: () => Completer<OwnerIdentity?>().future,
+      ).pump();
+      sw.stop();
+
+      expect(decision.calls, hasLength(3));
+      expect(decision.calls.map((c) => c.owner), everyElement(isNull));
+      // One wait of 300 ms for the three, not one each.
+      expect(sw.elapsed, lessThan(const Duration(milliseconds: 850)));
+    });
+
+    test('a quiesce during an owner wait lets the claim go on ownerless, and '
+        'leaves no timer behind', () async {
+      await seedMessage(id: 'm1');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      final queue = TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: decision,
+        owner: () => Completer<OwnerIdentity?>().future,
+      );
+      // Every timer the drain starts, with how long it was for, so the owner
+      // wait's own 300 ms timer can be found and asked whether it is gone.
+      final timers = <(Duration, Timer)>[];
+      final pumped = runZoned(
+        queue.pump,
+        zoneSpecification: ZoneSpecification(
+          createTimer: (self, parent, zone, duration, f) {
+            final timer = parent.createTimer(zone, duration, f);
+            timers.add((duration, timer));
+            return timer;
+          },
+        ),
+      );
+      Iterable<Timer> ownerTimers() => [
+            for (final (d, t) in timers)
+              if (d == const Duration(milliseconds: 300)) t,
+          ];
+      for (var i = 0; i < 50 && ownerTimers().isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 2));
+      }
+      expect(ownerTimers(), hasLength(1), reason: 'the claim is waiting');
+      expect(decision.calls, isEmpty);
+
+      final sw = Stopwatch()..start();
+      await queue.quiesce();
+      await pumped;
+
+      expect(decision.calls.single.owner, isNull);
+      expect(ownerTimers().where((t) => t.isActive), isEmpty);
+      expect(sw.elapsed, lessThan(const Duration(milliseconds: 250)));
+    });
+
+    test('a lookup that answered null is asked again at the next pump, and '
+        'that claim waits for it', () async {
+      var asked = 0;
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      final queue = TriageQueue(
+        store,
+        decisionClient: decision,
+        owner: () async {
+          asked++;
+          if (asked == 1) return null;
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return (name: 'Ada Park', address: 'ada@example.com');
+        },
+      );
+
+      await seedMessage(id: 'm1');
+      await queue.pump();
+      expect(decision.calls.single.owner, isNull);
+
+      await seedMessage(
+        id: 'm2',
+        conversationKey: 'conv-2',
+        receivedAt: '2026-08-29T11:00:00Z',
+      );
+      await queue.pump();
+
+      expect(asked, 2);
+      expect(decision.calls, hasLength(2));
+      expect(decision.calls.last.owner, contains('ada@example.com'));
+      expect((await store.decisionFor('email', 'm2'))!.ownerKnown, isTrue);
+    });
+
+    test("below the booleans' bar the answers are no", () async {
+      await seedMessage(id: 'm1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(needsAction: 0.49, replyExpected: 0.3),
+        ),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['needs_action'], 0);
+      expect(row['reply_expected'], 0);
+    });
+
+    test('the learned gate drops the message under its reason', () async {
+      await seedMessage(id: 'm1', from: 'helpdesk@example.com');
+      await seedConversation();
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final gated = <String>[];
+
+      await TriageQueue(
+        store,
+        activityLog: log,
+        onGated: (source, id) async => gated.add(id),
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.93, dropReason: 'ticket_system'),
+        ),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'ticket_system');
+      expect(gated, ['m1']);
+      // The decision is kept for the Why panel.
+      expect((await store.decisionFor('email', 'm1'))!.gateP,
+          closeTo(0.93, 1e-9));
+      final detail = await triageDetail('skipped');
+      expect(detail['reason'], 'ticket_system');
+      expect(detail['gate'], 'ticket_system');
+      expect(detail['learned'], true);
+      expect(detail['gate_p'], '0.93');
+      expect(detail['decision_ms'], 42);
+    });
+
+    test("the model's catch-all reads model_other", () async {
+      await seedMessage(id: 'm1');
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.8, dropReason: 'other'),
+        ),
+      ).pump();
+
+      expect((await messageRow('m1'))['gate_reason'], 'model_other');
+    });
+
+    test('a drop below the bar keeps the message', () async {
+      await seedMessage(id: 'm1');
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.69, dropReason: 'newsletter'),
+        ),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('cold outreach never gates, however sure the model is', () async {
+      await seedMessage(id: 'm1', from: 'rep@vendor.example.com');
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.97, dropReason: 'cold_outreach'),
+        ),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'triaged');
+      expect(row['gate_reason'], isNull);
+    });
+
+    test('a Teams 1:1 or @mention is never gated by the model', () async {
+      // The needs-you floor's rows: somebody wrote to the owner by name, and
+      // no gate took one before the decision model existed.
+      await seedMessage(
+        id: 'c1',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        from: 'teams:sarah',
+        subject: null,
+        addressedMe: true,
+      );
+      await seedMessage(
+        id: 'c2',
+        source: 'teams',
+        conversationKey: 'chat-2',
+        from: 'teams:sarah',
+        subject: null,
+      );
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.99, dropReason: 'newsletter'),
+        ),
+      ).pump();
+
+      final floor = await messageRow('c1', source: 'teams');
+      expect(floor['triage_status'], 'triaged');
+      expect(floor['gate_reason'], isNull);
+      // The same answer on a chat that did not name the owner still gates.
+      expect((await messageRow('c2', source: 'teams'))['gate_reason'],
+          'newsletter');
+    });
+
+    test('a restored message is never gated by the model either', () async {
+      await seedMessage(id: 'm1');
+      await store.restoreMessage('email', 'm1');
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(
+          fakeAnswers(gateDrop: 0.99, dropReason: 'newsletter'),
+        ),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('a rules gate still fires first, and the model is never asked',
+        () async {
+      await seedMessage(id: 'm1', from: 'no-reply@example.com');
+      final decision = FakeDecisionClient.fixed(fakeAnswers());
+      await TriageQueue(store, decisionClient: decision)
+          .pump();
+
+      expect(decision.calls, isEmpty);
+      expect((await messageRow('m1'))['gate_reason'], 'no_reply');
+      expect(await store.decisionFor('email', 'm1'), isNull);
+    });
+
+    test('a dead decision server parks under its own reason', () async {
+      await seedMessage(id: 'm1');
+      final queue = TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: FakeDecisionClient(
+          (_) => throw const DecisionUnavailableException('not running'),
+        ),
+      );
+      TriageProgress? last;
+      final subscription = queue.progress.listen((p) => last = p);
+
+      await queue.pump();
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(last!.parkedReason, 'decision_unavailable');
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'pending');
+      expect(row['triage_attempts'], 0);
+    });
+
+    for (final fault in <(String, DecisionUnavailableException, String)>[
+      (
+        'a missing heads file',
+        const DecisionNotInstalledException('not installed'),
+        'decision_not_installed',
+      ),
+      (
+        'a heads file this build refuses',
+        const DecisionMisconfiguredException('heads do not match'),
+        'decision_misconfigured',
+      ),
+      (
+        'a server answering normalised or wrong-width vectors',
+        const DecisionMisconfiguredException(rawEmbeddingsText),
+        'decision_misconfigured',
+      ),
+    ]) {
+      test('${fault.$1} parks: pending, no attempt, and no text or needs-you '
+          'work proceeds', () async {
+        await seedMessage(id: 'm1');
+        await store.enqueueWork('extract', 'email', 'm1');
+        await store.enqueueWork('needs_you', 'email', 'm1');
+        final queue = TriageQueue(
+          store,
+          concurrency: 1,
+          decisionClient: FakeDecisionClient((_) => throw fault.$2),
+        );
+        TriageProgress? last;
+        final subscription = queue.progress.listen((p) => last = p);
+
+        await queue.pump();
+        await Future<void>.delayed(Duration.zero);
+        await subscription.cancel();
+
+        expect(last!.parkedReason, fault.$3);
+        final row = await messageRow('m1');
+        expect(row['triage_status'], 'pending');
+        expect(row['triage_attempts'], 0);
+        // An untriaged row holds its text and needs-you work back.
+        expect(await store.claimPendingWork('extract'), isNull);
+        expect(await store.claimPendingWork('needs_you'), isNull);
+      });
+    }
+
+    test('a misconfigured park is retried by the next pump, so a fixed '
+        'address recovers with nobody pressing Check', () async {
+      await seedMessage(id: 'm1');
+      var fixed = false;
+      final queue = TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: FakeDecisionClient((_) {
+          if (!fixed) {
+            throw const DecisionMisconfiguredException('not the decision model');
+          }
+          return fakeDecision(fakeAnswers());
+        }),
+      );
+      await queue.pump();
+      expect((await messageRow('m1'))['triage_status'], 'pending');
+
+      fixed = true;
+      await queue.pump();
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('an unusable decision is a failure that spends an attempt', () async {
+      await seedMessage(id: 'm1');
+      await TriageQueue(
+        store,
+        concurrency: 1,
+        decisionClient: FakeDecisionClient(
+          (_) => throw const LlmFormatException('a normalised vector'),
+        ),
+      ).pump();
+
+      final row = await messageRow('m1');
+      expect(row['triage_attempts'], greaterThanOrEqualTo(1));
+      expect(row['triage_error'], contains('a normalised vector'));
+      expect(await store.decisionFor('email', 'm1'), isNull);
+    });
+  });
+
+  group('text owed after triage', () {
+    Future<Map<String, Object?>> extractRow(String id) async => (await db
+            .customSelect(
+              'SELECT status, created_at FROM work_items '
+              "WHERE task_kind = 'extract' AND source = 'email' "
+              'AND entity_id = ?',
+              variables: [Variable.withString(id)],
+            )
+            .getSingle())
+        .data;
+
+    Future<void> closeExtract(String id) => db.customStatement(
+          "UPDATE work_items SET status = 'done' "
+          "WHERE task_kind = 'extract' AND entity_id = ?",
+          [id],
+        );
+
+    test('a revived message with no summary and a done extract row is owed '
+        'its text again', () async {
+      // A v19 triage that errored: its extract row was claimed and closed
+      // `done` without ever writing a summary.
+      await seedMessage(id: 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
+      await closeExtract('m1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect((await extractRow('m1'))['status'], 'pending');
+    });
+
+    test('new mail keeps its pending extract row, stamp and all', () async {
+      await seedMessage(id: 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
+      final before = await extractRow('m1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      final after = await extractRow('m1');
+      expect(after['status'], 'pending');
+      expect(after['created_at'], before['created_at']);
+    });
+
+    test('a message the sync queued no text for gets none from triage',
+        () async {
+      await seedMessage(id: 'm1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      expect(await store.workStatusOf('extract', 'email', 'm1'), isNull);
+    });
+
+    test('a message whose text already landed is not asked for it again',
+        () async {
+      await seedMessage(id: 'm1');
+      await db.customStatement(
+        "UPDATE messages SET summary = 'Sarah asks about the launch date.' "
+        "WHERE source_message_id = 'm1'",
+      );
+      await store.enqueueWork('extract', 'email', 'm1');
+      await closeExtract('m1');
+
+      await TriageQueue(
+        store,
+        decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+      ).pump();
+
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      expect((await extractRow('m1'))['status'], 'done');
+    });
+  });
+
   group('drain', () {
     test('a second pump does not start a racing drain', () async {
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
       await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
       await seedMessage(id: 'm3', receivedAt: '2026-08-29T12:00:00Z');
       final llm = fakeLlm([answer()]);
-      final queue = TriageQueue(store, llm);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm));
 
       // Two pumps started together: the second must find the first running
       // and return rather than race it.
@@ -247,8 +791,8 @@ void main() {
       final second = fakeLlm([answer()]);
 
       await Future.wait([
-        TriageQueue(store, first).pump(),
-        TriageQueue(store, second).pump(),
+        TriageQueue(store, decisionClient: ScriptedDecisionClient(first)).pump(),
+        TriageQueue(store, decisionClient: ScriptedDecisionClient(second)).pump(),
       ]);
 
       final asked = [...first.userMessages, ...second.userMessages];
@@ -272,7 +816,7 @@ void main() {
       }
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       // The whole point of the phase: a backlog keeps three requests batched
       // at the server instead of leaving it idle between messages.
@@ -287,7 +831,7 @@ void main() {
       }
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       // Not a vestige: the tests whose assertions are about request ORDER run
       // this way, and so would a machine whose server has one slot.
@@ -301,7 +845,7 @@ void main() {
       await seedMessage(id: 'mid', subject: 'Middle', receivedAt: '2026-08-28T10:00:00Z');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(
         [
@@ -321,7 +865,7 @@ void main() {
       await seedMessage(id: 'm1', triageStatus: 'triaged');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages, isEmpty);
     });
@@ -332,7 +876,7 @@ void main() {
       await seedMessage(id: 'm1', from: 'no-reply@bank.com');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages, isEmpty);
       final row = await messageRow('m1');
@@ -347,7 +891,7 @@ void main() {
       await store.setSenderPref('dana@example.com', 'drop');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages, isEmpty);
       final row = await messageRow('m1');
@@ -365,7 +909,7 @@ void main() {
       await store.restoreMessage('email', 'm1');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages, hasLength(1));
       expect((await messageRow('m1'))['triage_status'], 'triaged');
@@ -374,7 +918,7 @@ void main() {
     test('the self gate uses the address set after sign-in', () async {
       await seedMessage(id: 'm1', from: 'lo@bond.com');
       final llm = fakeLlm([answer()]);
-      final queue = TriageQueue(store, llm)..userAddress = 'LO@bond.com';
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))..userAddress = 'LO@bond.com';
 
       await queue.pump();
 
@@ -389,7 +933,7 @@ void main() {
       await seedConversation();
       await seedMessage(id: 'm1', from: 'no-reply@bank.com');
 
-      await TriageQueue(store, fakeLlm([answer()])).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()]))).pump();
 
       expect((await conversationRow())['state'], 'waiting');
     });
@@ -404,7 +948,7 @@ void main() {
       );
       await seedMessage(id: 'real', receivedAt: '2026-08-29T12:00:00Z');
 
-      await TriageQueue(store, fakeLlm([answer()])).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()]))).pump();
 
       // One direction, and only when nothing kept is left: the newer message
       // is still somebody's question.
@@ -420,7 +964,7 @@ void main() {
       await seedMessage(id: 'real', receivedAt: '2026-08-29T11:00:00Z');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages.length, 1);
       expect((await messageRow('real'))['triage_status'], 'triaged');
@@ -441,7 +985,7 @@ void main() {
 
       await TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onGated: (source, id) async {
           gated.add((source, id));
           statusInside.add((await messageRow(id))['triage_status']);
@@ -469,7 +1013,7 @@ void main() {
 
       await TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         ensureBody: fetch.call,
         onGated: (source, id) async => gated.add((source, id)),
       ).pump();
@@ -484,7 +1028,7 @@ void main() {
 
       await TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onGated: (source, id) async => gated.add((source, id)),
       ).pump();
 
@@ -503,7 +1047,7 @@ void main() {
 
       await TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onGated: (source, id) async => throw StateError('repair is down'),
       ).pump();
 
@@ -549,7 +1093,7 @@ void main() {
       addTearDown(log.dispose);
       TriageQueue queue() => TriageQueue(
             store,
-            llm,
+            decisionClient: ScriptedDecisionClient(llm),
             ensureBody: fetch.call,
             activityLog: log,
           );
@@ -605,7 +1149,7 @@ void main() {
       // Concurrency 1 makes the count exact. With more, the claims already in
       // flight when the cap is reached defer too — still one attempt each and
       // never re-claimed, only more of them.
-      await TriageQueue(store, llm, ensureBody: fetch.call, concurrency: 1)
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call, concurrency: 1)
           .pump();
 
       var deferred = 0;
@@ -632,7 +1176,7 @@ void main() {
       final fetch = await seedDeferrable(from: 'sarah@example.com');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       // The deferral is about the gates that never got to speak, and no gate
       // was ever going to fire on a colleague.
@@ -657,7 +1201,7 @@ void main() {
       );
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect((await messageRow('human'))['triage_status'], 'triaged');
       final machine = await messageRow('machine');
@@ -671,7 +1215,7 @@ void main() {
       final fetch = FakeDetailFetch(store, error: Exception('graph down'));
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(fetch.fetched, isEmpty);
       expect((await messageRow('c1', source: 'teams'))['triage_status'],
@@ -691,7 +1235,7 @@ void main() {
       await store.restoreMessage('email', 'm1');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages.length, 1);
       expect((await messageRow('m1'))['triage_status'], 'triaged');
@@ -706,7 +1250,7 @@ void main() {
       await seedMessage(id: 'm1', from: 'no-reply@example.com');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages, isEmpty);
       final row = await messageRow('m1');
@@ -729,7 +1273,7 @@ void main() {
         headers: const {'list-unsubscribe': '<mailto:stop@example.com>'},
       );
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       // The fetch still happens — the override is about the verdict, not
       // about skipping the work that informs it — and the newsletter gate
@@ -749,7 +1293,7 @@ void main() {
         bodyText: 'The full unquoted body, all of it.',
       );
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(fetch.fetched, ['m1']);
       // The ordering that matters: the model was called with what the fetch
@@ -768,7 +1312,7 @@ void main() {
         headers: const {'list-unsubscribe': '<mailto:stop@news.com>'},
       );
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       // Fetched, then gated on what the fetch brought back — so the gates
       // demonstrably re-run against the reloaded row.
@@ -790,7 +1334,7 @@ void main() {
         headers: const {'list-unsubscribe': '<mailto:stop@news.example.com>'},
       );
 
-      await TriageQueue(store, fakeLlm([answer()]), ensureBody: fetch.call)
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()])), ensureBody: fetch.call)
           .pump();
 
       expect((await messageRow('m1'))['gate_reason'], 'newsletter');
@@ -802,7 +1346,7 @@ void main() {
       final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'Body');
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       // The whole economic point of running the address gates first.
       expect(fetch.fetched, isEmpty);
@@ -815,7 +1359,7 @@ void main() {
       final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'Body');
 
-      final queue = TriageQueue(store, llm, ensureBody: fetch.call)
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call)
         ..userAddress = 'lo@bond.com';
       await queue.pump();
 
@@ -831,7 +1375,7 @@ void main() {
         error: StateError('Graph is having a moment'),
       );
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(fetch.fetched, ['m1']);
       expect(llm.userMessages.single, contains('Short preview'));
@@ -859,7 +1403,7 @@ void main() {
       // Serial: this asserts that m2's fetch was never ATTEMPTED, which is a
       // claim about what the drain does after the park rather than about what
       // it had already sent.
-      await TriageQueue(store, llm, ensureBody: fetch.call, concurrency: 1)
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call, concurrency: 1)
           .pump();
 
       // The session is over, so triaging m1 from its preview would be model
@@ -878,7 +1422,7 @@ void main() {
       final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, error: const ReconsentRequired());
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(llm.userMessages, isEmpty);
       expect((await messageRow('m1'))['triage_status'], 'pending');
@@ -894,7 +1438,7 @@ void main() {
         error: const AuthException('Microsoft is having a moment'),
       );
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(llm.userMessages.single, contains('Short preview'));
       expect((await messageRow('m1'))['triage_status'], 'triaged');
@@ -909,7 +1453,7 @@ void main() {
       final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'Body');
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(fetch.fetched, isEmpty);
       expect(llm.userMessages.length, 1);
@@ -920,7 +1464,7 @@ void main() {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages.single, contains('Short preview'));
       expect((await messageRow('m1'))['triage_status'], 'triaged');
@@ -934,7 +1478,7 @@ void main() {
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
-      await TriageQueue(store, llm, activityLog: log).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), activityLog: log).pump();
 
       expect(llm.userMessages.single, contains('Can you send the CD today?'));
       final row = await messageRow('c1', source: 'teams');
@@ -966,7 +1510,7 @@ void main() {
       ]);
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages.single, contains('Shared a file: Contract-v2.docx'));
       expect(llm.userMessages.single, isNot(contains('[[att:')));
@@ -989,7 +1533,7 @@ void main() {
       final llm = fakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, bodyText: 'The full body');
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), ensureBody: fetch.call).pump();
 
       expect(fetch.fetched, ['m1']);
       expect((await messageRow('c1', source: 'teams'))['triage_status'],
@@ -1002,7 +1546,7 @@ void main() {
       await seedChat(id: 'c1', withBody: false);
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages, isEmpty);
       final row = await messageRow('c1', source: 'teams');
@@ -1016,17 +1560,14 @@ void main() {
       // right key against the wrong source.
       await seedConversation(key: 'chat-1');
       await seedChat(id: 'c1');
-      final llm = fakeLlm([
-        answer(urgency: 'urgent', actionItems: const ['Send the CD']),
-      ]);
+      final llm = fakeLlm([answer(urgency: 'urgent')]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       final chat = (await store.getConversationRow('teams', 'chat-1'))!;
-      expect(chat['cta_text'], 'Send the CD');
       expect(chat['cta_urgency'], 'urgent');
-      expect((await store.getConversationRow('email', 'chat-1'))!['cta_text'],
-          isNull);
+      expect((await store.getConversationRow('email', 'chat-1'))!['cta_urgency'],
+          isNot('urgent'));
     });
 
     test('one drain empties both sources, newest first', () async {
@@ -1034,7 +1575,7 @@ void main() {
       await seedChat(id: 'c1', receivedAt: '2026-08-29T11:00:00Z');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       expect(llm.userMessages.length, 2);
       expect(llm.userMessages.first, contains('Body of c1'));
@@ -1046,7 +1587,7 @@ void main() {
       await seedChat(id: 'c1', triageStatus: 'processing');
       await seedMessage(id: 'm1', triageStatus: 'processing');
 
-      await TriageQueue(store, fakeLlm([answer()])).resetInterrupted();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()]))).resetInterrupted();
 
       expect((await messageRow('c1', source: 'teams'))['triage_status'],
           'pending');
@@ -1071,27 +1612,25 @@ void main() {
 
       // Serial, because the assertion is about WHICH request carried what:
       // newest first, so `second` goes out before `first`.
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       final judgingSecond = llm.userMessages.first;
-      expect(judgingSecond, contains('<untrusted_data source="thread">'));
+      expect(judgingSecond, contains('Recent thread before this message'));
       // The earlier message is quoted as context — this is what lets the model
       // see that a question a message back never got answered.
       expect(
         judgingSecond.indexOf('Can you still make Thursday?'),
-        lessThan(judgingSecond.indexOf('Judge ONLY this message:')),
+        lessThan(judgingSecond.indexOf('The message to judge:')),
       );
       expect(
         judgingSecond.indexOf('Any word on that?'),
-        greaterThan(judgingSecond.indexOf('Judge ONLY this message:')),
+        greaterThan(judgingSecond.indexOf('The message to judge:')),
       );
     });
 
-    test('triage sends the thread tail and never a digest', () async {
-      // The context ladder measured on 2026-09-16/17 left triage exactly here:
-      // the newest three turns verbatim, and no `thread_digest` fence. The
-      // prompt field still exists and `TriageTask` still renders it, so this
-      // pins that the QUEUE never fills it in.
+    test('the decision reads the thread tail', () async {
+      // The decision state's tail: the newest earlier turns, oldest first,
+      // before the judged message (the heads were trained on it).
       await seedMessage(
         id: 'earlier',
         receivedAt: '2026-08-29T09:00:00Z',
@@ -1105,12 +1644,11 @@ void main() {
       final llm = fakeLlm([answer()]);
 
       // Serial, so the first request out is the one judging `latest`.
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       final judgingLatest = llm.userMessages.first;
-      expect(judgingLatest, contains('<untrusted_data source="thread">'));
+      expect(judgingLatest, contains('Recent thread before this message'));
       expect(judgingLatest, contains('The dock survey is booked for Tuesday.'));
-      expect(judgingLatest, isNot(contains('thread_digest')));
     });
 
     test('the oldest message on a thread has no thread to quote', () async {
@@ -1126,12 +1664,12 @@ void main() {
       );
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       // Only what came BEFORE: a later message is not context for a judgement
       // about an earlier one.
       final judgingFirst = llm.userMessages.last;
-      expect(judgingFirst, isNot(contains('source="thread"')));
+      expect(judgingFirst, isNot(contains('Recent thread before')));
       expect(judgingFirst, isNot(contains('Any word on that?')));
     });
 
@@ -1140,9 +1678,9 @@ void main() {
       await seedMessage(id: 'm1', bodyText: 'The only message.');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
-      expect(llm.userMessages.single, isNot(contains('source="thread"')));
+      expect(llm.userMessages.single, isNot(contains('Recent thread before')));
       expect('The only message.'.allMatches(llm.userMessages.single).length, 1);
     });
 
@@ -1169,7 +1707,7 @@ void main() {
       );
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       final judgingC2 = llm.userMessages.first;
       expect(judgingC2, contains('Did the CD go out?'));
@@ -1178,7 +1716,7 @@ void main() {
   });
 
   group('attachments', () {
-    test('the names and sizes reach the model beside the message', () async {
+    test('the rows reach the decision beside the message', () async {
       await seedMessage(id: 'm1');
       await store.upsertAttachments('email', 'm1', [
         {
@@ -1191,20 +1729,22 @@ void main() {
           'is_inline': false,
         },
       ]);
-      final llm = fakeLlm([answer()]);
+      final decision = ScriptedDecisionClient(fakeLlm([answer()]));
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: decision).pump();
 
-      expect(llm.userMessages.single, contains('Attachments: '));
-      expect(llm.userMessages.single, contains('lease-addendum.pdf (180 KB)'));
+      expect(
+        [for (final a in decision.calls.single.attachments) a.name],
+        ['lease-addendum.pdf'],
+      );
     });
 
     test('the detail fetch writes them before the model is asked', () async {
-      // The ordering the whole line depends on: `_triageClaimed` calls
+      // The ordering the input depends on: `_triageClaimed` calls
       // `ensureBody` inside the claim, so a mail attachment is on the row by
-      // the time the prompt is built.
+      // the time the decision input is built.
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short');
-      final llm = fakeLlm([answer()]);
+      final decision = ScriptedDecisionClient(fakeLlm([answer()]));
       final fetch = FakeDetailFetch(
         store,
         bodyText: 'Signed copy attached.',
@@ -1221,204 +1761,117 @@ void main() {
         ],
       );
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: decision, ensureBody: fetch.call)
+          .pump();
 
       expect(fetch.fetched, ['m1']);
-      expect(llm.userMessages.single, contains('lease-addendum.pdf'));
+      expect(
+        [for (final a in decision.calls.single.attachments) a.name],
+        ['lease-addendum.pdf'],
+      );
     });
 
-    test('a failed fetch costs the line, never the triage', () async {
+    test('a failed fetch costs the attachments, never the triage', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
-      final llm = fakeLlm([answer()]);
+      final decision = ScriptedDecisionClient(fakeLlm([answer()]));
       final fetch = FakeDetailFetch(store, error: StateError('graph is down'));
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      await TriageQueue(store, decisionClient: decision, ensureBody: fetch.call)
+          .pump();
 
-      expect(llm.userMessages.single, isNot(contains('Attachments:')));
+      expect(decision.calls.single.attachments, isEmpty);
       expect((await messageRow('m1'))['triage_status'], 'triaged');
-    });
-
-    test('a message with nothing attached says nothing', () async {
-      await seedMessage(id: 'm1');
-      final llm = fakeLlm([answer()]);
-
-      await TriageQueue(store, llm).pump();
-
-      expect(llm.userMessages.single, isNot(contains('Attachments:')));
     });
   });
 
   group('results', () {
-    test('a success writes every result column', () async {
+    test('a success writes the decided columns and no text', () async {
       await seedMessage(id: 'm1');
       final llm = fakeLlm([
-        answer(
-          urgency: 'urgent',
-          category: 'work',
-          summary: 'Marisa needs the final copy today.',
-          actionItems: const ['Send the final copy', 'Call Marisa'],
-        ),
+        answer(urgency: 'urgent', category: 'work', needsAction: true),
       ]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
       final row = await messageRow('m1');
       expect(row['triage_status'], 'triaged');
       expect(row['urgency'], 'urgent');
       expect(row['category'], 'work');
-      expect(row['summary'], 'Marisa needs the final copy today.');
       expect(row['needs_action'], 1);
-      expect(
-        jsonDecode(row['action_items_json'] as String),
-        ['Send the final copy', 'Call Marisa'],
-      );
+      expect(row['summary'], isNull);
+      expect(row['action_items_json'], isNull);
+      expect(row['label'], isNull);
     });
 
     test('reply_expected reaches the row, so a NULL becomes a judgement',
         () async {
       await seedMessage(id: 'm1');
-      final llm = fakeLlm([answer(replyExpected: true, deadline: 'Friday')]);
+      final llm = fakeLlm([answer(replyExpected: true)]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
       final row = await messageRow('m1');
       // 0/1, because STRICT sqlite has no bool — and the point is that it is
       // no longer NULL: something has now judged this message.
       expect(row['reply_expected'], 1);
-      expect(row['deadline'], 'Friday');
-    });
-
-    test('a nonsense answer is clamped rather than stored raw', () async {
-      await seedMessage(id: 'm1');
-      final llm = fakeLlm([
-        {
-          'urgency': 'CRITICAL',
-          'category': 'errand',
-          'summary': 'x' * 900,
-          'needs_action': 'yes',
-          'action_items': ['one', 'two', 'three', 'four'],
-        },
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
-      final row = await messageRow('m1');
-      expect(row['urgency'], 'normal');
-      expect(row['category'], 'other');
-      expect((row['summary'] as String).length, 500);
-      expect(row['needs_action'], 0);
-      expect((jsonDecode(row['action_items_json'] as String) as List).length, 3);
+      expect(row['deadline'], isNull);
     });
   });
 
   group('conversation fold-up', () {
-    test('the first action item becomes the thread CTA', () async {
+    // The CTA's wording — first action item, summary stand-in, deadline, cap —
+    // is `foldCtaUp`'s, pinned in `conversation_cta_test.dart`. What the queue
+    // owes the fold is the decision's urgency and category, the row's own text
+    // (none on a new message), and the two guards.
+    test('the decision lands on the thread, and the ask waits for the text',
+        () async {
       await seedConversation();
+      await store.updateConversationTriage(
+        'email',
+        'conv-1',
+        ctaText: 'An ask from a message this one replaced',
+        ctaUrgency: 'low',
+      );
       await seedMessage(id: 'm1');
-      final llm = fakeLlm([
-        answer(urgency: 'urgent', actionItems: const ['Send the final invoice']),
-      ]);
+      final llm = fakeLlm([answer(urgency: 'urgent', needsAction: true)]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
       final row = await conversationRow();
-      expect(row['cta_text'], 'Send the final invoice');
+      // The thread's current ask stays until the text lands — clearing it
+      // for the seconds the text call takes would drop the thread out of
+      // Needs You and back.
+      expect(row['cta_text'], 'An ask from a message this one replaced');
       expect(row['cta_urgency'], 'urgent');
       expect(row['category'], 'work');
     });
 
-    test('with no action items, a needed summary stands in', () async {
+    test('a re-triaged message keeps the ask its text gave it', () async {
+      // The text landed on an earlier pass and a revive sent the message
+      // through triage again: the decision write leaves the text alone, and
+      // the fold reads it back off the row.
       await seedConversation();
       await seedMessage(id: 'm1');
-      final llm = fakeLlm([
-        answer(
-          summary: 'Sarah is waiting on the lock extension.',
-          actionItems: const [],
-        ),
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
-      expect(
-        (await conversationRow())['cta_text'],
-        'Sarah is waiting on the lock extension.',
+      await store.writeMessageText(
+        'email',
+        'm1',
+        summary: 'Marisa needs the final copy.',
+        actionItems: const ['Send the final copy'],
+        deadline: '',
       );
-    });
+      final llm = fakeLlm([answer(urgency: 'high')]);
 
-    test('a deadline rides along on the CTA', () async {
-      await seedConversation();
-      await seedMessage(id: 'm1');
-      final llm = fakeLlm([
-        answer(
-          actionItems: const ['Send the final invoice'],
-          deadline: 'Friday',
-        ),
-      ]);
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
-      await TriageQueue(store, llm).pump();
-
-      expect(
-        (await conversationRow())['cta_text'],
-        'Send the final invoice — by Friday',
-      );
-    });
-
-    test('a CTA with its deadline still fits the cap', () async {
-      await seedConversation();
-      await seedMessage(id: 'm1');
-      // An ask already at the cap: appending the deadline must cost the ask
-      // its tail rather than push the pair over.
-      final llm = fakeLlm([
-        answer(actionItems: ['a' * 200], deadline: 'Friday'),
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
-      final cta = (await conversationRow())['cta_text'] as String;
-      expect(cta.length, 200);
-      expect(cta, startsWith('aaa'));
-    });
-
-    test('no deadline leaves the ask exactly as the model wrote it', () async {
-      await seedConversation();
-      await seedMessage(id: 'm1');
-      final llm = fakeLlm([answer(actionItems: const ['Send the invoice'])]);
-
-      await TriageQueue(store, llm).pump();
-
-      expect((await conversationRow())['cta_text'], 'Send the invoice');
-    });
-
-    test('a deadline with nothing to hang it on adds no CTA', () async {
-      await seedConversation();
-      await seedMessage(id: 'm1');
-      final llm = fakeLlm([
-        answer(needsAction: false, actionItems: const [], deadline: 'Friday'),
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
-      // " — by Friday" on its own is not an ask, and a row showing one would
-      // be advertising work the message never asked for.
-      expect((await conversationRow())['cta_text'], isNull);
-    });
-
-    test('a message that needs nothing leaves no CTA', () async {
-      await seedConversation();
-      await seedMessage(id: 'm1');
-      final llm = fakeLlm([
-        answer(
-          urgency: 'low',
-          needsAction: false,
-          actionItems: const [],
-        ),
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
+      final message = await messageRow('m1');
+      expect(message['summary'], 'Marisa needs the final copy.');
       final row = await conversationRow();
-      expect(row['cta_text'], isNull);
-      expect(row['cta_urgency'], 'low');
+      expect(row['cta_text'], 'Send the final copy');
+      expect(row['cta_urgency'], 'high');
     });
 
     test('an older message never overwrites the newest inbound message\'s ask',
@@ -1439,11 +1892,10 @@ void main() {
         triageStatus: 'triaged',
       );
       await seedMessage(id: 'older', receivedAt: '2026-08-20T09:00:00Z');
-      final llm = fakeLlm([
-        answer(urgency: 'low', actionItems: const ['Reply about parking']),
-      ]);
+      final llm = fakeLlm([answer(urgency: 'low')]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
       expect((await messageRow('older'))['triage_status'], 'triaged');
       final row = await conversationRow();
@@ -1451,32 +1903,23 @@ void main() {
       expect(row['cta_urgency'], 'urgent');
     });
 
-    test('an ask the user already answered never comes back as a CTA',
-        () async {
+    test('an ask the user already answered is not re-urged', () async {
       // The resurrection case: the CTA was cleared when the user's reply
-      // synced in, then a re-judgment backfill (or an error revive, or a
-      // reply that beat the first drain) sends the same inbound message
-      // through triage again. The fold must not write the dead ask back —
-      // nor the urgency multiplier that would push an answered thread into
-      // Needs You.
+      // synced in, then a revive sends the same inbound message through
+      // triage again. The fold must not write the urgency multiplier that
+      // would push an answered thread into Needs You.
       await seedConversation(
         lastInboundAt: '2026-08-29T10:00:00Z',
         lastOutboundAt: '2026-08-29T11:00:00Z',
         state: 'waiting',
       );
       await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
-      final llm = fakeLlm([
-        answer(
-          urgency: 'urgent',
-          actionItems: const ['Confirm attendance'],
-          deadline: 'Friday',
-        ),
-      ]);
+      final llm = fakeLlm([answer(urgency: 'urgent')]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
-      // The message itself is still judged — its own columns are what the
-      // scorer and a future re-judgment read.
+      // The message itself is still judged.
       expect((await messageRow('m1'))['triage_status'], 'triaged');
       final row = await conversationRow();
       expect(row['cta_text'], isNull);
@@ -1484,48 +1927,12 @@ void main() {
       expect(row['state'], 'waiting');
     });
 
-    test('a reply at the same instant as the ask still counts as the answer',
-        () async {
-      // Ties resolve toward the reply, exactly as outboundResolves reads
-      // them when it clears the CTA at ingest — the two guards must agree on
-      // the boundary or a same-second pair would clear and resurrect in turn.
-      await seedConversation(
-        lastInboundAt: '2026-08-29T10:00:00Z',
-        lastOutboundAt: '2026-08-29T10:00:00Z',
-        state: 'waiting',
-      );
-      await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
-      final llm = fakeLlm([
-        answer(actionItems: const ['Confirm attendance']),
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
-      expect((await conversationRow())['cta_text'], isNull);
-    });
-
-    test('an ask newer than the last reply still folds up', () async {
-      // The inverse must keep working: the user replied, then the sender
-      // asked again. That newer ask is unanswered and owns the thread.
-      await seedConversation(
-        lastInboundAt: '2026-08-29T12:00:00Z',
-        lastOutboundAt: '2026-08-29T11:00:00Z',
-      );
-      await seedMessage(id: 'm2', receivedAt: '2026-08-29T12:00:00Z');
-      final llm = fakeLlm([
-        answer(actionItems: const ['Send the revised draft']),
-      ]);
-
-      await TriageQueue(store, llm).pump();
-
-      expect((await conversationRow())['cta_text'], 'Send the revised draft');
-    });
-
     test('a message with no conversation row folds up into nothing', () async {
       await seedMessage(id: 'm1', conversationKey: 'orphan');
       final llm = fakeLlm([answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+          .pump();
 
       expect((await messageRow('m1'))['triage_status'], 'triaged');
       expect(await store.getConversationRow('email', 'orphan'), isNull);
@@ -1537,7 +1944,7 @@ void main() {
       await seedMessage(id: 'm1');
       final llm = fakeLlm([const LlmFormatException('not json')]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages.length, 2);
       final row = await messageRow('m1');
@@ -1550,7 +1957,7 @@ void main() {
       await seedMessage(id: 'm1');
       final llm = fakeLlm([const LlmFormatException('not json'), answer()]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       final row = await messageRow('m1');
       expect(row['triage_status'], 'triaged');
@@ -1563,7 +1970,7 @@ void main() {
         const LlmException('JSON schema conversion failed', 400),
       ]);
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(llm.userMessages.length, 1);
       final row = await messageRow('m1');
@@ -1581,7 +1988,7 @@ void main() {
 
       // Serial: which message gets the 400 and which gets the answer is the
       // script's ORDER, and only a one-at-a-time drain pins it.
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       expect((await messageRow('bad'))['triage_status'], 'error');
       expect((await messageRow('good'))['triage_status'], 'triaged');
@@ -1595,7 +2002,7 @@ void main() {
       // Serial: the assertion is that exactly one call went out, which is a
       // claim about the launch AFTER the park. The concurrent case — a park
       // arriving with siblings already at the server — is the next test.
-      await TriageQueue(store, llm, concurrency: 1).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1).pump();
 
       // One call, then the drain gives up: the second message would have
       // failed identically.
@@ -1620,7 +2027,7 @@ void main() {
         const LlmUnavailableException('not reachable'),
         heldAnswer(held),
       ]);
-      final queue = TriageQueue(store, llm);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm));
 
       final drain = queue.pump();
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -1651,25 +2058,24 @@ void main() {
       await seedMessage(id: 'older', receivedAt: '2026-08-20T09:00:00Z');
       // Both go out at once, and the older one is held open so it folds up
       // LAST. Serially that ordering was impossible; concurrently it is the
-      // normal case, and `_foldUp`'s newest-inbound guard is the only thing
-      // standing between it and a thread advertising last week's ask.
+      // normal case, and `foldCtaUp`'s newest-inbound guard is the only thing
+      // standing between it and a thread advertising last week's urgency.
       final held = Completer<Map<String, dynamic>>();
       final llm = fakeLlm([
-        answer(urgency: 'urgent', actionItems: const ['Ship on Thursday']),
+        answer(urgency: 'urgent'),
         heldAnswer(held),
       ]);
 
-      final drain = TriageQueue(store, llm).pump();
+      final drain =
+          TriageQueue(store, decisionClient: ScriptedDecisionClient(llm))
+              .pump();
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect((await conversationRow())['cta_text'], 'Ship on Thursday');
-      held.complete(
-        answer(urgency: 'low', actionItems: const ['Reply about parking']),
-      );
+      expect((await conversationRow())['cta_urgency'], 'urgent');
+      held.complete(answer(urgency: 'low'));
       await drain;
 
       expect((await messageRow('older'))['triage_status'], 'triaged');
       final row = await conversationRow();
-      expect(row['cta_text'], 'Ship on Thursday');
       expect(row['cta_urgency'], 'urgent');
     });
 
@@ -1679,7 +2085,7 @@ void main() {
         const LlmUnavailableException('not reachable'),
         answer(),
       ]);
-      final queue = TriageQueue(store, llm);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm));
 
       await queue.pump();
       expect((await messageRow('m1'))['triage_status'], 'pending');
@@ -1694,7 +2100,7 @@ void main() {
       await seedMessage(id: 'm1', triageStatus: 'processing');
       await seedMessage(id: 'm2', triageStatus: 'triaged');
       final llm = fakeLlm([answer()]);
-      final queue = TriageQueue(store, llm);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm));
 
       expect(await store.nextPendingTriage(), isNull);
       await queue.resetInterrupted();
@@ -1713,7 +2119,7 @@ void main() {
         statusDuringCall = (await messageRow('m1'))['triage_status'] as String;
       });
 
-      await TriageQueue(store, llm).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm)).pump();
 
       expect(statusDuringCall, 'processing');
     });
@@ -1729,7 +2135,7 @@ void main() {
       // reads them, so two messages finishing together legitimately skip a
       // number. What that would test is the scheduler; what this tests is that
       // the count is emitted, and correct, once per message.
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       final seen = <int>[];
       final subscription = queue.progress.listen((p) => seen.add(p.remaining));
 
@@ -1746,7 +2152,7 @@ void main() {
       await seedMessage(id: 'm1');
       await seedMessage(id: 'gated', from: 'noreply@x.com');
       final llm = fakeLlm([answer()]);
-      final queue = TriageQueue(store, llm);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm));
       TriageProgress? last;
       final subscription = queue.progress.listen((p) => last = p);
 
@@ -1770,7 +2176,7 @@ void main() {
         const LlmUnavailableException('down'),
         answer(),
       ]);
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       final seen = <String?>[];
       final subscription =
           queue.progress.listen((p) => seen.add(p.parkedReason));
@@ -1790,7 +2196,7 @@ void main() {
     test('a refused key parks with its own reason', () async {
       await seedMessage(id: 'm1');
       final llm = fakeLlm([const LlmUnauthorizedException('refused')]);
-      final queue = TriageQueue(store, llm, concurrency: 1);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
       TriageProgress? last;
       final subscription = queue.progress.listen((p) => last = p);
 
@@ -1815,7 +2221,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (_) async => called++,
       );
 
@@ -1834,7 +2240,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         concurrency: 1,
         onDrained: (_) async => called++,
       );
@@ -1866,7 +2272,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (_) async => called++,
       );
 
@@ -1880,7 +2286,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (_) async => called++,
       );
 
@@ -1897,7 +2303,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([const LlmUnavailableException('off')]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([const LlmUnavailableException('off')])),
         onDrained: (_) async => called++,
       );
 
@@ -1919,7 +2325,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([const LlmException('JSON schema conversion failed', 400)]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([const LlmException('JSON schema conversion failed', 400)])),
         onDrained: (_) async => called++,
       );
 
@@ -1934,7 +2340,7 @@ void main() {
       var called = 0;
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (_) async => called++,
       );
 
@@ -1948,7 +2354,7 @@ void main() {
       await seedMessage(id: 'm1');
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (_) async => throw StateError('the worker blew up'),
       );
 
@@ -1971,7 +2377,7 @@ void main() {
       var carried = <({String source, String id})>[];
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (triaged) async => carried = triaged,
       );
 
@@ -1990,7 +2396,7 @@ void main() {
       final seen = <List<({String source, String id})>>[];
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         onDrained: (triaged) async => seen.add(triaged),
       );
 
@@ -2008,7 +2414,7 @@ void main() {
     test('is made when something is pending', () async {
       await seedMessage(id: 'm1');
       final gate = _RecordingGate();
-      final queue = TriageQueue(store, fakeLlm([answer()]), gate: gate);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()])), gate: gate);
 
       await queue.pump();
 
@@ -2017,7 +2423,7 @@ void main() {
 
     test('is not made when nothing is pending', () async {
       final gate = _RecordingGate();
-      final queue = TriageQueue(store, fakeLlm([answer()]), gate: gate);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()])), gate: gate);
 
       await queue.pump();
 
@@ -2034,7 +2440,7 @@ void main() {
       // the incident this pins: a backlog walk over an afternoon's mail.
       final holder = Completer<void>();
       unawaited(gate.run(() => holder.future));
-      final queue = TriageQueue(store, fakeLlm([answer()]), gate: gate);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(fakeLlm([answer()])), gate: gate);
 
       // Nothing pending: the pump must come straight back. It used to queue
       // its drain here anyway — ticketless, because the empty queue asks for
@@ -2067,7 +2473,7 @@ void main() {
       final gate = _RecordingGate();
       final queue = TriageQueue(
         store,
-        fakeLlm([answer()]),
+        decisionClient: ScriptedDecisionClient(fakeLlm([answer()])),
         gate: gate,
         enabled: () => false,
       );
@@ -2088,7 +2494,7 @@ void main() {
     // time the drain has legitimately launched siblings before the stop lands,
     // and what happens to those is the park test's subject rather than this
     // one's. The claim here is that stop launches nothing FURTHER.
-    queue = TriageQueue(store, llm, concurrency: 1);
+    queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), concurrency: 1);
 
     await queue.pump();
 
@@ -2105,4 +2511,4 @@ void main() {
 /// inspect mid-request is a query: reading the row back is what tells us the
 /// claim landed.
 ScriptedLlm inspectingLlm(FutureOr<void> Function() onCall) =>
-    ScriptedLlm(answers: {'triage': answer()}, onCall: (_) => onCall());
+    ScriptedLlm(answers: {'decision': answer()}, onCall: (_) => onCall());

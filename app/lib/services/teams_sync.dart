@@ -5,6 +5,7 @@ import '../models/attachment_models.dart' show quoteAttachmentKind;
 import 'activity_log.dart';
 import 'attachments/attachment_markers.dart';
 import 'attachments/attachment_policy.dart';
+import 'chat_roster.dart' show teamsNamesSubject;
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'pipeline_progress.dart';
@@ -88,9 +89,6 @@ class TeamsSync {
   /// mail's cap: a chat message is a sentence, and a hundred of them is already
   /// half an hour of local model time.
   static const int _extractCap = 100;
-
-  /// Names in an unnamed group chat's title before it becomes "and so on".
-  static const int _maxSubjectNames = 3;
 
   /// The stored snippet's length, matching what a Graph mail delta page hands
   /// back for `bodyPreview`.
@@ -1028,14 +1026,9 @@ class TeamsSync {
     final topic = (chat['topic'] as String?)?.trim();
     if (topic != null && topic.isNotEmpty) return topic;
     if (!firstSight) return null;
-
-    final names = [
-      for (final participant in work.participants)
-        (participant['name'] as String?) ?? (participant['email'] as String? ?? ''),
-    ]..removeWhere((name) => name.isEmpty);
-    if (names.isEmpty) return null;
-    if (names.length <= _maxSubjectNames) return names.join(', ');
-    return '${names.take(_maxSubjectNames).join(', ')}…';
+    // The one names rule, shared with the clustering card that has to tell
+    // this title apart from a real topic (`isTeamsNamesSubject`).
+    return teamsNamesSubject(work.participants);
   }
 }
 

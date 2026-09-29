@@ -1,10 +1,28 @@
 # The message pipeline
 
 Every synced message moves through the same ordered pipeline: cheap gates
-first, then a chain of model calls that classify it, extract facts from it,
-group its conversation into storylines, decide whether it deserves a reply,
-and draft one. This directory documents each section — what happens, what the
-prompt says, and which model serves it.
+first, then ONE pass of the decision model that classifies it (the learned
+gate, urgency, category, the asks, needs-you, intent, importance and whether a
+reply is expected), then ONE generative call that writes its text, then the
+storylines its conversation joins and, when a reply is expected, a drafted
+answer. This directory documents each section — what happens, what the prompt
+says, and which model serves it.
+
+**Three models, three roles** (since the decision-model round, 2026-09):
+
+- **Decision** — a fine-tuned ModernBERT-large encoder served as a mean-pooled
+  embedding model (router id `bond-decide`), whose nine calibrated heads run
+  in Dart. It answers every classification-shaped question, one forward pass
+  per kept message, and no chat model is asked any of them.
+- **Generative** — ONE chat model for every piece of text: the message text,
+  the needs-you band, attachment and directory digests, every storyline call,
+  drafts and Improve. The box 27B by default when the build names one, else the
+  27B or the 4B the app's own router serves.
+- **Embeddings** — always on this Mac; search, clustering and retrieval.
+
+Where each runs is two questions on Settings → Models (Decision and
+Generative, each **This Mac** or **Your server**), resolved per call by
+`AppPrefs.specForStage` — see [10-model-routing.md](10-model-routing.md).
 
 **Maintenance rule: these files describe the code, and the code moves. Any
 change to a pipeline stage — its ordering, its prompt, its schema, its model
@@ -20,20 +38,26 @@ is always the authority when they disagree.
 | 2 | Tier-1 gates — sender-only checks on delta fields | no | [02-gates.md](02-gates.md) |
 | 3 | Detail fetch (mail) — full body + headers | no | [02-gates.md](02-gates.md) |
 | 4 | Tier-2 gates — list/auto-generated header checks | no | [02-gates.md](02-gates.md) |
-| 5 | **Triage** — urgency, category, summary, action items | **yes** | [03-triage.md](03-triage.md) |
-| 6 | **Needs-you verdict** — does this message want the owner | **yes**† | [11-needs-you.md](11-needs-you.md) |
-| 7 | **Extraction** — evidence, topics, people, intent, importance | **yes** | [04-extraction.md](04-extraction.md) |
+| 5 | **Triage** — the decision model: learned gate, urgency, category, needs_action, reply_expected (no text) | decision model§ | [03-triage.md](03-triage.md) |
+| 6 | **Needs-you verdict** — does this message want the owner: the floor, then the decision model's probability, the generative model only inside the band | band only† | [11-needs-you.md](11-needs-you.md) |
+| 7 | **Message text** (work kind `extract`, stage `message_text`) — ONE generative call: summary, action items, deadline, topics, project; the ask onto the thread | **yes** | [04-extraction.md](04-extraction.md) |
 | 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
 | 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file, one brief per directory, and one section pick per directory-fed draft | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
-| 12 | **Reply decision** — does this message need an answer; lazy by policy, and skipped outright when a person asked — see 07 | **yes** | [07-replies.md](07-replies.md) |
+| 12 | **Reply gate** — the decision model's `reply_expected` probability, read from triage's stored row BEFORE any context is gathered; skipped outright when a person asked — see 07 | no§ | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 15 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
 
 \* embeddings call the embedding server, but no chat model.
+
+§ one forward pass of the decision model (an embedding call whose heads run
+in Dart), no chat model; the text the retired triage call wrote is stage 7's
+since the decision-model round's Phase 6. Stage 12 makes no call at all: it
+reads the probability stage 5 stored in `message_decisions`. There is no
+`triage`, `extraction` or `reply_decision` LLM stage any more.
 
 **Stage numbers are the order inside a lane, not a single queue.** Since Round
 C (2026-09) the work queue drains through THREE `AiWorker` instances on three
@@ -42,7 +66,7 @@ the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
 Within a lane the order above is exactly the order the work happens in; ACROSS
 lanes, a stage reaches the next one by enqueuing a row and waking the lane that
 owns it. What that buys is stage 5's seconds: a new message's triage,
-needs-you verdict and extraction no longer wait behind a storyline recap or a
+needs-you verdict and text no longer wait behind a storyline recap or a
 draft. The lanes, their gates and the two writers that ride the storyline gate
 are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
 measures the whole thing end to end.
@@ -72,9 +96,9 @@ whether or not anything arrived in the mailbox.
 inside stage 1: both syncs write `attachments` rows and queue `attachment_text`
 work, and triage reads the names and sizes. `attachment_text` then fetches the
 words through Graph and embeds their passages on the embedding server — no chat
-model, so a park there is a park on `make embed`. `attachment_digest` is the
-one fast-slot call: one record per document, queued by the text handler and
-only once there are words.
+model, so a park there is a park on the embedding model. `attachment_digest` is
+the one generative call: one record per document, queued by the text handler
+and only once there are words.
 
 The arrow also runs backwards, once. A digest that records something the
 document ASKS for sends its message back to stage 6 — a file saying "sign by
@@ -87,14 +111,19 @@ own thread and its storyline's pinned files. See
 
 ‡‡ The walk, the extractors, the chunker and the two derived indexes dial no
 chat model at all — the embedding server is their only server. The two
-COMPILED kinds do: `context_digest` is one fast-slot call per changed file of
-200 characters or more, capped at 40 per pass, and `context_brief` is one
-fast-slot call per directory whose notes or digest map have moved. Both are
-off the fast slot, and both are skipped before they spend anything when
+COMPILED kinds do: `context_digest` is one generative call per changed file
+of 200 characters or more, capped at 40 per pass, and `context_brief` is one
+generative call per directory whose notes or digest map have moved. Both run
+on the fast lane, and both are skipped before they spend anything when
 nothing they read has changed.
 
 † a deterministic floor (an inbound Teams @mention or 1:1) answers without any
-model call; everything below the floor gets the fast-slot judgment. See
+model call; below it the decision model's stored probability answers yes at
+`p >= 0.65` (0.85 for cold outreach) and no under 0.35, and only the band
+between them — plus every message when the owner saved custom Needs You rules,
+any message whose attachment digest carries an ask (a digest that asks nothing
+leaves it to the decision model), and any message decided before the owner
+was known or before the decision model existed — asks the generative model. See
 [11-needs-you.md](11-needs-you.md).
 
 Cross-cutting concerns — which client serves which task, ports and defaults,
@@ -105,33 +134,38 @@ Evaluating any stage's model against real traffic — the golden set, its gold
 labels, the scorer and the populations a number is quoted on — is described in
 [../model-bakeoff.md](../model-bakeoff.md) under "The golden set".
 
-## The two-model split at a glance
+## The three roles at a glance
 
-| Task | Default target | Default server (compile-time) |
-|------|------|----------------|
-| Triage | Local fast | `:8082` Qwen3-4B-Instruct (`make fast`) |
-| Needs-you verdict | Local fast | `:8082` |
-| Extraction | Local fast | `:8082` |
-| Attachment digest | Local fast | `:8082` |
-| Directory file digest | Local fast | `:8082` |
-| Directory brief | Local fast | `:8082` |
-| Directory section pick | Local fast | `:8082` |
-| Storyline membership confirm | Local fast | `:8082` |
-| Storyline grouping (dark; `GroupingMode.model` only) | Local prose | `:8080` Qwen3.8-27B (`make model`) |
-| Storyline naming | Local prose | `:8080` |
-| Storyline refresh | Local prose | `:8080` |
-| Storyline recap | Local prose | `:8080` |
-| Reply decision | Local prose | `:8080` |
-| Draft generation | Local prose | `:8080` |
-| Improve a draft | Local prose | `:8080` |
-| Embeddings | embed | `:8081` Qwen3-Embedding-0.6B (`make embed`) |
+| Task | Role | Stage id | Hand-servers default (`BOND_DEV_HAND_SERVERS`) |
+|------|------|----------|----------------|
+| Triage: gate, urgency, category, needs_action, reply_expected, needs-you p, intent, importance | Decision | `decision` | `:8083` (`make decide`) |
+| Needs-you verdict (the band only) | Generative | `needs_you` | `:8080` (`make model`) |
+| Message text | Generative | `message_text` | `:8080` |
+| Attachment digest | Generative | `attachment_digest` | `:8080` |
+| Directory file digest | Generative | `context_file_digest` | `:8080` |
+| Directory brief | Generative | `context_brief` | `:8080` |
+| Directory section pick | Generative | `context_select` | `:8080` |
+| Storyline membership confirm | Generative | `storyline_membership` | `:8080` |
+| Storyline grouping (dark; `GroupingMode.model` only) | Generative | `storyline_group` | `:8080` |
+| Storyline naming | Generative | `storyline_name` | `:8080` |
+| Storyline refresh | Generative | `storyline_refresh` | `:8080` |
+| Storyline recap | Generative | `storyline_recap` | `:8080` |
+| Draft generation | Generative, or Cloud drafts when set and consented | `draft_reply` | `:8080` |
+| Improve a draft | Generative, or Cloud drafts when set and consented | `draft_improve` | `:8080` |
+| Embeddings | Embeddings (not routed) | `embeddings` | `:8081` (`make embed`) |
 
-The PLACEMENT decides where a chat stage goes, Managed or User defined, and
-the mapping above is what Managed resolves to. The per-stage picks under it
-are still data in `stage_targets` rather than wiring in the code, but no
-screen has written one since Round H. Embeddings is the exception and
-is not routed at all. See
-[10-model-routing.md](10-model-routing.md#runtime-overrides).
+The routing is a RULE, not stored rows: `AppPrefs.specForStage` sends
+`decision` to the decision role's target, the two draft stages to the Cloud
+drafts target when one is set and either is the owner's own host or consent
+stands, and every other stage to the ONE generative target. By default the app
+runs its own router (the managed column): `bond-decide` for the decision
+model, `bond-prose` (27B) or `bond-bulk` (4B) for the generative model when it
+runs here, `bond-embed` for embeddings; a build compiled with `BOND_BOX_URL`
+sends the generative role to the box's `/prose` by default. The hand-servers
+column above is a dev build's. The pre-round per-stage picks
+(`stage_targets`, `llm_targets`, the fast/prose slot prefs) are inert and read
+by nothing but the frozen one-shot migrations. See
+[10-model-routing.md](10-model-routing.md).
 
 The home screen's five-segment stage bar (triage · extract · storyline ·
 draft · settle) is this pipeline rendered per row; `pipeline_progress.dart`

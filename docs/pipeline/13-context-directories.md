@@ -469,7 +469,7 @@ moved is not a frontmatter that changed.
 **On by default** (`context_dirs.digests` = 1; the Settings switch is
 **Summaries**). `ContextDigestHandler`
 (`app/lib/services/context/context_digest_handler.dart`), kind
-`context_digest`, source `local`, concurrency 1, fast slot, 512 tokens,
+`context_digest`, source `local`, concurrency 1, generative model, 512 tokens,
 temperature 0.
 
 The entity id is `'<dirId>|<fileId>'` (`entityIdFor` / `splitEntityId`). The
@@ -507,15 +507,15 @@ conclusion very rarely shares vocabulary with the code that produced it.
 reconcile pass: the model call is already paid for, and parking the kind would
 put it at risk of being spent twice. The passage keeps a NULL embedding, which
 is invisible to the index and to every KNN until something re-reads the file.
-A fast slot that is down DOES park, leaving `digest_status = 'pending'`.
+A generative model that is down DOES park, leaving `digest_status = 'pending'`.
 
 **The cap paces a new project.** `maxDigestsPerPass` = 40 per reconcile pass,
 worklist `digest_status = 'pending' AND text_chars >= 200` ordered by
 `updated_at DESC, id` — the freshest edits first, because what the owner wants
 read first is what they were last working on. The drain runs every handler to
 EXHAUSTION in registration order and the three context kinds sit ahead of the
-storylines and the drafts, so the cap is not a rate: it is how many fast-slot
-calls one pass may spend before the drafts run, about a minute of fast-slot
+storylines and the drafts, so the cap is not a rate: it is how many generative
+calls one pass may spend before the drafts run, about a minute of generative
 time at the sync cadence. A backlog past the cap lands on the following
 passes, and that is why the brief is queued whenever THIS PASS queued anything
 rather than only when the disk moved.
@@ -535,7 +535,7 @@ left `pending` against a work row already written `error`.
 
 **One per directory.** `ContextBriefHandler`
 (`app/lib/services/context/context_brief_handler.dart`), kind `context_brief`,
-entity the directory id, fast slot, 768 tokens, temperature 0.
+entity the directory id, generative model, 768 tokens, temperature 0.
 
 Two inputs, and only two:
 
@@ -895,20 +895,15 @@ with runs of whitespace collapsed, because the prose packer trims paragraphs
 and rejoins them and a verbatim comparison would miss for no reason.
 
 The sections have their own ceiling (two × 3,000); the ranked tail keeps the
-`budgetChars` it was already trimmed to, and nothing re-budgets it. The one
-exception is the DECISION prompt, whose directory fence is 800 (`07-replies.md`):
-there one expanded section is all that fits, and the ranked tail behind it is
-clamped away by the renderer. That is the intended trade — the decision is a
-yes or no about whether to draft, and the section the model asked to read is
-the part of the pack most likely to decide it.
+`budgetChars` it was already trimmed to, and nothing re-budgets it. (The
+retired 27B reply-decision prompt had an 800 directory fence; the pack now has
+one reader, the draft.)
 
-**The select call runs before the reply decision, by design.** One pack
-serves both calls (§Serving), so the section pick happens while building it,
-which means a message the decision then declines to draft has already spent
-one fast-slot call. Splitting the two — decide first, expand only for the
-messages that get a draft — is a follow-up, not an oversight: it would mean
-two packs, two scope reads and a second embedding closure for the sake of
-one small call on the messages nobody replies to.
+**The select call runs after the reply decision.** Since the decision-model
+round the reply decision is a stored probability read BEFORE the
+pack is built (`07-replies.md`), so a message the decision declines to draft
+spends no section pick, no scope read and no embedding. (Before it, the 27B
+decision read the same pack, and the select ran first by design.)
 
 **Two reads that overlap each other are one read.** An answer naming both
 `Pricing` and `Pricing > Q4 rates` has named one thing and part of it, and
@@ -949,9 +944,6 @@ pack chooses between them: **3,000** ordinarily, and **8,700** when
 two 3,000-character sections and the two bracket lines the render writes above
 them. The larger number is a ceiling for a pack that asked to read closer, not
 a target, and `07-replies.md` carries the arithmetic for both.
-`reply_decision_task.dart` stays at **800** — the decision reads the head of
-the first section, which is the most relevant text there is, and a yes-or-no
-about whether a reply is owed needs no more than that.
 
 **The preference** is `AppPrefs.contextSelectExpand`, key
 `context_select_expand`, default **ON** — the one bounded call per
@@ -1261,9 +1253,8 @@ that call.
   `replyToQueryVector`, shared by both retrievals.
 - `app/lib/services/draft_handler.dart` — one pack per draft, both prompts,
   the stored provenance and the activity keys.
-- `app/lib/services/llm/draft_task.dart`,
-  `app/lib/services/llm/reply_decision_task.dart` — the three fences and the
-  widened invention rule.
+- `app/lib/services/llm/draft_task.dart` — the three fences and the widened
+  invention rule (the retired `reply_decision_task.dart` carried them too).
 - `app/lib/widgets/context_panel.dart`, `app/lib/widgets/side_panel.dart` —
   the link panel with its `Files ›` disclosure, and the sixth and seventh
   panel kinds.
@@ -1280,7 +1271,7 @@ that call.
 - `app/lib/widgets/composer.dart` — the provenance chips.
 - `app/lib/widgets/thread_detail_panel.dart`,
   `app/lib/widgets/storyline_timeline.dart` — the **Context** room action.
-- `app/lib/services/llm/model_slots.dart` — the three fast-slot stage rows.
+- `app/lib/services/llm/model_slots.dart` — the three generative stage rows.
 - `app/lib/services/sync_service.dart` — the tail enqueue.
 - `app/lib/services/ai_worker.dart` — `local` in `_sources`.
 - `app/lib/services/attachments/file_dialogs.dart` — `chooseDirectory()`.

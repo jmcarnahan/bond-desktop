@@ -159,6 +159,50 @@ void main() {
       );
     });
 
+    test('the decision model is the file `make decide-install` installs', () {
+      // No `-hf` here: the decision model is hand-installed (D12), so the
+      // join is the folder, the file, the quant and the heads, which is what
+      // `make decide-install` copies and `make decide` serves.
+      final decide = manifest.byId(routerDecideId);
+      expect(decide.repo, 'local/bond-decide');
+      final dir = defaults['DECIDE_DIR'];
+      expect(dir, isNotNull, reason: '../Makefile has no `DECIDE_DIR ?=`');
+      expect(
+        dir!.split('/').last,
+        decide.relativePath.split('/').first,
+        reason: 'DECIDE_DIR in ../Makefile installs into ${dir.split('/').last}; '
+            'the manifest\'s repo ${decide.repo} is served from '
+            '${decide.relativePath.split('/').first}',
+      );
+      final quant = defaults['DECIDE_QUANT'];
+      expect(quant, 'f16');
+      final file = defaults['DECIDE_FILE']!
+          .replaceAll(r'$(DECIDE_QUANT)', quant!);
+      expect(file, decide.file,
+          reason: 'DECIDE_FILE in ../Makefile is $file; the manifest ships '
+              '${decide.file}');
+      expect(_quant.firstMatch(decide.file)?.group(1)?.toLowerCase(), quant);
+      expect(defaults['DECIDE_HEADS'], decide.heads!.file);
+    });
+
+    test('the decision server args are the same set', () {
+      // `make decide` launches `--embeddings -ngl 99 $(DECIDE_ARGS)`; the
+      // router preset writes the manifest's serverArgs. Pooling, context,
+      // batch, ubatch and slots must agree, or the pooled vector the heads
+      // read differs between the two worlds.
+      final args = defaults['DECIDE_ARGS'];
+      expect(args, isNotNull, reason: '../Makefile has no `DECIDE_ARGS ?=`');
+      String? flag(String name) =>
+          RegExp('(?:^|\\s)$name\\s+(\\S+)').firstMatch(args!)?.group(1);
+      final served = full.byId(routerDecideId).serverArgs;
+      expect(flag('--pooling'), served['pooling']);
+      expect(flag('-c'), served['c']);
+      expect(flag('-ub'), served['ub']);
+      expect(flag('-b'), served['b']);
+      expect(flag('-np'), served['parallel']);
+      expect(served['embedding'], 'true');
+    });
+
     test('the inbox tier narrows the bulk server rather than the checkpoint',
         () {
       // The Makefile has one machine's configuration and the manifest has two.

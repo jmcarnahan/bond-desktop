@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show SocketException;
+import 'dart:io' show SocketException, TlsException;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
@@ -10,7 +10,7 @@ import 'model_slots.dart';
 /// [LlmWire] lives in `model_slots.dart` — a resolved [LlmTarget] carries one,
 /// and that file may not import this one. Re-exported so every importer of
 /// this file reads the enum where it always did.
-export 'model_slots.dart' show LlmWire;
+export 'model_slots.dart' show LlmWire, accessKeyCharsText, isUsableAccessKey;
 
 /// The one HTTP call this app makes to the local model.
 ///
@@ -113,13 +113,78 @@ class EmbedUnavailableException extends LlmUnavailableException {
   const EmbedUnavailableException(super.message);
 }
 
+/// The DECISION server is the one that could not be reached.
+///
+/// A subclass of [LlmUnavailableException] for [EmbedUnavailableException]'s
+/// reason: every existing `on LlmUnavailableException` arm keeps catching it
+/// and a drain parks exactly as it does for the generating server. What it
+/// adds is which server died — the decision model is placed on its own, so a
+/// park that said only `model_unavailable` would send a person to look at a
+/// generating server that is answering fine. The drains record the reason
+/// `decision_unavailable`.
+class DecisionUnavailableException extends LlmUnavailableException {
+  const DecisionUnavailableException(super.message);
+}
+
+/// A MANAGED model this Mac runs is not on disk, so the router does not
+/// serve it: the target carried `LlmTarget.unavailable` and the request was
+/// refused before it was sent.
+///
+/// A subclass of [LlmUnavailableException] for [EmbedUnavailableException]'s
+/// reason: every existing `on LlmUnavailableException` arm keeps catching it
+/// and the drains park exactly as they did. What it adds is the cause: a
+/// park that said only `model_unavailable` reads as a server that is not
+/// answering, when the server is fine and the fix is to download the model.
+/// The drains record the reason `not_installed`.
+class ModelNotInstalledException extends LlmUnavailableException {
+  const ModelNotInstalledException(super.message);
+}
+
+/// The DECISION model is not installed on this Mac: the router is not
+/// serving it, or its heads file is missing. A [DecisionUnavailableException]
+/// so every decision arm keeps treating it as its own park; its own reason,
+/// `decision_not_installed`, because the fix (`make decide-install`) is not
+/// the generative download that `not_installed` asks for.
+class DecisionNotInstalledException extends DecisionUnavailableException {
+  const DecisionNotInstalledException(super.message);
+}
+
+/// The decision model is set up in a way that fails EVERY message the same
+/// way: a heads file this build refuses, heads that are not JSON, or a server
+/// that does not answer with the decision model's raw embeddings (the
+/// address points at another server — its tokenizer is not ModernBERT's — or
+/// it normalises, or it has no `/tokenize`). Parks under its own
+/// `decision_misconfigured` rather than spending attempts, because counting it
+/// against each message would error the whole backlog and let every row flow
+/// on to its text with no decision. [message] names the cause in a sentence
+/// that carries no key.
+class DecisionMisconfiguredException extends DecisionUnavailableException {
+  const DecisionMisconfiguredException(super.message);
+}
+
+/// The DECISION server refused the access key (HTTP 401 or 403), or the key
+/// cannot be sent at all. Its own reason, `decision_unauthorized`, so the
+/// rail names the decision server instead of wording it by the generative
+/// placement.
+class DecisionUnauthorizedException extends LlmUnauthorizedException {
+  const DecisionUnauthorizedException(super.message);
+}
+
 /// The word a drain records when [e] parked it, for the rail to read.
 ///
-/// One recipe rather than one per drain: the three subclasses are a closed set
+/// One recipe rather than one per drain: the subclasses are a closed set
 /// and the rail's sentences are written against these exact words, so a new
 /// subclass that is added here reaches every park site at once.
 String parkReasonFor(Object e) => switch (e) {
+      // Subclasses before their parents: the more specific word wins.
+      DecisionUnauthorizedException() => 'decision_unauthorized',
       LlmUnauthorizedException() => 'unauthorized',
+      DecisionNotInstalledException() => 'decision_not_installed',
+      ModelNotInstalledException() => 'not_installed',
+      // Waiting fixes nothing here — the address or the heads file does —
+      // so it is not worded as a server that is still coming up.
+      DecisionMisconfiguredException() => 'decision_misconfigured',
+      DecisionUnavailableException() => 'decision_unavailable',
       EmbedUnavailableException() => 'embed_unavailable',
       _ => 'model_unavailable',
     };
@@ -135,11 +200,13 @@ class LlmFormatException extends LlmException {
 /// import upward: the client reports what happened and has no opinion about
 /// who is listening.
 class LlmCallRecord {
-  /// Which task asked — a [completeJson] caller's `schemaName`, or
-  /// `'complete'` for free text. The five names in the app today: `triage`,
-  /// `extraction`, `draft_reply`, `storyline_membership`, `storyline_name`
-  /// (the storyline propose path reuses the naming task's schema, so there is
-  /// deliberately no sixth).
+  /// Which task asked — a [completeJson] caller's `schemaName`, `'complete'`
+  /// for free text, or `'decision'` for the decision model's embedding call
+  /// (`DecisionClient`). The task names in the app today: `message_text`,
+  /// `needs_you`, `attachment_digest`, `context_file_digest`,
+  /// `context_brief`, `context_select`, `draft_reply`
+  /// (Improve a draft reuses it), `storyline_membership`, `storyline_name`,
+  /// `storyline_group`, `storyline_refresh` and `storyline_recap`.
   final String label;
 
   final int durationMs;
@@ -244,11 +311,7 @@ class LlmClient {
   /// `model_slots.dart` now so the slot defaults there can be const, and a
   /// `const` alias of a const variable is the only shape that avoids a library
   /// cycle between the two files.
-  static const String defaultBaseUrl = proseUrlDefault;
-
-  /// The small model that does the bulk work — triage, extraction, storyline
-  /// membership. Same wire protocol, its own server: see `make fast`.
-  static const String fastBaseUrl = fastUrlDefault;
+  static const String defaultBaseUrl = generativeUrlDefault;
 
   /// The model name every request carries, and the reason it is per instance
   /// rather than the one constant it used to be.
@@ -257,11 +320,7 @@ class LlmClient {
   /// the OpenAI request schema requires the field, and an MLX-based server
   /// HONOURS it: one runtime can hold several models and picks by this name.
   /// A single constant would make the app unable to say which of them it meant.
-  static const String defaultModel = proseModelDefault;
-
-  /// The same, for the bulk-work server — the two may be different models on
-  /// different runtimes, so they get separate defines.
-  static const String fastModel = fastModelDefault;
+  static const String defaultModel = generativeModelDefault;
 
   /// The model generates at roughly 12 tokens a second, so a full 512-token
   /// answer can legitimately take most of a minute. This ceiling is here to
@@ -387,8 +446,8 @@ class LlmClient {
       _remoteFor(target) ? 'The model' : 'The local model';
 
   /// Names the server that did not answer. The old constant said
-  /// "run: make model" for BOTH clients, which was wrong for the fast slot
-  /// and wronger now that either can point anywhere.
+  /// "run: make model" for every client, which was wrong for the old fast
+  /// slot and wronger now that a target can point anywhere.
   String _unreachable(LlmTarget target, String url) => _remoteFor(target)
       ? 'The model server at $url is not reachable — check the network and '
           'the URL'
@@ -709,9 +768,19 @@ class LlmClient {
     final streamed = onText != null && _wireOf(target) == LlmWire.openAi;
     // One closure so the instrumented try below stays a single try over either
     // path, exactly as it was over the only path there used to be.
-    Future<_Reply> send() => streamed
-        ? _postStreamed(body, request: request, target: target, onText: onText)
-        : _postInner(body, request: request, target: target);
+    //
+    // A target that says it cannot answer is refused HERE, before any
+    // request, and inside the instrumented try below so the call is recorded
+    // as `unavailable`: the drains park on it, where the router's 400 for a
+    // model it is not serving would be fatal.
+    Future<_Reply> send() async {
+      if (target.unavailable case final why?) {
+        throw ModelNotInstalledException(why);
+      }
+      return streamed
+          ? _postStreamed(body, request: request, target: target, onText: onText)
+          : _postInner(body, request: request, target: target);
+    }
 
     final observer = _onCall;
     if (observer == null) {
@@ -775,19 +844,21 @@ class LlmClient {
   /// never put into an exception message.
   Map<String, String> _headersFor(LlmTarget target) {
     final bearer = _bearerOf(target);
+    // Refused before anything is sent: a key with a line break or a
+    // non-ASCII character in it is not a header any server can accept.
+    if (bearer != null && bearer.isNotEmpty && !isUsableAccessKey(bearer)) {
+      throw const LlmUnauthorizedException(accessKeyCharsText);
+    }
     return {
       'Content-Type': 'application/json',
       if (bearer != null) 'Authorization': 'Bearer $bearer',
     };
   }
 
-  /// NOT [LlmUnavailableException]: the server accepted the connection, so
-  /// this is one request going wrong rather than a server that is down.
-  /// Counting it against the message is what stops a single pathological
-  /// email from blocking the queue behind it forever.
-  /// The three ways a request fails before the server has answered, mapped
-  /// ONCE for both paths: no socket and a client-side abort are the server
-  /// being unreachable, and the ceiling is the timeout the observer counts.
+  /// The ways a request fails before the server has answered, mapped ONCE
+  /// for both paths: no socket, a client-side abort and a failed TLS
+  /// handshake are the server being unreachable, and the ceiling is the
+  /// timeout the observer counts.
   Future<T> _guardTransport<T>(
     Uri url,
     LlmTarget target,
@@ -799,11 +870,28 @@ class LlmClient {
       throw LlmUnavailableException(_unreachable(target, url.toString()));
     } on http.ClientException {
       throw LlmUnavailableException(_unreachable(target, url.toString()));
+    } on TlsException {
+      // A handshake that failed (HandshakeException is a subclass), such as
+      // an expired certificate on your server, is a server that cannot be
+      // reached safely rather than a bad request: it parks, as the decision
+      // client's does, instead of spending one attempt per message.
+      throw LlmUnavailableException(_unreachable(target, url.toString()));
     } on TimeoutException {
       throw _timeoutException(target);
+    } on FormatException {
+      // Raised while the request is BUILT: a header value dart:io refuses,
+      // which in this client can only be the key. The sentence never
+      // includes it, and it parks like a refused key.
+      throw const LlmUnauthorizedException(accessKeyCharsText);
+    } on ArgumentError {
+      throw const LlmUnauthorizedException(accessKeyCharsText);
     }
   }
 
+  /// NOT [LlmUnavailableException]: the server accepted the connection, so
+  /// this is one request going wrong rather than a server that is down.
+  /// Counting it against the message is what stops a single pathological
+  /// email from blocking the queue behind it forever.
   LlmException _timeoutException(LlmTarget target) => LlmException(
         '${_modelNoun(target)} did not answer within ${timeout.inSeconds} '
         'seconds.',
@@ -820,7 +908,7 @@ class LlmClient {
     if (statusCode >= 500) {
       throw LlmUnavailableException(
         '${_serverNoun(target)} is not ready (HTTP $statusCode). '
-        '${_snippet(bodyText)}',
+        '${_snippet(bodyText, _bearerOf(target))}',
       );
     }
 
@@ -844,13 +932,13 @@ class LlmClient {
     if (statusCode == 429) {
       throw LlmUnavailableException(
         '${_serverNoun(target)} is throttling requests '
-        '(HTTP 429). ${_snippet(bodyText)}',
+        '(HTTP 429). ${_snippet(bodyText, _bearerOf(target))}',
       );
     }
 
     throw LlmException(
       '${_modelNoun(target)} rejected the request (HTTP $statusCode). '
-      '${_snippet(bodyText)}',
+      '${_snippet(bodyText, _bearerOf(target))}',
       statusCode,
     );
   }
@@ -989,7 +1077,8 @@ class LlmClient {
       // chunk rather than as a status — the request was already 200 by then.
       if (chunk['error'] != null) {
         throw LlmException(
-          '${_modelNoun(target)} failed mid-stream: ${_snippet(payload)}',
+          '${_modelNoun(target)} failed mid-stream: '
+          '${_snippet(payload, _bearerOf(target))}',
         );
       }
 
@@ -1056,7 +1145,11 @@ class LlmClient {
       onError: (Object e) {
         if (done.isCompleted) return;
         done.completeError(
-          e is SocketException || e is http.ClientException
+          // A TLS failure mid-stream is the same unreachable server as one
+          // at the handshake: it parks.
+          e is SocketException ||
+                  e is http.ClientException ||
+                  e is TlsException
               ? LlmUnavailableException(_unreachable(target, url.toString()))
               : e,
         );
@@ -1253,8 +1346,13 @@ class LlmClient {
   static String _text(http.Response response) =>
       utf8.decode(response.bodyBytes, allowMalformed: true);
 
-  static String _snippet(String text) {
-    final trimmed = text.trim();
+  /// The start of [text], for a sentence. With [bearer] blanked out, as
+  /// the decision client's does, in case a proxy echoes a header back.
+  static String _snippet(String text, [String? bearer]) {
+    var trimmed = text.trim();
+    if (bearer != null && bearer.isNotEmpty) {
+      trimmed = trimmed.replaceAll(bearer, '<key>');
+    }
     return trimmed.length > 300 ? '${trimmed.substring(0, 300)}…' : trimmed;
   }
 }

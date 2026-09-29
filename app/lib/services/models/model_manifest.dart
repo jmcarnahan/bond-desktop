@@ -1,23 +1,28 @@
 import 'dart:convert';
+import 'dart:io' show File;
 
 import 'package:flutter/foundation.dart' show immutable;
+import 'package:path/path.dart' as p;
 import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 
 import '../llm/model_slots.dart';
 import '../server/router_preset.dart';
 
-/// Which of the three jobs a checkpoint fills.
+/// Which job a checkpoint fills — one FILE per role.
 ///
 /// The role and not the checkpoint is what the rest of the app knows about —
 /// the same reasoning `routerProseId` and friends record in
 /// `model_slots.dart`. A manifest that named two prose models would leave the
 /// preset with two sections claiming one id, so [ModelManifest] refuses it.
-enum ModelRole { embed, bulk, prose }
+/// [bulk] (the 4B) and [prose] (the 27B) are the two files that can each fill
+/// the GENERATIVE stage role; [decide] is the decision model.
+enum ModelRole { embed, bulk, prose, decide }
 
 ModelRole _roleFrom(String value) => switch (value) {
       'embed' => ModelRole.embed,
       'bulk' => ModelRole.bulk,
       'prose' => ModelRole.prose,
+      'decide' => ModelRole.decide,
       _ => throw FormatException('manifest: unknown role "$value"'),
     };
 
@@ -25,6 +30,7 @@ String _roleName(ModelRole role) => switch (role) {
       ModelRole.embed => 'embed',
       ModelRole.bulk => 'bulk',
       ModelRole.prose => 'prose',
+      ModelRole.decide => 'decide',
     };
 
 /// The id the router preset gives each role — `model_slots.dart` owns these
@@ -33,7 +39,13 @@ const Map<ModelRole, String> _idForRole = {
   ModelRole.embed: routerEmbedId,
   ModelRole.bulk: routerBulkId,
   ModelRole.prose: routerProseId,
+  ModelRole.decide: routerDecideId,
 };
+
+/// Where a checkpoint's bytes come from: the Hugging Face hub, or INSTALLED
+/// by hand into the models folder (`make decide-install`), never downloaded.
+const String sourceHf = 'hf';
+const String sourceLocal = 'local';
 
 /// The tier ids the `tiers` array may use, spelled exactly as [MachineTier]
 /// spells them, so the JSON and the enum cannot drift apart.
@@ -154,6 +166,71 @@ class ModelSidecar {
       'ModelSidecar($file @ ${revision.substring(0, 7)}, $sizeBytes B)';
 }
 
+/// The decision model's HEADS file: the nine linear heads and temperatures
+/// that turn the pooled vector into answers, applied in Dart.
+///
+/// A sidecar of kind heads, NOT a [ModelSidecar]: `RouterPreset` never
+/// names it (it is not a draft model and llama-server never reads it), the
+/// downloader never fetches it (the entry is `source: local`), and it is
+/// needed even when a remote server embeds, because the heads run here.
+@immutable
+class ModelHeads {
+  /// The file's name inside the parent's repo folder.
+  final String file;
+
+  /// Lower-case hex sha256.
+  final String sha256;
+
+  final int sizeBytes;
+
+  const ModelHeads({
+    required this.file,
+    required this.sha256,
+    required this.sizeBytes,
+  });
+
+  factory ModelHeads.fromJson(Map<String, Object?> json) {
+    final file = json['file'];
+    if (file is! String || file.isEmpty) {
+      throw const FormatException(
+        'manifest: "heads.file" must be a non-empty string',
+      );
+    }
+    final digest = json['sha256'];
+    if (digest is! String || !_hex64.hasMatch(digest)) {
+      throw const FormatException(
+        'manifest: "heads.sha256" must be 64 lower-case hex characters',
+      );
+    }
+    final size = json['sizeBytes'];
+    if (size is! num || size.toInt() <= 0) {
+      throw const FormatException(
+        'manifest: "heads.sizeBytes" must be a positive number',
+      );
+    }
+    return ModelHeads(file: file, sha256: digest, sizeBytes: size.toInt());
+  }
+
+  Map<String, Object?> toJson() => {
+        'file': file,
+        'sha256': sha256,
+        'sizeBytes': sizeBytes,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ModelHeads &&
+      other.file == file &&
+      other.sha256 == sha256 &&
+      other.sizeBytes == sizeBytes;
+
+  @override
+  int get hashCode => Object.hash(file, sha256, sizeBytes);
+
+  @override
+  String toString() => 'ModelHeads($file, $sizeBytes B)';
+}
+
 /// One downloadable checkpoint: what it is, where it comes from, what it must
 /// hash to, and the flags the router loads it with.
 ///
@@ -175,7 +252,8 @@ class ModelFile {
   /// wants both halves and so does the on-disk layout.
   final String file;
 
-  /// The repo revision as a COMMIT SHA, never `main`.
+  /// The repo revision as a COMMIT SHA, never `main`. EMPTY for a
+  /// `source: local` entry, which has no repo to pin.
   ///
   /// A branch name is a moving target: the file behind `main` can be replaced
   /// upstream, and a download that resolved through it would fetch bytes that
@@ -212,6 +290,15 @@ class ModelFile {
   /// rather than being a fourth entry in `models`.
   final ModelSidecar? sidecar;
 
+  /// [sourceHf] (the default) or [sourceLocal]. A local entry is installed
+  /// by hand, never downloaded: its repo is `local/<name>`, it has no
+  /// revision, it costs no download bytes, and the ledger never records it —
+  /// whether it is installed is whether its files are on disk.
+  final String source;
+
+  /// The decision model's heads file, or null for every other entry.
+  final ModelHeads? heads;
+
   const ModelFile({
     required this.id,
     required this.role,
@@ -227,7 +314,12 @@ class ModelFile {
     this.notice,
     this.serverArgs = const {},
     this.sidecar,
+    this.source = sourceHf,
+    this.heads,
   });
+
+  /// Whether this entry is installed by hand rather than downloaded.
+  bool get isLocal => source == sourceLocal;
 
   static String _string(Map<String, Object?> json, String field) {
     final value = json[field];
@@ -248,12 +340,35 @@ class ModelFile {
   factory ModelFile.fromJson(Map<String, Object?> json) {
     final id = _string(json, 'id');
     final role = _roleFrom(_string(json, 'role'));
-    final revision = _string(json, 'revision');
-    if (!_hex40.hasMatch(revision)) {
+    final rawSource = json['source'] ?? sourceHf;
+    if (rawSource != sourceHf && rawSource != sourceLocal) {
       throw FormatException(
-        'manifest: "revision" must be a 40-character lower-case commit sha, '
-        'not "$revision"',
+        'manifest: "source" must be "$sourceHf" or "$sourceLocal", not '
+        '"$rawSource"',
       );
+    }
+    final source = rawSource as String;
+    final local = source == sourceLocal;
+    final repo = _string(json, 'repo');
+    // A local entry has no hub repo, and the `local/` prefix is what keeps its
+    // folder (`local_<name>`) from ever colliding with a downloaded one.
+    if (local && !repo.startsWith('local/')) {
+      throw FormatException(
+        'manifest: a "source": "local" entry must have a "repo" of '
+        '"local/<name>", not "$repo"',
+      );
+    }
+    final String revision;
+    if (local && json['revision'] == null) {
+      revision = '';
+    } else {
+      revision = _string(json, 'revision');
+      if (!_hex40.hasMatch(revision)) {
+        throw FormatException(
+          'manifest: "revision" must be a 40-character lower-case commit sha, '
+          'not "$revision"',
+        );
+      }
     }
     final digest = _string(json, 'sha256');
     if (!_hex64.hasMatch(digest)) {
@@ -295,11 +410,15 @@ class ModelFile {
         'manifest: "sidecar" must be an object or null',
       );
     }
+    final rawHeads = json['heads'];
+    if (rawHeads != null && rawHeads is! Map) {
+      throw const FormatException('manifest: "heads" must be an object or null');
+    }
     return ModelFile(
       id: id,
       role: role,
       displayName: _string(json, 'displayName'),
-      repo: _string(json, 'repo'),
+      repo: repo,
       file: _string(json, 'file'),
       revision: revision,
       sizeBytes: sizeBytes,
@@ -312,16 +431,21 @@ class ModelFile {
       sidecar: rawSidecar is Map
           ? ModelSidecar.fromJson(rawSidecar.cast<String, Object?>())
           : null,
+      source: source,
+      heads: rawHeads is Map
+          ? ModelHeads.fromJson(rawHeads.cast<String, Object?>())
+          : null,
     );
   }
 
   Map<String, Object?> toJson() => {
         'id': id,
         'role': _roleName(role),
+        if (isLocal) 'source': source,
         'displayName': displayName,
         'repo': repo,
         'file': file,
-        'revision': revision,
+        if (revision.isNotEmpty) 'revision': revision,
         'sizeBytes': sizeBytes,
         'sha256': sha256,
         'minRamBytes': minRamBytes,
@@ -330,6 +454,7 @@ class ModelFile {
         'notice': notice,
         'serverArgs': serverArgs,
         'sidecar': sidecar?.toJson(),
+        if (heads != null) 'heads': heads!.toJson(),
       };
 
   /// `<repo with '/' → '_'>/<file>` — the same rule as
@@ -360,10 +485,19 @@ class ModelFile {
     );
   }
 
+  /// Where the heads file lands, in the parent's repo folder, or null for an
+  /// entry without one.
+  String? get headsRelativePath {
+    final h = heads;
+    if (h == null) return null;
+    return '${repo.replaceAll('/', '_')}/${h.file}';
+  }
+
   /// Every byte this entry costs a download — the weights and the sidecar.
   /// What the wizard's total, the disk preflight and one progress bar all
   /// count, because one entry is one row on the screen whatever it fetches.
-  int get downloadBytes => sizeBytes + (sidecar?.sizeBytes ?? 0);
+  /// ZERO for a local entry, which is never downloaded.
+  int get downloadBytes => isLocal ? 0 : sizeBytes + (sidecar?.sizeBytes ?? 0);
 
   RouterModelSpec toSpec() => RouterModelSpec(
         id: id,
@@ -397,6 +531,8 @@ class ModelFile {
       notice: notice,
       serverArgs: Map.unmodifiable({...serverArgs, ...overrides}),
       sidecar: sidecar,
+      source: source,
+      heads: heads,
     );
   }
 
@@ -416,6 +552,8 @@ class ModelFile {
       other.licenseUrl == licenseUrl &&
       other.notice == notice &&
       other.sidecar == sidecar &&
+      other.source == source &&
+      other.heads == heads &&
       _sameArgs(other.serverArgs, serverArgs);
 
   static bool _sameArgs(Map<String, String> a, Map<String, String> b) {
@@ -441,6 +579,8 @@ class ModelFile {
         licenseUrl,
         notice,
         sidecar,
+        source,
+        heads,
         Object.hashAll([
           for (final key in serverArgs.keys.toList()..sort())
             '$key=${serverArgs[key]}',
@@ -449,7 +589,7 @@ class ModelFile {
 
   @override
   String toString() => 'ModelFile($id, $repo/$file @ '
-      '${revision.substring(0, 7)}, $sizeBytes B)';
+      '${isLocal ? 'local' : revision.substring(0, 7)}, $sizeBytes B)';
 }
 
 /// One rung of the machine ladder: which checkpoints a machine of this size
@@ -700,8 +840,14 @@ class ModelManifest {
     // Exactly one per role: the router routes on the id alone, and the app
     // asks for a role — a second prose model would have no way to be chosen
     // and a missing one would leave a slot pointing at nothing.
+    //
+    // The decision model is the one role that may be ABSENT: it is installed
+    // by hand rather than downloaded, and a build that ships none simply has
+    // no managed decision model (the decision pass parks). At most once all
+    // the same, for the router's reason.
     for (final role in ModelRole.values) {
       final forRole = models.where((m) => m.role == role);
+      if (role == ModelRole.decide && forRole.isEmpty) continue;
       if (forRole.length != 1) {
         throw FormatException(
           'manifest: "role" ${_roleName(role)} appears ${forRole.length} '
@@ -736,8 +882,9 @@ class ModelManifest {
   /// otherwise fail later and further away: every [MachineTier] is named
   /// exactly once (a tier with no entry is a Mac the wizard cannot answer
   /// for); every id a tier lists exists (a preset pointing at a section with
-  /// no file); the embedding and inbox models are in every tier (the two the
-  /// app cannot work without, and `usableIds` says so); the ladder starts at
+  /// no file); the embedding and 4B models are in every tier (the embedding
+  /// model always runs here, and the 4B is the generative model every Mac can
+  /// hold); the ladder starts at
   /// zero (no machine falls between two rungs); and the top rung starts
   /// exactly at [fullTierMinBytes], so this file and `model_slots.dart`
   /// cannot drift apart about where the writing model begins.
@@ -778,13 +925,10 @@ class ModelManifest {
           );
         }
       }
-      // Every tier serves the embedding model, because vectors are written on
-      // this Mac whatever the placement. Only the memory rungs must also serve
-      // the bulk model: the remote tier's inbox stages are on the box.
-      final roles = tier.tier == MachineTier.remote
-          ? const [ModelRole.embed]
-          : const [ModelRole.embed, ModelRole.bulk];
-      for (final role in roles) {
+      // Every tier holds the embedding model, because vectors are written on
+      // this Mac whatever the placements, and the 4B, the one generative model
+      // every Mac can run.
+      for (final role in const [ModelRole.embed, ModelRole.bulk]) {
         final required = _idForRole[role]!;
         if (!tier.models.contains(required)) {
           throw FormatException(
@@ -794,22 +938,8 @@ class ModelManifest {
         }
       }
     }
-    for (final tier in tiers) {
-      if (tier.tier == MachineTier.remote && tier.minRamBytes != 0) {
-        throw FormatException(
-          'manifest: the "${MachineTier.remote.name}" tier is a placement '
-          'rather than a memory rung and must have "minRamBytes" 0, not '
-          '${tier.minRamBytes}',
-        );
-      }
-    }
-    // The ladder is the MEMORY rungs alone. With the remote tier in it there
-    // would be two rungs at zero bytes, an unstable sort would pick either as
-    // the lowest, and the message below would name the wrong tier.
-    final ladder = [
-      for (final tier in tiers)
-        if (tier.tier != MachineTier.remote) tier,
-    ]..sort((a, b) => a.minRamBytes.compareTo(b.minRamBytes));
+    final ladder = [...tiers]
+      ..sort((a, b) => a.minRamBytes.compareTo(b.minRamBytes));
     if (ladder.first.minRamBytes != 0) {
       throw FormatException(
         'manifest: the lowest tier "${ladder.first.tier.name}" must have '
@@ -890,23 +1020,6 @@ class ModelManifest {
     return total;
   }
 
-  /// The two smallest ids — the embedding and bulk models, INFORMATIONAL.
-  ///
-  /// Nothing gates on this set. The wizard's Continue and
-  /// `ModelServerSupervisor._launch` both wait for every file the RESOLVED
-  /// manifest names, because the preset names every file and the server
-  /// refuses to start with one of them missing. It is here for a screen that
-  /// wants to say which models the inbox itself leans on, and for the
-  /// downloader's smallest-first order.
-  ///
-  /// A MASTER-manifest read: it asks for the bulk model, which a
-  /// [MachineTier.remote] view does not carry, so it throws on one. Nothing in
-  /// `lib/` calls it.
-  Set<String> get usableIds => {
-        byRole(ModelRole.embed).id,
-        byRole(ModelRole.bulk).id,
-      };
-
   /// This manifest as [tier] wants it: only that tier's checkpoints, with its
   /// argument overrides merged onto each entry.
   ///
@@ -940,6 +1053,89 @@ class ModelManifest {
       tiers: tiers,
     );
   }
+
+  /// What this Mac SERVES under the role placements: the embedding model,
+  /// the decision model when it runs here, and the managed generative model
+  /// when that runs here — out of [hardwareTier]'s view, with its argument
+  /// overrides merged as [forTier] merges them.
+  ///
+  /// [generativeManagedId] is the router id of the managed generative model
+  /// (`bond-prose` or `bond-bulk`), or null when the generative model runs on
+  /// the owner's server. An id the tier does not hold is simply absent: the
+  /// caller resolved it through `managedGenerativeIdFor`, which never answers
+  /// the 27B on the inbox tier.
+  ModelManifest forRoles({
+    required MachineTier hardwareTier,
+    required bool decisionManaged,
+    required String? generativeManagedId,
+  }) {
+    final view = forTier(hardwareTier);
+    return ModelManifest(
+      version: version,
+      models: List.unmodifiable([
+        for (final model in view.models)
+          if (model.role == ModelRole.embed ||
+              (decisionManaged && model.role == ModelRole.decide) ||
+              (generativeManagedId != null && model.id == generativeManagedId))
+            model,
+      ]),
+      tiers: tiers,
+    );
+  }
+
+  /// The entries this build DOWNLOADS: every one but the `source: local`
+  /// ones. The wizard's rows and total, the disk preflight, the download run
+  /// and the ledger check all read this view, so a decision model that is not
+  /// installed never forces the wizard and never shows a bar that cannot move.
+  ModelManifest get downloadable => ModelManifest(
+        version: version,
+        models: List.unmodifiable([
+          for (final model in models)
+            if (!model.isLocal) model,
+        ]),
+        tiers: tiers,
+      );
+
+  /// This manifest without the entries whose files are not all in
+  /// [modelsFolder] (the GGUF, the MTP sidecar and the heads file, whichever
+  /// the entry has), EXCEPT the embedding model.
+  ///
+  /// What the managed server's preset is built from. The server refuses to
+  /// start with a file the preset names missing, and one missing model must
+  /// not take the others down with it: a decision model not yet installed by
+  /// hand, or a generative model the owner chose that was never downloaded
+  /// (the 4B on a full Mac, since only the chosen one is fetched), leaves the
+  /// preset and that role parks on its own reason while the rest run. The
+  /// next `ensurePreset` after the file lands sees a new hash and restarts.
+  ///
+  /// The embedding model is KEPT whatever the disk says: every stage needs
+  /// it, and a router started without it would look healthy while nothing
+  /// could work. Left in, its absence fails the start with the preflight's
+  /// own `Model files are missing` sentence, which is the true report.
+  ModelManifest withPresentFiles(String modelsFolder) => ModelManifest(
+        version: version,
+        models: List.unmodifiable([
+          for (final model in models)
+            if (model.role == ModelRole.embed ||
+                filesPresent(model, modelsFolder))
+              model,
+        ]),
+        tiers: tiers,
+      );
+
+  /// Whether every file [model] needs is in [modelsFolder]: the weights, the
+  /// MTP sidecar when it has one, and the heads file when it has one.
+  static bool filesPresent(ModelFile model, String modelsFolder) {
+    bool at(String? relative) =>
+        relative == null || File(p.join(modelsFolder, relative)).existsSync();
+    return at(model.relativePath) &&
+        at(model.sidecarRelativePath) &&
+        at(model.headsRelativePath);
+  }
+
+  /// Whether a `source: local` entry's files are all in [modelsFolder].
+  static bool localInstalled(ModelFile model, String modelsFolder) =>
+      filesPresent(model, modelsFolder);
 
   /// The preset the supervisor writes, pointed at [modelsFolder].
   RouterPreset toPreset(String modelsFolder) => RouterPreset(

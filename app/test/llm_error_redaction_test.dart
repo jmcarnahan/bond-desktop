@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -175,7 +176,7 @@ void main() {
       });
       final queue = TriageQueue(
         store,
-        throwingLlm(),
+        decisionClient: ScriptedDecisionClient(throwingLlm()),
         concurrency: 1,
         activityLog: ActivityLog(store),
       );

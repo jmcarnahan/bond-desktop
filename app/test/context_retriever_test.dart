@@ -1309,7 +1309,7 @@ The kitchen inventory is counted on the first of the month.
           messages,
           context,
           embedder ?? embeddings.client,
-          fastClient: fake,
+          selectClient: fake,
           selectExpand: () => on,
         ).packFor(
           source: 'email',

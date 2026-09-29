@@ -990,6 +990,38 @@ void main() {
         )),
         'Embed message parked — embedding server unreachable',
       );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'decision_unavailable'},
+        )),
+        'Triage parked — decision model unreachable',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'not_installed'},
+        )),
+        'Triage parked — model not downloaded',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'decision_not_installed'},
+        )),
+        'Triage parked — decision model not installed',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
+          detail: const {'reason': 'decision_unauthorized'},
+        )),
+        'Triage parked — the decision server refused the access key',
+      );
     });
 
     test('a document read says how many passages it became', () {
@@ -1255,6 +1287,24 @@ void main() {
         )),
         'Storyline sweep — 1 proposed, 2 threads confirmed, 0 rejected, '
         '0 joined',
+      );
+    });
+
+    test('a sweep that only skipped clusters a possible storyline holds says why',
+        () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 0,
+            'confirmed': 0,
+            'rejected': 0,
+            'joined': 0,
+            'overlaps_possible': 1,
+          },
+        )),
+        'Storyline sweep — 0 proposed, 0 threads confirmed, 0 rejected, '
+        '0 joined, 1 left for a possible storyline',
       );
     });
 

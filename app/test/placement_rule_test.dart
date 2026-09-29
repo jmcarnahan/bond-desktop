@@ -11,14 +11,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fixtures/memory_token_store.dart';
 import 'fixtures/test_db.dart';
 
-/// The placement rule: the GPU box as a DEFAULT rather than as stored rows.
+/// The routing RULE: three roles, one target each, and nothing stored.
 ///
-/// `llm_targets_test.dart` owns the notifier's box API. What this file holds
-/// is the rule itself and the three things it touches on the way past: which
-/// target a stage resolves to with nothing stored, what happens to a Round G
-/// install that has the old rows, and the two preferences the rule made
-/// necessary — the address it derives from, and the processing switch that
-/// only starts on because the default server is now the measured one.
+/// `llm_targets_test.dart` owns the notifier's writers. What this file holds
+/// is the rule itself — which target a stage resolves to on each placement —
+/// and two things it touches on the way past: what the older one-shot
+/// migrations still do to a Round G install, and the processing switch that
+/// only starts on because the default server is the measured one.
 ///
 /// `boxUrlDefault` is empty under `flutter test`, so every case that wants the
 /// box says so, by constructing an [AppPrefs] with an address or by writing
@@ -36,16 +35,13 @@ void main() {
 
   const url = 'https://box.example.com';
   const bigUrl = '$url/prose/v1/chat/completions';
-  const smallUrl = '$url/bulk/v1/chat/completions';
   // A fictional string, and the only "key" anywhere in this file.
   const key = 'sk-fixture-not-a-real-box-key';
 
-  /// What a fresh install on a build with a compiled address holds: the
-  /// placement default resolved to the box, and the address to dial.
+  /// The generative model on the owner's server, at a stored address.
   const onBox = AppPrefs(
     modelPlacement: ModelPlacement.box,
     boxBigUrl: bigUrl,
-    boxSmallUrl: smallUrl,
   );
 
   Future<AppPrefsNotifier> notifier({
@@ -62,160 +58,227 @@ void main() {
     return made;
   }
 
-  group('a fresh install on a build that names a box', () {
-    test('routes the fourteen stages by role and stores nothing', () {
-      expect(onBox.hasBox, isTrue);
-      expect(onBox.effectiveBoxBigUrl, bigUrl);
-      expect(onBox.effectiveBoxSmallUrl, smallUrl);
-      expect(onBox.stageTargets, isEmpty);
+  /// Every stage that makes a text call: the generative role.
+  final generativeStages = [
+    for (final stage in pipelineStages)
+      if (stage.slot == ModelSlot.generative) stage.id,
+  ];
 
-      for (final id in smallModelStageIds) {
-        expect(onBox.targetIdForStage(id), boxBulkId, reason: id);
+  group('every text stage is the one generative model', () {
+    test('managed on the full tier: the 27B on the router', () {
+      const prefs = AppPrefs(modelPlacement: ModelPlacement.local);
+      for (final id in generativeStages) {
+        final spec = prefs.specForStage(id)!;
+        expect(spec.id, localGenerativeId, reason: id);
+        expect(spec.name, 'This Mac · generative', reason: id);
+        expect(spec.url, 'http://127.0.0.1:8080/v1/chat/completions');
+        expect(spec.model, routerProseId, reason: id);
       }
-      for (final id in bigModelStageIds) {
-        expect(onBox.targetIdForStage(id), boxProseId, reason: id);
+      // Thirteen (triage and extraction became message_text, and the reply
+      // decision became the decision model's), so the list has not quietly
+      // shrunk.
+      expect(generativeStages, hasLength(13));
+    });
+
+    test('managed on the inbox tier: the 4B', () {
+      const prefs = AppPrefs(
+        modelPlacement: ModelPlacement.local,
+        machineTier: MachineTier.inbox,
+      );
+      for (final id in generativeStages) {
+        expect(prefs.specForStage(id)!.model, routerBulkId, reason: id);
       }
-      // Seven and eight, so the two lists have not quietly grown.
-      expect(smallModelStageIds, hasLength(7));
-      expect(bigModelStageIds, hasLength(8));
-
-      // The one stage that is not routed at all.
-      expect(onBox.targetIdForStage('embeddings'), isNull);
     });
 
-    test('offers the derived pair in the picker, once each', () {
-      final ids = [for (final spec in onBox.allTargets) spec.id];
-      expect(ids, [builtInFastId, builtInProseId, boxBulkId, boxProseId]);
-      // A duplicate id is what makes the stage picker assert on its value.
-      expect(ids.toSet(), hasLength(ids.length));
+    test('your server with a stored address: box-prose, one at a time', () {
+      for (final id in generativeStages) {
+        final spec = onBox.specForStage(id)!;
+        expect(spec.id, boxProseId, reason: id);
+        expect(spec.name, 'Your server · generative', reason: id);
+        expect(spec.url, bigUrl, reason: id);
+        expect(spec.model, boxProseModel, reason: id);
+        // A stored address is one request at a time: a one-slot llama-server
+        // would queue the rest past the prose client's ceiling. (Four wide is
+        // for an address that FOLLOWS the build, which `flutter test` cannot
+        // construct: `boxUrlDefault` is empty here.)
+        expect(spec.parallel, 1, reason: id);
+      }
     });
 
-    test('a build that names no box is on this Mac, with no pair at all', () {
-      const fresh = AppPrefs();
-      expect(fresh.modelPlacement, ModelPlacement.local);
-      expect(fresh.hasBox, isFalse);
-      expect([for (final spec in fresh.allTargets) spec.id],
-          [builtInFastId, builtInProseId]);
-      expect(fresh.targetIdForStage('storyline_membership'), builtInFastId);
-      expect(fresh.targetIdForStage('draft_reply'), builtInProseId);
-    });
-  });
-
-  group('an override outranks the rule', () {
-    test('picking the small model for the confirm stores an entry, and the '
-        'big one clears it', () async {
-      final prefs = await notifier(initial: onBox);
-
-      await prefs.setStageTarget('storyline_membership', boxBulkId);
-      expect(prefs.state.stageTargets, {'storyline_membership': boxBulkId});
-      expect(prefs.state.targetIdForStage('storyline_membership'), boxBulkId);
-
-      await prefs.setStageTarget('storyline_membership', boxProseId);
-      expect(prefs.state.stageTargets, isEmpty,
-          reason: 'back on the rule, so the map holds non-defaults only');
-      expect(prefs.state.targetIdForStage('storyline_membership'), boxProseId);
+    test('your server with no address to dial is this Mac', () {
+      // No compiled address and none stored: the placement cannot be honoured,
+      // and a target nothing can reach would park every lane.
+      const prefs = AppPrefs(modelPlacement: ModelPlacement.box);
+      expect(prefs.effectiveGenerativeUrl, isEmpty);
+      for (final id in generativeStages) {
+        expect(prefs.specForStage(id)!.id, localGenerativeId, reason: id);
+      }
     });
 
-    test('the same two picks on this Mac mean the other way round', () async {
-      final prefs = await notifier();
-
-      // Here the confirm's default is the fast built-in, so THAT is the pick
-      // that stores nothing.
-      await prefs.setStageTarget('storyline_membership', builtInProseId);
-      expect(prefs.state.stageTargets,
-          {'storyline_membership': builtInProseId});
-      await prefs.setStageTarget('storyline_membership', builtInFastId);
-      expect(prefs.state.stageTargets, isEmpty);
-    });
-  });
-
-  group('the placement round trip', () {
-    test('this Mac and back: routing follows the placement, a user pick '
-        'survives both, and the tier entries do not come along', () async {
-      const own = LlmTargetSpec(
-        id: 't-1a2b3c4d',
-        name: 'Studio box',
-        url: 'http://localhost:18100/v1/chat/completions',
-        model: 'qwen3-27b-fp8',
-      );
-      final made = await notifier(
-        initial: const AppPrefs(
-          modelPlacement: ModelPlacement.box,
-          boxBigUrl: bigUrl,
-          boxSmallUrl: smallUrl,
-          targets: [own],
-        ),
-      );
-      await made.setStageTarget('triage', 't-1a2b3c4d');
-
-      // To this Mac, on a small machine: the tier writes its six prose picks,
-      // membership goes to the small model by rule, and the user pick stays.
-      await made.usePlacement(ModelPlacement.local,
-          hardwareTier: MachineTier.inbox);
-      expect(made.state.modelPlacement, ModelPlacement.local);
-      expect(made.state.targetIdForStage('draft_reply'), builtInFastId);
-      expect(made.state.targetIdForStage('storyline_membership'),
-          builtInFastId);
-      expect(made.state.targetIdForStage('triage'), 't-1a2b3c4d');
-      expect(made.state.draftPolicy, tierDraftPolicy(MachineTier.inbox));
-
-      // And back: the tier's entries are dropped, the rule answers again, the
-      // user pick is still the user's, and drafts are worth prefetching.
-      await made.usePlacement(ModelPlacement.box,
-          hardwareTier: MachineTier.inbox);
-      expect(made.state.modelPlacement, ModelPlacement.box);
-      expect(made.state.targetIdForStage('draft_reply'), boxProseId);
-      expect(made.state.targetIdForStage('storyline_membership'), boxProseId);
-      expect(made.state.targetIdForStage('triage'), 't-1a2b3c4d');
-      expect(made.state.stageTargets.keys, ['triage']);
-      expect(made.state.draftPolicy, DraftPolicy.needsYou);
-    });
-  });
-
-  group('the draft lane', () {
-    test('follows the box spec on the box and prose_parallel here', () async {
-      // One at a time on a TYPED address; the width group above pins the four
-      // an address that follows the build carries.
-      expect(onBox.specForStage('draft_reply')!.parallel, 1);
-
-      const here = AppPrefs(proseParallel: 2);
-      expect(here.specForStage('draft_reply')!.parallel, 2);
+    test('hand-started servers: the compiled prose server', () {
+      const prefs = AppPrefs(managedServer: false);
+      for (final id in generativeStages) {
+        final spec = prefs.specForStage(id)!;
+        expect(spec.id, localGenerativeId, reason: id);
+        expect(spec.url, generativeUrlDefault, reason: id);
+        expect(spec.model, generativeModelDefault, reason: id);
+      }
     });
 
-    test('a gated draft falls back to the box, not to a dead local port',
-        () async {
-      const bedrock = LlmTargetSpec(
-        id: 'cloud-1',
-        name: 'Cloud prose',
-        url: 'https://bedrock-runtime.example.com',
-        model: 'us.example.big-model',
-        wire: LlmWire.bedrockConverse,
-      );
-      const gated = AppPrefs(
+    test('the confirm is plain generative, on either placement', () {
+      // It was the one stage whose role depended on the placement.
+      expect(onBox.specForStage('storyline_membership')!.id, boxProseId);
+      expect(const AppPrefs().specForStage('storyline_membership')!.id,
+          localGenerativeId);
+      expect(onBox.specForStage('storyline_membership'),
+          onBox.specForStage('message_text'));
+    });
+
+    test('the discovered model name is asked for, and the wire read off the '
+        'host', () {
+      const named = AppPrefs(
         modelPlacement: ModelPlacement.box,
         boxBigUrl: bigUrl,
-        boxSmallUrl: smallUrl,
-        targets: [bedrock],
-        stageTargets: {'draft_reply': 'cloud-1', 'draft_improve': 'cloud-1'},
+        boxBigModel: 'qwen3.8-mlx',
       );
+      expect(named.generativeSpec.model, 'qwen3.8-mlx');
+      expect(named.generativeSpec.wire, LlmWire.openAi);
+    });
 
-      // Without consent the third-party pick is refused, and what takes its
-      // place has to be somewhere the work can actually run: before Round H
-      // this was the local prose target, on a machine whose local servers are
-      // not started.
-      expect(gated.specForStage('draft_reply')!.id, boxProseId);
-      expect(gated.draftFallbackSpec.id, boxProseId);
-      // Improve a draft goes to the same place: it is a prose stage like the
-      // rest since Round H, so a refused pick falls back rather than
-      // disappearing.
-      expect(gated.specForStage('draft_improve')!.id, boxProseId);
+    test('a hand-edited third-party generative address is never dialled', () {
+      // The writer refuses one and the migration moves one; this is the belt
+      // at resolution, for a row somebody typed into the table.
+      for (final url in [
+        'https://api.openai.com/v1/chat/completions',
+        'https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1/chat/completions',
+      ]) {
+        final prefs =
+            AppPrefs(modelPlacement: ModelPlacement.box, boxBigUrl: url);
+        expect(prefs.generativeSpec.id, localGenerativeId, reason: url);
+      }
+    });
 
-      // On this Mac the fallback is what it always was.
-      const local = AppPrefs(
-        targets: [bedrock],
-        stageTargets: {'draft_reply': 'cloud-1'},
+    test('the width is the drafts-in-flight setting here', () {
+      expect(const AppPrefs(proseParallel: 2).specForStage('draft_reply')!
+          .parallel, 2);
+      expect(onBox.specForStage('draft_reply')!.parallel, 1);
+    });
+  });
+
+  group('the decision stage is the decision model', () {
+    test('this Mac by default, whatever the generative placement', () {
+      for (final prefs in [const AppPrefs(), onBox]) {
+        final spec = prefs.specForStage('decision')!;
+        expect(spec.id, localDecisionId);
+        expect(spec.name, 'This Mac · decision');
+        expect(spec.url, 'http://127.0.0.1:8080/v1/embeddings');
+        expect(spec.model, routerDecideId);
+      }
+    });
+
+    test('your server when the decision placement says so and an address '
+        'exists', () {
+      const prefs = AppPrefs(
+        decisionPlacement: ModelPlacement.box,
+        decisionUrl: '$url/decide/v1/embeddings',
       );
-      expect(local.specForStage('draft_reply')!.id, builtInProseId);
+      final spec = prefs.specForStage('decision')!;
+      expect(spec.id, boxDecideId);
+      expect(spec.name, 'Your server · decision');
+      expect(spec.url, '$url/decide/v1/embeddings');
+      expect(spec.model, boxDecideModel);
+      // And the text stages are untouched by it.
+      expect(prefs.specForStage('message_text')!.id, localGenerativeId);
+    });
+
+    test('your server with no address is this Mac', () {
+      const prefs = AppPrefs(decisionPlacement: ModelPlacement.box);
+      expect(prefs.effectiveDecisionUrl, isEmpty);
+      expect(prefs.specForStage('decision')!.id, localDecisionId);
+    });
+
+    test('hand-started: the make decide server', () {
+      const prefs = AppPrefs(managedServer: false);
+      expect(prefs.specForStage('decision')!.url, decideUrlDefault);
+      expect(prefs.specForStage('decision')!.model, decideModelDefault);
+    });
+
+    test('embeddings are not routed at all', () async {
+      expect(const AppPrefs().specForStage('embeddings'), isNull);
+      final prefs = await notifier();
+      expect(prefs.targetForStage('embeddings'),
+          prefs.state.embedRequestTarget);
+    });
+  });
+
+  group('the draft stages and cloud drafts', () {
+    const vendor = 'https://api.openai.com/v1/chat/completions';
+    const own = 'https://drafts.example.com/v1/chat/completions';
+
+    test('no cloud drafts: the drafts are generative like everything else', () {
+      for (final id in draftStageIds) {
+        expect(onBox.specForStage(id)!.id, boxProseId, reason: id);
+      }
+    });
+
+    test('a third-party target without consent: drafts stay generative', () {
+      const prefs = AppPrefs(cloudDraftsUrl: vendor, cloudDraftsModel: 'gpt');
+      expect(prefs.cloudDraftsSpec!.isThirdParty, isTrue);
+      for (final id in draftStageIds) {
+        expect(prefs.specForStage(id)!.id, localGenerativeId, reason: id);
+      }
+    });
+
+    test('with consent: the two draft stages and nothing else', () {
+      const prefs = AppPrefs(
+        cloudDraftsUrl: vendor,
+        cloudDraftsModel: 'gpt',
+        cloudDraftsConsent: true,
+      );
+      for (final id in draftStageIds) {
+        final spec = prefs.specForStage(id)!;
+        expect(spec.id, cloudDraftsId, reason: id);
+        expect(spec.name, 'Cloud drafts');
+        expect(spec.model, 'gpt');
+      }
+      for (final id in generativeStages) {
+        if (draftStageIds.contains(id)) continue;
+        expect(prefs.specForStage(id)!.id, localGenerativeId, reason: id);
+      }
+      expect(prefs.specForStage('decision')!.id, localDecisionId);
+    });
+
+    test('the owner\'s own host needs no consent', () {
+      const prefs = AppPrefs(cloudDraftsUrl: own, cloudDraftsModel: 'mine');
+      expect(prefs.cloudDraftsSpec!.isThirdParty, isFalse);
+      expect(prefs.specForStage('draft_reply')!.id, cloudDraftsId);
+    });
+
+    test('a Bedrock target speaks Converse and is third party', () {
+      const prefs = AppPrefs(
+        cloudDraftsUrl: 'https://bedrock-runtime.us-east-2.amazonaws.com',
+        cloudDraftsModel: 'us.example.big-model',
+      );
+      expect(prefs.cloudDraftsSpec!.wire, LlmWire.bedrockConverse);
+      expect(prefs.specForStage('draft_reply')!.id, localGenerativeId);
+    });
+  });
+
+  group('specById', () {
+    test('answers the current fixed specs by id, and nothing else', () {
+      const prefs = AppPrefs(
+        cloudDraftsUrl: 'https://drafts.example.com/v1/chat/completions',
+        cloudDraftsModel: 'mine',
+      );
+      expect(prefs.specById(localGenerativeId), prefs.generativeSpec);
+      expect(prefs.specById(localDecisionId), prefs.decisionSpec);
+      expect(prefs.specById(cloudDraftsId), prefs.cloudDraftsSpec);
+      // Not the current generative target, so not answered.
+      expect(prefs.specById(boxProseId), isNull);
+      expect(onBox.specById(boxProseId)!.url, bigUrl);
+      expect(prefs.specById('box-bulk'), isNull);
+      expect(prefs.specById('nope'), isNull);
+      expect(const AppPrefs().specById(cloudDraftsId), isNull);
     });
   });
 
@@ -223,7 +286,6 @@ void main() {
     test('a stage resolved before ready carries no key and says so', () async {
       final tokens = MemoryTokenStore({
         '$llmTargetBearerKeyPrefix$boxProseId': key,
-        '$llmTargetBearerKeyPrefix$boxBulkId': key,
       });
       final prefs = AppPrefsNotifier(store, tokens: tokens, initial: onBox);
       addTearDown(prefs.dispose);
@@ -232,16 +294,18 @@ void main() {
       // supervisor's first pump can beat it. What must not happen is a spec
       // that claims a key it does not hold, because that is one
       // unauthenticated request per stage.
-      expect(prefs.state.boxKeyStored, isFalse);
-      expect(prefs.state.specForStage('triage')!.hasBearer, isFalse);
-      expect(prefs.targetForStage('triage').bearer, isNull);
+      expect(prefs.state.boxBigKeyStored, isFalse);
+      expect(prefs.state.specForStage('message_text')!.hasBearer, isFalse);
+      expect(prefs.targetForStage('message_text').bearer, isNull);
 
       await prefs.ready;
 
-      expect(prefs.state.boxKeyStored, isTrue);
-      expect(prefs.state.specForStage('triage')!.hasBearer, isTrue);
-      expect(prefs.targetForStage('triage').bearer, key);
+      expect(prefs.state.boxBigKeyStored, isTrue);
+      expect(prefs.state.specForStage('message_text')!.hasBearer, isTrue);
+      expect(prefs.targetForStage('message_text').bearer, key);
       expect(prefs.targetForStage('draft_reply').bearer, key);
+      // The decision model runs here, so the generative key never rides it.
+      expect(prefs.targetForStage('decision').bearer, isNull);
       // Still nowhere near a preference.
       final rows = await db.customSelect('SELECT value FROM app_prefs').get();
       for (final row in rows) {
@@ -250,269 +314,20 @@ void main() {
     });
   });
 
-  group('the user-defined pair', () {
-    test('two addresses and two names, each falling back to the build', () {
-      const typed = AppPrefs(
-        modelPlacement: ModelPlacement.box,
-        boxBigUrl: 'https://big.example.com/v1/chat/completions',
-        boxSmallUrl: 'https://small.example.com/v1/chat/completions',
-        boxBigModel: 'a-big-model',
-        boxSmallModel: 'a-small-model',
-      );
-
-      expect(typed.boxProseSpec.url,
-          'https://big.example.com/v1/chat/completions');
-      expect(typed.boxProseSpec.model, 'a-big-model');
-      expect(typed.boxBulkSpec.url,
-          'https://small.example.com/v1/chat/completions');
-      expect(typed.boxBulkSpec.model, 'a-small-model');
-
-      // Empty means FOLLOW THE BUILD, and under `flutter test` the build names
-      // no box at all — which is why every case here says what it means.
-      const nothing = AppPrefs(modelPlacement: ModelPlacement.box);
-      expect(nothing.effectiveBoxBigUrl, isEmpty);
-      expect(nothing.effectiveBoxSmallUrl, isEmpty);
-      expect(nothing.hasBox, isFalse);
-      // The model names still have constants behind them.
-      expect(nothing.effectiveBoxBigModel, boxProseModel);
-      expect(nothing.effectiveBoxSmallModel, boxBulkModel);
-
-      // Half a pair is not a pair: a rule that sent the big stages to an
-      // address and the small ones nowhere would park half the pipeline.
-      const half = AppPrefs(
-        modelPlacement: ModelPlacement.box,
-        boxBigUrl: 'https://big.example.com/v1/chat/completions',
-      );
-      expect(half.hasBox, isFalse);
-      expect(half.targetIdForStage('draft_reply'), builtInProseId);
-    });
-
-    test('the width is four for the build and one for an address', () {
-      expect(onBox.boxProseSpec.parallel, 1);
-      expect(onBox.boxBulkSpec.parallel, 1);
-      // A one-slot llama-server queues the other three past the prose
-      // client's ceiling; four is a fact about the compiled box's vLLM pair.
-      const followsBuild = AppPrefs(modelPlacement: ModelPlacement.box);
-      expect(followsBuild.boxProseSpec.parallel, 4);
-      expect(followsBuild.boxBulkSpec.parallel, 4);
-    });
-
-    test('the wire is read off the host', () {
-      expect(wireForHost('https://box.example.com/v1/chat/completions'),
-          LlmWire.openAi);
-      expect(wireForHost('http://localhost:18100/v1/chat/completions'),
-          LlmWire.openAi);
-      expect(wireForHost('https://bedrock-runtime.us-east-2.amazonaws.com/x'),
-          LlmWire.bedrockConverse);
-      // A string that is not a URL is not a protocol claim either.
-      expect(wireForHost('nonsense'), LlmWire.openAi);
-    });
-
-    test('setBoxServers refuses an address that cannot be dialled', () async {
-      final prefs = await notifier();
-
-      for (final bad in ['', '   ', 'box.example.com', 'ftp://box']) {
-        await expectLater(
-          prefs.setBoxServers(
-            bigUrl: bad,
-            smallUrl: smallUrl,
-            bigModel: 'big',
-            smallModel: 'small',
-          ),
-          throwsArgumentError,
-          reason: bad,
-        );
-        await expectLater(
-          prefs.setBoxServers(
-            bigUrl: bigUrl,
-            smallUrl: bad,
-            bigModel: 'big',
-            smallModel: 'small',
-          ),
-          throwsArgumentError,
-          reason: bad,
-        );
-      }
-
-      expect(prefs.state.boxBigUrl, isEmpty);
-      expect(prefs.state.boxSmallUrl, isEmpty);
-    });
-
-    test('and a third-party big address until the consent stands', () async {
-      final prefs = await notifier();
-      const bedrock =
-          'https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1/'
-          'chat/completions';
-
-      await expectLater(
-        prefs.setBoxServers(
-          bigUrl: bedrock,
-          smallUrl: smallUrl,
-          bigModel: 'big',
-          smallModel: 'small',
-        ),
-        throwsArgumentError,
-      );
-      expect(prefs.state.boxBigUrl, isEmpty);
-
-      await prefs.setCloudDraftsConsent(true);
-      await prefs.setBoxServers(
-        bigUrl: bedrock,
-        smallUrl: smallUrl,
-        bigModel: 'big',
-        smallModel: 'small',
-      );
-      expect(prefs.state.boxBigUrl, bedrock);
-      expect(prefs.state.boxProseSpec.wire, LlmWire.bedrockConverse);
-    });
-
-    test('and a third-party small address whatever the consent says',
-        () async {
-      // The consent is about drafts on the big model. The small model reads
-      // every message body, and no cloud service serves that role from any
-      // screen, so the guard here does not read the flag at all.
-      final prefs = await notifier();
-      await prefs.setCloudDraftsConsent(true);
-
-      for (final vendor in [
-        'https://api.openai.com/v1/chat/completions',
-        'https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1/'
-            'chat/completions',
-      ]) {
-        await expectLater(
-          prefs.setBoxServers(
-            bigUrl: bigUrl,
-            smallUrl: vendor,
-            bigModel: 'big',
-            smallModel: 'small',
-          ),
-          throwsA(isA<ArgumentError>()
-              .having((e) => e.name, 'name', 'smallUrl')),
-          reason: vendor,
-        );
-      }
-      expect(prefs.state.boxBigUrl, isEmpty);
-      expect(prefs.state.boxSmallUrl, isEmpty);
-    });
-
-    test('a value that equals the build is stored as empty', () async {
-      final prefs = await notifier();
-
-      await prefs.setBoxServers(
-        bigUrl: '$bigUrl/',
-        smallUrl: smallUrl,
-        bigModel: boxProseModel,
-        smallModel: boxBulkModel,
-      );
-
-      // The two names are the constants this build serves, so nothing is
-      // frozen into the table; the addresses are not, so they are.
-      expect(await store.getPref(boxBigModelKey), isEmpty);
-      expect(await store.getPref(boxSmallModelKey), isEmpty);
-      expect(await store.getPref(boxBigUrlKey), bigUrl);
-      expect(prefs.state.effectiveBoxBigModel, boxProseModel);
-    });
-
-    test('useBox writes the four values, the keys and the placement',
-        () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens: tokens);
-
-      await prefs.useBox(
-        bigUrl: bigUrl,
-        smallUrl: smallUrl,
-        bigModel: 'a-big-model',
-        smallModel: 'a-small-model',
-        bigKey: key,
-        smallKey: 'sk-fixture-the-other-operator',
-        hardwareTier: MachineTier.full,
-      );
-
-      expect(prefs.state.modelPlacement, ModelPlacement.box);
-      expect(await store.getPref(boxBigUrlKey), bigUrl);
-      expect(await store.getPref(boxSmallUrlKey), smallUrl);
-      expect(await store.getPref(boxBigModelKey), 'a-big-model');
-      expect(await store.getPref(boxSmallModelKey), 'a-small-model');
-      // A key PER SERVER: two addresses can be two operators, and a key for
-      // one is never sent to the other.
-      expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
-      expect(tokens.values['$llmTargetBearerKeyPrefix$boxBulkId'],
-          'sk-fixture-the-other-operator');
-      expect(prefs.state.boxBigKeyStored, isTrue);
-      expect(prefs.state.boxSmallKeyStored, isTrue);
-      expect(prefs.state.boxKeyStored, isTrue);
-      // And nowhere near a preference.
-      final rows = await db.customSelect('SELECT value FROM app_prefs').get();
-      for (final row in rows) {
-        expect(row.read<String>('value'), isNot(contains('sk-fixture')));
-      }
-    });
-
-    test('one key for one server leaves the other hint honest', () async {
-      final tokens = MemoryTokenStore();
-      final prefs = await notifier(tokens: tokens);
-
-      await prefs.useBox(
-        bigUrl: bigUrl,
-        smallUrl: smallUrl,
-        bigModel: 'a-big-model',
-        smallModel: 'a-small-model',
-        bigKey: key,
-        hardwareTier: MachineTier.full,
-      );
-
-      expect(prefs.state.boxBigKeyStored, isTrue);
-      expect(prefs.state.boxSmallKeyStored, isFalse);
-      expect(prefs.state.boxKeyStored, isTrue);
-      expect(tokens.values.containsKey('$llmTargetBearerKeyPrefix$boxBulkId'),
-          isFalse);
-    });
-
-    test('the draft fallback is never a third party', () async {
-      final prefs = await notifier();
-      await prefs.setCloudDraftsConsent(true);
-      await prefs.useBox(
-        bigUrl: 'https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1/'
-            'chat/completions',
-        smallUrl: smallUrl,
-        bigModel: 'us.example.big-model',
-        smallModel: 'a-small-model',
-        hardwareTier: MachineTier.full,
-      );
-
-      // With consent, the big stages go there and Improve goes with them.
-      expect(prefs.state.specForStage('draft_reply')!.id, boxProseId);
-      expect(prefs.state.specForStage('draft_improve')!.id, boxProseId);
-
-      await prefs.setCloudDraftsConsent(false);
-
-      // Withdrawn: the fallback cannot be the address that was just refused,
-      // so it is this Mac's own prose target.
-      expect(prefs.state.draftFallbackSpec.id, builtInProseId);
-      expect(prefs.state.specForStage('draft_reply')!.id, builtInProseId);
-      expect(prefs.state.specForStage('draft_improve')!.id, builtInProseId);
-      // Every other stage still goes to the servers that were named.
-      expect(prefs.state.specForStage('triage')!.id, boxBulkId);
-      expect(prefs.state.specForStage('storyline_recap')!.id, boxProseId);
-    });
-
-    test('Improve a draft is routed by the rule on both placements', () {
-      expect(onBox.targetIdForStage('draft_improve'), boxProseId);
-      expect(const AppPrefs().targetIdForStage('draft_improve'),
-          builtInProseId);
-    });
-  });
-
   group('the Round G migration', () {
-    /// An install that pressed Round G's Adopt button: two rows, the fifteen
-    /// stage entries both presets wrote, and the placement.
+    /// Round H's small-model id, written here as the literal it was: the
+    /// constant went with the small model.
+    const boxBulk = 'box-bulk';
+
+    /// An install that pressed Round G's Adopt button: two rows, the stage
+    /// entries both presets wrote, and the placement.
     Future<void> seedRoundG({String base = url}) async {
       await store.setPref(
         llmTargetsKey,
         jsonEncode([
           {
             'id': boxProseId,
-            'name': boxProseName,
+            'name': 'Your server · big model',
             'url': '$base/prose/v1/chat/completions',
             'model': boxProseModel,
             'wire': 'openAi',
@@ -521,10 +336,10 @@ void main() {
             'streams': true,
           },
           {
-            'id': boxBulkId,
-            'name': boxBulkName,
+            'id': boxBulk,
+            'name': 'Your server · small model',
             'url': '$base/bulk/v1/chat/completions',
-            'model': boxBulkModel,
+            'model': 'qwen3-4b',
             'wire': 'openAi',
             'bearer': true,
             'parallel': 4,
@@ -541,48 +356,38 @@ void main() {
       await store.setPref(
         stageTargetsKey,
         jsonEncode({
-          for (final id in smallModelStageIds) id: boxBulkId,
-          for (final id in bigModelStageIds) id: boxProseId,
+          'triage': boxBulk,
+          'draft_reply': boxProseId,
           'draft_improve': 'gpu-1',
         }),
       );
       await store.setPref(modelPlacementKey, ModelPlacement.box.name);
     }
 
-    test('lifts the address into the pair, drops the rows and empties the map',
-        () async {
+    test('lifts the address into the generative remote, drops the rows and '
+        'empties the map', () async {
       await seedRoundG();
 
       final prefs = await AppPrefsNotifier.read(store);
 
-      // The origin is split in two by the migration that follows this one, so
-      // what the install ends on is the pair.
+      // The origin is split in two by the migration that follows this one;
+      // the big half IS the generative remote, and the small half is inert.
       expect(prefs.boxBigUrl, '$url/prose/v1/chat/completions');
-      expect(prefs.boxSmallUrl, '$url/bulk/v1/chat/completions');
+      expect(await store.getPref(boxSmallUrlKey),
+          '$url/bulk/v1/chat/completions');
       expect(await store.getPref(boxUrlKey), isEmpty);
-      expect(prefs.hasBox, isTrue);
       expect(prefs.modelPlacement, ModelPlacement.box);
-      // The pair is derived now, so the rows are gone and the ids appear once.
-      expect([for (final spec in prefs.targets) spec.id], ['gpu-1']);
-      expect(
-        [for (final spec in prefs.allTargets) spec.id],
-        [builtInFastId, builtInProseId, boxBulkId, boxProseId, 'gpu-1'],
-      );
-      // And the map is EMPTY, the owner's own pick included: with the stage
-      // picker deleted, an entry would route a stage somewhere no screen can
-      // show.
-      expect(prefs.stageTargets, isEmpty);
-      // Routing is the rule, which is what the entries said anyway.
-      expect(prefs.targetIdForStage('triage'), boxBulkId);
-      expect(prefs.targetIdForStage('storyline_membership'), boxProseId);
-      expect(prefs.targetIdForStage('draft_improve'), boxProseId);
-      // The user's target row is left where it is: with nothing naming it, it
-      // is inert rather than wrong, and dropping it would ask for a keychain
-      // sweep for no visible payoff.
-      expect(prefs.targets.single.id, 'gpu-1');
+      // The box rows are gone, the owner's own row is left, inert.
+      final rows = jsonDecode((await store.getPref(llmTargetsKey))!) as List;
+      expect([for (final row in rows) (row as Map)['id']], ['gpu-1']);
+      // And the map is EMPTY: nothing routes through it any more.
+      expect(await store.getPref(stageTargetsKey), isEmpty);
+      // Routing is the rule.
+      expect(prefs.specForStage('message_text')!.id, boxProseId);
+      expect(prefs.specForStage('draft_improve')!.id, boxProseId);
     });
 
-    test('the three one-shots run in order, and each runs once', () async {
+    test('the four one-shots run in order, and each runs once', () async {
       await seedRoundG();
 
       await AppPrefsNotifier.read(store);
@@ -590,22 +395,15 @@ void main() {
       expect(await store.getPref(boxTargetsDerivedKey), '1');
       expect(await store.getPref(boxServersDerivedKey), '1');
       expect(await store.getPref(stageTargetsClearedKey), '1');
+      // An own-host big address is the one shape the role split leaves alone.
+      expect(await store.getPref(modelRolesDerivedKey), modelRolesDoneValue);
 
-      // The ORDER is what makes the end state reachable: the Round G derive
-      // needs the old row and writes the origin, the split reads that origin,
-      // and the clear runs last over whatever the two left behind. Asserted by
-      // its result — an install seeded with rows and entries ends with the
-      // pair and an empty map — because no two of them could have run the
-      // other way round and got here.
-      final pinned = await AppPrefsNotifier.read(store);
-      expect(pinned.boxBigUrl, '$url/prose/v1/chat/completions');
-      expect(pinned.stageTargets, isEmpty);
-
-      // And a second read changes nothing: a pick made after the flags are set
-      // is the owner's, and no migration comes back for it.
+      // A map written after the flags are set is left alone: no migration
+      // comes back for it (and nothing reads it).
       await store.setPref(stageTargetsKey, jsonEncode({'triage': boxProseId}));
-      final again = await AppPrefsNotifier.read(store);
-      expect(again.stageTargets, {'triage': boxProseId});
+      await AppPrefsNotifier.read(store);
+      expect(await store.getPref(stageTargetsKey),
+          jsonEncode({'triage': boxProseId}));
     });
 
     test('the split is a no-op for an install that follows the build',
@@ -615,63 +413,20 @@ void main() {
       expect(await store.getPref(boxServersDerivedKey), '1');
       expect(await store.getPref(boxBigUrlKey), isNull);
       expect(prefs.boxBigUrl, isEmpty);
-      expect(prefs.boxSmallUrl, isEmpty);
-    });
-
-    test('the clear empties stage_targets once and leaves llm_targets',
-        () async {
-      await store.setPref(llmTargetsKey, jsonEncode([
-        {
-          'id': 'gpu-1',
-          'name': 'A server the owner added',
-          'url': 'http://localhost:18100/v1/chat/completions',
-          'model': 'qwen3.8',
-        },
-      ]));
-      await store.setPref(stageTargetsKey, jsonEncode({'triage': 'gpu-1'}));
-
-      final prefs = await AppPrefsNotifier.read(store);
-
-      expect(prefs.stageTargets, isEmpty);
-      expect(prefs.targets.single.id, 'gpu-1');
-      expect(await store.getPref(stageTargetsClearedKey), '1');
-
-      // Once. A pick made afterwards is the owner's and stays.
-      await store.setPref(stageTargetsKey, jsonEncode({'triage': 'gpu-1'}));
-      final after = await AppPrefsNotifier.read(store);
-      expect(after.stageTargets, {'triage': 'gpu-1'});
     });
 
     test('leaves the keychain alone, so nobody types the key again', () async {
       await seedRoundG();
       final tokens = MemoryTokenStore({
         '$llmTargetBearerKeyPrefix$boxProseId': key,
-        '$llmTargetBearerKeyPrefix$boxBulkId': key,
+        '$llmTargetBearerKeyPrefix$boxBulk': key,
       });
 
       final prefs = await notifier(tokens: tokens);
 
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxProseId'], key);
-      expect(prefs.state.boxKeyStored, isTrue);
-      expect(prefs.targetForStage('triage').bearer, key);
-    });
-
-    test('runs at most once, and a second read changes nothing', () async {
-      await seedRoundG();
-      await AppPrefsNotifier.read(store);
-      expect(await store.getPref(boxTargetsDerivedKey), '1');
-
-      // A pair written back by hand after the flag is set is left where it
-      // is: the migration is one-shot, and `_targets` is what keeps it out of
-      // `allTargets` from then on.
-      final owner = await store.getPref(llmTargetsKey);
-      await store.setPref(stageTargetsKey, jsonEncode({'triage': boxBulkId}));
-
-      final again = await AppPrefsNotifier.read(store);
-
-      expect(await store.getPref(llmTargetsKey), owner);
-      expect(again.stageTargets, {'triage': boxBulkId},
-          reason: 'the second read must not prune a map again');
+      expect(prefs.state.boxBigKeyStored, isTrue);
+      expect(prefs.targetForStage('message_text').bearer, key);
     });
 
     test('a fresh install writes the flags and nothing else', () async {
@@ -686,16 +441,12 @@ void main() {
 
     test('a row with no recoverable origin leaves the address empty',
         () async {
-      // The only way `boxBaseFromProseUrl` answers nothing is a row somebody
-      // hand-edited. The rows still go, because a stored pair would shadow
-      // the derived one; the address stays empty, which reads as "follow the
-      // build", and with no build address there is no box.
       await store.setPref(
         llmTargetsKey,
         jsonEncode([
           {
             'id': boxProseId,
-            'name': boxProseName,
+            'name': 'Your server · big model',
             'url': 'https://box.example.com/somewhere/else',
             'model': boxProseModel,
           },
@@ -705,19 +456,19 @@ void main() {
       final prefs = await AppPrefsNotifier.read(store);
 
       expect(prefs.boxBigUrl, isEmpty);
-      expect(prefs.hasBox, isFalse);
-      expect(prefs.targets, isEmpty);
+      expect(prefs.effectiveGenerativeUrl, isEmpty);
+      expect(await store.getPref(llmTargetsKey), '[]');
     });
 
-    test('the flag is a plain pref, not one of the derived one-shots',
-        () async {
+    test('the flags are plain prefs, not derived one-shots', () async {
       // `derivedOneShotPrefs` is what `wipeAll` and `clearDerived` delete so a
-      // walk runs again over a corpus they emptied. This flag guards no
-      // corpus, and a wipe leaves no rows to migrate.
+      // walk runs again over a corpus they emptied. These guard no corpus,
+      // and a wipe leaves no rows to migrate.
       for (final key in [
         boxTargetsDerivedKey,
         boxServersDerivedKey,
         stageTargetsClearedKey,
+        modelRolesDerivedKey,
       ]) {
         expect(MessageStore.derivedOneShotPrefs, isNot(contains(key)));
       }
@@ -729,6 +480,7 @@ void main() {
       expect(await store.getPref(boxTargetsDerivedKey), '1');
       expect(await store.getPref(boxServersDerivedKey), '1');
       expect(await store.getPref(stageTargetsClearedKey), '1');
+      expect(await store.getPref(modelRolesDerivedKey), modelRolesDoneValue);
       expect(await store.getPref(boxBigUrlKey),
           '$url/prose/v1/chat/completions');
     });

@@ -1,28 +1,30 @@
 @Skip('live — needs the golden set, and a server for all of it but the gate '
     'replay. Run: make golden (bulk), make golden-prose (prose), '
-    'make golden-storyline (storyline confirm) or make golden-gate (the '
-    "app's own gates, offline)")
+    'make golden-storyline (storyline confirm), make golden-gate (the '
+    "app's own gates, offline) or make golden-decision (the decision model)")
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
+import 'package:bond_inbox/services/decision/decision_client.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/message_block.dart'
     show threadDigestCap;
+import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -84,10 +86,10 @@ const String _noneCaveat =
 /// The caveat every `digest` row is quoted with. The digest is no longer
 /// clipped to a thread message's 300 characters — it rides in its own fence
 /// at [threadDigestCap] — so this rung is a measurement of compression rather
-/// than of a clipped head of one, and the extraction half is on its own knob.
+/// than of a clipped head of one.
 const String _digestCaveat =
     'ctx digest: the digest as its own $threadDigestCap-character fence above '
-    'the tail; extraction reads the rung GOLDEN_EXTRACT_CTX names';
+    'the tail, for the message text and needs-you';
 
 /// The caveat a Converse row is quoted with, for [_compressedCaveat]'s reason:
 /// `temperature` is the one handler parameter that wire cannot carry, so a
@@ -98,28 +100,61 @@ const String _converseCaveat =
     "the model's default";
 
 void main() {
+  /// `make golden`: the golden set through the app's per-message pipeline as
+  /// it now runs — the decision pass for every classification field, the
+  /// needs-you ladder, and ONE message-text call for the text.
+  ///
+  /// Per item: the live decision model (`DECIDE_URL`, heads from
+  /// `DECIDE_HEADS`; the state rendered from the packer's parts exactly as
+  /// the decision leg renders it) answers gate, category, urgency, the two
+  /// booleans, intent and importance; needs-you is the app's ladder (the
+  /// deterministic floor, then the decision's p(yes) against the policy bars,
+  /// and `NeedsYouTask` on the bulk slot only inside the band — the app's own
+  /// rule, minus the cold-outreach bar a golden item cannot evaluate); and
+  /// `MessageTextTask` on the bulk slot writes summary, action items,
+  /// deadline, topics and project. ONE run file in the scorer's shape carries
+  /// all of it — `label` and `evidence` are absent (neither exists any more)
+  /// — so `golden-judge-pack` can judge the summary facts and action items
+  /// beside the classification fields.
+  ///
+  /// Every item gets every stage, dropped or not, as the retired leg did: the
+  /// scorer's keep-only view is where the gate's drops leave the population.
+  ///
+  /// The name keeps `triage` (what `make golden` filters on) and none of the
+  /// other four words.
   test(
-    'the golden set through triage, needs-you and extraction',
+    'the golden set through triage: decision pass, message text and needs-you',
     () async {
       final set = await _loadOrFail();
-      // Both rungs are read HERE rather than in `_loadOrFail`: the prose,
-      // storyline and gate tests share that helper and not one of them runs
-      // an extraction or a context rung.
       final ctx = parseGoldenCtx(GoldenDefines.ctxRaw);
-      final extractCtx = parseExtractCtx(GoldenDefines.extractCtxRaw);
       final k = checkK(GoldenDefines.k);
       const target = BenchTarget.bulk;
 
+      final stageInputs = await _decoded(
+        GoldenDefines.setPath,
+        () async => _stageInputsById(
+          jsonDecode(await File(GoldenDefines.setPath).readAsString()),
+        ),
+      );
+      final owner = GoldenDefines.decisionOwner;
+      if (owner == null) {
+        // ignore: avoid_print
+        print('WARNING: GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS are not '
+            'both set — the decision states carry no owner line, and the app '
+            'sends an ownerless decision to the language model for needs-you '
+            'every time; this run does the same');
+      }
+      final headsPath = decideHeadsPath();
+      if (!File(headsPath).existsSync()) {
+        fail('no decision heads at $headsPath — run make decide-install, or '
+            'pass --dart-define=DECIDE_HEADS=<path>');
+      }
+      final heads = await DecisionHeads.load(File(headsPath));
+
       // What the digest rung actually carried, counted once over the set
-      // rather than guessed from the rung's name: an item with no earlier
-      // thread has no digest, and a digest over the fence's cap is read only
-      // in part. Both numbers are printed, because a rung that moved nothing
-      // on two thirds of the set is a different result from one that did.
-      // Counted only when a digest reached a prompt: at `none`, `tail3` and
-      // `compressed` (which clips at 300, not 900) the line would describe a
-      // fence the run never wrote.
-      final digestRung =
-          ctx == GoldenCtx.digest || extractCtx == GoldenCtx.digest;
+      // rather than guessed from the rung's name. Counted only when a digest
+      // reached a prompt.
+      final digestRung = ctx == GoldenCtx.digest;
       final carried = !digestRung
           ? null
           : set.items.where((item) => item.digest != null).length;
@@ -141,42 +176,57 @@ void main() {
       ];
       final lines = List<String?>.filled(set.items.length, null);
 
-      // Thrown away, and on a client with no observer, so the first call's
-      // weight-loading cost lands nowhere near the table — `bench`'s reasoning
-      // exactly. A warmup that fails is a server that is down, and the run
-      // stops there rather than spending ninety minutes on timeouts; see
-      // [_warmupFailed] for why the failure is re-thrown in other words.
+      final shared = http.Client();
+      final decider = DecisionClient(
+        resolveTarget: () => const LlmTarget(
+          baseUrl: DecisionClient.defaultBaseUrl,
+          model: DecisionClient.defaultModel,
+        ),
+        heads: () => heads,
+        client: shared,
+      );
+      final states = [
+        for (final item in set.items)
+          goldenDecisionState(
+            stageInputs[item.id] ??
+                (throw StateError('golden item ${item.id} has no stage_input')),
+            owner: owner,
+          ),
+      ];
+
+      // Thrown away: the first request of each server pays for its weights
+      // and graph, which is not a per-message cost. A warmup that fails is a
+      // server that is down, and the run stops there.
+      try {
+        await decider.decideStates([states.first]);
+      } on LlmUnavailableException {
+        fail('the decision server at ${DecisionClient.defaultBaseUrl} is not '
+            'answering — run make decide');
+      }
       final warmupClient = target.client();
       for (var i = 0; i < BenchTarget.warmup; i++) {
         try {
-          // Retried like every other call: the warmup is the first burst
-          // against a cloud account and so the likeliest throttle, and a 429
-          // here would otherwise read as a server that is down.
           await retryingUnavailable(
             () => runTask(
               warmupClient,
-              const TriageTask(),
-              TriageInput(set.items.first.message, set.items.first.now),
+              const MessageTextTask(),
+              MessageTextInput(set.items.first.message, set.items.first.now),
+              temperature: 0,
               think: BenchTarget.allowReasoning,
             ),
           );
         } on LlmException catch (e) {
-          _warmupFailed('triage', e, target);
+          _warmupFailed('message_text', e, target);
         }
       }
 
-      // ONE http client for the whole run, so connections are pooled rather
-      // than renegotiated per item, and ONE master collector, so the table's
-      // rates stay time-weighted over everything that ran. What is per item is
-      // the OBSERVER: under GOLDEN_K > 1 calls from different items interleave,
-      // so the collector's `lastFor` would hand a row somebody else's latency,
-      // and a per-item map is the only way a row's `calls` are its own.
-      final shared = http.Client();
+      // ONE master collector, so the table's rates stay time-weighted over
+      // everything that ran; the OBSERVER is per item, because under
+      // GOLDEN_K > 1 calls from different items interleave.
       final master = target.collector();
-      // Throttled stages retried, printed with the failures: a cloud row
-      // that had to wait is a slower row, and the wall clock above cannot
-      // say why on its own.
       var retries = 0;
+      final decisionMs = <int>[];
+      var band = 0;
       final startedAt = DateTime.now();
 
       try {
@@ -192,81 +242,90 @@ void main() {
             },
           )..onReasoningLeak = master.noteLeak;
 
-          // Each stage in its own try: a message the model cannot answer must
-          // cost its own section and nothing else. The observer has already
-          // recorded the failed call with its outcome, so the catch has
-          // nothing to do but let the next stage start.
+          // The decision pass. A decision that fails costs the item its
+          // classification and its ladder; the text still runs, as the app's
+          // text stage would for a message whose triage errored.
+          DecisionAnswers? decidedAnswers;
           try {
-            final triage = await retryingUnavailable(
+            final sw = Stopwatch()..start();
+            final decided = (await decider.decideStates([states[index]])).single;
+            final ms = sw.elapsedMilliseconds;
+            decisionMs.add(ms);
+            entry.calls['decision'] = GoldenCall(ms: ms, outcome: 'ok');
+            entry.classifier = classifierOut(
+              decided.answers,
+              rule: DecisionGateRule.policy,
+              truncated: decided.truncated,
+            );
+            // An ownerless decision's needs-you head is never used by the app
+            // (`message_decisions.owner_known`): the ladder goes to the LLM.
+            if (owner != null) decidedAnswers = decided.answers;
+          } on LlmException catch (e) {
+            entry.calls['decision'] = GoldenCall(
+              ms: 0,
+              outcome: e is LlmUnavailableException ? 'unavailable' : 'error',
+            );
+          }
+
+          // The needs-you ladder: floor, then the decision's probability,
+          // then the language model inside the band.
+          if (item.floorSaysYes) {
+            entry.needsYou = floorOut();
+          } else {
+            final settled = decidedAnswers == null
+                ? null
+                : decidedNeedsYouOut(decidedAnswers);
+            if (settled != null) {
+              entry.needsYou = settled;
+            } else {
+              if (decidedAnswers != null) band++;
+              try {
+                final needsYou = await retryingUnavailable(
+                  () => runTask(
+                    client,
+                    const NeedsYouTask(),
+                    NeedsYouInput(
+                      message: item.message,
+                      thread: item.threadFor(ctx),
+                      threadDigest: item.digestFor(ctx),
+                      ownerName: GoldenDefines.ownerName,
+                      ownerAddress: GoldenDefines.ownerAddress,
+                      now: item.now,
+                    ),
+                    // The handler's own parameters, both of them.
+                    temperature: 0,
+                    maxTokens: 256,
+                    think: BenchTarget.allowReasoning,
+                  ),
+                  onRetry: () => retries++,
+                );
+                entry.needsYou = needsYouOut(needsYou);
+              } on LlmException catch (_) {
+                // Recorded by the observer, with its outcome.
+              }
+            }
+          }
+
+          // The message text: the one generative call per kept message, with
+          // the handler's context (the thread tail and the attachment names).
+          try {
+            final text = await retryingUnavailable(
               () => runTask(
                 client,
-                const TriageTask(),
-                TriageInput(
+                const MessageTextTask(),
+                MessageTextInput(
                   item.message,
                   item.now,
                   thread: item.threadFor(ctx),
                   threadDigest: item.digestFor(ctx),
                   attachments: item.attachmentRows,
                 ),
-                think: BenchTarget.allowReasoning,
-              ),
-              onRetry: () => retries++,
-            );
-            entry.triage = triageOut(triage);
-          } on LlmException catch (_) {
-            // Recorded by the observer, with its outcome.
-          }
-
-          if (item.floorSaysYes) {
-            // The handler checks the deterministic floor BEFORE it calls, so a
-            // replay that asked the model here would be benching a path the
-            // app never takes — and paying for a call the app never makes.
-            entry.needsYou = floorOut();
-          } else {
-            try {
-              final needsYou = await retryingUnavailable(
-                () => runTask(
-                  client,
-                  const NeedsYouTask(),
-                  NeedsYouInput(
-                    message: item.message,
-                    thread: item.threadFor(ctx),
-                    threadDigest: item.digestFor(ctx),
-                    ownerName: GoldenDefines.ownerName,
-                    ownerAddress: GoldenDefines.ownerAddress,
-                    now: item.now,
-                  ),
-                  // The handler's own parameters, both of them: a different
-                  // temperature or budget measures a pipeline nobody ships.
-                  temperature: 0,
-                  maxTokens: 256,
-                  think: BenchTarget.allowReasoning,
-                ),
-                onRetry: () => retries++,
-              );
-              entry.needsYou = needsYouOut(needsYou);
-            } on LlmException catch (_) {
-              // Recorded by the observer, with its outcome.
-            }
-          }
-
-          try {
-            final extraction = await retryingUnavailable(
-              () => runTask(
-                client,
-                const ExtractTask(),
-                ExtractionInput(
-                  item.message,
-                  item.now,
-                  thread: item.threadFor(extractCtx),
-                  threadDigest: item.digestFor(extractCtx),
-                ),
                 temperature: 0,
                 think: BenchTarget.allowReasoning,
               ),
               onRetry: () => retries++,
             );
-            entry.extract = extractOut(extraction);
+            entry.text = textOut(text);
           } on LlmException catch (_) {
             // Recorded by the observer, with its outcome.
           }
@@ -275,22 +334,29 @@ void main() {
             entry.calls[call.key] = callOf(call.value);
           }
 
-          final triage = entry.triage;
-          final extract = entry.extract;
+          // Counts, milliseconds and enum words only: the set is real mail.
+          final out = entry.classifier;
           final needsYou = entry.needsYou;
+          final text = entry.text;
           final needsYouMs = (needsYou?.floor ?? false)
               ? 'floor'
-              : _ms(itemCalls['needs_you']);
+              : itemCalls['needs_you'] == null
+                  ? 'decided'
+                  : _ms(itemCalls['needs_you']);
           lines[index] = '${item.id.padRight(40)} '
-              'triage ${_ms(itemCalls['triage'])}  '
+              'decision ${entry.calls['decision']?.ms ?? '—'}ms  '
               'needs_you $needsYouMs  '
-              'extract ${_ms(itemCalls['extraction'])}  '
-              '${triage == null ? '—' : '${triage.category}/${triage.urgency}'
-                  '/needs_action=${triage.needsAction}'
-                  '/reply_expected=${triage.replyExpected}'}  '
+              'text ${_ms(itemCalls['message_text'])}  '
+              '${out == null ? '—' : '${out.gateVerdict} '
+                  '${out.category}/${out.urgency}'
+                  '/needs_action=${out.needsAction}'
+                  '/reply_expected=${out.replyExpected} '
+                  '${out.intent}/${out.importance}'}  '
               'ny=${needsYou == null ? '—' : '${needsYou.verdict}'
                   '(${needsYou.confidence ?? 'floor'})'}  '
-              '${extract == null ? '—' : '${extract.intent}/${extract.importance}'}';
+              '${text == null ? '—' : 'items=${text.actionItems.length} '
+                  'topics=${text.topics.length} '
+                  'deadline=${text.deadline.isNotEmpty}'}';
         });
       } finally {
         shared.close();
@@ -302,9 +368,8 @@ void main() {
           model: target.model,
           items: items,
         );
+        final sortedDecision = [...decisionMs]..sort();
 
-        // A Converse row samples at the model's default, and a reader
-        // comparing it with a local row has to be told so here.
         final caveat =
             target.wire == LlmWire.bedrockConverse ? '$_converseCaveat\n' : '';
 
@@ -315,14 +380,17 @@ void main() {
           '\n${master.table()}\n'
           '\n${lines.whereType<String>().join('\n')}\n'
           '\n${_failureLine(master, retries)}\n'
-          '${_ctxLine(ctx, extractCtx, k, items, wall)}\n'
+          'decision: ${decisionMs.length} of $items decided, p50 '
+          '${decisionMs.isEmpty ? '—' : percentile(sortedDecision, 0.5)} ms, '
+          'p95 ${decisionMs.isEmpty ? '—' : percentile(sortedDecision, 0.95)} '
+          'ms, owner ${owner == null ? 'NOT set' : 'set'}, model '
+          '${heads.model}; needs-you band (asked the model): $band\n'
+          '${_ctxLine(ctx, k, items, wall)}\n'
           '${carried == null ? '' : 'digests: $carried items carry one, '
               '$trimmed trimmed to $threadDigestCap\n'}'
           '\n${_costBlock(cost, target.url)}\n',
         );
 
-        // The rows that attempted anything — the same rule the prose half
-        // applies, so the two files mean the same thing by a missing row.
         final written = [
           for (final entry in entries)
             if (entry.attempted) entry,
@@ -335,7 +403,6 @@ void main() {
           extra: (runPath) => {
             'run_file': runPath,
             'ctx': ctx.name,
-            'extract_ctx': extractCtx.name,
             'digests_carried': ?carried,
             'digests_trimmed': ?trimmed,
             'k': k,
@@ -345,6 +412,18 @@ void main() {
             'wall_ms': wall.inMilliseconds,
             msgsPerMinKey: msgsPerMinute(items, wall),
             costKey: cost,
+            'decision': {
+              'url': DecisionClient.defaultBaseUrl,
+              'model': heads.model,
+              'decided': decisionMs.length,
+              'p50_ms': decisionMs.isEmpty
+                  ? null
+                  : percentile(sortedDecision, 0.5),
+              'p95_ms': decisionMs.isEmpty
+                  ? null
+                  : percentile(sortedDecision, 0.95),
+              'needs_you_band': band,
+            },
             'golden': {
               'path': GoldenDefines.setPath,
               'generated': set.generated,
@@ -363,11 +442,9 @@ void main() {
         );
       }
 
-      // Shape, never quality. Every word inside these fields is the model's
+      // Shape, never quality. Every word inside these fields is a model's
       // judgement and is scored by Python; an EMPTY one is a call that went
-      // wrong. Failures are not asserted at all — a run that lost three
-      // messages to a timeout still scores the ninety-seven it answered, and
-      // the table above already says how many.
+      // wrong. Failures are not asserted at all.
       expect(entries, hasLength(set.items.length));
       expect(
         master.tasks.any((m) => m.n > 0),
@@ -375,26 +452,35 @@ void main() {
         reason: 'no call succeeded — is the server up?',
       );
       for (final entry in entries) {
-        final triage = entry.triage;
-        if (triage != null) {
-          expect(triage.category, isNotEmpty, reason: entry.id);
-          expect(triage.urgency, isNotEmpty, reason: entry.id);
-          expect(triage.label, isNotEmpty, reason: entry.id);
+        final out = entry.classifier;
+        if (out != null) {
+          expect(out.category, isNotEmpty, reason: entry.id);
+          expect(out.urgency, isNotEmpty, reason: entry.id);
+          expect(out.intent, isNotEmpty, reason: entry.id);
+          expect(out.importance, isNotEmpty, reason: entry.id);
         }
-        final extract = entry.extract;
-        if (extract != null) {
-          expect(extract.intent, isNotEmpty, reason: entry.id);
-          expect(extract.importance, isNotEmpty, reason: entry.id);
+        final text = entry.text;
+        if (text != null) {
+          expect(text.summary, isNotEmpty, reason: entry.id);
         }
       }
 
       _assertNoLeaks(master);
     },
-    // A hundred items times three stages, on a candidate that may answer in
-    // twenty seconds a call.
+    // A hundred items times two or three stages, on a candidate that may
+    // answer in twenty seconds a call.
     timeout: const Timeout(Duration(minutes: 90)),
   );
 
+  /// `make golden-prose`: the reply decision and the drafts.
+  ///
+  /// The decision is the decision model's p(reply_expected = yes) against
+  /// `DecisionPolicy.replyYes` — what the app's draft lane reads before it
+  /// gathers anything — from the live decide server (`DECIDE_URL`, heads
+  /// from `DECIDE_HEADS`, the state rendered exactly as the `make golden`
+  /// leg renders it), on every gold-keep item. Drafts are the prose slot's,
+  /// on every item carrying a reply rubric. The name keeps `reply` (what
+  /// `make golden-prose` filters on).
   test(
     'the golden set through reply decision and drafts',
     () async {
@@ -406,6 +492,25 @@ void main() {
         fail('the set holds no gold-keep items — the prose half has nothing '
             'to decide on');
       }
+
+      final stageInputs = await _decoded(
+        GoldenDefines.setPath,
+        () async => _stageInputsById(
+          jsonDecode(await File(GoldenDefines.setPath).readAsString()),
+        ),
+      );
+      final owner = GoldenDefines.decisionOwner;
+      if (owner == null) {
+        // ignore: avoid_print
+        print('WARNING: GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS are not '
+            'both set — the decision states carry no owner line');
+      }
+      final headsPath = decideHeadsPath();
+      if (!File(headsPath).existsSync()) {
+        fail('no decision heads at $headsPath — run make decide-install, or '
+            'pass --dart-define=DECIDE_HEADS=<path>');
+      }
+      final heads = await DecisionHeads.load(File(headsPath));
 
       // The decision population is gold-keep; the draft population is the
       // items carrying a reply rubric. An entry exists for every item so the
@@ -422,7 +527,34 @@ void main() {
       ];
       final lines = List<String?>.filled(set.items.length, null);
 
+      final shared = http.Client();
+      final decider = DecisionClient(
+        resolveTarget: () => const LlmTarget(
+          baseUrl: DecisionClient.defaultBaseUrl,
+          model: DecisionClient.defaultModel,
+        ),
+        heads: () => heads,
+        client: shared,
+      );
+      String stateOf(GoldenItem item) => goldenDecisionState(
+            stageInputs[item.id] ??
+                (throw StateError('golden item ${item.id} has no stage_input')),
+            owner: owner,
+          );
+
+      // Thrown away, as in the triage leg: the first request of each server
+      // pays for its weights and graph.
+      try {
+        await decider.decideStates([stateOf(set.keep.first)]);
+      } on LlmUnavailableException {
+        fail('the decision server at ${DecisionClient.defaultBaseUrl} is not '
+            'answering — run make decide');
+      }
       final warmupClient = target.client();
+      final warmupItem = set.items.firstWhere(
+        (item) => item.gold.hasReply,
+        orElse: () => set.keep.first,
+      );
       for (var i = 0; i < BenchTarget.warmup; i++) {
         try {
           // Retried for the bulk half's reason: a throttled first call is
@@ -430,23 +562,22 @@ void main() {
           await retryingUnavailable(
             () => runTask(
               warmupClient,
-              const ReplyDecisionTask(),
-              ReplyDecisionInput(
-                context: set.keep.first.tail,
-                message: set.keep.first.message,
-                now: set.keep.first.now,
+              const DraftTask(),
+              DraftInput(
+                thread: [...warmupItem.tail, warmupItem.message],
+                replyTo: warmupItem.message,
+                now: warmupItem.now,
               ),
               temperature: 0,
-              maxTokens: 256,
+              maxTokens: DraftHandler.draftMaxTokens,
               think: BenchTarget.allowReasoning,
             ),
           );
         } on LlmException catch (e) {
-          _warmupFailed('reply_decision', e, target);
+          _warmupFailed('draft_reply', e, target);
         }
       }
 
-      final shared = http.Client();
       final master = target.collector();
       // Throttled stages retried, printed with the failures: a cloud row
       // that had to wait is a slower row, and the wall clock above cannot
@@ -472,30 +603,19 @@ void main() {
           )..onReasoningLeak = master.noteLeak;
 
           if (wantsDecision) {
+            final sw = Stopwatch()..start();
             try {
-              final decision = await retryingUnavailable(
-                () => runTask(
-                  client,
-                  const ReplyDecisionTask(),
-                  // The plain tail, whatever GOLDEN_CTX says. The decision
-                  // keeps six messages at 500 characters, so the tail already
-                  // fits it whole — the ladder is a question about the two
-                  // stages that clip, and answering it here would move a
-                  // number for a reason that has nothing to do with context.
-                  ReplyDecisionInput(
-                    context: item.tail,
-                    message: item.message,
-                    now: item.now,
-                  ),
-                  temperature: 0,
-                  maxTokens: 256,
-                  think: BenchTarget.allowReasoning,
-                ),
-                onRetry: () => retries++,
+              final decided =
+                  (await decider.decideStates([stateOf(item)])).single;
+              entry.calls['decision'] =
+                  GoldenCall(ms: sw.elapsedMilliseconds, outcome: 'ok');
+              entry.decision = decisionOut(decided.answers);
+            } on LlmException catch (e) {
+              // No observer sees the decision client: record it here.
+              entry.calls['decision'] = GoldenCall(
+                ms: sw.elapsedMilliseconds,
+                outcome: e is LlmUnavailableException ? 'unavailable' : 'error',
               );
-              entry.decision = decisionOut(decision);
-            } on LlmException catch (_) {
-              // Recorded by the observer, with its outcome.
             }
           }
 
@@ -543,7 +663,8 @@ void main() {
           final decision = entry.decision;
           final draft = entry.draft;
           lines[index] = '${item.id.padRight(40)} '
-              'decision ${_ms(itemCalls['reply_decision'])} '
+              'decision ${entry.calls['decision']?.ms ?? '—'} ms '
+              'p=${decision?.p.toStringAsFixed(2) ?? '—'} '
               'needs_reply=${decision?.needsReply ?? '—'}  '
               'draft ${_ms(itemCalls['draft_reply'])} '
               'options=${draft == null ? '—' : draft.options.length}';
@@ -623,15 +744,14 @@ void main() {
         isTrue,
         reason: 'no call succeeded — is the server up?',
       );
-      // Shape only, and the shape the SCHEMA promises: a string. Neither
-      // schema sets a minimum length, so an empty reason or body is a poor
-      // answer for the judge to fail, not a broken run for this test to fail —
-      // Sonnet 5 on Bedrock returned one empty reason in 76 decisions, and
-      // failing the whole row for it would have thrown away the other 75.
+      // Shape only: a probability, and the shape the draft SCHEMA promises —
+      // a string. The schema sets no minimum length, so an empty body is a
+      // poor answer for the judge to fail, not a broken run for this test to
+      // fail.
       for (final entry in entries) {
         final decision = entry.decision;
         if (decision != null) {
-          expect(decision.reason, isA<String>(), reason: entry.id);
+          expect(decision.p, inInclusiveRange(0, 1), reason: entry.id);
         }
         final draft = entry.draft;
         if (draft != null) {
@@ -1137,6 +1257,9 @@ void main() {
       final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
       final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
       final groupingMode = parseSweepGrouping(GoldenDefines.sweepGroupingRaw);
+      final possibleHoldsRoom =
+          parseSweepPossibleRoom(GoldenDefines.sweepPossibleRoomRaw);
+      final roomRule = sweepRoomRuleName(possibleHoldsRoom);
       final prefix = GoldenDefines.sweepEmbedPrefix;
 
       final db = vecTestDb();
@@ -1162,7 +1285,7 @@ void main() {
         // ignore: avoid_print
         print(
           'stage ${stage.name}, grouping ${groupingMode.name}, '
-          'card ${variant.wireName}, '
+          'card ${variant.wireName}, room $roomRule, '
           'prefix length ${report.prefixLength}, dims ${report.dims}, '
           'cards from the run for '
           '${set.items.where((i) => cards.byId.containsKey(i.id)).length} of '
@@ -1224,6 +1347,8 @@ void main() {
               // No `groupClient`: the grouping call goes to the prose client,
               // exactly as the naming call does.
               groupingMode: groupingMode,
+              // SWEEP_POSSIBLE_ROOM, defaulting to what the app ships.
+              possibleHoldsRoom: possibleHoldsRoom,
               // The overlap rule counts shared people who are not the owner,
               // so the bench has to name the owner the way the app does or
               // every mailbox-wide participant would buy the lower gate.
@@ -1347,9 +1472,11 @@ void main() {
             await service.keepSuggestion(storyline.id);
             keptSuggestions++;
           }
-          // The possible rows hold a slot of the sweep's room exactly as the
-          // suggestions do, so they need an answer too or this loop stops
-          // walking the mailbox after three declined clusters. The answer is
+          // Under SWEEP_POSSIBLE_ROOM=1 the possible rows hold a slot of the
+          // sweep's room exactly as the suggestions do, so they need an answer
+          // too or this loop stops walking the mailbox after three declined
+          // clusters. Answered under both settings, so the two rows differ in
+          // the room rule alone. The answer is
           // Dismiss and not Keep: these are groups no model vouched for, and
           // keeping them would inflate every number the run reports. A
           // dismissal keeps both hashes, so the population `tombstoned` counts
@@ -1708,6 +1835,7 @@ void main() {
             'recruited': recruited,
             'multi_filed': multiFiled,
             'card': variant.wireName,
+            'room': roomRule,
             'prefix_length': report.prefixLength,
             'sweep': tally.toJson(),
             'seed': report.toJson(),
@@ -1738,7 +1866,8 @@ void main() {
         print(
           '\n${confirmCollector.banner}\n${confirmCollector.table()}\n'
           '\n${nameCollector.banner}\n${nameCollector.table()}\n'
-          '\n${tally.table()}\n'
+          '\n  card ${variant.wireName}, room $roomRule\n'
+          '${tally.table()}\n'
           '${stage != SweepStage.declared ? '' : '\n  declared '
               '${slugById.length}, recruit calls $recruitCalls, '
               'recruited $recruited, multi-filed $multiFiled'}'
@@ -1947,6 +2076,184 @@ void main() {
     // A hundred pure function calls. The two minutes are for loading the set.
     timeout: const Timeout(Duration(minutes: 2)),
   );
+
+  /// The decision model over the golden set: each item's state rendered from
+  /// the packer's parts (`goldenDecisionState`, jev-prototype's
+  /// `golden_states`), one live `DecisionClient` call per item, and TWO run
+  /// files from the one pass — the gate by the app's policy (`p(drop) >=
+  /// 0.70`, cold outreach never dropped, reasons mapped to the app's words)
+  /// and by the row of record's argmax. Every other field is identical in
+  /// both. The name carries none of the five filter words (G21).
+  test(
+    'golden decision pass: the golden set through the decision model',
+    () async {
+      final set = await _loadOrFail();
+      final stageInputs = await _decoded(
+        GoldenDefines.setPath,
+        () async => _stageInputsById(
+          jsonDecode(await File(GoldenDefines.setPath).readAsString()),
+        ),
+      );
+      final owner = GoldenDefines.decisionOwner;
+      if (owner == null) {
+        // ignore: avoid_print
+        print('WARNING: GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS are not '
+            'both set — the states carry no owner line, and needs_you depends '
+            'on it (the row of record was taken with one)');
+      }
+
+      final headsPath = decideHeadsPath();
+      if (!File(headsPath).existsSync()) {
+        fail('no decision heads at $headsPath — run make decide-install, or '
+            'pass --dart-define=DECIDE_HEADS=<path>');
+      }
+      final heads = await DecisionHeads.load(File(headsPath));
+      final client = DecisionClient(
+        resolveTarget: () => const LlmTarget(
+          baseUrl: DecisionClient.defaultBaseUrl,
+          model: DecisionClient.defaultModel,
+        ),
+        heads: () => heads,
+      );
+
+      final states = [
+        for (final item in set.items)
+          goldenDecisionState(
+            stageInputs[item.id] ??
+                (throw StateError('golden item ${item.id} has no stage_input')),
+            owner: owner,
+          ),
+      ];
+
+      // One untimed call first: the server's first request pays for its
+      // graph, and that is not a per-message cost.
+      try {
+        await client.decideStates([states.first]);
+      } on LlmUnavailableException {
+        fail('the decision server at ${DecisionClient.defaultBaseUrl} is not '
+            'answering — run make decide');
+      }
+
+      final startedAt = DateTime.now();
+      final policy = <GoldenRunEntry>[];
+      final argmax = <GoldenRunEntry>[];
+      final ms = <int>[];
+      var truncated = 0;
+      for (var i = 0; i < set.items.length; i++) {
+        final item = set.items[i];
+        final sw = Stopwatch()..start();
+        final result = (await client.decideStates([states[i]])).single;
+        ms.add(sw.elapsedMilliseconds);
+        if (result.truncated) truncated++;
+        for (final (rule, into) in [
+          (DecisionGateRule.policy, policy),
+          (DecisionGateRule.argmax, argmax),
+        ]) {
+          into.add(
+            GoldenRunEntry(
+              id: item.id,
+              stratum: item.stratum,
+              difficulty: item.difficulty,
+            )..classifier = classifierOut(
+                result.answers,
+                rule: rule,
+                truncated: result.truncated,
+              ),
+          );
+        }
+      }
+      final wall = DateTime.now().difference(startedAt);
+
+      int drops(List<GoldenRunEntry> run) =>
+          run.where((e) => e.classifier!.gateVerdict == 'drop').length;
+      var differ = 0;
+      for (var i = 0; i < policy.length; i++) {
+        if (policy[i].classifier!.gateVerdict !=
+            argmax[i].classifier!.gateVerdict) {
+          differ++;
+        }
+      }
+      final sorted = [...ms]..sort();
+      final p50 = percentile(sorted, 0.5);
+      final p95 = percentile(sorted, 0.95);
+
+      // Counts and milliseconds only: the states are real mail.
+      // ignore: avoid_print
+      print(
+        '\ndecision: ${set.items.length} items, owner '
+        '${owner == null ? 'NOT set' : 'set'}, model ${heads.model}\n'
+        'per item: p50 $p50 ms, p95 $p95 ms, wall ${wall.inMilliseconds} ms, '
+        '$truncated truncated to ${heads.maxTokens} tokens\n'
+        'gate drops: policy ${drops(policy)}, argmax ${drops(argmax)}, '
+        'differ on $differ items\n'
+        'needs_you in the app band [0.35, 0.65): '
+        '${policy.where((e) {
+          final p = e.classifier!.probabilities['needs_you_yes']! as double;
+          return p >= 0.35 && p < 0.65;
+        }).length} items (the run files score p(yes) >= 0.5)\n',
+      );
+
+      final argmaxPaths = await _decisionBench.writeRun(
+        entries: argmax,
+        label: 'decision-argmax',
+        startedAt: startedAt,
+      );
+      final policyPaths = await _decisionBench.writeRun(
+        entries: policy,
+        label: 'decision-policy',
+        startedAt: startedAt,
+        extra: (runPath) => {
+          'run_file': runPath,
+          'argmax_run_file': argmaxPaths.runPath,
+          'items': set.items.length,
+          'p50_ms': p50,
+          'p95_ms': p95,
+          'wall_ms': wall.inMilliseconds,
+          'truncated': truncated,
+          'model': heads.model,
+          'url': DecisionClient.defaultBaseUrl,
+          'owner_set': owner != null,
+          'gate_drops_policy': drops(policy),
+          'gate_drops_argmax': drops(argmax),
+        },
+      );
+      // ignore: avoid_print
+      print('argmax gate (the row of record\'s rule):');
+      _decisionBench.printPaths(runPath: argmaxPaths.runPath);
+      // ignore: avoid_print
+      print('policy gate (the app\'s rule):');
+      _decisionBench.printPaths(
+        runPath: policyPaths.runPath,
+        resultPath: policyPaths.resultPath,
+      );
+
+      // Shape, never accuracy.
+      expect(policy, hasLength(set.items.length));
+      for (final entry in policy) {
+        final out = entry.classifier!;
+        expect(out.gateVerdict, anyOf('keep', 'drop'));
+        expect(out.category, isNotEmpty);
+        expect(out.urgency, isNotEmpty);
+        expect(out.intent, isNotEmpty);
+        expect(out.importance, isNotEmpty);
+      }
+    },
+    // A hundred forward passes of tens of milliseconds each.
+    timeout: const Timeout(Duration(minutes: 10)),
+  );
+}
+
+/// `stage_input` per item id, off the raw set — what [goldenDecisionState]
+/// renders from, byte for byte.
+Map<String, Map<String, dynamic>> _stageInputsById(Object? decoded) {
+  final items = decoded is Map ? decoded['items'] : null;
+  return {
+    if (items is List)
+      for (final item in items)
+        if (item is Map && item['id'] is String && item['stage_input'] is Map)
+          item['id'] as String:
+              (item['stage_input'] as Map).cast<String, dynamic>(),
+  };
 }
 
 /// The stratum drawn to be gated wrongly — machine-shaped mail a person
@@ -2021,6 +2328,7 @@ const LiveBench _storylineBench = LiveBench('golden-storyline');
 const LiveBench _gatesBench = LiveBench('golden-gate');
 const LiveBench _sweepBench = LiveBench('golden-sweep');
 const LiveBench _vectorBench = LiveBench('golden-vector');
+const LiveBench _decisionBench = LiveBench('golden-decision');
 
 /// [load], with a decode failure rethrown as a sentence naming the FILE.
 ///
@@ -2398,12 +2706,11 @@ String _failureLine(CallCollector master, int retries) =>
 
 String _ctxLine(
   GoldenCtx ctx,
-  GoldenCtx extractCtx,
   int k,
   int items,
   Duration wall,
 ) {
-  final head = 'ctx ${ctx.name}, extract ctx ${extractCtx.name}, k $k, '
+  final head = 'ctx ${ctx.name}, k $k, '
       '$items items in ${wall.inSeconds}s, '
       '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min';
   return switch (ctx) {

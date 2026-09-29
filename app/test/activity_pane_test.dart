@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// The activity pane as the SCREEN assembles it.
@@ -57,6 +58,7 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        keepingDecisionClient(),
         // Predates Home: this file asserts on a pane the rail's old landing
         // section opened.
         initialSectionProvider.overrideWithValue(RailSection.needsYou),

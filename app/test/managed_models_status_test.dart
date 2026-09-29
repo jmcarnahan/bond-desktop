@@ -50,7 +50,7 @@ void main() {
 
   ProviderContainer containerFor(
     ModelManifest manifest, {
-    ModelPlacement placement = ModelPlacement.local,
+    AppPrefs prefs = const AppPrefs(modelPlacement: ModelPlacement.local),
     int memoryBytes = 64 * 1024 * 1024 * 1024,
   }) {
     final system = FakeSystemInfo()
@@ -67,9 +67,8 @@ void main() {
       modelManifestProvider.overrideWithValue(manifest),
       systemInfoProvider.overrideWithValue(system),
       // The prefs are handed over rather than read, so this test needs no
-      // preference rows: the placement is what decides the effective tier.
-      initialAppPrefsProvider
-          .overrideWithValue(AppPrefs(modelPlacement: placement)),
+      // preference rows: the placements are what decide the served set.
+      initialAppPrefsProvider.overrideWithValue(prefs),
     ]);
     addTearDown(made.dispose);
     return made;
@@ -88,34 +87,57 @@ void main() {
     await support.delete(recursive: true);
   });
 
-  test('three rows on a full Mac, each saying what it costs and where it is',
-      () async {
-    final manifest = testManifest();
+  test('three rows on a full Mac: decision, generative, embed', () async {
+    final manifest = testManifest(withDecide: true);
     final embed = manifest.byRole(ModelRole.embed);
-    final bulk = manifest.byRole(ModelRole.bulk);
     final prose = manifest.byRole(ModelRole.prose);
-    await setup.recordDownload(
-      DownloadLedger({embed.id: done(embed), bulk.id: done(bulk)}),
-    );
+    final decide = manifest.byRole(ModelRole.decide);
+    await setup.recordDownload(DownloadLedger({embed.id: done(embed)}));
     await write(embed);
-    await write(bulk);
 
     final rows =
         await containerFor(manifest).read(managedModelsStatusProvider.future);
 
-    expect([for (final row in rows) row.roleId], ['big', 'small', 'embed']);
+    expect([for (final row in rows) row.roleId],
+        ['decision', 'generative', 'embed']);
     expect([for (final row in rows) row.routerId],
-        [routerProseId, routerBulkId, routerEmbedId]);
-    expect(rows[0].displayName, prose.displayName);
-    expect(rows[0].bytes, prose.downloadBytes);
-    // The writing model is in the manifest and not on this disk, which is what
-    // a download that has not finished looks like.
-    expect(rows[0].onDisk, isFalse);
-    expect(rows[1].onDisk, isTrue);
+        [routerDecideId, routerProseId, routerEmbedId]);
+    // The full tier's managed generative model is the 27B.
+    expect(rows[1].displayName, prose.displayName);
+    expect(rows[1].bytes, prose.downloadBytes);
+    // The writing model is in the manifest and not on this disk, which is
+    // what a download that has not finished looks like.
+    expect(rows[1].onDisk, isFalse);
     expect(rows[2].onDisk, isTrue);
     expect(rows[2].displayName, embed.displayName);
-    // Managed serves everything this Mac's tier resolved.
+    // The decision model is hand-installed: its size is the weights and the
+    // heads, and it is not on disk until both are.
+    expect(rows[0].local, isTrue);
+    expect(rows[1].local, isFalse);
+    expect(rows[0].bytes, decide.sizeBytes + decide.heads!.sizeBytes);
+    expect(rows[0].onDisk, isFalse);
+    // Managed serves all three roles here.
     expect([for (final row in rows) row.inUse], [true, true, true]);
+  });
+
+  test('the decision model is on disk when its GGUF AND heads are, with no '
+      'ledger', () async {
+    final manifest = testManifest(withDecide: true);
+    final decide = manifest.byRole(ModelRole.decide);
+
+    await write(decide);
+    var rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.first.roleId, 'decision');
+    expect(rows.first.onDisk, isFalse, reason: 'the heads are missing');
+    expect(rows.first.headsOnDisk, isFalse);
+
+    final heads = File(p.join(models.path, decide.headsRelativePath!));
+    await heads.writeAsString('{}');
+    rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.first.onDisk, isTrue);
+    expect(rows.first.headsOnDisk, isTrue);
   });
 
   test('a ledger row over a file somebody deleted is not on disk', () async {
@@ -152,8 +174,7 @@ void main() {
     expect(rows.last.onDisk, isFalse);
   });
 
-  test('a small Mac has two rows, and the big one names the model that writes',
-      () async {
+  test('a small Mac\'s generative row is the 4B', () async {
     final manifest = testManifest();
     final bulk = manifest.byRole(ModelRole.bulk);
 
@@ -162,35 +183,58 @@ void main() {
       memoryBytes: 16 * 1024 * 1024 * 1024,
     ).read(managedModelsStatusProvider.future);
 
-    expect([for (final row in rows) row.roleId], ['big', 'small', 'embed']);
-    // The inbox tier downloads no writing model, so the big row describes the
-    // model that does the writing there — the small one.
+    // No decide entry in this fixture, so two rows.
+    expect([for (final row in rows) row.roleId], ['generative', 'embed']);
     expect(rows[0].displayName, bulk.displayName);
-    expect(rows[1].displayName, bulk.displayName);
-    // And the router id is the FILE's, not the role's: the preset for this
-    // tier declares no writing model, so a big row keyed on the prose id
-    // would never read as loaded.
+    // The router id is the FILE's, so the row finds its own loaded flag.
     expect(rows[0].routerId, bulk.id);
-    expect(rows[1].routerId, bulk.id);
-    expect(rows[0].routerId, isNot(routerProseId));
-    expect([for (final row in rows) row.inUse], [true, true, true]);
+    expect([for (final row in rows) row.inUse], [true, true]);
   });
 
-  test('the user-defined placement lists all three and marks only the '
-      'embedding row in use', () async {
-    final manifest = testManifest();
-
+  test('the owner\'s choice of the 4B on a full Mac is the generative row',
+      () async {
     final rows = await containerFor(
-      manifest,
-      placement: ModelPlacement.box,
+      testManifest(),
+      prefs: const AppPrefs(
+        modelPlacement: ModelPlacement.local,
+        generativeManagedModel: routerBulkId,
+      ),
     ).read(managedModelsStatusProvider.future);
 
-    // The two chat models run on somebody's server there, and their weights
-    // are still on this disk: the rows stay, and `inUse` is what says the
-    // router is not asked to hold them.
-    expect([for (final row in rows) row.roleId], ['big', 'small', 'embed']);
+    expect(rows.first.roleId, 'generative');
+    expect(rows.first.routerId, routerBulkId);
+  });
+
+  test('a role on your server keeps its row and is not in use', () async {
+    final rows = await containerFor(
+      testManifest(withDecide: true),
+      prefs: const AppPrefs(
+        modelPlacement: ModelPlacement.box,
+        boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
+        decisionPlacement: ModelPlacement.box,
+        decisionUrl: 'https://box.example.com/decide/v1/embeddings',
+      ),
+    ).read(managedModelsStatusProvider.future);
+
+    // The two models run on somebody's server there, and their weights are
+    // still on this disk: the rows stay, and `inUse` is what says the router
+    // is not asked to hold them.
+    expect([for (final row in rows) row.roleId],
+        ['decision', 'generative', 'embed']);
     expect([for (final row in rows) row.inUse], [false, false, true]);
     expect(rows.last.routerId, routerEmbedId);
+  });
+
+  test('your server with no address to dial is still this Mac', () async {
+    // The placement cannot be honoured, so the rule answers the router, and
+    // the row says the router is asked to hold the model.
+    final rows = await containerFor(
+      testManifest(),
+      prefs: const AppPrefs(modelPlacement: ModelPlacement.box),
+    ).read(managedModelsStatusProvider.future);
+
+    expect(rows.first.roleId, 'generative');
+    expect(rows.first.inUse, isTrue);
   });
 
   test('Set up again re-reads it', () async {
@@ -207,5 +251,43 @@ void main() {
 
     final after = await container.read(managedModelsStatusProvider.future);
     expect(after.last.onDisk, isTrue);
+  });
+
+  test('the served preset leaves out a chosen model that is not on disk, and '
+      'embed and decide stay', () async {
+    // A full Mac that downloaded embed + 27B and installed the decision
+    // model, then chose the 4B: the preset the supervisor builds (the roles'
+    // manifest through `withPresentFiles`) must not name the missing 4B, or
+    // the router's preflight would stop embed and decide with it.
+    final manifest = testManifest(withDecide: true);
+    final decide = manifest.byRole(ModelRole.decide);
+    await write(manifest.byRole(ModelRole.embed));
+    await write(manifest.byRole(ModelRole.prose));
+    await write(decide);
+    await File(p.join(models.path, decide.headsRelativePath!))
+        .writeAsString('{}');
+
+    final container = containerFor(
+      manifest,
+      prefs: const AppPrefs(
+        modelPlacement: ModelPlacement.local,
+        generativeManagedModel: routerBulkId,
+      ),
+    );
+    final served = await container.read(managedManifestProvider.future);
+    expect([for (final m in served.models) m.id], contains(routerBulkId));
+
+    final present = served.withPresentFiles(models.path);
+    expect([for (final m in present.models) m.id],
+        unorderedEquals([routerEmbedId, routerDecideId]));
+    expect(present.toPreset(models.path).missingFiles(), isEmpty);
+
+    // And the row the Models page reads still says the 4B is not here.
+    final rows = await container.read(managedModelsStatusProvider.future);
+    final generative = rows.firstWhere((r) => r.roleId == 'generative');
+    expect(generative.routerId, routerBulkId);
+    expect(generative.onDisk, isFalse);
+    // A file with no heads record never reads as missing its heads.
+    expect(generative.headsOnDisk, isTrue);
   });
 }

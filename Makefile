@@ -116,11 +116,12 @@ EMBED_HF     ?= Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
 # server is stood up beside it for `make golden-vector`.
 EMBED_ARGS   ?= --pooling last
 
-# The third server: the bulk-work model. Triage, extraction and
-# storyline-confirm all run here; the 27B on :$(MODEL_PORT) keeps drafting and
-# naming, where prose quality is the product. Same chat-completions wire, its
-# own port — the app picks a server per task, and a task whose server is down
-# parks exactly as it always has.
+# The third server: the bulk-work model (the 4B), for the BENCHES. The bench
+# shape's bulk slot (`make bench`, `make golden`, the message text, the
+# needs-you band, storyline confirm) defaults here; the 27B on :$(MODEL_PORT)
+# is the prose slot. The APP no longer dials it: since the decision-model round
+# the app has ONE generative model (the box 27B, or the 27B/4B its own router
+# serves), and a hand-servers build sends every text stage to :$(MODEL_PORT).
 FAST_PORT    ?= 8082
 FAST_HF      ?= ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF
 # Matched to the app's drain concurrency of 3, plus one slot of headroom for a
@@ -128,6 +129,29 @@ FAST_HF      ?= ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF
 # more slots than clients is the slot roulette described under SLOTS above,
 # fewer makes the extra requests queue on the server instead of batching.
 FAST_SLOTS   ?= 4
+
+# The fourth server: the decision model, the fine-tuned ModernBERT-large
+# classifier from jev-prototype served as a mean-pooled embedding model — the
+# app applies its nine heads itself (tmp/PLAN-decision-model.md, D1). Its own
+# port because 8090 is OMLX_PORT, and its own process because the embed server
+# pools `last` and one llama-server serves one pooling mode per model.
+DECIDE_PORT  ?= 8083
+# Where `make decide-install` copies from: the export the decision-model round's
+# Phase 1 writes (GGUF, heads JSON, SHA256SUMS). Never downloaded — the weights
+# were trained on the owner's own mail (the plan's D12).
+DECIDE_SRC   ?= $(HOME)/projects/jev-prototype/runs/modernbert-large-v2-swap/export
+# The app's models folder, where the managed server will look:
+# <models>/<repo with '/' as '_'>/<file> (RouterPreset.modelPath), for the repo
+# `local/bond-decide`. It holds a space, so every recipe quotes it.
+DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/local_bond-decide
+DECIDE_QUANT ?= f16
+DECIDE_FILE  ?= bond-decide-mbl-v2swap-$(DECIDE_QUANT).gguf
+DECIDE_HEADS ?= decide-heads.json
+DECIDE_GGUF  ?= $(DECIDE_DIR)/$(DECIDE_FILE)
+# 2048 because the heads were trained on states truncated at 2048 tokens: a
+# wider context would pool over text the model never saw in training. Batch and
+# ubatch match it because an embedding is one pass over the whole input.
+DECIDE_ARGS  ?= --pooling mean -c 2048 -ub 2048 -b 2048 -np 1
 
 # Where llama-server's -hf flag parks the weights: the repo half of MODEL_HF
 # (everything before the ':'), with '/' turned into '--' the way huggingface's
@@ -153,12 +177,13 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
+        decide decide-stop decide-install _wait-decide \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
-        golden-gate \
+        golden-gate golden-decision decision-agreement _decide-health \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -173,6 +198,9 @@ help:
 	@printf "  make embed-stop   → stop the embedding server on :$(EMBED_PORT)\n"
 	@printf "  make fast         → start the bulk-work server :$(FAST_PORT) ($(FAST_HF))\n"
 	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
+	@printf "  make decide       → start the decision-model server :$(DECIDE_PORT) ($(DECIDE_FILE))\n"
+	@printf "  make decide-stop  → stop the decision-model server on :$(DECIDE_PORT)\n"
+	@printf "  make decide-install → copy the decision model from DECIDE_SRC into the models folder\n"
 	@printf "  make omlx         → start the oMLX bakeoff server :$(OMLX_PORT) (all cached models)\n"
 	@printf "  make omlx-stop    → stop the oMLX server on :$(OMLX_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
@@ -195,13 +223,15 @@ help:
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
-	@printf "  make golden        → the golden set through triage/needs-you/extraction on the bulk slot (GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_EXTRACT_CTX=none|tail3|digest, GOLDEN_K=…)\n"
+	@printf "  make golden        → the golden set through the decision model + needs-you ladder + message text on the bulk slot (needs make decide; GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → storyline confirm for every golden item against the gold registry, on the bulk slot (GOLDEN_CHARTER_CAP=…)\n"
-	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary)\n"
+	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled, SWEEP_POSSIBLE_ROOM=0|1)\n"
 	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
 	@printf "  make golden-declared GOLDEN_RUN=<run.json> → every registry storyline declared by hand and then recruited into, on the embed server and the bulk slot; the ceiling the sweep is read against\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
+	@printf "  make golden-decision → the golden set through the decision model on :$(DECIDE_PORT) (after make decide); two run files, the app's gate and the row of record's\n"
+	@printf "  make decision-agreement DECISION_DB=<copy of the app db> → the decision model against the stored 4B labels, counts only (DECISION_LIMIT=…)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
@@ -254,9 +284,11 @@ install:
 # WAIT_TIMEOUT seconds because the download (~19GB / ~4.3GB) has not finished
 # and the port is not bound yet. That is the expected first-run outcome, not a
 # failure — the download keeps going in the background and the polls below are
-# what actually wait for it. Both servers, not just the 27B: triage PARKS
-# rather than degrades when the fast server is down, so a setup that skipped
-# it would hand over an inbox whose AI silently never runs.
+# what actually wait for it. Both servers, not just the 27B: every bench's
+# bulk slot defaults to the fast server, so a setup that skipped it would hand
+# over benches that fail on their first call. The app itself needs neither by
+# default (it runs its own router); the decision model is not downloaded here
+# at all — `make decide-install` copies it, `make decide` serves it by hand.
 setup:
 	@printf "$(BLUE)==>$(RESET) [1/7] installing prerequisites\n"
 	@$(MAKE) --no-print-directory install
@@ -511,6 +543,129 @@ fast-stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(FAST_PORT) free\n"
 
+# The decision-model server. Same port guard as `embed:`, same split between the
+# launch line and the wait line so `make -n decide` stays a dry run. -m rather
+# than -hf: the weights are a local install (`make decide-install`), so a
+# missing file is a missing install, said as one, not a download to wait for.
+# Like `embed:`, any llama-server already on the port counts as up, whichever
+# model it holds — `make decide-stop` first to swap the file.
+decide:
+	@pid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	   case "$$cmd" in \
+	     *llama-server*) exit 0 ;; \
+	     *) printf "  $(YELLOW)!$(RESET) :$(DECIDE_PORT) is held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd"; \
+	        printf "    not ours to reuse — free it, or: make decide DECIDE_PORT=<other>\n"; \
+	        exit 1 ;; \
+	   esac; \
+	 fi; \
+	 if [ ! -f "$(DECIDE_GGUF)" ]; then \
+	   printf "  $(RED)✗$(RESET) no decision model at %s\n" "$(DECIDE_GGUF)"; \
+	   printf "    install it first: make decide-install\n"; \
+	   exit 1; \
+	 fi; \
+	 mkdir -p $(LOG_DIR); \
+	 printf "→ llama-server on :$(DECIDE_PORT)  ($(DECIDE_FILE), decision embeddings)\n"; \
+	 nohup llama-server -m "$(DECIDE_GGUF)" --embeddings --host 127.0.0.1 --port $(DECIDE_PORT) \
+	   -ngl 99 $(DECIDE_ARGS) \
+	   > $(LOG_DIR)/model-$(DECIDE_PORT).log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-decide
+
+# Port-based only, for the reason `stop:` is: killing by name would take the
+# other servers down with it.
+decide-stop:
+	@pid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -z "$$pid" ]; then \
+	   printf "  $(RED)[down]$(RESET) nothing holds :$(DECIDE_PORT)\n"; \
+	   exit 0; \
+	 fi; \
+	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	 case "$$cmd" in \
+	   *llama-server*) ;; \
+	   *) printf "  $(YELLOW)[skip]$(RESET) :$(DECIDE_PORT) held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd" >&2; \
+	      exit 0 ;; \
+	 esac; \
+	 printf "  stopping llama-server :$(DECIDE_PORT) (pid %s)\n" "$$pid"; \
+	 kill -TERM $$pid 2>/dev/null || true; \
+	 for i in 1 2 3 4 5 6 7 8 9 10; do \
+	   rem=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	   [ -z "$$rem" ] && break; \
+	   sleep 1; \
+	 done; \
+	 rem=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	 if [ -n "$$rem" ]; then \
+	   printf "  $(RED)✗$(RESET) :$(DECIDE_PORT) still held after 10s (pid %s)\n" "$$rem"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) :$(DECIDE_PORT) free\n"
+
+# Copies the GGUF and the heads file — the heads are needed even when the
+# decision server is remote, because the app applies them — from DECIDE_SRC
+# into the models folder, and refuses unless each is named exactly once in the
+# export's SHA256SUMS and matches it on both sides of the copy. Each file lands
+# as a dot-temp beside its final name and is renamed only once it verifies: a
+# running server has the installed GGUF mmapped, and overwriting it in place
+# can bring that server down or leave a half-written file behind. The two lines
+# it checked are kept as decide.sha256 beside them, so what is installed can be
+# named later.
+decide-install:
+	@src="$(DECIDE_SRC)"; dir="$(DECIDE_DIR)"; \
+	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
+	   if [ ! -f "$$src/$$f" ]; then \
+	     printf "  $(RED)✗$(RESET) %s is not in %s\n" "$$f" "$$src"; \
+	     printf "    the export is written by Phase 1 of tmp/PLAN-decision-model.md (distill/export/)\n"; \
+	     exit 1; \
+	   fi; \
+	 done; \
+	 if [ ! -f "$$src/SHA256SUMS" ]; then \
+	   printf "  $(RED)✗$(RESET) no SHA256SUMS in %s — refusing an unpinned copy\n" "$$src"; \
+	   exit 1; \
+	 fi; \
+	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
+	   n=$$(awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a' "$$src/SHA256SUMS" | grep -c .); \
+	   if [ "$$n" -ne 1 ]; then \
+	     printf "  $(RED)✗$(RESET) SHA256SUMS must name %s exactly once (it names it %s times)\n" "$$f" "$$n"; \
+	     exit 1; \
+	   fi; \
+	 done; \
+	 sums=$$(awk -v a="$(DECIDE_FILE)" -v b="$(DECIDE_HEADS)" \
+	   '{ g = $$2; sub(/^\*/, "", g) } g == a || g == b' "$$src/SHA256SUMS"); \
+	 if ! (cd "$$src" && printf '%s\n' "$$sums" | shasum -a 256 -c - >/dev/null 2>&1); then \
+	   printf "  $(RED)✗$(RESET) checksum mismatch in %s\n" "$$src"; \
+	   exit 1; \
+	 fi; \
+	 mkdir -p "$$dir"; \
+	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
+	   want=$$(printf '%s\n' "$$sums" | awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a { print $$1 }'); \
+	   cp "$$src/$$f" "$$dir/.$$f.tmp" || { rm -f "$$dir/.$$f.tmp"; exit 1; }; \
+	   got=$$(shasum -a 256 "$$dir/.$$f.tmp" | cut -d' ' -f1); \
+	   if [ "$$got" != "$$want" ]; then \
+	     rm -f "$$dir/.$$f.tmp"; \
+	     printf "  $(RED)✗$(RESET) the copy of %s does not match — nothing was replaced\n" "$$f"; \
+	     exit 1; \
+	   fi; \
+	   mv -f "$$dir/.$$f.tmp" "$$dir/$$f"; \
+	 done; \
+	 printf '%s\n' "$$sums" > "$$dir/decide.sha256"; \
+	 printf "  $(GREEN)✓$(RESET) decision model installed in %s\n" "$$dir"; \
+	 printf '%s\n' "$$sums" | sed 's/^/    /'
+
+# ~0.8GB from local disk: no download, so a timeout here is a failure worth the
+# log.
+_wait-decide:
+	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
+	   pid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	   if [ -n "$$pid" ]; then \
+	     printf "  $(GREEN)✓$(RESET) decide bound :$(DECIDE_PORT) (pid $$pid)\n"; \
+	     exit 0; \
+	   fi; \
+	   sleep 1; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) decide has not bound :$(DECIDE_PORT) after $(WAIT_TIMEOUT)s\n"; \
+	 printf "    the log has the reason: tail -f $(LOG_DIR)/model-$(DECIDE_PORT).log\n"; \
+	 exit 1
+
 # pgrep -x, NOT `ps ax | grep llama-server`: this recipe's own /bin/sh -c
 # command line contains the literal string "llama-server" (in the printf
 # below), and ps shows that shell, so a full-command-line grep matches the
@@ -529,6 +684,7 @@ status:
 	 epid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 fpid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 opid=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 dpid=$$(lsof -nP -iTCP:$(DECIDE_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 if [ -n "$$mpid" ]; then \
 	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$mpid"; \
 	 else \
@@ -549,7 +705,12 @@ status:
 	 else \
 	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "omlx" "$(OMLX_PORT)"; \
 	 fi; \
-	 if [ -z "$$mpid" ] && [ -z "$$epid" ] && [ -z "$$fpid" ]; then \
+	 if [ -n "$$dpid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "decide" "$(DECIDE_PORT)" "$$dpid"; \
+	 else \
+	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "decide" "$(DECIDE_PORT)"; \
+	 fi; \
+	 if [ -z "$$mpid" ] && [ -z "$$epid" ] && [ -z "$$fpid" ] && [ -z "$$dpid" ]; then \
 	   lpid=$$(pgrep -x llama-server 2>/dev/null | head -1); \
 	   if [ -n "$$lpid" ]; then \
 	     printf "  $(YELLOW)[..]$(RESET)   llama-server (pid %s) is loading/downloading — watch: make logs\n" "$$lpid"; \
@@ -591,13 +752,19 @@ clean:
 	@printf "removed $(LOG_DIR)\n"
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
-# The app talks to ALL THREE servers above: :$(FAST_PORT) for triage,
-# extraction and storyline membership, :$(MODEL_PORT) for drafts and storyline
-# names, :$(EMBED_PORT) for conversation embeddings. None is required to run it
-# — with a server down the work that needs it simply parks and retries on the
-# next sync — but `make model`, `make fast` and `make embed` are what make it do
-# anything intelligent. Override the URLs with --dart-define=LLAMA_URL=... /
-# --dart-define=FAST_LLAMA_URL=... / --dart-define=EMBED_URL=... .
+# By default the app runs its OWN llama-server router (the decision model, the
+# embeddings and, unless the build names a box, the generative model) and
+# none of the servers above is needed. A BOND_DEV_HAND_SERVERS build instead
+# talks to three hand-started servers: :$(DECIDE_PORT) for the decision model
+# (every kept message's classification), :$(MODEL_PORT) for every generative
+# stage (message text, the needs-you band, storylines, drafts) and
+# :$(EMBED_PORT) for embeddings. :$(FAST_PORT) is bench-only. None is required
+# to run it — with a server down the work that needs it parks and retries on
+# the next sync — but `make decide`, `make model` and `make embed` are what make
+# it do anything intelligent. Override the URLs with
+# --dart-define=DECIDE_URL=... / --dart-define=LLAMA_URL=... /
+# --dart-define=EMBED_URL=... (DECIDE_URL and EMBED_URL are the FULL
+# /v1/embeddings URLs).
 
 # Dev-stage Microsoft auth: the app registration's client id, tenant id, and
 # (because the shared Azure registration has no public-client platform, and
@@ -622,8 +789,8 @@ MS_ENV ?= $(CURDIR)/.env
 # code edit: `make bench BENCH_URL=http://localhost:9000/v1/chat/completions
 # BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b`.
 #
-# BENCH_* is the BULK slot — triage, extraction, membership, the work the fast
-# server does today. Defaults to exactly that, so a bench with no overrides
+# BENCH_* is the BULK slot — the message text, the needs-you band, membership,
+# the work the fast server does in the bench shape. Defaults to exactly that, so a bench with no overrides
 # still measures what ships.
 BENCH_URL    ?= http://localhost:$(FAST_PORT)/v1/chat/completions
 # Names the run, and lands in the result filename. Name the weights as well as
@@ -682,6 +849,11 @@ PIPE_LATE    ?= 1
 # default stays `all` so every row in the ledger keeps the meaning it was
 # written with, and `needsYou` is how the shipped default is measured.
 PIPE_POLICY  ?= all
+# The p(needs_you) the bench's stand-in decision model answers. 0.5 sits
+# INSIDE the band, so every message still asks the generative model — the
+# worst case, and what every row before the decision model paid. 0.9 is the
+# default path: the verdict comes from the decision model and costs no call.
+PIPE_NEEDS_YOU_P ?= 0.5
 
 # ── the bakeoff: Bedrock as a target ────────────────────────────────────
 # Two wires. Most Bedrock models speak the OpenAI shape at
@@ -720,18 +892,26 @@ GOLDEN_K   ?= 1
 # How many items ride in one rubric-judge packet; one Claude Code agent reads
 # one packet, so this is really "how much work per agent".
 GOLDEN_BATCH ?= 10
-# Which context rung triage and needs-you see: none | tail3 | compressed | digest.
+# Which context rung the message text and needs-you see: none | tail3 |
+# compressed | digest.
 GOLDEN_CTX ?= tail3
-# The bulk run file (from `make golden`) whose extraction topics and triage
-# summary build each storyline candidate card, the way the app's card carries
+# The bulk run file (from `make golden`) whose topics and summary build each
+# storyline candidate card, the way the app's card carries
 # the newest inbound message's; required by golden-storyline.
 GOLDEN_RUN ?=
 # The confirm task's charter clamp for golden-storyline; the app's default is
 # 400, and the replay runs 400 / 800 / 1200 against the same cards to choose it.
 GOLDEN_CHARTER_CAP ?= 400
-# Which context rung EXTRACTION sees, on its own axis: none | tail3 | digest.
-# The app gives extraction no thread today; the replay prices giving it one.
-GOLDEN_EXTRACT_CTX ?= none
+# The decision server `make golden`, `make golden-decision` and
+# `make decision-agreement` call: `make decide`'s own port unless DECIDE_URL (the FULL /v1/embeddings
+# URL, as the app's define takes it) points somewhere else. Recursive, so a
+# DECIDE_PORT given on the command line moves it too.
+DECISION_URL = $(if $(strip $(DECIDE_URL)),$(DECIDE_URL),http://127.0.0.1:$(DECIDE_PORT)/v1/embeddings)
+# A COPY of the app database for `make decision-agreement`. A copy because the
+# report must never share a file with a running app; it is opened read-only.
+DECISION_DB ?=
+# How many of that copy's newest triaged inbound messages the report reads.
+DECISION_LIMIT ?= 500
 # Which clustering card `make golden-sweep` embeds: topics (what the app ships
 # since 2026-09-18, the card with its people segment left empty) or
 # participants (what it shipped before). The variable that bench was built to
@@ -751,6 +931,12 @@ SWEEP_STAGE ?= full
 # StorylineTuning.groupingMode, so a row names the mode it was taken under.
 # The default follows the app.
 SWEEP_GROUPING ?= cosine
+# Whether a `possible` storyline spends a slot of the sweep's room on that
+# bench: 0 (what the app ships since the decision-model round — suggested rows
+# only) or 1 (the old rule, suggested and possible both count). A define and
+# not a sed of StorylineTuning.possibleHoldsRoom, for SWEEP_GROUPING's reason.
+# The default follows the app.
+SWEEP_POSSIBLE_ROOM ?= 0
 # The instruction the embedding model is given about what a card is FOR. Empty
 # means the app's own `EmbeddingsClient.clusteringPrefix`; the literal `none`,
 # matched EXACTLY and with no trimming, means no prefix at all; anything else
@@ -788,18 +974,19 @@ BENCH_DEFINES := \
   --dart-define=PIPE_SHAPE='$(PIPE_SHAPE)' \
   --dart-define=PIPE_LATE=$(if $(filter-out 0,$(PIPE_LATE)),true,false) \
   --dart-define=PIPE_POLICY='$(PIPE_POLICY)' \
+  --dart-define=PIPE_NEEDS_YOU_P='$(PIPE_NEEDS_YOU_P)' \
   --dart-define=GOLDEN_SET='$(GOLDEN)' \
   --dart-define=GOLDEN_REGISTRY='$(GOLDEN_REGISTRY)' \
   --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
   --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)' \
   --dart-define=GOLDEN_K='$(GOLDEN_K)' \
   --dart-define=GOLDEN_CTX='$(GOLDEN_CTX)' \
-  --dart-define=GOLDEN_EXTRACT_CTX='$(GOLDEN_EXTRACT_CTX)' \
   --dart-define=GOLDEN_RUN='$(if $(GOLDEN_RUN),$(abspath $(GOLDEN_RUN)),)' \
   --dart-define=GOLDEN_CHARTER_CAP='$(GOLDEN_CHARTER_CAP)' \
   --dart-define=SWEEP_CARD='$(SWEEP_CARD)' \
   --dart-define=SWEEP_STAGE='$(SWEEP_STAGE)' \
   --dart-define=SWEEP_GROUPING='$(SWEEP_GROUPING)' \
+  --dart-define=SWEEP_POSSIBLE_ROOM='$(SWEEP_POSSIBLE_ROOM)' \
   --dart-define=SWEEP_EMBED_PREFIX='$(SWEEP_EMBED_PREFIX)' \
   --dart-define=EMBED_URL='$(if $(strip $(EMBED_URL)),$(EMBED_URL),http://localhost:$(EMBED_PORT)/v1/embeddings)' \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
@@ -906,8 +1093,9 @@ omlx-stop:
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
 # behavior). BOND_BOX_URL rides along: it makes the GPU server the build's
-# default placement and prefills the box address in the wizard and in
-# Settings. The box's access key is NOT here. It is typed in the app and kept
+# default place for the GENERATIVE model (`/prose`) and prefills both role
+# addresses in the wizard and in Settings (`/prose` and `/decide`); the
+# decision model still defaults to this Mac. The box's access key is NOT here. It is typed in the app and kept
 # in the keychain.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
@@ -927,15 +1115,13 @@ endef
 # edit to llm_client.dart.
 #
 # Emitted only for the vars that are SET, which is the whole reason this is
-# nine lines instead of one: an empty define is not the same as no define.
+# one block per var instead of one line: an empty define is not the same as no
+# define.
 # `--dart-define=LLAMA_URL=` makes String.fromEnvironment read '' — the app
 # would POST to nowhere instead of falling back to its default.
 APP_LLM_DEFINES :=
 ifneq ($(strip $(LLAMA_URL)),)
 APP_LLM_DEFINES += --dart-define=LLAMA_URL='$(LLAMA_URL)'
-endif
-ifneq ($(strip $(FAST_LLAMA_URL)),)
-APP_LLM_DEFINES += --dart-define=FAST_LLAMA_URL='$(FAST_LLAMA_URL)'
 endif
 ifneq ($(strip $(EMBED_URL)),)
 APP_LLM_DEFINES += --dart-define=EMBED_URL='$(EMBED_URL)'
@@ -943,12 +1129,18 @@ endif
 ifneq ($(strip $(LLAMA_MODEL)),)
 APP_LLM_DEFINES += --dart-define=LLAMA_MODEL='$(LLAMA_MODEL)'
 endif
-ifneq ($(strip $(FAST_LLAMA_MODEL)),)
-APP_LLM_DEFINES += --dart-define=FAST_LLAMA_MODEL='$(FAST_LLAMA_MODEL)'
+# The decision model's endpoint and name (`DecisionClient`), for a decide
+# server somewhere other than `make decide`'s :8083. DECIDE_URL is the FULL
+# `/v1/embeddings` URL, as EMBED_URL is.
+ifneq ($(strip $(DECIDE_URL)),)
+APP_LLM_DEFINES += --dart-define=DECIDE_URL='$(DECIDE_URL)'
+endif
+ifneq ($(strip $(DECIDE_MODEL)),)
+APP_LLM_DEFINES += --dart-define=DECIDE_MODEL='$(DECIDE_MODEL)'
 endif
 # Points a DEV build at a llama-server it did not ship with — Homebrew's, or a
-# checkout's build directory — so Settings -> Models -> Local server can run
-# the one bundled-style router without packaging an .app first. The shipped
+# checkout's build directory — so the app's managed router (Settings ->
+# Models, This Mac) can run without packaging an .app first. The shipped
 # bundle carries its own copy beside the executable and needs none of this.
 ifneq ($(strip $(BOND_LLAMA_SERVER)),)
 APP_LLM_DEFINES += --dart-define=BOND_LLAMA_SERVER='$(BOND_LLAMA_SERVER)'
@@ -961,7 +1153,7 @@ ifneq ($(strip $(BOND_DEV_SKIP_SETUP)),)
 APP_LLM_DEFINES += --dart-define=BOND_DEV_SKIP_SETUP='$(BOND_DEV_SKIP_SETUP)'
 endif
 # Read by `managedServerDefault` (app/lib/services/llm/model_slots.dart) so a
-# developer who runs `make model fast embed` by hand keeps this app off its own
+# developer who runs `make decide model embed` by hand keeps this app off its own
 # llama-server. Round H took that switch off the Models page, and this define
 # is what replaced it — same shape as the skip above, same `local.mk` line.
 ifneq ($(strip $(BOND_DEV_HAND_SERVERS)),)
@@ -1022,9 +1214,10 @@ bench-verify-prose:
 # and prints a latency table. The test file is @Skip'd so `make app-test` never
 # depends on a server being up; --run-skipped is what actually runs it here.
 #
-# Runs against the BULK slot, not :$(MODEL_PORT): after phase 3 triage and
-# extraction are the fast server's work, so benching them anywhere else would
-# be measuring a path the app no longer takes.
+# Runs against the BULK slot, not :$(MODEL_PORT): the per-message text call
+# (MessageTextTask, which replaced triage's and extraction's calls) is timed
+# where the bulk work runs; the classification is the decision model's and is
+# benched by golden-decision.
 #
 # The `:` arm of every $(if) below is load-bearing — an empty command after an
 # @ is a make error, so BENCH_VERIFY=0 needs a no-op to expand to.
@@ -1039,8 +1232,8 @@ bench-prose:
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_prose_live_test.dart --run-skipped $(BENCH_DEFINES)
 
-# Side-by-side: the same corpus through triage and extraction on BOTH servers,
-# printing where the 4B and the 27B disagree and what each cost. Live and never
+# Side-by-side: the same corpus through the message-text call on BOTH servers,
+# printing where the 4B and the 27B disagree (counts) and what each cost. Live and never
 # a gate — agreement is a judgement about labels, not a defect to fail on.
 #
 # Both slots are verified, because both are measured: a comparison against an
@@ -1059,7 +1252,7 @@ ab-membership:
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The drain race live: one round per concurrency in BENCH_K (default 1,3) over
-# the same backlog on the bulk server, which needs parallel slots to show
+# the same backlog's message-text calls on the bulk server, which needs parallel slots to show
 # anything — start it with FAST_SLOTS >= max(K) or the high rounds measure
 # queue-wait instead. The check that re-verified the atomic-claim redesign
 # against real inference, and the only bench that can see batching at all.
@@ -1068,9 +1261,9 @@ drain:
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The whole backlog through the real queues, both shapes: PIPE_COPIES copies of
-# the fixture corpus through triage, needs-you and extraction on the bulk
-# server and the drafts they queue on the prose one. What `drain` measures is
-# triage's batching; what this measures is the thing a person feels — when the
+# the fixture corpus through triage (a fake decision model), needs-you and the
+# message text on the bulk server and the drafts they queue on the prose one.
+# What `drain` measures is the text stage's batching; what this measures is the thing a person feels — when the
 # inbox is usable, when the drafts are done, and how long a message that
 # arrives mid-backlog waits (PIPE_LATE).
 #
@@ -1127,25 +1320,32 @@ golden-score: golden-check
 	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))' --keep-only $(if $(BREAKDOWN),--breakdown $(BREAKDOWN),) $(if $(JSON),--json '$(abspath $(JSON))',)
 	@cd $(dir $(GOLDEN)) && python3 tools/score_run.py --run '$(abspath $(R))'
 
-# The golden set through the real tasks on the bulk slot (triage, needs-you,
-# extraction) — the run that produces a ledger row. Writes two files to
-# $(BENCH_OUT): golden-run-<label>-<stamp>.json (score it with
-# `make golden-score R=…`; the test prints the exact command) and the
-# golden-bulk timing/cost JSON beside it. GOLDEN_CTX picks the context rung
-# triage and needs-you see and GOLDEN_EXTRACT_CTX the one extraction sees —
-# two knobs because the app's two halves differ today. GOLDEN_K > 1 needs the
-# server started with FAST_SLOTS >= K, or the pool measures queue-wait dressed
-# up as throughput.
-golden: golden-check
+# The golden set through the app's per-message pipeline — the run that
+# produces a ledger row. Per item: the decision model (make decide, :$(DECIDE_PORT),
+# or DECIDE_URL) for every classification field, the app's needs-you ladder
+# (floor, the decision's p(yes), NeedsYouTask on the bulk slot inside the
+# band) and ONE MessageTextTask call on the bulk slot for summary, action
+# items, deadline, topics and project. Writes two files to $(BENCH_OUT):
+# golden-run-<label>-<stamp>.json (score it with `make golden-score R=…`; the
+# test prints the exact command) and the golden-bulk timing/cost JSON beside
+# it. GOLDEN_CTX picks the context rung the text and needs-you see. Set
+# GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS: the decision's needs-you reads
+# the owner line. GOLDEN_K > 1 needs the server started with FAST_SLOTS >= K,
+# or the pool measures queue-wait dressed up as throughput.
+golden: golden-check _decide-health
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'triage' $(BENCH_DEFINES) $(DECISION_DEFINES)
 
-# The prose half: a reply decision for every gold-keep item and a draft for
-# every item that carries a reply rubric, on the prose slot. Same two files,
-# bench name golden-prose; the drafts are judged by rubric in a later phase.
-golden-prose: golden-check
+# The prose half: a reply decision for every gold-keep item — the decision
+# model's reply_expected probability (make decide, :$(DECIDE_PORT), or
+# DECIDE_URL), as the app's draft lane reads it — and a draft for every item
+# that carries a reply rubric, on the prose slot. Same two files, bench name
+# golden-prose; the drafts are judged by rubric in a later phase. Set
+# GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS: the decision state reads the
+# owner line.
+golden-prose: golden-check _decide-health
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'reply' $(BENCH_DEFINES) $(DECISION_DEFINES)
 
 # The storyline half: `ConfirmMembershipTask` alone, on the bulk slot, for every
 # golden item against the gold registry. The candidate list is BOUNDED — the
@@ -1180,7 +1380,7 @@ golden-storyline: golden-check
 # storyline.id — derived from MEMBERSHIP here, where golden-baseline derives
 # it from the app's stored title.
 golden-sweep: golden-check
-	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary BENCH_URL=… PROSE_URL=…]\n"; exit 1; }
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled SWEEP_POSSIBLE_ROOM=0|1 BENCH_URL=… PROSE_URL=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
@@ -1209,7 +1409,7 @@ golden-sweep: golden-check
 # here. Writes the result JSON to $(BENCH_OUT); the ledger is
 # docs/model-bakeoff.md's "Clustering vector" table.
 golden-vector: golden-check
-	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-vector GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary SWEEP_EMBED_PREFIX='…' EMBED_URL=…]\n"; exit 1; }
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-vector GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled SWEEP_EMBED_PREFIX='…' EMBED_URL=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) --dart-define=SWEEP_STAGE=vector
 
@@ -1251,6 +1451,46 @@ golden-declared: golden-check
 golden-gate: golden-check
 	@$(if $(GOLDEN_RUN),test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; },:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'gates' $(BENCH_DEFINES)
+
+# The decision server's own health check, first in both decision targets: a
+# run against a server that is not up fails on its first call with a sentence
+# about sockets, and this one says what to run.
+_decide-health:
+	@url='$(patsubst %/v1/embeddings,%/health,$(DECISION_URL))'; \
+	 curl -sf -m 5 "$$url" >/dev/null || { printf "$(RED)✗$(RESET) no decision server answering at $$url — run make decide (or point DECIDE_URL at one)\n"; exit 1; }
+
+# What the decision tests are told: the server, the model name and the heads
+# file the app applies in Dart (the heads ride beside the GGUF, not on the
+# server — the plan's D12).
+DECISION_DEFINES = \
+  --dart-define=DECIDE_URL='$(DECISION_URL)' \
+  --dart-define=DECIDE_MODEL='$(if $(strip $(DECIDE_MODEL)),$(DECIDE_MODEL),bond-decide)' \
+  --dart-define=DECIDE_HEADS='$(DECIDE_DIR)/$(DECIDE_HEADS)'
+
+# The golden set through the decision model: each item's state rendered from
+# the packer's parts exactly as jev-prototype's golden_states did, one live
+# call per item on the decide server (make decide, :$(DECIDE_PORT)), and TWO
+# run files from the one pass — golden-run-decision-policy-… (the gate as the
+# app applies it: p(drop) >= 0.70, cold outreach kept, reasons in the app's
+# words) and golden-run-decision-argmax-… (the gate as the plan's §1 row of
+# record was scored). Every other field is the same in both; score each with
+# `make golden-score R=…` (the test prints both commands). Set
+# GOLDEN_OWNER_NAME and GOLDEN_OWNER_ADDRESS: needs_you reads the owner line.
+golden-decision: golden-check _decide-health
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'golden decision pass' $(BENCH_DEFINES) $(DECISION_DEFINES)
+
+# The decision model against the labels the 4B already stored, on a COPY of
+# the app database: per-field agreement counts, the gate drops the learned gate
+# would add, and how many messages fall in the needs-you band the generative
+# model would still answer. Counts and enum words only — the copy is real mail.
+decision-agreement: _decide-health
+	@test -n "$(DECISION_DB)" || { printf "$(RED)✗$(RESET) usage: make decision-agreement DECISION_DB=<path to a COPY of the app database> [DECISION_LIMIT=500]\n"; exit 1; }
+	@test -f "$(DECISION_DB)" || { printf "$(RED)✗$(RESET) no database at $(DECISION_DB)\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/decision_agreement_live_test.dart --run-skipped --plain-name 'db agreement' $(DECISION_DEFINES) \
+	  --dart-define=DECISION_DB='$(abspath $(DECISION_DB))' \
+	  --dart-define=DECISION_LIMIT='$(DECISION_LIMIT)' \
+	  --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
+	  --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)'
 
 # The rubric fields — label, summary, action items, the two evidence sentences
 # and a drafted reply — need a READER, and the middle step here is deliberately

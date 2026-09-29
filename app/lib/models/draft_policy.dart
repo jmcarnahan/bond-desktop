@@ -1,8 +1,9 @@
 /// When a suggested reply is written without anyone asking for it.
 ///
 /// Three modes, and the middle one is the whole point of the setting. Drafting
-/// is the most expensive thing this app does — one big-model decision and one
-/// big-model draft per message — so a sixty-message backlog that drafts
+/// is the most expensive thing this app does — one generative-model draft per
+/// message, after the decision model's reply probability has said one is
+/// wanted — so a sixty-message backlog that drafts
 /// everything spends a quarter of an hour of the prose server on replies
 /// nobody will read, while the message that actually needs an answer waits
 /// behind them.

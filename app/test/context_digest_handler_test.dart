@@ -19,7 +19,7 @@ import 'fixtures/fake_embed_server.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/vec_test_db.dart';
 
-/// One fast-slot call per file, and the ladder of reasons not to make it.
+/// One generative call per file, and the ladder of reasons not to make it.
 ///
 /// The ladder is most of this file, because most of what this handler does
 /// is decline: a file too short to be worth a call, a directory whose
@@ -422,14 +422,14 @@ void main() {
       expect([for (final hit in hits) hit.locator], contains('digest'));
     });
 
-    test('a fast server that is down parks and leaves the digest pending',
+    test('a generative server that is down parks and leaves the digest pending',
         () async {
       final dirId = await register();
       final fileId = await addFile(dirId);
 
       await expectLater(
         runFor(
-          handlerWith([const LlmUnavailableException('fast slot off')]),
+          handlerWith([const LlmUnavailableException('generative server off')]),
           ContextDigestHandler.entityIdFor(dirId, fileId),
         ),
         throwsA(isA<LlmUnavailableException>()),

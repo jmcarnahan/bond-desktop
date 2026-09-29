@@ -46,8 +46,9 @@ replies** setting, one of three `DraftPolicy` modes: `asksForAReply` counts
 default mode's narrower `prefetchWorthy` counts it as one of three. Either way
 this handler is registered ahead of `ExtractHandler` so the verdict is on the
 row when the gate reads it. A gate only decides what gets asked about;
-`ReplyDecisionTask` still decides whether a draft is written — except when a
-person pressed **Draft reply**, which is that decision.
+the reply decision (the decision model's stored `reply_expected`, see
+[07-replies.md](07-replies.md)) still decides whether a draft is written —
+except when a person pressed **Draft reply**, which is that decision.
 
 **What happens.** `NeedsYouHandler`
 (`app/lib/services/needs_you_handler.dart`, run by `AiWorker`) answers one
@@ -76,8 +77,38 @@ not caught. `needsYouFloor(row, coldOutreach: true)` does not fire, and the
 model reads the message like any other. Every way the check cannot answer
 answers false, because a true takes a message off the rail.
 
-**The model branch.** Everything below the floor goes to `NeedsYouTask`
-(`app/lib/services/llm/needs_you_task.dart`) on the **fast** slot — bulk work,
+**The decision model's verdict (schema v20).** Below the floor, the ladder
+(D6 of the decision-model round) is:
+
+1. **Forced to the language model:** the owner saved custom
+   `needs_you_rules` (non-blank and not a retype of the defaults — a trained
+   head cannot follow them), or the message has an attachment digest WITH an
+   ask (the decision model read the message, never its files; this is also
+   what the digest handler's requeue lands on). A digest that asks nothing
+   leaves the decision model to settle it.
+2. **No usable decision**: no `message_decisions` row (triaged before the
+   decision model), or a row decided with NO owner line in its state
+   (`owner_known` false inside `answers_json` — the account had not answered
+   when triage ran; the head was trained with that line): the language
+   model.
+3. Otherwise the stored p(needs_you = yes) against `DecisionPolicy`
+   (`app/lib/services/decision/decision_policy.dart`): **p ≥ 0.65** — or
+   **≥ 0.85** when `isColdOutreach` holds, the same cold rule that moves the
+   language model's bar below — writes **1**; **p < 0.35** writes **0**; the
+   BAND between goes to the language model exactly as before, its raise policy
+   and hedge unchanged. The activity note is `{verdict, source: decision, p}`.
+
+A decided yes carries a templated `needs_you_reason`, because the rail's
+`_canExplainItself` and the Why panel read it and the heads write no
+evidence: intent `approval` → "Asks you to approve something.", `question` →
+"Asks you a question.", `request` → "Asks you to do something.",
+`scheduling` → "Asks you about a time.", else p(reply_expected) ≥ 0.50 →
+"Expects a reply from you.", else "Names you and needs your attention." A
+decided no reads "Nothing here asks for you." (`needsYouYesReason`,
+`needsYouNoReason`).
+
+**The model branch.** Everything the ladder above sends on goes to
+`NeedsYouTask` (`app/lib/services/llm/needs_you_task.dart`) on the **fast** slot — bulk work,
 one small answer per message, see `10-model-routing.md`. Temperature 0 and 256
 max tokens: the same message must get the same verdict twice, or a re-drain
 would flip rows under the user.
@@ -90,8 +121,8 @@ The answer is three fields, in this order:
 | `needs_you` | boolean |
 | `confidence` | `low` \| `medium` \| `high` |
 
-`evidence` comes **first**, the opposite of the reply decision's verdict-first
-order, and the difference is the input: the floor has already taken the easy
+`evidence` comes **first**, the opposite of a verdict-first order, and the
+difference is the input: the floor has already taken the easy
 cases, so what reaches this call is the ambiguous residue. Locating the
 sentence that points at the owner *is* the work, and the boolean should fall
 out of having written it.
@@ -261,7 +292,7 @@ judgement reads.
 | Column | Meaning |
 |---|---|
 | `needs_you_verdict` | tri-state INTEGER — NULL never judged or a hedge, 0 judged no, 1 judged yes |
-| `needs_you_reason` | why: `teams_direct` from the floor, or the model's evidence sentence; on a NULL verdict, a reason marks a hedge |
+| `needs_you_reason` | why: `teams_direct` from the floor, a templated sentence from the decision model, or the language model's evidence sentence; on a NULL verdict, a reason marks a hedge |
 
 The tri-state is load-bearing. NULL is not "no" — the unjudged rows *are* the
 worklist, so nothing may read the two as one. The work row, not the NULL, says
@@ -600,7 +631,7 @@ a message, and the reason is the first thing on it.
 
 | Block | Source |
 |---|---|
-| Verdict | `Message.needsYouVerdict` / `needsYouReason`, now parsed in `Message.fromRow`; `gateReason` when the gate took the message |
+| Verdict | `Message.needsYouVerdict` / `needsYouReason`, now parsed in `Message.fromRow`; `gateReason` when the gate took the message (in `homeDropLabels`' words, lower-cased, when it has one); and, when `message_decisions` has a row, one line "Decision model: gate keep 0.94, needs you 0.71, action 0.66, reply 0.12 · 58 ms" (`WhyPanelBody.decisionLine`). The gate is worded by the verdict: "gate drop 0.91" on a dropped message, "gate keep (drop 0.60)" on a kept one the head leaned against |
 | Triage | the message's `triageStatus`, `summary`, `urgency`, `category`, `label` |
 | Asks | `needsAction`, `replyExpected`, `deadline`, `addressedMe`, `actionItems` |
 | Attention | the thread's `attentionScore` against the reader's own threshold, then `conversation_ai`'s `bucket`, `bucket_reason` and `snoozed_until` |
@@ -650,5 +681,6 @@ stage, judgement and queue row behind it, with the levers — see
 [README.md](README.md#finding-out-what-happened-to-a-message). The two read the
 same rows (`needs_you_verdict`, `needs_you_reason`, the extraction, the
 attention row) through their own reads, by decision: `whyFactsProvider` is
-three store calls and `messageHistoryProvider` is nine (over eight tables),
-and the smaller one is what makes Why cheap enough to open from a hover.
+four store calls (the fourth is `decisionFor`) and `messageHistoryProvider`
+is nine (over eight tables), and the smaller one is what makes Why cheap
+enough to open from a hover.

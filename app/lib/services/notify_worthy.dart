@@ -81,13 +81,19 @@ bool notifyWorthy(Map<String, Object?> row,
 
 /// Whether the conversation's CTA fields are this message's own words.
 ///
-/// They describe the newest TRIAGED message of the thread, so only a
-/// candidate whose own triage finished may be judged — or quoted — by them.
+/// They describe the newest message of the thread whose TEXT has landed, so
+/// only a candidate whose own triage finished AND whose message-text stage
+/// wrote its summary may be judged — or quoted — by them. Triage writes the
+/// row from the decision model and leaves the thread's older ask in place
+/// until the text refolds it; a triaged row with no summary is not yet the
+/// owner of that ask. (Rows triaged before the decision model carry their
+/// summary, so they are unaffected.)
 ///
 /// Public alongside [notifyWorthy] and for its reason: the settle asks this to
 /// decide whether the CTA is an ask, and then asks it again to decide whether
 /// the toast may QUOTE that CTA. A second copy would eventually let one answer
 /// yes and the other no about the same message.
-bool ownsCta(Map<String, Object?> row) => row['triage_status'] == 'triaged';
+bool ownsCta(Map<String, Object?> row) =>
+    row['triage_status'] == 'triaged' && row['summary'] != null;
 
 int? _int(Object? value) => (value as num?)?.toInt();

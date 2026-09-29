@@ -109,12 +109,94 @@ class GoldenNeedsYouOut {
   });
 }
 
-/// The reply-decision stage's answer for one item.
+/// The reply decision for one item: the decision model's p(reply_expected =
+/// yes), and the verdict the app's draft lane reads off it
+/// (`p >= DecisionPolicy.replyYes`).
 class GoldenDecisionOut {
   final bool needsReply;
-  final String reason;
+  final double p;
 
-  const GoldenDecisionOut({required this.needsReply, this.reason = ''});
+  /// What answered — `decision_model` since the 27B reply decision was
+  /// retired. Older run files carry a `reason` sentence instead.
+  final String source;
+
+  const GoldenDecisionOut({
+    required this.needsReply,
+    required this.p,
+    this.source = 'decision_model',
+  });
+}
+
+/// The decision model's answer for one item: every classification field the
+/// scorer reads, from ONE forward pass, and no text at all.
+///
+/// Its own class rather than a [GoldenTriageOut] and a [GoldenExtractOut]
+/// with empty strings in their text fields, because the scorer reads an empty
+/// `deadline`, `project` or `topics` as an ANSWER ("no deadline", "no
+/// project") and would score the decision model on fields it never produced.
+/// Written, these sections carry only the keys the model answered, so every
+/// text field reads to `score_run.py` as "not attempted".
+class GoldenClassifierOut {
+  /// `keep` or `drop`, by whichever gate rule the run was asked for.
+  final String gateVerdict;
+
+  /// The gate reason slug on a drop; null on a keep.
+  final String? gateReason;
+
+  final String category;
+  final String urgency;
+  final bool needsAction;
+  final bool replyExpected;
+  final bool needsYouVerdict;
+
+  /// `low`, `medium` or `high`, from the needs-you head's top probability.
+  final String needsYouConfidence;
+
+  final String intent;
+  final String importance;
+
+  /// For the reader, never scored: the probabilities the verdicts above were
+  /// read from, and whether the state had to be cut to the model's window.
+  final Map<String, Object?> probabilities;
+
+  const GoldenClassifierOut({
+    required this.gateVerdict,
+    this.gateReason,
+    required this.category,
+    required this.urgency,
+    required this.needsAction,
+    required this.replyExpected,
+    required this.needsYouVerdict,
+    required this.needsYouConfidence,
+    required this.intent,
+    required this.importance,
+    this.probabilities = const {},
+  });
+}
+
+/// The message-text stage's answer for one item (`MessageTextTask`): the text
+/// half of what the retired triage and extraction calls answered between
+/// them. Written only beside a [GoldenClassifierOut], whose sections it
+/// completes: summary, action items and deadline under `triage`, topics and
+/// project under `extract`. No `label` and no `evidence` — neither exists any
+/// more, and the scorer reads a missing key as "not attempted".
+class GoldenTextOut {
+  final String summary;
+  final List<String> actionItems;
+
+  /// Empty string when the message named none — an ANSWER, see the note at
+  /// the top of this file.
+  final String deadline;
+  final List<String> topics;
+  final String project;
+
+  const GoldenTextOut({
+    required this.summary,
+    this.actionItems = const [],
+    this.deadline = '',
+    this.topics = const [],
+    this.project = '',
+  });
 }
 
 /// A drafted reply, for the rubric judge.
@@ -163,9 +245,10 @@ class GoldenCall {
 /// each in its own `try`, so a stage that throws leaves its section absent
 /// and the rest of the row still scores.
 ///
-/// [calls] is keyed by stage — `triage`, `needs_you`, `extraction`,
-/// `reply_decision`, `draft_reply`, `storyline_membership` — the same words
-/// the tasks use for their labels.
+/// [calls] is keyed by stage — `decision`, `message_text`, `needs_you`,
+/// `draft_reply`, `storyline_membership` — the same words the tasks use for
+/// their labels (older run files carry `triage`, `extraction` and
+/// `reply_decision`).
 class GoldenRunEntry {
   final String id;
 
@@ -191,6 +274,17 @@ class GoldenRunEntry {
   GoldenDecisionOut? decision;
   GoldenDraftOut? draft;
 
+  /// The decision model's classification-only answer. A run that sets it
+  /// sets none of [gate], [triage] or [extract]; if one of those is set as
+  /// well, the typed section wins its key. [needsYou] beside it is the app's
+  /// ladder (the `triage` leg) and wins the `needs_you` key.
+  GoldenClassifierOut? classifier;
+
+  /// The message-text stage's answer, merged into [classifier]'s `triage`
+  /// and `extract` sections — or written as those sections on its own when
+  /// the item has no [classifier] (its decision call failed).
+  GoldenTextOut? text;
+
   final Map<String, GoldenCall> calls = {};
 
   /// Whether any stage was so much as tried on this item.
@@ -207,7 +301,8 @@ class GoldenRunEntry {
       needsYou != null ||
       storylineId != null ||
       decision != null ||
-      draft != null;
+      draft != null ||
+      classifier != null;
 
   GoldenRunEntry({
     required this.id,
@@ -222,10 +317,10 @@ class GoldenRunEntry {
   /// `triage: {reply_expected: …}` carrying the decision's verdict and no
   /// other triage key. The scorer's `triage.reply_expected` field is the
   /// question "is the sender waiting on an answer", which is exactly what the
-  /// reply-decision stage answers, and gold has one label for it. So in a
-  /// prose run file `triage.reply_expected` IS the reply decision; the
-  /// `decision` object beside it carries the same verdict plus the model's
-  /// reason, which the scorer ignores and a reader does not.
+  /// reply decision answers, and gold has one label for it. So in a prose run
+  /// file `triage.reply_expected` IS the reply decision; the `decision` object
+  /// beside it carries what answered and its probability, which the scorer
+  /// ignores and a reader does not.
   Map<String, Object?> toScoreRunJson() => {
         'id': id,
         'stratum': stratum,
@@ -239,6 +334,11 @@ class GoldenRunEntry {
             'verdict': gate!.verdict,
             'reason': gate!.reason,
             'model_category': gate!.modelCategory,
+          }
+        else if (classifier != null)
+          'gate': {
+            'verdict': classifier!.gateVerdict,
+            'reason': classifier!.gateReason,
           },
         if (triage != null)
           'triage': {
@@ -252,7 +352,27 @@ class GoldenRunEntry {
             'action_items': triage!.actionItems,
           }
         else if (decision != null)
-          'triage': {'reply_expected': decision!.needsReply},
+          'triage': {'reply_expected': decision!.needsReply}
+        else if (classifier != null)
+          'triage': {
+            'category': classifier!.category,
+            'urgency': classifier!.urgency,
+            'needs_action': classifier!.needsAction,
+            'reply_expected': classifier!.replyExpected,
+            if (text != null) ...{
+              'deadline': text!.deadline,
+              'summary': text!.summary,
+              'action_items': text!.actionItems,
+            },
+          }
+        else if (text != null)
+          // The decision failed on this item and the text did not: the text
+          // still scores.
+          'triage': {
+            'deadline': text!.deadline,
+            'summary': text!.summary,
+            'action_items': text!.actionItems,
+          },
         if (extract != null)
           'extract': {
             'intent': extract!.intent,
@@ -262,6 +382,20 @@ class GoldenRunEntry {
             'people': extract!.people,
             'organizations': extract!.organizations,
             'evidence': extract!.evidence,
+          }
+        else if (classifier != null)
+          'extract': {
+            'intent': classifier!.intent,
+            'importance': classifier!.importance,
+            if (text != null) ...{
+              'project': text!.project,
+              'topics': text!.topics,
+            },
+          }
+        else if (text != null)
+          'extract': {
+            'project': text!.project,
+            'topics': text!.topics,
           },
         if (needsYou != null)
           'needs_you': {
@@ -271,12 +405,19 @@ class GoldenRunEntry {
             if (needsYou!.confidence != null) 'confidence': needsYou!.confidence,
             'evidence': needsYou!.evidence,
             'floor': needsYou!.floor,
+          }
+        else if (classifier != null)
+          'needs_you': {
+            'verdict': classifier!.needsYouVerdict,
+            'confidence': classifier!.needsYouConfidence,
           },
+        if (classifier != null) 'decision_model': classifier!.probabilities,
         if (storylineId != null) 'storyline': {'id': storylineId},
         if (decision != null)
           'decision': {
+            'source': decision!.source,
+            'p': decision!.p,
             'needs_reply': decision!.needsReply,
-            'reason': decision!.reason,
           },
         if (draft != null)
           'draft': {

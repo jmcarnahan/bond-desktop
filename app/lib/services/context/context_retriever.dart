@@ -310,11 +310,12 @@ class ContextRetriever {
   final ContextStore _context;
   final EmbeddingsClient _embeddings;
 
-  /// The fast slot, for the one call this class makes. Nullable because a
+  /// The `context_select` stage's client (the generative model), for the one
+  /// call this class makes. Nullable because a
   /// build without one is a legal build — every test that is about the
   /// ranking wants a retriever with no model behind it, and the step below
   /// simply does not run.
-  final LlmClient? _fastClient;
+  final LlmClient? _selectClient;
 
   /// Whether the owner has left the section pick on. A closure and not a
   /// value, on the house rule that `services/` never reaches into
@@ -327,11 +328,11 @@ class ContextRetriever {
     this._store,
     this._context,
     this._embeddings, {
-    LlmClient? fastClient,
+    LlmClient? selectClient,
     bool Function()? selectExpand,
   })  :
         // ignore: prefer_initializing_formals
-        _fastClient = fastClient,
+        _selectClient = selectClient,
         _selectExpand = selectExpand ?? _alwaysOn;
 
   static bool _alwaysOn() => true;
@@ -353,7 +354,7 @@ class ContextRetriever {
   /// so a room whose directories hold nothing indexed still costs no POST.
   ///
   /// **The last step may ask to read closer.** Once the directory has
-  /// anything indexed, and with a fast client, the preference on, and either
+  /// anything indexed, and with a select client, the preference on, and either
   /// a brief that points at files or a page of ranked passages worth choosing
   /// between, one call names up to two sections to read WHOLE; they go to the
   /// front of the excerpts and the passages they already contain come out.
@@ -1076,7 +1077,7 @@ class ContextRetriever {
     );
   }
 
-  /// The look-closer step: one fast call that may name up to two sections to
+  /// The look-closer step: one model call that may name up to two sections to
   /// read WHOLE and up to two skills to read at all.
   ///
   /// Six passages of a thousand characters can miss the one section that
@@ -1110,7 +1111,7 @@ class ContextRetriever {
     required Set<String> contributed,
     required List<String> expanded,
   }) async {
-    final client = _fastClient;
+    final client = _selectClient;
     if (client == null) return;
     if (!_selectExpand()) return;
     // A pack with pointers always qualifies, however short the ranking is:

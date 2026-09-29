@@ -1,9 +1,11 @@
+import 'package:bond_inbox/models/extraction_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart'
-    show ExtractionResult;
+import 'package:bond_inbox/services/decision/stored_decision.dart';
 import 'package:bond_inbox/widgets/why_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/fake_decision_client.dart';
 
 /// The explanation beside a message.
 ///
@@ -60,6 +62,7 @@ void main() {
     Map<String, Object?>? ai,
     double threshold = 1.0,
     VoidCallback? onWhatHappened,
+    StoredDecision? decision,
   }) async {
     await tester.binding.setSurfaceSize(const Size(600, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -73,6 +76,7 @@ void main() {
           threshold: threshold,
           now: now,
           onWhatHappened: onWhatHappened,
+          decision: decision,
         ),
       ),
     ));
@@ -160,6 +164,138 @@ void main() {
 
       expect(find.text('Skipped by the gate: teams source.'), findsOneWidget);
     });
+
+    testWidgets("the decision model's own gate reads in the label's words",
+        (tester) async {
+      await pump(tester, message: msg(gateReason: 'model_other'));
+
+      expect(find.text('Skipped by the gate: automated.'), findsOneWidget);
+    });
+
+    testWidgets("the decision model's numbers are one line", (tester) async {
+      await pump(
+        tester,
+        decision: StoredDecision(
+          answers: fakeAnswers(),
+          model: 'bond-decide-fake',
+          gateP: 0.06,
+          needsYouP: 0.713,
+          needsActionP: 0.66,
+          replyExpectedP: 0.1,
+          latencyMs: 58,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep 0.94, needs you 0.71, '
+            'action 0.66, reply 0.10 · 58 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a learned drop says drop, with its probability',
+        (tester) async {
+      await pump(
+        tester,
+        message: msg(gateReason: 'digest', triageStatus: 'skipped'),
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.91),
+          model: 'bond-decide-fake',
+          gateP: 0.91,
+          needsYouP: 0.02,
+          needsActionP: 0.05,
+          replyExpectedP: 0.03,
+          latencyMs: 40,
+        ),
+      );
+
+      expect(find.text('Skipped by the gate: digest.'), findsOneWidget);
+      expect(
+        find.text('Decision model: gate drop 0.91, needs you 0.02, '
+            'action 0.05, reply 0.03 · 40 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an owner-Ignored message reads what the model said, not a '
+        'drop', (tester) async {
+      // `user` is the owner's gate word, not the learned gate's, so the line
+      // is the model's keep rather than "gate drop 0.05".
+      await pump(
+        tester,
+        message: msg(gateReason: 'user', triageStatus: 'skipped'),
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.05),
+          model: 'bond-decide-fake',
+          gateP: 0.05,
+          needsYouP: 0.3,
+          needsActionP: 0.2,
+          replyExpectedP: 0.1,
+          latencyMs: 40,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep 0.95, needs you 0.30, '
+            'action 0.20, reply 0.10 · 40 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a learned word under the bar is not the model dropping it',
+        (tester) async {
+      // A rules gate can write a word the learned gate also writes; without
+      // p(drop) over the bar the model did not take it.
+      await pump(
+        tester,
+        message: msg(gateReason: 'newsletter', triageStatus: 'skipped'),
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.2),
+          model: 'bond-decide-fake',
+          gateP: 0.2,
+          needsYouP: 0.1,
+          needsActionP: 0.1,
+          replyExpectedP: 0.1,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep 0.80, needs you 0.10, '
+            'action 0.10, reply 0.10'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a kept message the head leaned against says so',
+        (tester) async {
+      await pump(
+        tester,
+        decision: StoredDecision(
+          answers: fakeAnswers(gateDrop: 0.6),
+          model: 'bond-decide-fake',
+          gateP: 0.6,
+          needsYouP: 0.4,
+          needsActionP: 0.5,
+          replyExpectedP: 0.5,
+          latencyMs: 40,
+        ),
+      );
+
+      expect(
+        find.text('Decision model: gate keep (drop 0.60), needs you 0.40, '
+            'action 0.50, reply 0.50 · 40 ms'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('no decision, no line', (tester) async {
+      await pump(tester);
+
+      expect(
+        texts(tester).where((t) => t.startsWith('Decision model')),
+        isEmpty,
+      );
+    });
   });
 
   group('triage', () {
@@ -179,6 +315,42 @@ void main() {
         find.text('Urgency high · Category work · Label survey'),
         findsOneWidget,
       );
+    });
+  });
+
+  group('a row written since the decision model', () {
+    // Triage wrote no label and the text stage writes no evidence, people or
+    // organizations: each line is simply absent, never drawn empty.
+    testWidgets('no label on the triage line', (tester) async {
+      await pump(tester, message: msg(label: null));
+
+      expect(find.text('Urgency high · Category work'), findsOneWidget);
+      expect(find.textContaining('Label'), findsNothing);
+    });
+
+    testWidgets('no evidence, people or organizations lines', (tester) async {
+      await pump(
+        tester,
+        extraction: const ExtractionResult(
+          topics: ['survey'],
+          project: 'Lot 14',
+          intent: 'request',
+          importance: 'high',
+        ),
+      );
+
+      expect(find.text('Intent request · Importance high'), findsOneWidget);
+      expect(find.text('Topics: survey'), findsOneWidget);
+      expect(find.text('Project: Lot 14'), findsOneWidget);
+      expect(find.textContaining('People'), findsNothing);
+      expect(find.textContaining('Organizations'), findsNothing);
+    });
+
+    testWidgets('text not landed yet: the triage line alone', (tester) async {
+      await pump(tester, message: msg(summary: null, label: null));
+
+      expect(find.text('Urgency high · Category work'), findsOneWidget);
+      expect(find.text('They want the survey back.'), findsNothing);
     });
   });
 

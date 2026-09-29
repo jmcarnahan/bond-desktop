@@ -101,6 +101,17 @@ class SetupState {
   /// a stored key would be a secret in `setup_state`.
   final ModelPlacement? placement;
 
+  /// Where the DECISION model runs. This Mac by default whatever the build:
+  /// it reads every message, and a local forward pass beats any network hop.
+  /// Your server is written by that form's own Connect, before the step's
+  /// way forward, so this is the choice and the prefs are the record.
+  final ModelPlacement decisionPlacement;
+
+  /// Which managed generative model this Mac takes under This Mac:
+  /// `bond-prose` (the 27B), `bond-bulk` (the 4B), or `''` to follow the
+  /// hardware tier. The 27B on the inbox tier reads as the 4B.
+  final String generativeManaged;
+
   const SetupState({
     this.loaded = false,
     this.step = SetupStep.welcome,
@@ -120,6 +131,8 @@ class SetupState {
     this.finishFailed = false,
     this.canReturnToInbox = false,
     this.placement,
+    this.decisionPlacement = ModelPlacement.local,
+    this.generativeManaged = '',
   });
 
   SetupState copyWith({
@@ -147,6 +160,8 @@ class SetupState {
     bool? canReturnToInbox,
     ModelPlacement? placement,
     bool clearPlacement = false,
+    ModelPlacement? decisionPlacement,
+    String? generativeManaged,
   }) =>
       SetupState(
         loaded: loaded ?? this.loaded,
@@ -170,6 +185,8 @@ class SetupState {
         finishFailed: finishFailed ?? this.finishFailed,
         canReturnToInbox: canReturnToInbox ?? this.canReturnToInbox,
         placement: clearPlacement ? null : (placement ?? this.placement),
+        decisionPlacement: decisionPlacement ?? this.decisionPlacement,
+        generativeManaged: generativeManaged ?? this.generativeManaged,
       );
 
   @override
@@ -193,7 +210,9 @@ class SetupState {
       other.finishing == finishing &&
       other.finishFailed == finishFailed &&
       other.canReturnToInbox == canReturnToInbox &&
-      other.placement == placement;
+      other.placement == placement &&
+      other.decisionPlacement == decisionPlacement &&
+      other.generativeManaged == generativeManaged;
 
   static bool _sameDownloads(
     Map<String, DownloadProgress> a,
@@ -229,25 +248,46 @@ class SetupState {
         finishFailed,
         canReturnToInbox,
         placement,
+        decisionPlacement,
+        generativeManaged,
       );
 
   @override
   String toString() => 'SetupState(${step.name}, loaded: $loaded, '
       'complete: $downloadsComplete, signedIn: $signedIn, '
-      'placement: ${placement?.name})';
+      'placement: ${placement?.name}, decision: ${decisionPlacement.name})';
 }
 
-/// What the Where step's form hands back on Continue: the pair as typed and
-/// as discovered from each server, and the keys as typed, or null to keep the
-/// ones already in the keychain. Held for the length of one call and in no
-/// state: see [SetupState.placement].
+/// What one of the Where step's forms hands back on its press: the address
+/// as typed, the model name the server listed, the key as typed (null keeps
+/// the one already in the keychain) and whether the stored key belongs to
+/// another host and must be forgotten. Held for the length of one call and
+/// in no state: see [SetupState.placement].
 typedef ModelServersPayload = ({
-  String bigUrl,
-  String smallUrl,
-  String bigModel,
-  String smallModel,
-  String? bigKey,
-  String? smallKey,
+  String url,
+  String model,
+  String? key,
+  bool clearKey,
+});
+
+/// `AppPrefsNotifier.useGenerative`, as the controller is handed it.
+typedef GenerativeWriter = Future<void> Function({
+  required ModelPlacement placement,
+  String? managedModel,
+  String? url,
+  String? model,
+  String? key,
+  bool clearKey,
+  required MachineTier hardwareTier,
+});
+
+/// `AppPrefsNotifier.useDecision`, as the controller is handed it.
+typedef DecisionWriter = Future<void> Function({
+  required ModelPlacement placement,
+  String? url,
+  String? model,
+  String? key,
+  bool clearKey,
 });
 
 /// Drives the first run: which step, what each step probed, what it wrote.
@@ -273,11 +313,11 @@ class SetupController extends StateNotifier<SetupState> {
     required this.paths,
     required this.readPrefs,
     required this.setModelsFolder,
-    required this.applyTierDefaults,
     this.probe,
     this.storedBearer,
-    required this.useBox,
-    required this.usePlacement,
+    required this.useGenerative,
+    required this.useDecision,
+    this.checkDecision,
     required this.auth,
     required this.notifier,
     required this.seedAuthorization,
@@ -295,51 +335,34 @@ class SetupController extends StateNotifier<SetupState> {
   final AppPrefs Function() readPrefs;
   final Future<void> Function(String) setModelsFolder;
 
-  /// Writes this machine's tier defaults — the stage picks and the draft
-  /// policy. A CLOSURE for the same reason the two above are: the prefs
-  /// notifier's state is protected, and this controller is told what to do
-  /// rather than reaching for the provider.
-  final Future<void> Function(MachineTier) applyTierDefaults;
-
   /// Asks a model server what it serves. Handed DOWN, through [SetupFlow], to
   /// the Where step's form, which is what discovers a model name on Connect.
   /// Null takes that form's button off, the discipline every optional control
   /// in this app follows.
   final Future<ModelProbeResult> Function(String url, {String? bearer})? probe;
 
-  /// Writes the two addresses, the two discovered model names, a key per
-  /// server and the box placement. The two targets and the stage map are a
-  /// RULE since Round H and are written nowhere. A CLOSURE for the reason the
-  /// writes above are: the prefs notifier's state is protected.
-  ///
-  /// The two keys are SECRETS and pass straight through to the keychain. They
-  /// are never stored on this controller and never enter [SetupState]. Null
-  /// means "keep the stored one": a re-entry with a key already in the
-  /// keychain moves on with the field blank rather than asking for a second
-  /// paste, the form's own contract.
-  final Future<void> Function({
-    required String bigUrl,
-    required String smallUrl,
-    required String bigModel,
-    required String smallModel,
-    String? bigKey,
-    String? smallKey,
-    required MachineTier hardwareTier,
-  }) useBox;
+  /// Points the GENERATIVE role somewhere and writes the tier's draft
+  /// policy: this Mac (with the managed model chosen here) or the owner's
+  /// server. A CLOSURE because the prefs notifier's state is protected, and
+  /// this controller is told what to do rather than reaching for the
+  /// provider. The key is a SECRET and passes straight through to the
+  /// keychain; it never enters [SetupState].
+  final GenerativeWriter useGenerative;
+
+  /// Points the DECISION role somewhere, on [useGenerative]'s terms.
+  final DecisionWriter useDecision;
+
+  /// Asks the server a decision Connect names whether it IS the decision
+  /// model, before anything is written: throws the sentence as an
+  /// [ArgumentError] when it is not. Null asks nothing, which is a test's
+  /// controller.
+  final Future<void> Function(ModelServersPayload server)? checkDecision;
 
   /// Looks up one target's stored token for a probe made with the key field
   /// blank. Handed down to the same form. A LOOKUP by id, never the value;
   /// null when the host has no keychain to ask, and the probe then goes
   /// without a key.
   final String? Function(String targetId)? storedBearer;
-
-  /// Moves the install to a placement and clears out the stage entries the app
-  /// itself wrote. Managed's answer to **Where the models run**, wired so
-  /// that both answers have one shape.
-  final Future<void> Function(
-    ModelPlacement placement, {
-    required MachineTier hardwareTier,
-  }) usePlacement;
 
   final AuthSession Function() auth;
   final DesktopNotifier notifier;
@@ -384,23 +407,19 @@ class SetupController extends StateNotifier<SetupState> {
     await probeHardware();
     if (!mounted) return;
     final prefs = readPrefs();
-    // The stored answer, before anything reads [tier]: the `done` branch below
-    // compares the ledger against [resolvedManifest], and on a box install
-    // that is the embedding model alone. It also means a re-entry through
-    // "Set up again" opens the where step knowing which install this is, so
-    // choosing Managed there writes the undo.
-    //
-    // ONLY User defined is seeded, and since Round H that is a FRESH install
-    // on any build with a compiled address: `defaultModelPlacement` is the
-    // box whenever `BOND_BOX_URL` was passed. Preselecting it answers
-    // nothing, because the form keeps the way forward behind its own press; a
-    // preselected Managed would put a live Continue under a question nobody
-    // had been asked. A Managed re-entry loses nothing by asking again:
-    // choosing Managed there writes the same defaults it already has.
-    if (prefs.modelPlacement == ModelPlacement.box) {
-      if (!mounted) return;
-      state = state.copyWith(placement: ModelPlacement.box);
-    }
+    // The stored answers, before anything reads [tier]: the `done` branch
+    // below compares the ledger against [resolvedManifest], and on an install
+    // whose generative model runs on the owner's server that is the
+    // embedding model alone. They are also the step's DEFAULTS: the
+    // generative model on Your server when the build compiled an address
+    // (`defaultModelPlacement`), on this Mac otherwise; the decision model
+    // on this Mac. Seeding writes nothing: the Where step's own press does.
+    if (!mounted) return;
+    state = state.copyWith(
+      placement: prefs.modelPlacement,
+      decisionPlacement: prefs.decisionPlacement,
+      generativeManaged: prefs.generativeManagedModel,
+    );
     SetupStep step = SetupStep.welcome;
     MigrationReport? migration;
     var canReturn = false;
@@ -442,65 +461,100 @@ class SetupController extends StateNotifier<SetupState> {
 
   // ── Where the models run ─────────────────────────────────────────────────
 
-  /// Picks User defined. Nothing is written until the form's Continue: the
-  /// choice reveals the form and nothing more.
+  /// Picks Your server for the generative model. Nothing is written until
+  /// the form's Continue: the choice reveals the form and nothing more.
   void chooseBox() {
     if (!mounted) return;
     state = state.copyWith(placement: ModelPlacement.box);
   }
 
-  /// Picks Managed. Nothing is written until the step's own Continue.
+  /// Picks This Mac for the generative model. Nothing is written until the
+  /// step's own Continue.
   void chooseLocal() {
     if (!mounted) return;
     state = state.copyWith(placement: ModelPlacement.local);
   }
 
-  /// The step's Continue, from either card.
+  /// Picks where the decision model runs. Nothing is written: This Mac is
+  /// written by the step's way forward, Your server by that form's Connect.
+  void chooseDecision(ModelPlacement placement) {
+    if (!mounted) return;
+    state = state.copyWith(decisionPlacement: placement);
+  }
+
+  /// Picks the managed generative model, `bond-prose` or `bond-bulk`. The
+  /// 27B is refused on the inbox tier, where the screen does not offer it.
+  void chooseGenerativeManaged(String id) {
+    if (!mounted) return;
+    if (id == routerProseId && lowMemory) return;
+    state = state.copyWith(generativeManaged: id);
+  }
+
+  /// What the step says when the decision model was sent to Your server and
+  /// that server has not been connected yet.
+  static const String decisionFirstText =
+      'Connect the decision server first, or choose This Mac for it.';
+
+  /// The decision form's Connect: writes the decision role to the owner's
+  /// server at once, and stays on the step. NOTHING is caught: a server that
+  /// is not the decision model, or a refused write, goes back to the form,
+  /// which draws it under its field.
+  Future<void> connectDecision(ModelServersPayload server) async {
+    await checkDecision?.call(server);
+    await useDecision(
+      placement: ModelPlacement.box,
+      url: server.url,
+      model: server.model,
+      key: server.key,
+      clearKey: server.clearKey,
+    );
+  }
+
+  /// The step's way forward, from either generative card.
   ///
-  /// Under User defined the FORM is the press: it has refused per field,
-  /// asked both servers what they serve and discovered the two names before
-  /// this runs, and what arrives here is the pair it means to write. The
-  /// refusals are the form's now, and a press that reaches here with nothing
-  /// to write is a bug rather than a state, so it writes nothing.
+  /// Under Your server the generative FORM is the press: it has refused,
+  /// probed and discovered before this runs, and what arrives here is the
+  /// server it means to write. A press that reaches here with nothing to
+  /// write is a bug rather than a state, so it writes nothing.
   ///
-  /// Managed WRITES too, and that is not symmetry for its own sake. A wizard
-  /// re-entered through "Set up again" on an install that is already on
-  /// User defined would otherwise leave `model_placement = box` standing
-  /// while `finish()` applied this machine's tier defaults on top — an
-  /// install claiming to run locally with every stage still resolving to a
-  /// server it no longer means to use. [AppPrefsNotifier.usePlacement] is
-  /// called unconditionally rather than only when the stored answer was the
-  /// box: the entry sweep finds nothing to drop on a first run, and the tier
-  /// write is the one `finish()` was going to make anyway.
+  /// This Mac WRITES too: a wizard re-entered through "Set up again" on an
+  /// install whose generative model is on the owner's server would
+  /// otherwise leave it there while `finish()` applied this machine's
+  /// defaults on top. The addresses and the keys are KEPT: changing where
+  /// the work runs is not forgetting how to reach the servers.
   ///
-  /// It KEEPS the addresses and the keys. Changing where the work runs is not
-  /// forgetting how to reach the servers, and a tester who tries Managed and
-  /// goes back should not have to paste the key again. The Models page
-  /// behaves the same way.
+  /// The decision role is checked FIRST and written with it: on This Mac it
+  /// is written here; on Your server it must already have been connected by
+  /// its own form, and a press that has not is refused with
+  /// [decisionFirstText] before anything is written.
   ///
-  /// The tier is the HARDWARE's, read here rather than through [tier], which
-  /// answers `remote` while the placement is still the box.
-  ///
-  /// NOTHING is caught: a refused write propagates to the form, which is the
-  /// thing that can draw the sentence under its own fields.
-  Future<void> continueFromWhere({ModelServersPayload? servers}) async {
+  /// The tier is the HARDWARE's. NOTHING is caught: a refused write
+  /// propagates to the form, which is the thing that can draw the sentence.
+  Future<void> continueFromWhere({ModelServersPayload? generative}) async {
     final hardwareTier = machineTierFor(state.hardware?.memoryBytes ?? 0);
+    if (state.decisionPlacement == ModelPlacement.box &&
+        readPrefs().decisionPlacement != ModelPlacement.box) {
+      throw ArgumentError(decisionFirstText);
+    }
     if (placement == ModelPlacement.box) {
-      // The form has refused, probed and discovered before this runs; a press
-      // that reaches here with nothing to write is a bug, not a state, and
-      // writes nothing.
-      if (servers == null) return;
-      await useBox(
-        bigUrl: servers.bigUrl,
-        smallUrl: servers.smallUrl,
-        bigModel: servers.bigModel,
-        smallModel: servers.smallModel,
-        bigKey: servers.bigKey,
-        smallKey: servers.smallKey,
+      if (generative == null) return;
+      await useGenerative(
+        placement: ModelPlacement.box,
+        url: generative.url,
+        model: generative.model,
+        key: generative.key,
+        clearKey: generative.clearKey,
         hardwareTier: hardwareTier,
       );
     } else {
-      await usePlacement(ModelPlacement.local, hardwareTier: hardwareTier);
+      await useGenerative(
+        placement: ModelPlacement.local,
+        managedModel: state.generativeManaged,
+        hardwareTier: hardwareTier,
+      );
+    }
+    if (state.decisionPlacement == ModelPlacement.local) {
+      await useDecision(placement: ModelPlacement.local);
     }
     if (!mounted) return;
     await _goTo(SetupStep.models);
@@ -617,26 +671,54 @@ class SetupController extends StateNotifier<SetupState> {
   /// on a machine whose memory could not be read, it is
   /// [MachineTier.full] — the never-refuse rule [machineTierFor] states.
   ///
-  /// On [ModelPlacement.box] it is [MachineTier.remote] whatever the memory
-  /// is: this Mac serves the embedding model and nothing else, so the models
-  /// step lists one file, the storage step sizes one, the download step
-  /// fetches one and `init`'s ledger comparison asks for one.
-  MachineTier get tier => placement == ModelPlacement.box
-      ? MachineTier.remote
-      : machineTierFor(state.hardware?.memoryBytes ?? 0);
+  MachineTier get tier => machineTierFor(state.hardware?.memoryBytes ?? 0);
 
   /// The answer so far, defaulting to this Mac. Null means nobody has chosen
   /// yet, and the steps before the choice read the same as they always did.
   ModelPlacement get placement => state.placement ?? ModelPlacement.local;
 
-  /// The manifest as [tier] wants it. THE view every step reads: the models
-  /// step's rows and total, the disk preflight, the download run, the ledger
-  /// check and the preset the supervisor starts.
-  ModelManifest get resolvedManifest => manifest.forTier(tier);
+  /// The files this install DOWNLOADS under the role placements. THE view
+  /// every step reads: the models step's rows and total, the disk preflight,
+  /// the download run and the ledger check.
+  ///
+  /// The roles' manifest (`ModelManifest.forRoles`: embeddings, the decision
+  /// model when it runs here, the managed generative model when that runs
+  /// here — so choosing User defined drops the chat model from the download)
+  /// without the hand-installed entries, which are never downloaded: a
+  /// decision model that is not installed never holds the wizard up.
+  ModelManifest get resolvedManifest {
+    return manifest
+        .forRoles(
+          hardwareTier: tier,
+          decisionManaged: state.decisionPlacement == ModelPlacement.local,
+          generativeManagedId: placement == ModelPlacement.box
+              ? null
+              : managedGenerativeIdFor(tier, state.generativeManaged),
+        )
+        .downloadable;
+  }
+
+  /// The decision model's entry when it runs on this Mac, or null. It is
+  /// installed by hand (`make decide-install`) and never downloaded, so the
+  /// models step lists it apart from the downloads.
+  ModelFile? get localDecisionModel =>
+      state.decisionPlacement == ModelPlacement.local
+          ? manifest.byRoleOrNull(ModelRole.decide)
+          : null;
+
+  /// Whether [localDecisionModel]'s files are in the models folder.
+  bool get decisionInstalled {
+    final file = localDecisionModel;
+    if (file == null) return false;
+    return ModelManifest.localInstalled(
+      file,
+      readPrefs().effectiveModelsFolder(paths),
+    );
+  }
 
   /// Enough memory for the inbox, not enough for the writing model. A
-  /// warning rather than a refusal: triage, extraction and search all run on
-  /// the two small models, and they fit anywhere.
+  /// warning rather than a refusal: the decision model, the embedding model
+  /// and the 4B fit anywhere, and the 4B is the generative model here.
   ///
   /// It reads the TIER rather than a threshold of its own, so there is one
   /// answer to "is this Mac small" and the sentence the device step shows
@@ -835,17 +917,21 @@ class SetupController extends StateNotifier<SetupState> {
     }
     var saved = false;
     try {
-      // BEFORE the stored word and before the server: the stage picks are
-      // what the first drain resolves a target through, and a machine with no
-      // writing model must not have six stages pointing at a server this tier
-      // never starts. A write that throws leaves the wizard on this screen
-      // with the button again, exactly as a half-written setup does.
-      // Only on the local placement. `applyTierDefaults` returns at once on
-      // [MachineTier.remote] anyway, and saying so here is what keeps the
-      // user-defined adoption's stage map obviously untouched by the wizard's
-      // last step.
+      // BEFORE the stored word and before the server: the generative
+      // placement, the tier and the draft policy are what the first drain
+      // resolves through. A write that throws leaves the wizard on this
+      // screen with the button again, exactly as a half-written setup does.
+      // Only on the local placement: the user-defined adoption was written
+      // by the form's own press and the wizard's last step leaves it alone.
       if (placement == ModelPlacement.local) {
-        await applyTierDefaults(tier);
+        await useGenerative(
+          placement: ModelPlacement.local,
+          managedModel: state.generativeManaged,
+          hardwareTier: tier,
+        );
+      }
+      if (state.decisionPlacement == ModelPlacement.local) {
+        await useDecision(placement: ModelPlacement.local);
       }
       // The stash exists only while the welcome step is offering a way back;
       // finishing is the end of that offer, and a leftover value would have
@@ -982,31 +1068,48 @@ final setupControllerProvider =
     readPrefs: () => ref.read(appPrefsProvider),
     setModelsFolder: (path) =>
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
-    applyTierDefaults: (tier) =>
-        ref.read(appPrefsProvider.notifier).applyTierDefaults(tier),
     probe: ModelServerProbe().probe,
     storedBearer: ref.read(appPrefsProvider.notifier).bearerFor,
-    useBox: ({
-      required bigUrl,
-      required smallUrl,
-      required bigModel,
-      required smallModel,
-      bigKey,
-      smallKey,
+    useGenerative: ({
+      required placement,
+      managedModel,
+      url,
+      model,
+      key,
+      clearKey = false,
       required hardwareTier,
     }) =>
-        ref.read(appPrefsProvider.notifier).useBox(
-              bigUrl: bigUrl,
-              smallUrl: smallUrl,
-              bigModel: bigModel,
-              smallModel: smallModel,
-              bigKey: bigKey,
-              smallKey: smallKey,
+        ref.read(appPrefsProvider.notifier).useGenerative(
+              placement: placement,
+              managedModel: managedModel,
+              url: url,
+              model: model,
+              key: key,
+              clearKey: clearKey,
               hardwareTier: hardwareTier,
             ),
-    usePlacement: (placement, {required hardwareTier}) => ref
-        .read(appPrefsProvider.notifier)
-        .usePlacement(placement, hardwareTier: hardwareTier),
+    useDecision: ({
+      required placement,
+      url,
+      model,
+      key,
+      clearKey = false,
+    }) =>
+        ref.read(appPrefsProvider.notifier).useDecision(
+              placement: placement,
+              url: url,
+              model: model,
+              key: key,
+              clearKey: clearKey,
+            ),
+    checkDecision: (server) => refuseWrongDecisionServer(
+          ref.read(decisionClientProvider),
+          ref.read(appPrefsProvider.notifier),
+          url: server.url,
+          model: server.model,
+          key: server.key,
+          clearKey: server.clearKey,
+        ),
     auth: () => ref.read(authSessionProvider),
     notifier: ref.watch(desktopNotifierProvider),
     // Late-bound: reading the service provider here would build the whole

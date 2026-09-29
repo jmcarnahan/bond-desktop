@@ -22,7 +22,7 @@ import '../models/message_models.dart';
 ///    something about the message rather than about the model, which is why it
 ///    comes first.
 ///  * a non-empty [Message.actionItems] — the extractor's prompt writes those
-///    as "things the READER must do" (`llm/triage_task.dart`), so an action
+///    as "things the READER must do" (`llm/message_text_task.dart`), so an action
 ///    item names the owner by construction. This is what catches the turn that
 ///    asked the group to confirm owners without typing anybody's name.
 ///

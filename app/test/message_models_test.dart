@@ -450,37 +450,4 @@ void main() {
       expect(m.actionItems, isEmpty);
     });
   });
-
-  group('TriageResult', () {
-    test('fallback is the quiet middle', () {
-      final r = TriageResult.fallback();
-      expect(r.urgency, 'normal');
-      expect(r.category, 'other');
-      expect(r.summary, '');
-      expect(r.needsAction, isFalse);
-      expect(r.actionItems, isEmpty);
-      expect(r.replyExpected, isFalse);
-      expect(r.deadline, '');
-    });
-
-    test('fromJson defaults match the fallback on an empty payload', () {
-      final r = TriageResult.fromJson(const {});
-      expect(r.urgency, 'normal');
-      expect(r.category, 'other');
-      expect(r.summary, '');
-      expect(r.needsAction, isFalse);
-      expect(r.actionItems, isEmpty);
-      expect(r.replyExpected, isFalse);
-      expect(r.deadline, '');
-    });
-
-    test('fromJson reads the v2 answers when the model gives them', () {
-      final r = TriageResult.fromJson(const {
-        'reply_expected': true,
-        'deadline': 'end of the week',
-      });
-      expect(r.replyExpected, isTrue);
-      expect(r.deadline, 'end of the week');
-    });
-  });
 }

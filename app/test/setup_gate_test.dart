@@ -98,11 +98,12 @@ void main() {
     SetupStore? overStore,
     int memoryBytes = 0,
     SystemInfo? system,
+    ModelManifest? manifest,
   }) async {
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
       appPathsProvider.overrideWithValue(AppPaths(support)),
-      modelManifestProvider.overrideWithValue(testManifest()),
+      modelManifestProvider.overrideWithValue(manifest ?? testManifest()),
       // A downloader pointed at the loopback hub with nothing published on
       // it: the model-bump case opens the wizard ON the download step, and a
       // run against the real Hugging Face is not a thing a test may start.
@@ -339,6 +340,44 @@ void main() {
     await store.set(SetupStore.setupKey, SetupStep.done.name);
     await seedLedger(tier: MachineTier.inbox);
     await makeContainer(memoryBytes: 17179869184);
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('a hand-installed decision model that is missing does not '
+      'reopen the wizard', (tester) async {
+    // The decision model is installed by `make decide-install`, never
+    // downloaded, so it has no ledger row and may not be on disk at all. A
+    // missing one parks the decision pass; it must not send a finished setup
+    // back through the wizard for a file the wizard cannot fetch.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
+    await makeContainer(manifest: testManifest(withDecide: true));
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('a full Mac goes through without the 4B', (tester) async {
+    // One generative model: the full tier serves the 27B and never asked for
+    // the 4B, so a ledger without it is complete.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    var ledger = DownloadLedger.empty;
+    for (final id in [routerEmbedId, routerProseId]) {
+      final model = testManifest().byId(id);
+      ledger = ledger.record(FileDownloadState(
+        id: model.id,
+        status: DownloadStatus.done,
+        receivedBytes: model.sizeBytes,
+        totalBytes: model.sizeBytes,
+        sha256: model.sha256,
+      ));
+    }
+    await store.recordDownload(ledger);
+    await makeContainer(memoryBytes: 68719476736);
 
     await mount(tester);
 

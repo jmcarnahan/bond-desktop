@@ -4,6 +4,8 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/chat_roster.dart'
+    show isTeamsNamesSubject, teamsNamesSubject;
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/sender_display.dart';
@@ -14,6 +16,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// End-to-end chat syncs: a scripted Graph on one side, a real sqlite database
 /// on the other, and the real [GraphAuth], [GraphTeams] and [TeamsSync] in
@@ -1627,8 +1630,12 @@ void main() {
       // into the queue. Finished means a result, not just a status — a row
       // carrying a status and no verdict is what the v2 re-judgement pass
       // beside this one exists to pick up.
-      await store.writeTriage('teams', 'in-window',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'teams',
+        'in-window',
+        status: 'triaged',
+      );
       await build().syncNow();
       expect((await row('in-window'))['triage_status'], 'triaged');
     });
@@ -1678,8 +1685,12 @@ void main() {
 
       // Self-exhausting, exactly like the gate re-pend above it: once v2 has
       // answered, the next refresh leaves the row alone.
-      await store.writeTriage('teams', 'v1-judged',
-          status: 'triaged', result: TriageResult.fallback());
+      await writeTriaged(
+        store,
+        'teams',
+        'v1-judged',
+        status: 'triaged',
+      );
       graph.chats
         ..clear()
         ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
@@ -1857,6 +1868,55 @@ void main() {
       graph.requests.clear();
       await sync.syncNow();
       expect(graph.requests, isNotEmpty);
+    });
+  });
+
+  /// The names rule `_subjectFor` uses on first sight, public so the
+  /// clustering card can recognise the title it wrote.
+  group('teamsNamesSubject', () {
+    test('names the people, three at most, ellipsis after', () {
+      expect(
+        teamsNamesSubject([
+          {'name': 'Sarah Whitfield', 'email': 'teams:u1'},
+          {'name': null, 'email': 'teams:u2'},
+          {'name': '', 'email': 'teams:u3'},
+        ]),
+        'Sarah Whitfield, teams:u2',
+      );
+      expect(
+        teamsNamesSubject([
+          for (var i = 1; i <= 5; i++) {'name': 'Person $i'},
+        ]),
+        'Person 1, Person 2, Person 3…',
+      );
+      expect(teamsNamesSubject([{'name': ''}]), isNull);
+      expect(teamsNamesSubject(const []), isNull);
+    });
+
+    test('isTeamsNamesSubject reads the derived title and nothing else', () {
+      final roster = [
+        {'name': 'Sarah Whitfield', 'email': 'teams:u1'},
+        {'name': 'Eric Vance', 'email': 'teams:u2'},
+        {'name': 'Whitfield, Dana', 'email': 'teams:u3'},
+        {'name': 'Tom Reyes', 'email': 'teams:u4'},
+      ];
+      // Exactly what the sync would write over this roster.
+      expect(isTeamsNamesSubject(teamsNamesSubject(roster), roster), isTrue);
+      // Written when the roster was smaller, and never updated since.
+      expect(isTeamsNamesSubject('Sarah Whitfield', roster), isTrue);
+      expect(isTeamsNamesSubject('eric vance, Sarah Whitfield', roster), isTrue);
+      // A comma inside a directory name is still one name.
+      expect(
+        isTeamsNamesSubject('Whitfield, Dana, Tom Reyes…', roster),
+        isTrue,
+      );
+      // A real topic, or one that only mentions somebody.
+      expect(isTeamsNamesSubject('Website redesign', roster), isFalse);
+      expect(isTeamsNamesSubject('Sarah Whitfield offsite', roster), isFalse);
+      expect(isTeamsNamesSubject('Sarah Whitfield, Budget', roster), isFalse);
+      expect(isTeamsNamesSubject('', roster), isFalse);
+      expect(isTeamsNamesSubject(null, roster), isFalse);
+      expect(isTeamsNamesSubject('Sarah Whitfield', const []), isFalse);
     });
   });
 }

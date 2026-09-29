@@ -20,26 +20,24 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/fake_embed_server.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
 
-/// A client scripted by TASK rather than by position: the handler asks
-/// `reply_decision` first and `draft_reply` second on the eager path, and
-/// `draft_reply` alone when a person asked, so the two named steps say which
-/// half of the pair a test is scripting.
+/// A client scripted by TASK rather than by position. The handler makes one
+/// model call, `draft_reply`: whether a reply is wanted was decided at triage
+/// and is read from the store.
 ///
 /// [chunks] is what a STREAMED draft call pushes through `onText`; the plain
 /// calls never touch it. A streamed call still answers with its [draft] step,
 /// which is either the chunks [decoded] or the failure the stream dies with.
 ScriptedLlm draftClient({
-  Object? decision,
   Object? draft,
   List<String> chunks = draftChunks,
 }) {
   final llm = ScriptedLlm();
-  if (decision != null) llm.answer('reply_decision', decision);
   if (draft != null) llm.answer('draft_reply', draft);
   llm.streamChunks = chunks;
   return llm;
@@ -78,14 +76,6 @@ const List<String> draftChunks = [
       'dy":"Friday is safer."}],"reply_body":"Hi Sarah — Thursday',
   ' still works. I will send the addendum today."}',
 ];
-
-/// The reply-decision call's answer. It comes FIRST in every script: the
-/// handler asks whether a reply is owed before it spends anything writing one.
-Map<String, dynamic> decision({
-  bool needsReply = true,
-  String reason = 'Sarah is waiting on a date.',
-}) =>
-    {'needs_reply': needsReply, 'reason': reason};
 
 /// A retriever that answers from a fixture and records what it was asked.
 ///
@@ -352,7 +342,7 @@ void main() {
         () async {
       await seedInbound(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
       await seedInbound(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress), id: 'm1');
 
@@ -372,17 +362,18 @@ void main() {
       expect(await store.getDraftForMessage('email', 'm2'), isNull);
     });
 
-    test('the decision runs first, cheap, and the draft after it', () async {
+    test('one model call, the draft, at zero and at the draft budget',
+        () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
-      // Both at zero: the same message must get the same verdict and the same
-      // reply twice. The budgets differ because the answers do — a yes/no and
-      // a sentence, then a reply long enough to send.
-      expect(llm.temperatures, [0.0, 0.0]);
-      expect(llm.tokenBudgets, [256, DraftHandler.draftMaxTokens]);
+      // Zero: the same message must get the same reply twice. Whether a reply
+      // is wanted was decided at triage and costs no call here.
+      expect(llm.schemaNames, ['draft_reply']);
+      expect(llm.temperatures, [0.0]);
+      expect(llm.tokenBudgets, [DraftHandler.draftMaxTokens]);
     });
 
     test('the draft stage lands done and stamps the row', () async {
@@ -391,7 +382,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          draftClient(decision: decision(), draft: answer()),
+          draftClient(draft: answer()),
           progress: progress,
         ),
       );
@@ -421,7 +412,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          draftClient(decision: decision(), draft: answer()),
+          draftClient(draft: answer()),
           progress: progress,
         ),
       );
@@ -431,59 +422,185 @@ void main() {
   });
 
   group('the decision', () {
-    test('a no stores nothing and spends one call', () async {
+    // What triage stored, read BEFORE `_gather`: the decision model's
+    // reply_expected probability, or the triage column for a row it never
+    // read.
+    Future<void> decide(double replyP, {String id = 'm2'}) =>
+        store.writeDecision(
+          'email',
+          id,
+          fakeDecision(fakeAnswers(replyExpected: replyP)),
+          qhash: 'test',
+          ownerKnown: true,
+        );
+    Future<void> storeReplyExpected(int? value, {String id = 'm2'}) =>
+        db.customUpdate(
+          'UPDATE messages SET reply_expected = ? '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: [Variable(value), Variable('email'), Variable(id)],
+        );
+
+    test('a no from the decision model stores nothing and spends nothing',
+        () async {
       await seedInbound();
-      final llm = draftClient(
-        decision: decision(
-          needsReply: false,
-          reason: 'A receipt, nobody is waiting.',
-        ),
-        draft: answer(),
-      );
+      await decide(0.12);
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
-      expect(llm.userMessages, hasLength(1),
+      expect(llm.userMessages, isEmpty,
           reason: 'the drafting model is never reached');
       expect(await store.getDraftForMessage('email', 'm2'), isNull);
-      // A real end state: the model read the thread and said no reply is owed.
+      // A real end state: the model read the message and said no reply is
+      // owed.
       expect((await progressOf('m2'))['draft_state'], 'skipped');
     });
 
-    test('a no records both the verdict and the sentence behind it', () async {
-      // `_skip`'s payload, pinned once for the four ends that share it: the
-      // item is `skipped` rather than `ok`, `reason` says which end, and `why`
-      // carries the model's own sentence — which only this end has.
+    test('a no pays for no gathering: no retrieval, no pack, no embedding',
+        () async {
       await seedInbound();
+      await decide(0.2);
+      final embed = FakeEmbedServer();
+      final retriever = FakeRetriever(store);
+      final directories = FakeContextRetriever(store, ContextStore(db));
+      final llm = draftClient(draft: answer());
+
+      await runOne(DraftHandler(
+        store,
+        llm,
+        attachments: retriever,
+        contextDirs: directories,
+        embeddings: embed.client,
+        progress: progress,
+      ));
+
+      expect(retriever.calls, 0);
+      expect(directories.calls, 0);
+      expect(embed.calls, 0);
+      expect(llm.schemaNames, isEmpty,
+          reason: 'no context_select and no draft');
+    });
+
+    test('a no records the verdict and the probability behind it', () async {
+      // `_skip`'s payload: the item is `skipped` rather than `ok`, `reason`
+      // says which end, and `why` says what the decision model said.
+      await seedInbound();
+      await decide(0.123);
       final log = _Recorder();
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(
-            needsReply: false,
-            reason: 'A receipt, nobody is waiting.',
-          ), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         progress: progress,
       ));
 
       expect(log.notes['reason'], 'no_reply_needed');
-      expect(log.notes['why'], 'A receipt, nobody is waiting.');
+      expect(log.notes['why'],
+          'The decision model put the chance a reply is expected at 0.12.');
+      expect(log.notes['decision'], 'decision_model');
+      expect(log.notes['reply_p'], 0.12);
     });
 
-    test('reads the message and the thread before it', () async {
-      await seedOutbound(body: 'What is the current expiry? — Jo');
-      await seedInbound(body: 'It expires Wednesday.');
-      final llm = draftClient(decision: decision(), draft: answer());
+    test('a yes proceeds to the draft and says what decided it', () async {
+      await seedInbound();
+      await decide(0.87);
+      final llm = draftClient(draft: answer());
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        llm,
+        activityLog: log,
+        progress: progress,
+      ));
+
+      expect(llm.schemaNames, ['draft_reply']);
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+      expect(log.notes['decision'], 'decision_model');
+      expect(log.notes['reply_p'], 0.87);
+      expect(log.notes['reason'], isNull);
+    });
+
+    test('the threshold is replyYes: exactly at it is a yes', () async {
+      await seedInbound();
+      await decide(0.5);
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
-      expect(llm.userMessages.first, contains('It expires Wednesday.'));
-      expect(llm.userMessages.first, contains('What is the current expiry?'));
-      expect(llm.userMessages.first, contains('Decide about ONLY this'));
+      expect(llm.schemaNames, ['draft_reply']);
     });
 
-    test('and never a message that landed after the one it is judging',
+    test('a row decided before the decision model falls back to triage',
+        () async {
+      // No `message_decisions` row: the stored `reply_expected` column says.
+      await seedInbound();
+      await storeReplyExpected(0);
+      final llm = draftClient(draft: answer());
+      final retriever = FakeRetriever(store);
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        llm,
+        attachments: retriever,
+        activityLog: log,
+        progress: progress,
+      ));
+
+      expect(llm.userMessages, isEmpty);
+      expect(retriever.calls, 0);
+      expect((await progressOf('m2'))['draft_state'], 'skipped');
+      expect(log.notes['reason'], 'no_reply_needed');
+      expect(log.notes['why'], 'Triage judged no reply is expected.');
+      expect(log.notes['decision'], 'stored');
+    });
+
+    for (final value in [1, null]) {
+      test('and a stored reply_expected of $value lets the draft proceed',
+          () async {
+        await seedInbound();
+        await storeReplyExpected(value);
+        final llm = draftClient(draft: answer());
+        final log = _Recorder();
+
+        await runOne(DraftHandler(
+          store,
+          llm,
+          activityLog: log,
+          progress: progress,
+        ));
+
+        expect(llm.schemaNames, ['draft_reply']);
+        expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+        expect(log.notes['decision'], 'stored');
+      });
+    }
+
+    test('the decision model outranks the stored column', () async {
+      await seedInbound();
+      await storeReplyExpected(1);
+      await decide(0.1);
+      final llm = draftClient(draft: answer());
+
+      await runOne(DraftHandler(store, llm, progress: progress));
+
+      expect(llm.userMessages, isEmpty);
+    });
+
+    test('the draft reads the message and the thread before it', () async {
+      await seedOutbound(body: 'What is the current expiry? — Jo');
+      await seedInbound(body: 'It expires Wednesday.');
+      final llm = draftClient(draft: answer());
+
+      await runOne(DraftHandler(store, llm, progress: progress));
+
+      expect(llm.userMessages.single, contains('It expires Wednesday.'));
+      expect(llm.userMessages.single, contains('What is the current expiry?'));
+    });
+
+    test('and never a message that landed after the one it is answering',
         () async {
       await seedInbound(
         id: 'm1',
@@ -495,7 +612,7 @@ void main() {
         receivedAt: '2026-08-29T10:00:00Z',
         body: 'Never mind, we shipped it.',
       );
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress), id: 'm1');
 
@@ -509,6 +626,8 @@ void main() {
 
     test('a draft a person asked for skips the decision entirely', () async {
       await seedInbound();
+      // Even a decision that says no: pressing the button is the answer.
+      await decide(0.05);
       final llm = draftClient(draft: answer());
       final log = _Recorder();
 
@@ -554,7 +673,8 @@ void main() {
 
     test('a malformed payload still runs the decision', () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      await decide(0.9);
+      final llm = draftClient(draft: answer());
       final log = _Recorder();
 
       await DraftHandler(store, llm, activityLog: log, progress: progress).run({
@@ -566,13 +686,14 @@ void main() {
 
       // Unreadable is "nobody asked", never "skip the judgement": the flag
       // only ever skips work when it was definitely set.
-      expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
-      expect(log.notes['decision'], isNull);
+      expect(llm.schemaNames, ['draft_reply']);
+      expect(log.notes['decision'], 'decision_model');
     });
 
     test('only the literal true skips it', () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      await decide(0.05);
+      final llm = draftClient(draft: answer());
 
       await DraftHandler(store, llm, progress: progress).run({
         'task_kind': 'draft',
@@ -583,7 +704,8 @@ void main() {
         'payload_json': '{"asked":"true"}',
       });
 
-      expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
+      expect(llm.schemaNames, isEmpty,
+          reason: 'not asked, so the decision says no');
     });
 
     test('a message a machine wrote costs no call at all', () async {
@@ -592,7 +714,7 @@ void main() {
       // the question may only have arrived since. Nothing gated this message:
       // the headers are the whole of the evidence.
       await seedInbound(headers: {'List-Unsubscribe': '<https://x.example.com/u>'});
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       final log = _Recorder();
 
       await runOne(DraftHandler(
@@ -602,8 +724,7 @@ void main() {
         progress: progress,
       ));
 
-      // Not even the reply decision: a judgement about whether a machine is
-      // waiting for an answer is not a judgement worth a model call.
+      // Not even the reply decision: the suppression is asked first.
       expect(llm.userMessages, isEmpty);
       expect(await store.getDraftForMessage('email', 'm2'), isNull);
       expect((await progressOf('m2'))['draft_state'], 'skipped');
@@ -620,7 +741,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         attachments: retriever,
         progress: progress,
       ));
@@ -658,7 +779,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('style_examples'));
@@ -669,7 +790,7 @@ void main() {
       await seedOutbound(key: 'conv-0', to: 'someone.else@x.com');
       await seedInbound();
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, isNot(contains('style_examples')));
@@ -688,7 +809,7 @@ void main() {
       );
       await seedInbound();
 
-      final quiet = draftClient(decision: decision(), draft: answer());
+      final quiet = draftClient(draft: answer());
       await runOne(DraftHandler(store, quiet, progress: progress));
       expect(quiet.userMessages.last, contains('style_examples'));
 
@@ -703,7 +824,7 @@ void main() {
       );
       await seedInbound(id: 'm3', key: 'conv-2');
 
-      final spoken = draftClient(decision: decision(), draft: answer());
+      final spoken = draftClient(draft: answer());
       await runOne(DraftHandler(store, spoken, progress: progress), id: 'm3');
 
       expect(spoken.userMessages.last, isNot(contains('style_examples')));
@@ -731,7 +852,7 @@ void main() {
         );
       }
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress), id: 'm34');
 
       final prompt = llm.userMessages.last;
@@ -750,7 +871,7 @@ void main() {
       await seedInbound();
       await store.setPref(aboutMeKey, 'I own the website redesign and the launch.');
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       // Both calls get it: who the owner is decides whether THEY have to
@@ -772,7 +893,7 @@ void main() {
       );
       await store.addStorylineMember('s1', 'email', 'conv-1', addedBy: 'auto');
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('storyline_summary'));
@@ -783,7 +904,7 @@ void main() {
       await seedOutbound(body: 'What is the current expiry? — Jo');
       await seedInbound(body: 'It expires Wednesday.');
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('What is the current expiry?'));
@@ -797,7 +918,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('This is an email thread.'));
@@ -813,7 +934,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, isNot(contains('[[att:')));
@@ -832,7 +953,7 @@ void main() {
       );
       await seedInbound();
 
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.userMessages.last, contains('style_examples'));
@@ -842,11 +963,10 @@ void main() {
   });
 
   group('a chat drafts through the same handler', () {
-    test('a file-only chat message reaches the model as what was shared',
+    test('a file-only chat message reaches the draft as what was shared',
         () async {
-      // The reply-decision call is the one that matters: it is asked whether a
-      // message needs an answer, and a body that is nothing but a marker looks
-      // to it like a message that said nothing at all.
+      // A body that is nothing but a marker would read to the drafting model
+      // like a message that said nothing at all.
       await seedChat(body: '[[att:a1]]', hasAttachments: 1);
       await store.upsertAttachments('teams', 'chat-1-m1', [
         {
@@ -857,7 +977,7 @@ void main() {
           'size': 0,
         },
       ]);
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -865,14 +985,14 @@ void main() {
         source: 'teams',
       );
 
-      expect(llm.userMessages.first, contains('Shared a file: Contract-v2.docx'));
-      expect(llm.userMessages.first, isNot(contains('[[att:')));
+      expect(llm.userMessages.single,
+          contains('Shared a file: Contract-v2.docx'));
+      expect(llm.userMessages.single, isNot(contains('[[att:')));
     });
 
     test('and gets the chat channel note, not the email one', () async {
       await seedChat();
       final llm = draftClient(
-        decision: decision(),
         draft: answer(replyBody: 'Sending it over now.'),
       );
 
@@ -908,7 +1028,7 @@ void main() {
         'received_at': '2026-08-28T10:00:00Z',
         'body_text': 'On it — will check this afternoon.',
       });
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -927,7 +1047,7 @@ void main() {
     test('and its thread lines name the sender rather than the Graph id',
         () async {
       await seedChat();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -941,17 +1061,15 @@ void main() {
   });
 
   group('the documents in the prompt', () {
-    test('one retrieval reaches both the decision and the draft', () async {
+    test('one retrieval reaches the draft', () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       final retriever = FakeRetriever(store, answer: [excerpt()]);
 
       await runOne(DraftHandler(store, llm, attachments: retriever));
 
-      // ONE call, two prompts. A second pass would be a second embedding call
-      // for an answer that cannot come back different.
       expect(retriever.calls, 1);
-      expect(llm.userMessages.length, 2);
+      expect(llm.userMessages.length, 1);
       for (final sent in llm.userMessages) {
         expect(sent, contains('<untrusted_data source="attachment_excerpts">'));
         expect(sent, contains('The rent rises to 2,600'));
@@ -966,7 +1084,7 @@ void main() {
       final retriever = FakeRetriever(store);
 
       await runOne(
-        DraftHandler(store, draftClient(decision: decision(), draft: answer()),
+        DraftHandler(store, draftClient(draft: answer()),
             attachments: retriever),
         id: 'm1',
       );
@@ -979,7 +1097,7 @@ void main() {
     test('a handler built with no retriever drafts exactly as before',
         () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm));
 
@@ -996,7 +1114,7 @@ void main() {
 
       await DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         attachments: retriever,
       ).run({
         'task_kind': 'draft',
@@ -1017,7 +1135,7 @@ void main() {
 
       await DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         attachments: retriever,
       ).run({
         'task_kind': 'draft',
@@ -1036,7 +1154,7 @@ void main() {
           FakeRetriever(store, throws: StateError('the index fell over'));
 
       await runOne(
-        DraftHandler(store, draftClient(decision: decision(), draft: answer()),
+        DraftHandler(store, draftClient(draft: answer()),
             attachments: retriever),
       );
 
@@ -1046,27 +1164,19 @@ void main() {
   });
 
   group("the owner's own directories in the prompt", () {
-    test('one pack reaches both the decision and the draft', () async {
+    test('one pack reaches the draft', () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
       final directories = FakeContextRetriever(store, ContextStore(db),
           answer: directoryPack());
 
       await runOne(DraftHandler(store, llm, contextDirs: directories));
 
-      // ONE call, two prompts. The directories cannot have changed between
-      // the two, so a second pass would buy nothing and cost a vector read.
       expect(directories.calls, 1);
-      expect(llm.userMessages.length, 2);
-      for (final sent in llm.userMessages) {
-        expect(sent, contains('<untrusted_data source="directory_excerpts">'));
-        expect(sent, contains('Q4 rates hold at nine.'));
-      }
-      // The guidance is the draft's alone: whether an answer is OWED is not a
-      // question about how one should read.
-      expect(llm.userMessages.last, contains('source="directory_guidance"'));
-      expect(llm.userMessages.first,
-          isNot(contains('source="directory_guidance"')));
+      final sent = llm.userMessages.single;
+      expect(sent, contains('<untrusted_data source="directory_excerpts">'));
+      expect(sent, contains('Q4 rates hold at nine.'));
+      expect(sent, contains('source="directory_guidance"'));
     });
 
     test('the storylines the thread is in reach the retriever', () async {
@@ -1082,7 +1192,7 @@ void main() {
       final directories = FakeContextRetriever(store, ContextStore(db));
 
       await runOne(
-        DraftHandler(store, draftClient(decision: decision(), draft: answer()),
+        DraftHandler(store, draftClient(draft: answer()),
             contextDirs: directories),
       );
 
@@ -1097,7 +1207,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          draftClient(decision: decision(), draft: answer()),
+          draftClient(draft: answer()),
           attachments: FakeRetriever(store, answer: [excerpt()]),
           contextDirs: directories,
         ),
@@ -1127,7 +1237,7 @@ void main() {
       await seedInbound();
 
       await runOne(
-        DraftHandler(store, draftClient(decision: decision(), draft: answer())),
+        DraftHandler(store, draftClient(draft: answer())),
       );
 
       final row = (await store.getDraftForMessage('email', 'm2'))!;
@@ -1148,7 +1258,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         contextDirs: FakeContextRetriever(
           store,
           ContextStore(db),
@@ -1173,7 +1283,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         attachments: FakeRetriever(store, answer: [excerpt()]),
         contextDirs: FakeContextRetriever(store, ContextStore(db),
@@ -1197,7 +1307,7 @@ void main() {
 
       await DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ).run({
@@ -1220,7 +1330,7 @@ void main() {
 
       await DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ).run({
@@ -1244,7 +1354,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ));
@@ -1288,7 +1398,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         contextDirs: directories,
       ));
@@ -1304,7 +1414,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         contextDirs: FakeContextRetriever(store, ContextStore(db),
             answer: directoryPack()),
@@ -1321,7 +1431,7 @@ void main() {
 
       await runOne(DraftHandler(
         store,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         activityLog: log,
         contextDirs: FakeContextRetriever(store, ContextStore(db),
             throws: StateError('the index fell over')),
@@ -1404,7 +1514,7 @@ void main() {
 
       await DraftHandler(
         vecStore,
-        draftClient(decision: decision(), draft: answer()),
+        draftClient(draft: answer()),
         attachments: AttachmentRetriever(vecStore, embed.client),
         contextDirs: ContextRetriever(vecStore, directories, embed.client),
         embeddings: embed.client,
@@ -1419,7 +1529,7 @@ void main() {
     test('a handler built with no retriever drafts exactly as before',
         () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm));
 
@@ -1438,7 +1548,7 @@ void main() {
         replyToMessageId: 'm2',
         body: 'an existing draft',
       );
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1450,7 +1560,7 @@ void main() {
     });
 
     test('a message that vanished is done, not failed', () async {
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1460,7 +1570,7 @@ void main() {
 
     test('the user\'s own message is skipped', () async {
       await seedOutbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress), id: 'o1');
 
@@ -1471,7 +1581,7 @@ void main() {
 
     test('a message triage gated after the enqueue is skipped', () async {
       await seedInbound(triageStatus: 'skipped', gateReason: 'newsletter');
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
@@ -1493,7 +1603,7 @@ void main() {
         'triage_status': 'skipped',
         'gate_reason': 'teams_source',
       });
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(store, llm, progress: progress),
@@ -1509,7 +1619,6 @@ void main() {
     test('are stored beside the long form, stance and body', () async {
       await seedInbound();
       final llm = draftClient(
-        decision: decision(),
         draft: answer(options: const [
           {'stance': 'Confirm Thursday', 'reply_body': 'Thursday still works.'},
           {'stance': 'Propose Monday', 'reply_body': 'Could we say Monday?'},
@@ -1536,7 +1645,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          draftClient(decision: decision(), draft: answer()),
+          draftClient(draft: answer()),
           progress: progress,
         ),
       );
@@ -1548,7 +1657,6 @@ void main() {
     test('a half-written option does not reach the row', () async {
       await seedInbound();
       final llm = draftClient(
-        decision: decision(),
         draft: answer(options: const [
           {'stance': '', 'reply_body': 'unlabelled'},
           {'stance': 'Confirm Thursday', 'reply_body': 'Thursday still works.'},
@@ -1571,7 +1679,6 @@ void main() {
       // reply are not a reason to store a draft the worker should retry.
       await seedInbound();
       final llm = draftClient(
-        decision: decision(),
         draft: answer(replyBody: '   ', options: const [
           {'stance': 'Confirm Thursday', 'reply_body': 'Thursday works.'},
         ]),
@@ -1587,7 +1694,7 @@ void main() {
     test('throws rather than storing a blank suggestion', () async {
       await seedInbound();
       final llm =
-          draftClient(decision: decision(), draft: answer(replyBody: '   '));
+          draftClient(draft: answer(replyBody: '   '));
 
       await expectLater(
         runOne(DraftHandler(store, llm, progress: progress)),
@@ -1600,7 +1707,7 @@ void main() {
       await seedInbound();
       await store.enqueueWork('draft', 'email', 'm2');
       final llm =
-          draftClient(decision: decision(), draft: answer(replyBody: ''));
+          draftClient(draft: answer(replyBody: ''));
       final worker = AiWorker(
         store,
         handlers: [DraftHandler(store, llm, progress: progress)],
@@ -1612,7 +1719,7 @@ void main() {
       await worker.pump();
 
       expect(await store.workCounts('draft'), {'error': 1});
-      expect(llm.userMessages, hasLength(4),
+      expect(llm.userMessages, hasLength(2),
           reason: 'one retry, then the item is left alone');
       // Red only once the retries are gone — a bar that showed it in between
       // would report a state the pipeline does not consider final.
@@ -1629,7 +1736,7 @@ void main() {
         handlers: [
           DraftHandler(
             store,
-            draftClient(decision: decision(), draft: answer()),
+            draftClient(draft: answer()),
             progress: progress,
           ),
         ],
@@ -1643,7 +1750,7 @@ void main() {
       expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
     });
 
-    test('a server that is down during the DECISION leaves the item queued',
+    test('a server that is down during the DRAFT leaves the item queued',
         () async {
       await seedInbound();
       await store.enqueueWork('draft', 'email', 'm2');
@@ -1652,38 +1759,7 @@ void main() {
         handlers: [
           DraftHandler(
             store,
-            // The server is down, and the same failure is scripted for both
-            // halves so the test does not depend on which one is reached.
             draftClient(
-              decision: const LlmUnavailableException('not reachable'),
-              draft: const LlmUnavailableException('not reachable'),
-            ),
-            progress: progress,
-          ),
-        ],
-        progress: progress,
-      );
-      addTearDown(worker.dispose);
-
-      await worker.pump();
-
-      expect(await store.workCounts('draft'), {'pending': 1});
-      expect(await store.getDraftForMessage('email', 'm2'), isNull);
-      // Waiting, not finished and not failed: nothing about this message went
-      // wrong, and the stage must not read terminal.
-      expect((await progressOf('m2'))['draft_state'], 'pending');
-    });
-
-    test('and one that goes down during the DRAFT does the same', () async {
-      await seedInbound();
-      await store.enqueueWork('draft', 'email', 'm2');
-      final worker = AiWorker(
-        store,
-        handlers: [
-          DraftHandler(
-            store,
-            draftClient(
-              decision: decision(),
               draft: const LlmUnavailableException('not reachable'),
             ),
             progress: progress,
@@ -1706,7 +1782,7 @@ void main() {
       // What every test in this file, every bench and a single-slot
       // llama-server gets.
       expect(
-        DraftHandler(store, draftClient(decision: decision())).concurrency,
+        DraftHandler(store, draftClient()).concurrency,
         1,
       );
     });
@@ -1721,57 +1797,13 @@ void main() {
       var width = 2;
       final handler = DraftHandler(
         store,
-        draftClient(decision: decision()),
+        draftClient(),
         concurrency: () => width,
       );
 
       expect(handler.concurrency, 2);
       width = 8;
       expect(handler.concurrency, 8);
-    });
-  });
-
-  group('two clients', () {
-    test('the decision goes to one and the draft to the other', () async {
-      await seedInbound();
-      final decider = draftClient(decision: decision());
-      final writer = draftClient(draft: answer());
-
-      await runOne(
-        DraftHandler(store, writer, decisionClient: decider, progress: progress),
-      );
-
-      // Two stages, `reply_decision` and `draft_reply`, so a machine with a
-      // second server can put the cheap half of a prefetch somewhere else.
-      expect(decider.schemaNames, ['reply_decision']);
-      expect(writer.schemaNames, ['draft_reply']);
-      expect((await store.getDraftForMessage('email', 'm2'))!['body'],
-          startsWith('Hi Sarah — Friday works.'));
-    });
-
-    test('a no from the decision client still costs no draft', () async {
-      await seedInbound();
-      final decider = draftClient(decision: decision(needsReply: false));
-      final writer = draftClient(draft: answer());
-
-      await runOne(
-        DraftHandler(store, writer, decisionClient: decider, progress: progress),
-      );
-
-      expect(decider.schemaNames, ['reply_decision']);
-      expect(writer.schemaNames, isEmpty);
-      expect(await store.getDraftForMessage('email', 'm2'), isNull);
-    });
-
-    test('without one, both halves stay on the client it was given', () async {
-      await seedInbound();
-      final only = draftClient(decision: decision(), draft: answer());
-
-      await runOne(DraftHandler(store, only, progress: progress));
-
-      // The pre-Round-E behaviour, and what every other test in this file and
-      // every bench relies on.
-      expect(only.schemaNames, ['reply_decision', 'draft_reply']);
     });
   });
 
@@ -1793,7 +1825,7 @@ void main() {
       await runOne(
         DraftHandler(
           store,
-          draftClient(decision: decision(), draft: decoded(draftChunks)),
+          draftClient(draft: decoded(draftChunks)),
           progress: progress,
           stream: bus,
         ),
@@ -1833,15 +1865,14 @@ void main() {
     test('a handler with no bus makes the plain call it always made',
         () async {
       await seedInbound();
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(DraftHandler(store, llm, progress: progress));
 
       expect(llm.streamedCalls, 0);
-      // Decision then draft, both through `completeJson` — which is what every
-      // other test in this file, and every other fake in the suite, relies on.
-      expect(llm.schemaNames.length, 2);
-      expect(llm.schemaNames.last, 'draft_reply');
+      // Through `completeJson` — which is what every other test in this file,
+      // and every other fake in the suite, relies on.
+      expect(llm.schemaNames, ['draft_reply']);
       expect((await store.getDraftForMessage('email', 'm2'))!['body'],
           startsWith('Hi Sarah — Friday works.'));
     });
@@ -1853,7 +1884,7 @@ void main() {
       final events = <DraftStreamEvent>[];
       final sub = bus.stream.listen(events.add);
       addTearDown(sub.cancel);
-      final llm = draftClient(decision: decision(), draft: answer());
+      final llm = draftClient(draft: answer());
 
       await runOne(
         DraftHandler(
@@ -1869,7 +1900,7 @@ void main() {
       );
 
       expect(llm.streamedCalls, 0);
-      expect(llm.schemaNames, ['reply_decision', 'draft_reply']);
+      expect(llm.schemaNames, ['draft_reply']);
       expect(events, isEmpty);
       // And the draft still lands, which is the whole point of degrading
       // rather than refusing.
@@ -1882,7 +1913,7 @@ void main() {
       final bus = DraftStreamBus();
       addTearDown(bus.dispose);
       final llm =
-          draftClient(decision: decision(), draft: decoded(draftChunks));
+          draftClient(draft: decoded(draftChunks));
 
       await runOne(
         DraftHandler(
@@ -1910,7 +1941,6 @@ void main() {
           DraftHandler(
             store,
             draftClient(
-              decision: decision(),
               draft: const LlmFormatException('cut off mid-object'),
             ),
             progress: progress,
@@ -1944,7 +1974,7 @@ void main() {
         runOne(
           DraftHandler(
             refusing,
-            draftClient(decision: decision(), draft: decoded(draftChunks)),
+            draftClient(draft: decoded(draftChunks)),
             progress: progress,
             stream: bus,
           ),
@@ -1970,7 +2000,7 @@ void main() {
         runOne(
           DraftHandler(
             store,
-            draftClient(decision: decision(), draft: decoded(const [
+            draftClient(draft: decoded(const [
                 '{"evidence":"nothing to say","options":[],"reply_body":""}',
               ]), chunks: const [
                 '{"evidence":"nothing to say","options":[],"reply_body":""}',

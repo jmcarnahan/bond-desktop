@@ -35,6 +35,8 @@ void main() {
     ModelManifest? which,
     void Function(ModelFile)? onOpenLicense,
     VoidCallback? onContinue,
+    ModelFile? decisionModel,
+    bool decisionInstalled = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(760, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -43,6 +45,8 @@ void main() {
         body: SingleChildScrollView(
           child: SetupModelsBody(
             manifest: which ?? manifest,
+            decisionModel: decisionModel,
+            decisionInstalled: decisionInstalled,
             onOpenLicense: onOpenLicense,
             onContinue: onContinue ?? () {},
           ),
@@ -57,8 +61,9 @@ void main() {
     await open(tester, onOpenLicense: (_) {});
 
     expect(find.text('Finds related messages'), findsOneWidget);
-    expect(find.text('Reads and sorts your mail'), findsOneWidget);
-    expect(find.text('Writes drafts and replies'), findsOneWidget);
+    // Both chat checkpoints are the one generative role, whichever is here.
+    expect(find.text('Writes summaries, drafts and storylines'),
+        findsNWidgets(2));
     expect(find.text('610 MB'), findsOneWidget);
     expect(find.text('4.0 GB'), findsOneWidget);
     expect(find.text('17.7 GB'), findsOneWidget);
@@ -91,8 +96,8 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Finds related messages'), findsOneWidget);
-    expect(find.text('Reads and sorts your mail'), findsOneWidget);
-    expect(find.text('Writes drafts and replies'), findsNothing);
+    expect(find.text('Writes summaries, drafts and storylines'),
+        findsOneWidget);
     expect(find.text('Total download: 4.6 GB'), findsOneWidget);
     expect(find.text('17.7 GB'), findsNothing);
     // No writing model on this tier, so no head either.
@@ -103,7 +108,8 @@ void main() {
       (tester) async {
     await open(tester, which: manifest.forTier(MachineTier.full));
 
-    expect(find.text('Writes drafts and replies'), findsOneWidget);
+    expect(find.text('Writes summaries, drafts and storylines'),
+        findsNWidgets(2));
     expect(find.text('Total download: 23.8 GB'), findsOneWidget);
   });
 
@@ -162,6 +168,30 @@ void main() {
     );
 
     expect(find.text(notice), findsOneWidget);
+  });
+
+  testWidgets('the decision model is listed with its install state and '
+      'never counted as a download', (tester) async {
+    final decide = testDecideFile();
+    await open(tester, decisionModel: decide);
+
+    expect(find.byKey(SetupModelsBody.decisionRowKey), findsOneWidget);
+    expect(find.text(decide.displayName), findsOneWidget);
+    expect(find.text('Sorts and flags every message'), findsOneWidget);
+    expect(find.text('Not installed · run make decide-install'),
+        findsOneWidget);
+    // Neither the sentence nor the total moves.
+    expect(find.text('Total download: 23.8 GB'), findsOneWidget);
+    expect(find.textContaining('Bond downloads three models'), findsOneWidget);
+
+    await open(tester, decisionModel: decide, decisionInstalled: true);
+    expect(find.text(SetupModelsBody.installedText), findsOneWidget);
+    expect(find.text(SetupModelsBody.notInstalledText), findsNothing);
+  });
+
+  testWidgets('a decision model on your server is not listed', (tester) async {
+    await open(tester);
+    expect(find.byKey(SetupModelsBody.decisionRowKey), findsNothing);
   });
 
   testWidgets('Continue fires the host callback', (tester) async {

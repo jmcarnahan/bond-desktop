@@ -18793,6 +18793,741 @@ class ConversationLabelsCompanion extends UpdateCompanion<ConversationLabel> {
   }
 }
 
+class MessageDecisions extends Table
+    with TableInfo<MessageDecisions, MessageDecision> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  MessageDecisions(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _modelMeta = const VerificationMeta('model');
+  late final GeneratedColumn<String> model = GeneratedColumn<String>(
+    'model',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _qhashMeta = const VerificationMeta('qhash');
+  late final GeneratedColumn<String> qhash = GeneratedColumn<String>(
+    'qhash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _answersJsonMeta = const VerificationMeta(
+    'answersJson',
+  );
+  late final GeneratedColumn<String> answersJson = GeneratedColumn<String>(
+    'answers_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _gatePMeta = const VerificationMeta('gateP');
+  late final GeneratedColumn<double> gateP = GeneratedColumn<double>(
+    'gate_p',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _needsYouPMeta = const VerificationMeta(
+    'needsYouP',
+  );
+  late final GeneratedColumn<double> needsYouP = GeneratedColumn<double>(
+    'needs_you_p',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _needsActionPMeta = const VerificationMeta(
+    'needsActionP',
+  );
+  late final GeneratedColumn<double> needsActionP = GeneratedColumn<double>(
+    'needs_action_p',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _replyExpectedPMeta = const VerificationMeta(
+    'replyExpectedP',
+  );
+  late final GeneratedColumn<double> replyExpectedP = GeneratedColumn<double>(
+    'reply_expected_p',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _latencyMsMeta = const VerificationMeta(
+    'latencyMs',
+  );
+  late final GeneratedColumn<double> latencyMs = GeneratedColumn<double>(
+    'latency_ms',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _truncatedMeta = const VerificationMeta(
+    'truncated',
+  );
+  late final GeneratedColumn<int> truncated = GeneratedColumn<int>(
+    'truncated',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _decidedAtMeta = const VerificationMeta(
+    'decidedAt',
+  );
+  late final GeneratedColumn<String> decidedAt = GeneratedColumn<String>(
+    'decided_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    model,
+    qhash,
+    answersJson,
+    gateP,
+    needsYouP,
+    needsActionP,
+    replyExpectedP,
+    latencyMs,
+    truncated,
+    decidedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'message_decisions';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MessageDecision> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('model')) {
+      context.handle(
+        _modelMeta,
+        model.isAcceptableOrUnknown(data['model']!, _modelMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_modelMeta);
+    }
+    if (data.containsKey('qhash')) {
+      context.handle(
+        _qhashMeta,
+        qhash.isAcceptableOrUnknown(data['qhash']!, _qhashMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_qhashMeta);
+    }
+    if (data.containsKey('answers_json')) {
+      context.handle(
+        _answersJsonMeta,
+        answersJson.isAcceptableOrUnknown(
+          data['answers_json']!,
+          _answersJsonMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_answersJsonMeta);
+    }
+    if (data.containsKey('gate_p')) {
+      context.handle(
+        _gatePMeta,
+        gateP.isAcceptableOrUnknown(data['gate_p']!, _gatePMeta),
+      );
+    }
+    if (data.containsKey('needs_you_p')) {
+      context.handle(
+        _needsYouPMeta,
+        needsYouP.isAcceptableOrUnknown(data['needs_you_p']!, _needsYouPMeta),
+      );
+    }
+    if (data.containsKey('needs_action_p')) {
+      context.handle(
+        _needsActionPMeta,
+        needsActionP.isAcceptableOrUnknown(
+          data['needs_action_p']!,
+          _needsActionPMeta,
+        ),
+      );
+    }
+    if (data.containsKey('reply_expected_p')) {
+      context.handle(
+        _replyExpectedPMeta,
+        replyExpectedP.isAcceptableOrUnknown(
+          data['reply_expected_p']!,
+          _replyExpectedPMeta,
+        ),
+      );
+    }
+    if (data.containsKey('latency_ms')) {
+      context.handle(
+        _latencyMsMeta,
+        latencyMs.isAcceptableOrUnknown(data['latency_ms']!, _latencyMsMeta),
+      );
+    }
+    if (data.containsKey('truncated')) {
+      context.handle(
+        _truncatedMeta,
+        truncated.isAcceptableOrUnknown(data['truncated']!, _truncatedMeta),
+      );
+    }
+    if (data.containsKey('decided_at')) {
+      context.handle(
+        _decidedAtMeta,
+        decidedAt.isAcceptableOrUnknown(data['decided_at']!, _decidedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_decidedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {source, sourceMessageId};
+  @override
+  MessageDecision map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MessageDecision(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      model: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}model'],
+      )!,
+      qhash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}qhash'],
+      )!,
+      answersJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}answers_json'],
+      )!,
+      gateP: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}gate_p'],
+      ),
+      needsYouP: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}needs_you_p'],
+      ),
+      needsActionP: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}needs_action_p'],
+      ),
+      replyExpectedP: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}reply_expected_p'],
+      ),
+      latencyMs: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}latency_ms'],
+      ),
+      truncated: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}truncated'],
+      )!,
+      decidedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}decided_at'],
+      )!,
+    );
+  }
+
+  @override
+  MessageDecisions createAlias(String alias) {
+    return MessageDecisions(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class MessageDecision extends DataClass implements Insertable<MessageDecision> {
+  final String source;
+  final String sourceMessageId;
+  final String model;
+  final String qhash;
+  final String answersJson;
+  final double? gateP;
+  final double? needsYouP;
+  final double? needsActionP;
+  final double? replyExpectedP;
+  final double? latencyMs;
+  final int truncated;
+  final String decidedAt;
+  const MessageDecision({
+    required this.source,
+    required this.sourceMessageId,
+    required this.model,
+    required this.qhash,
+    required this.answersJson,
+    this.gateP,
+    this.needsYouP,
+    this.needsActionP,
+    this.replyExpectedP,
+    this.latencyMs,
+    required this.truncated,
+    required this.decidedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['model'] = Variable<String>(model);
+    map['qhash'] = Variable<String>(qhash);
+    map['answers_json'] = Variable<String>(answersJson);
+    if (!nullToAbsent || gateP != null) {
+      map['gate_p'] = Variable<double>(gateP);
+    }
+    if (!nullToAbsent || needsYouP != null) {
+      map['needs_you_p'] = Variable<double>(needsYouP);
+    }
+    if (!nullToAbsent || needsActionP != null) {
+      map['needs_action_p'] = Variable<double>(needsActionP);
+    }
+    if (!nullToAbsent || replyExpectedP != null) {
+      map['reply_expected_p'] = Variable<double>(replyExpectedP);
+    }
+    if (!nullToAbsent || latencyMs != null) {
+      map['latency_ms'] = Variable<double>(latencyMs);
+    }
+    map['truncated'] = Variable<int>(truncated);
+    map['decided_at'] = Variable<String>(decidedAt);
+    return map;
+  }
+
+  MessageDecisionsCompanion toCompanion(bool nullToAbsent) {
+    return MessageDecisionsCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      model: Value(model),
+      qhash: Value(qhash),
+      answersJson: Value(answersJson),
+      gateP: gateP == null && nullToAbsent
+          ? const Value.absent()
+          : Value(gateP),
+      needsYouP: needsYouP == null && nullToAbsent
+          ? const Value.absent()
+          : Value(needsYouP),
+      needsActionP: needsActionP == null && nullToAbsent
+          ? const Value.absent()
+          : Value(needsActionP),
+      replyExpectedP: replyExpectedP == null && nullToAbsent
+          ? const Value.absent()
+          : Value(replyExpectedP),
+      latencyMs: latencyMs == null && nullToAbsent
+          ? const Value.absent()
+          : Value(latencyMs),
+      truncated: Value(truncated),
+      decidedAt: Value(decidedAt),
+    );
+  }
+
+  factory MessageDecision.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MessageDecision(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      model: serializer.fromJson<String>(json['model']),
+      qhash: serializer.fromJson<String>(json['qhash']),
+      answersJson: serializer.fromJson<String>(json['answers_json']),
+      gateP: serializer.fromJson<double?>(json['gate_p']),
+      needsYouP: serializer.fromJson<double?>(json['needs_you_p']),
+      needsActionP: serializer.fromJson<double?>(json['needs_action_p']),
+      replyExpectedP: serializer.fromJson<double?>(json['reply_expected_p']),
+      latencyMs: serializer.fromJson<double?>(json['latency_ms']),
+      truncated: serializer.fromJson<int>(json['truncated']),
+      decidedAt: serializer.fromJson<String>(json['decided_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'model': serializer.toJson<String>(model),
+      'qhash': serializer.toJson<String>(qhash),
+      'answers_json': serializer.toJson<String>(answersJson),
+      'gate_p': serializer.toJson<double?>(gateP),
+      'needs_you_p': serializer.toJson<double?>(needsYouP),
+      'needs_action_p': serializer.toJson<double?>(needsActionP),
+      'reply_expected_p': serializer.toJson<double?>(replyExpectedP),
+      'latency_ms': serializer.toJson<double?>(latencyMs),
+      'truncated': serializer.toJson<int>(truncated),
+      'decided_at': serializer.toJson<String>(decidedAt),
+    };
+  }
+
+  MessageDecision copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? model,
+    String? qhash,
+    String? answersJson,
+    Value<double?> gateP = const Value.absent(),
+    Value<double?> needsYouP = const Value.absent(),
+    Value<double?> needsActionP = const Value.absent(),
+    Value<double?> replyExpectedP = const Value.absent(),
+    Value<double?> latencyMs = const Value.absent(),
+    int? truncated,
+    String? decidedAt,
+  }) => MessageDecision(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    model: model ?? this.model,
+    qhash: qhash ?? this.qhash,
+    answersJson: answersJson ?? this.answersJson,
+    gateP: gateP.present ? gateP.value : this.gateP,
+    needsYouP: needsYouP.present ? needsYouP.value : this.needsYouP,
+    needsActionP: needsActionP.present ? needsActionP.value : this.needsActionP,
+    replyExpectedP: replyExpectedP.present
+        ? replyExpectedP.value
+        : this.replyExpectedP,
+    latencyMs: latencyMs.present ? latencyMs.value : this.latencyMs,
+    truncated: truncated ?? this.truncated,
+    decidedAt: decidedAt ?? this.decidedAt,
+  );
+  MessageDecision copyWithCompanion(MessageDecisionsCompanion data) {
+    return MessageDecision(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      model: data.model.present ? data.model.value : this.model,
+      qhash: data.qhash.present ? data.qhash.value : this.qhash,
+      answersJson: data.answersJson.present
+          ? data.answersJson.value
+          : this.answersJson,
+      gateP: data.gateP.present ? data.gateP.value : this.gateP,
+      needsYouP: data.needsYouP.present ? data.needsYouP.value : this.needsYouP,
+      needsActionP: data.needsActionP.present
+          ? data.needsActionP.value
+          : this.needsActionP,
+      replyExpectedP: data.replyExpectedP.present
+          ? data.replyExpectedP.value
+          : this.replyExpectedP,
+      latencyMs: data.latencyMs.present ? data.latencyMs.value : this.latencyMs,
+      truncated: data.truncated.present ? data.truncated.value : this.truncated,
+      decidedAt: data.decidedAt.present ? data.decidedAt.value : this.decidedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageDecision(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('model: $model, ')
+          ..write('qhash: $qhash, ')
+          ..write('answersJson: $answersJson, ')
+          ..write('gateP: $gateP, ')
+          ..write('needsYouP: $needsYouP, ')
+          ..write('needsActionP: $needsActionP, ')
+          ..write('replyExpectedP: $replyExpectedP, ')
+          ..write('latencyMs: $latencyMs, ')
+          ..write('truncated: $truncated, ')
+          ..write('decidedAt: $decidedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    source,
+    sourceMessageId,
+    model,
+    qhash,
+    answersJson,
+    gateP,
+    needsYouP,
+    needsActionP,
+    replyExpectedP,
+    latencyMs,
+    truncated,
+    decidedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MessageDecision &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.model == this.model &&
+          other.qhash == this.qhash &&
+          other.answersJson == this.answersJson &&
+          other.gateP == this.gateP &&
+          other.needsYouP == this.needsYouP &&
+          other.needsActionP == this.needsActionP &&
+          other.replyExpectedP == this.replyExpectedP &&
+          other.latencyMs == this.latencyMs &&
+          other.truncated == this.truncated &&
+          other.decidedAt == this.decidedAt);
+}
+
+class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> model;
+  final Value<String> qhash;
+  final Value<String> answersJson;
+  final Value<double?> gateP;
+  final Value<double?> needsYouP;
+  final Value<double?> needsActionP;
+  final Value<double?> replyExpectedP;
+  final Value<double?> latencyMs;
+  final Value<int> truncated;
+  final Value<String> decidedAt;
+  final Value<int> rowid;
+  const MessageDecisionsCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.model = const Value.absent(),
+    this.qhash = const Value.absent(),
+    this.answersJson = const Value.absent(),
+    this.gateP = const Value.absent(),
+    this.needsYouP = const Value.absent(),
+    this.needsActionP = const Value.absent(),
+    this.replyExpectedP = const Value.absent(),
+    this.latencyMs = const Value.absent(),
+    this.truncated = const Value.absent(),
+    this.decidedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  MessageDecisionsCompanion.insert({
+    required String source,
+    required String sourceMessageId,
+    required String model,
+    required String qhash,
+    required String answersJson,
+    this.gateP = const Value.absent(),
+    this.needsYouP = const Value.absent(),
+    this.needsActionP = const Value.absent(),
+    this.replyExpectedP = const Value.absent(),
+    this.latencyMs = const Value.absent(),
+    this.truncated = const Value.absent(),
+    required String decidedAt,
+    this.rowid = const Value.absent(),
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       model = Value(model),
+       qhash = Value(qhash),
+       answersJson = Value(answersJson),
+       decidedAt = Value(decidedAt);
+  static Insertable<MessageDecision> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? model,
+    Expression<String>? qhash,
+    Expression<String>? answersJson,
+    Expression<double>? gateP,
+    Expression<double>? needsYouP,
+    Expression<double>? needsActionP,
+    Expression<double>? replyExpectedP,
+    Expression<double>? latencyMs,
+    Expression<int>? truncated,
+    Expression<String>? decidedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (model != null) 'model': model,
+      if (qhash != null) 'qhash': qhash,
+      if (answersJson != null) 'answers_json': answersJson,
+      if (gateP != null) 'gate_p': gateP,
+      if (needsYouP != null) 'needs_you_p': needsYouP,
+      if (needsActionP != null) 'needs_action_p': needsActionP,
+      if (replyExpectedP != null) 'reply_expected_p': replyExpectedP,
+      if (latencyMs != null) 'latency_ms': latencyMs,
+      if (truncated != null) 'truncated': truncated,
+      if (decidedAt != null) 'decided_at': decidedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  MessageDecisionsCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? model,
+    Value<String>? qhash,
+    Value<String>? answersJson,
+    Value<double?>? gateP,
+    Value<double?>? needsYouP,
+    Value<double?>? needsActionP,
+    Value<double?>? replyExpectedP,
+    Value<double?>? latencyMs,
+    Value<int>? truncated,
+    Value<String>? decidedAt,
+    Value<int>? rowid,
+  }) {
+    return MessageDecisionsCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      model: model ?? this.model,
+      qhash: qhash ?? this.qhash,
+      answersJson: answersJson ?? this.answersJson,
+      gateP: gateP ?? this.gateP,
+      needsYouP: needsYouP ?? this.needsYouP,
+      needsActionP: needsActionP ?? this.needsActionP,
+      replyExpectedP: replyExpectedP ?? this.replyExpectedP,
+      latencyMs: latencyMs ?? this.latencyMs,
+      truncated: truncated ?? this.truncated,
+      decidedAt: decidedAt ?? this.decidedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (model.present) {
+      map['model'] = Variable<String>(model.value);
+    }
+    if (qhash.present) {
+      map['qhash'] = Variable<String>(qhash.value);
+    }
+    if (answersJson.present) {
+      map['answers_json'] = Variable<String>(answersJson.value);
+    }
+    if (gateP.present) {
+      map['gate_p'] = Variable<double>(gateP.value);
+    }
+    if (needsYouP.present) {
+      map['needs_you_p'] = Variable<double>(needsYouP.value);
+    }
+    if (needsActionP.present) {
+      map['needs_action_p'] = Variable<double>(needsActionP.value);
+    }
+    if (replyExpectedP.present) {
+      map['reply_expected_p'] = Variable<double>(replyExpectedP.value);
+    }
+    if (latencyMs.present) {
+      map['latency_ms'] = Variable<double>(latencyMs.value);
+    }
+    if (truncated.present) {
+      map['truncated'] = Variable<int>(truncated.value);
+    }
+    if (decidedAt.present) {
+      map['decided_at'] = Variable<String>(decidedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageDecisionsCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('model: $model, ')
+          ..write('qhash: $qhash, ')
+          ..write('answersJson: $answersJson, ')
+          ..write('gateP: $gateP, ')
+          ..write('needsYouP: $needsYouP, ')
+          ..write('needsActionP: $needsActionP, ')
+          ..write('replyExpectedP: $replyExpectedP, ')
+          ..write('latencyMs: $latencyMs, ')
+          ..write('truncated: $truncated, ')
+          ..write('decidedAt: $decidedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -18937,6 +19672,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'ix_conv_labels_label',
     'CREATE INDEX ix_conv_labels_label ON conversation_labels (label_id, applied_at DESC)',
   );
+  late final MessageDecisions messageDecisions = MessageDecisions(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -18998,6 +19734,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixLabelsNameKey,
     conversationLabels,
     ixConvLabelsLabel,
+    messageDecisions,
   ];
 }
 
@@ -27811,6 +28548,347 @@ typedef $ConversationLabelsProcessedTableManager =
       ConversationLabel,
       PrefetchHooks Function()
     >;
+typedef $MessageDecisionsCreateCompanionBuilder =
+    MessageDecisionsCompanion Function({
+      required String source,
+      required String sourceMessageId,
+      required String model,
+      required String qhash,
+      required String answersJson,
+      Value<double?> gateP,
+      Value<double?> needsYouP,
+      Value<double?> needsActionP,
+      Value<double?> replyExpectedP,
+      Value<double?> latencyMs,
+      Value<int> truncated,
+      required String decidedAt,
+      Value<int> rowid,
+    });
+typedef $MessageDecisionsUpdateCompanionBuilder =
+    MessageDecisionsCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> model,
+      Value<String> qhash,
+      Value<String> answersJson,
+      Value<double?> gateP,
+      Value<double?> needsYouP,
+      Value<double?> needsActionP,
+      Value<double?> replyExpectedP,
+      Value<double?> latencyMs,
+      Value<int> truncated,
+      Value<String> decidedAt,
+      Value<int> rowid,
+    });
+
+class $MessageDecisionsFilterComposer
+    extends Composer<_$BondDatabase, MessageDecisions> {
+  $MessageDecisionsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get qhash => $composableBuilder(
+    column: $table.qhash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get answersJson => $composableBuilder(
+    column: $table.answersJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get gateP => $composableBuilder(
+    column: $table.gateP,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get needsYouP => $composableBuilder(
+    column: $table.needsYouP,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get needsActionP => $composableBuilder(
+    column: $table.needsActionP,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get replyExpectedP => $composableBuilder(
+    column: $table.replyExpectedP,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get latencyMs => $composableBuilder(
+    column: $table.latencyMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get truncated => $composableBuilder(
+    column: $table.truncated,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get decidedAt => $composableBuilder(
+    column: $table.decidedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $MessageDecisionsOrderingComposer
+    extends Composer<_$BondDatabase, MessageDecisions> {
+  $MessageDecisionsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get qhash => $composableBuilder(
+    column: $table.qhash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get answersJson => $composableBuilder(
+    column: $table.answersJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get gateP => $composableBuilder(
+    column: $table.gateP,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get needsYouP => $composableBuilder(
+    column: $table.needsYouP,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get needsActionP => $composableBuilder(
+    column: $table.needsActionP,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get replyExpectedP => $composableBuilder(
+    column: $table.replyExpectedP,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get latencyMs => $composableBuilder(
+    column: $table.latencyMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get truncated => $composableBuilder(
+    column: $table.truncated,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get decidedAt => $composableBuilder(
+    column: $table.decidedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $MessageDecisionsAnnotationComposer
+    extends Composer<_$BondDatabase, MessageDecisions> {
+  $MessageDecisionsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get model =>
+      $composableBuilder(column: $table.model, builder: (column) => column);
+
+  GeneratedColumn<String> get qhash =>
+      $composableBuilder(column: $table.qhash, builder: (column) => column);
+
+  GeneratedColumn<String> get answersJson => $composableBuilder(
+    column: $table.answersJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get gateP =>
+      $composableBuilder(column: $table.gateP, builder: (column) => column);
+
+  GeneratedColumn<double> get needsYouP =>
+      $composableBuilder(column: $table.needsYouP, builder: (column) => column);
+
+  GeneratedColumn<double> get needsActionP => $composableBuilder(
+    column: $table.needsActionP,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get replyExpectedP => $composableBuilder(
+    column: $table.replyExpectedP,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get latencyMs =>
+      $composableBuilder(column: $table.latencyMs, builder: (column) => column);
+
+  GeneratedColumn<int> get truncated =>
+      $composableBuilder(column: $table.truncated, builder: (column) => column);
+
+  GeneratedColumn<String> get decidedAt =>
+      $composableBuilder(column: $table.decidedAt, builder: (column) => column);
+}
+
+class $MessageDecisionsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          MessageDecisions,
+          MessageDecision,
+          $MessageDecisionsFilterComposer,
+          $MessageDecisionsOrderingComposer,
+          $MessageDecisionsAnnotationComposer,
+          $MessageDecisionsCreateCompanionBuilder,
+          $MessageDecisionsUpdateCompanionBuilder,
+          (
+            MessageDecision,
+            BaseReferences<_$BondDatabase, MessageDecisions, MessageDecision>,
+          ),
+          MessageDecision,
+          PrefetchHooks Function()
+        > {
+  $MessageDecisionsTableManager(_$BondDatabase db, MessageDecisions table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $MessageDecisionsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $MessageDecisionsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $MessageDecisionsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                Value<String> qhash = const Value.absent(),
+                Value<String> answersJson = const Value.absent(),
+                Value<double?> gateP = const Value.absent(),
+                Value<double?> needsYouP = const Value.absent(),
+                Value<double?> needsActionP = const Value.absent(),
+                Value<double?> replyExpectedP = const Value.absent(),
+                Value<double?> latencyMs = const Value.absent(),
+                Value<int> truncated = const Value.absent(),
+                Value<String> decidedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MessageDecisionsCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                model: model,
+                qhash: qhash,
+                answersJson: answersJson,
+                gateP: gateP,
+                needsYouP: needsYouP,
+                needsActionP: needsActionP,
+                replyExpectedP: replyExpectedP,
+                latencyMs: latencyMs,
+                truncated: truncated,
+                decidedAt: decidedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String source,
+                required String sourceMessageId,
+                required String model,
+                required String qhash,
+                required String answersJson,
+                Value<double?> gateP = const Value.absent(),
+                Value<double?> needsYouP = const Value.absent(),
+                Value<double?> needsActionP = const Value.absent(),
+                Value<double?> replyExpectedP = const Value.absent(),
+                Value<double?> latencyMs = const Value.absent(),
+                Value<int> truncated = const Value.absent(),
+                required String decidedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => MessageDecisionsCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                model: model,
+                qhash: qhash,
+                answersJson: answersJson,
+                gateP: gateP,
+                needsYouP: needsYouP,
+                needsActionP: needsActionP,
+                replyExpectedP: replyExpectedP,
+                latencyMs: latencyMs,
+                truncated: truncated,
+                decidedAt: decidedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $MessageDecisionsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      MessageDecisions,
+      MessageDecision,
+      $MessageDecisionsFilterComposer,
+      $MessageDecisionsOrderingComposer,
+      $MessageDecisionsAnnotationComposer,
+      $MessageDecisionsCreateCompanionBuilder,
+      $MessageDecisionsUpdateCompanionBuilder,
+      (
+        MessageDecision,
+        BaseReferences<_$BondDatabase, MessageDecisions, MessageDecision>,
+      ),
+      MessageDecision,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -27869,4 +28947,6 @@ class $BondDatabaseManager {
   $LabelsTableManager get labels => $LabelsTableManager(_db, _db.labels);
   $ConversationLabelsTableManager get conversationLabels =>
       $ConversationLabelsTableManager(_db, _db.conversationLabels);
+  $MessageDecisionsTableManager get messageDecisions =>
+      $MessageDecisionsTableManager(_db, _db.messageDecisions);
 }

@@ -1,11 +1,15 @@
-import 'package:bond_inbox/models/message_models.dart';
+import 'dart:io';
+
 import 'package:bond_inbox/services/clustering_card.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_input.dart';
+import 'package:bond_inbox/services/decision/decision_policy.dart';
+import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 // `show`: the two things this file wants from the storyline service are the
 // charter clamp the app ships and the grouping mode a define can pick, so a
 // harness default cannot drift from either.
@@ -49,22 +53,12 @@ class GoldenDefines {
   /// How many items are in flight at once.
   static const int k = int.fromEnvironment('GOLDEN_K', defaultValue: 1);
 
-  /// Which context rung triage and needs-you are shown, by name. Parsed by
-  /// `parseGoldenCtx`, which refuses anything that is not a rung.
+  /// Which context rung the message text and needs-you are shown, by name.
+  /// Parsed by `parseGoldenCtx`, which refuses anything that is not a rung.
+  /// (Extraction's own axis, `GOLDEN_EXTRACT_CTX`, went with the extraction
+  /// call: the text stage reads the tail the retired triage call read.)
   static const String ctxRaw =
       String.fromEnvironment('GOLDEN_CTX', defaultValue: 'tail3');
-
-  /// Which context rung EXTRACTION is shown, by name — its own axis, parsed
-  /// by `parseExtractCtx`.
-  ///
-  /// Separate from `GOLDEN_CTX` because the app's two halves are not the same
-  /// today: triage and needs-you read the last three thread messages and
-  /// extraction reads the message alone. Defaulting to `none` is what keeps
-  /// that true — a replay that moved extraction whenever triage moved could
-  /// never say which of the two a number came from, and `none` is the control
-  /// every extraction figure so far was measured at.
-  static const String extractCtxRaw =
-      String.fromEnvironment('GOLDEN_EXTRACT_CTX', defaultValue: 'none');
 
   /// The gold storyline registry — the thirty efforts a storyline replay files
   /// candidates into, and the anti-storylines it must not. Machine-local like
@@ -121,6 +115,14 @@ class GoldenDefines {
   static const String sweepGroupingRaw =
       String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'cosine');
 
+  /// Whether a `possible` storyline spends a slot of the sweep's room: `0`
+  /// (what the app ships — suggested rows only) or `1` (the old rule, both
+  /// count). Parsed by [parseSweepPossibleRoom], which refuses anything else;
+  /// handed to the service as `possibleHoldsRoom`. A define and not a `sed` of
+  /// `StorylineTuning.possibleHoldsRoom`, for [sweepGroupingRaw]'s reason.
+  static const String sweepPossibleRoomRaw =
+      String.fromEnvironment('SWEEP_POSSIBLE_ROOM', defaultValue: '0');
+
   /// The instruction the embedding model is given about what a card is FOR,
   /// verbatim — a trailing space included, which is why nothing here trims it.
   ///
@@ -146,26 +148,133 @@ class GoldenDefines {
 
   static String? get ownerAddress =>
       ownerAddressRaw.trim().isEmpty ? null : ownerAddressRaw.trim();
+
+  /// The decision model's owner line value, `name <address>` — the form the
+  /// heads were trained on — or null unless BOTH defines are set. Not
+  /// `decisionOwnerString`'s fallback to whichever half is known: the golden
+  /// row of record was taken with the full form, and a half-owner run would
+  /// be a different measurement quietly scored against it.
+  static String? get decisionOwner => ownerName == null || ownerAddress == null
+      ? null
+      : '$ownerName <$ownerAddress>';
 }
 
-/// Reads the `GOLDEN_EXTRACT_CTX` define. Case-insensitive, and loud rather
-/// than defaulted for `parseGoldenCtx`'s reason: a typo would silently bench
-/// the wrong rung.
+// ── the decision model on the golden set ─────────────────────────────
+
+/// The state the decision model reads for one golden item, from the item's
+/// raw `stage_input` — jev-prototype's `distill/state.py` `golden_states`,
+/// the WITH-tail half: `now`, `directness_line`, `message_block` and
+/// `ctx_tail3.thread_tail` exactly as the packer wrote them, through the same
+/// composer the app's raw-field renderer calls. No cap and no strip here,
+/// because `render_state` applied none — the packer already had.
 ///
-/// `compressed` is refused rather than accepted. That rung rides the digest
-/// in as a synthetic thread message, and extraction has never quoted a thread
-/// at all — there is no slot for it to ride in, so the name means nothing
-/// here and accepting it would quietly measure `none`.
-GoldenCtx parseExtractCtx(String raw) => switch (raw.trim().toLowerCase()) {
-      'none' => GoldenCtx.none,
-      'tail3' => GoldenCtx.tail3,
-      'digest' => GoldenCtx.digest,
-      _ => throw ArgumentError.value(
-          raw,
-          'GOLDEN_EXTRACT_CTX',
-          'must be one of none, tail3, digest',
-        ),
-    };
+/// From the raw map rather than a [GoldenItem]: the item keeps `now` as a
+/// parsed date and the tail as rebuilt messages, and a round trip through
+/// either is a second renderer that could drift from the bytes the heads were
+/// scored on.
+String goldenDecisionState(
+  Map<String, dynamic> stageInput, {
+  String? owner,
+}) {
+  String text(Object? v) => v is String ? v : '';
+  final ctx = stageInput['ctx_tail3'];
+  final tail = ctx is Map ? ctx['thread_tail'] : null;
+  return renderDecisionStateFromParts(
+    owner: owner,
+    now: text(stageInput['now']),
+    directnessLine: text(stageInput['directness_line']),
+    messageBlock: text(stageInput['message_block']),
+    tail: [
+      if (tail is List)
+        for (final t in tail)
+          if (t is Map)
+            // `t.get('who') or ''`, `t.get('text') or ''`.
+            DecisionTailItem(who: text(t['who']), text: text(t['text'])),
+    ],
+  );
+}
+
+/// The heads file a decision leg applies: `DECIDE_HEADS` (the Makefile
+/// passes `$(DECIDE_DIR)/$(DECIDE_HEADS)`), else where `make decide-install`
+/// puts it.
+String decideHeadsPath() {
+  const defined = String.fromEnvironment('DECIDE_HEADS');
+  if (defined.isNotEmpty) return defined;
+  final home = Platform.environment['HOME'] ?? '';
+  return '$home/Library/Application Support/com.bondinbox.app/models/'
+      'local_bond-decide/decide-heads.json';
+}
+
+/// Which gate rule a decision run file records.
+enum DecisionGateRule {
+  /// The app's `learnedGateReason`: drop when `p(drop) >= 0.70` and the drop
+  /// reason is not `cold_outreach` (a human writing to the owner stays kept),
+  /// with the reason mapped to the app's gate word (R5-1).
+  policy,
+
+  /// The row of record's: the gate head's argmax and the drop-reason head's
+  /// raw argmax — jev-prototype's `golden_run.run_entry`, which is what the
+  /// plan's §1 numbers were scored from.
+  argmax,
+}
+
+/// The needs-you confidence word from the head's top probability — the row
+/// of record's `confidence_word(max(p, 1 - p))`.
+String decisionConfidenceWord(double pYes) {
+  final top = pYes >= 1 - pYes ? pYes : 1 - pYes;
+  return top >= 0.85
+      ? 'high'
+      : top >= 0.65
+          ? 'medium'
+          : 'low';
+}
+
+/// One item's decision answers, as the run file records them.
+///
+/// needs_you is `p(yes) >= 0.5` in BOTH rules: that is the row of record's
+/// verdict. The app's own reading is banded (yes at 0.65, no below 0.35,
+/// the generative model in between — D6), which a run file of one model's
+/// answers cannot express; the band's size is what the agreement leg counts.
+GoldenClassifierOut classifierOut(
+  DecisionAnswers a, {
+  required DecisionGateRule rule,
+  bool truncated = false,
+}) {
+  final pDrop = a.p('gate', 'drop');
+  final dropReason = a['drop_reason'].choice;
+  final String verdict;
+  final String? reason;
+  switch (rule) {
+    case DecisionGateRule.policy:
+      // The app's own rule, called rather than restated.
+      reason = learnedGateReason(a);
+      verdict = reason == null ? 'keep' : 'drop';
+    case DecisionGateRule.argmax:
+      verdict = a['gate'].choice;
+      reason = verdict == 'drop' ? dropReason : null;
+  }
+  final pNeedsYou = a.p('needs_you', 'yes');
+  return GoldenClassifierOut(
+    gateVerdict: verdict,
+    gateReason: reason,
+    category: a['category'].choice,
+    urgency: a['urgency'].choice,
+    needsAction: a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
+    replyExpected: a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
+    needsYouVerdict: pNeedsYou >= 0.5,
+    needsYouConfidence: decisionConfidenceWord(pNeedsYou),
+    intent: a['intent'].choice,
+    importance: a['importance'].choice,
+    probabilities: {
+      'gate_drop': pDrop,
+      'drop_reason': dropReason,
+      'needs_you_yes': pNeedsYou,
+      'needs_action_yes': a.p('needs_action', 'yes'),
+      'reply_expected_yes': a.p('reply_expected', 'yes'),
+      'truncated': truncated,
+    },
+  );
+}
 
 /// `SWEEP_EMBED_PREFIX`'s three readings, apart from the define so they can be
 /// pinned without one.
@@ -239,6 +348,26 @@ GroupingMode parseSweepGrouping(String raw) =>
         ),
     };
 
+/// Whether `SWEEP_POSSIBLE_ROOM` says a `possible` row holds room, or a
+/// thrown [ArgumentError].
+///
+/// Loud for [parseSweepStage]'s reason: the two settings are the two sides
+/// of one A/B, and a typo that quietly ran the shipped rule would record a
+/// row for the candidate that is the baseline again.
+bool parseSweepPossibleRoom(String raw) => switch (raw.trim().toLowerCase()) {
+      '1' => true,
+      '0' => false,
+      _ => throw ArgumentError.value(
+          raw,
+          'SWEEP_POSSIBLE_ROOM',
+          'must be 0 or 1',
+        ),
+    };
+
+/// The words a sweep row prints and records for its room rule.
+String sweepRoomRuleName(bool possibleHoldsRoom) =>
+    possibleHoldsRoom ? 'suggested+possible' : 'suggested-only';
+
 /// [k] if it names a concurrency, or a thrown [ArgumentError].
 ///
 /// Separate from [GoldenDefines] so the validation is testable without
@@ -267,35 +396,49 @@ int checkCharterCap(int cap) {
   return cap;
 }
 
-/// Triage's answer, as the run file records it.
-///
-/// A straight copy, and it has to stay one: the scorer reads these fields by
-/// name, so anything clever here would be scoring a transformation rather than
-/// the model. `deadline` needs no null guard because `TriageTask.validate`
-/// already clamps it to a string — the empty one meaning "this message named
-/// no deadline", which is an answer and scores as one.
-GoldenTriageOut triageOut(TriageResult r) => GoldenTriageOut(
-      category: r.category,
-      urgency: r.urgency,
-      needsAction: r.needsAction,
-      replyExpected: r.replyExpected,
-      deadline: r.deadline,
-      label: r.label,
+/// The message-text stage's answer, as the run file records it. A straight
+/// copy: the scorer reads these fields by name, so anything clever here would
+/// be scoring a transformation rather than the model. `deadline` needs no null
+/// guard because `MessageTextTask.validate` already clamps it to a string —
+/// the empty one meaning "this message named no deadline", which is an answer.
+GoldenTextOut textOut(MessageTextResult r) => GoldenTextOut(
       summary: r.summary,
       actionItems: r.actionItems,
+      deadline: r.deadline,
+      topics: r.topics,
+      project: r.project,
     );
 
-/// Extraction's answer, as the run file records it. A straight copy, for
-/// [triageOut]'s reason.
-GoldenExtractOut extractOut(ExtractionResult r) => GoldenExtractOut(
-      intent: r.intent,
-      importance: r.importance,
-      project: r.project,
-      topics: r.topics,
-      people: r.people,
-      organizations: r.organizations,
-      evidence: r.evidence,
+/// The needs-you answer the app's ladder settles from the decision model
+/// alone, or null when p(yes) sits in the band and the generative model is
+/// asked (`NeedsYouHandler`, D6): yes at [DecisionPolicy.needsYouYes] and
+/// above, no below [DecisionPolicy.needsYouNo]. The confidence word is the
+/// head's, as the decision leg records it, and the evidence is the app's own
+/// TEMPLATED `needs_you_reason` ([needsYouYesReason] / [needsYouNoReason]),
+/// so a decided item carries evidence the way the app's row does.
+///
+/// The ONE bar the replay cannot reproduce is the cold-outreach one
+/// ([DecisionPolicy.needsYouYesCold]): the app decides "cold" from the
+/// owner's own sender history, which a golden item does not carry, so the
+/// replay uses the ordinary bar throughout.
+GoldenNeedsYouOut? decidedNeedsYouOut(DecisionAnswers a) {
+  final pYes = a.p('needs_you', 'yes');
+  if (pYes >= DecisionPolicy.needsYouYes) {
+    return GoldenNeedsYouOut(
+      verdict: true,
+      confidence: decisionConfidenceWord(pYes),
+      evidence: needsYouYesReason(a),
     );
+  }
+  if (pYes < DecisionPolicy.needsYouNo) {
+    return GoldenNeedsYouOut(
+      verdict: false,
+      confidence: decisionConfidenceWord(pYes),
+      evidence: needsYouNoReason,
+    );
+  }
+  return null;
+}
 
 /// The needs-you answer, as the HANDLER would have written it down.
 ///
@@ -320,9 +463,13 @@ GoldenNeedsYouOut needsYouOut(NeedsYouResult r) => GoldenNeedsYouOut(
 GoldenNeedsYouOut floorOut() =>
     const GoldenNeedsYouOut(verdict: true, floor: true);
 
-/// The reply decision, as the run file records it.
-GoldenDecisionOut decisionOut(ReplyDecisionResult r) =>
-    GoldenDecisionOut(needsReply: r.needsReply, reason: r.reason);
+/// The reply decision, as the run file records it: the decision model's
+/// p(reply_expected = yes) against [DecisionPolicy.replyYes] — the bar the
+/// draft lane applies before it gathers anything.
+GoldenDecisionOut decisionOut(DecisionAnswers answers) {
+  final p = answers.p('reply_expected', 'yes');
+  return GoldenDecisionOut(needsReply: p >= DecisionPolicy.replyYes, p: p);
+}
 
 /// A drafted reply, as the rubric judge reads it.
 ///

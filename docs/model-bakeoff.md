@@ -28,7 +28,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-baseline` | Not a model run at all: what the shipping app already scored on the golden set, from the labels the set stores. See "The golden set". |
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
-| `make golden-prose` | Reply decisions for every gold-keep item and drafts for the reply-rubric items, on the prose slot. |
+| `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
 | `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
@@ -69,7 +69,7 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   wants a different one from `CTX_SIZE`. llama.cpp splits `-c` across
   `--parallel` slots, so `SLOTS=2` at 16K is 8K a slot; `make model SLOTS=2
   MODEL_CTX=32768` is how a second slot is bought without narrowing either one.
-- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_EXTRACT_CTX`, `GOLDEN_K`,
+- `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`,
   `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
   "The golden set".
 - `SWEEP_CARD` — which clustering card `make golden-sweep` and `make
@@ -271,12 +271,27 @@ capped at 900 characters by `fitThreadDigest`, which drops whole lines from the
 OLD end and keeps the header line. Prefer `digest`; `compressed` stays only so
 older rows can be read.
 
-`GOLDEN_EXTRACT_CTX` is extraction's own axis — `none` (the default, what
-ships), `tail3` or `digest` — because extraction's question is not triage's
-and the two stages had never been measured apart. It is recorded as
-`extra.extract_ctx` in the timing JSON, and every run prints a
+`GOLDEN_EXTRACT_CTX` was extraction's own axis (`none`, `tail3`, `digest`)
+and is RETIRED with the extraction call (decision-model round, Phase 6): the
+one message-text call reads the rung `GOLDEN_CTX` names, as triage did. Older
+rows carry `extra.extract_ctx`; new ones do not. A digest run prints a
 `digests: N items carry one, M trimmed to 900` line so a reader knows how much
 of the set the rung actually touched.
+
+**What `make golden` runs since Phase 6.** Per item: the live decision model
+(`make decide`, `DECIDE_URL`; heads from `DECIDE_HEADS`) for gate, category,
+urgency, the booleans, intent and importance — the policy gate, the same
+answers `make golden-decision` scores; the app's needs-you ladder (the floor,
+then the decision's p(yes) against 0.65 / 0.35, and `NeedsYouTask` on the
+bulk slot only inside the band — the cold-outreach bar needs the owner's
+sender history, which a golden item does not carry, so the ordinary bar is
+used throughout); and ONE `MessageTextTask` call on the bulk slot for summary,
+action items, deadline, topics and project. One run file carries all of it,
+`label` and `evidence` absent. The per-item line prints `decision <ms>`,
+`needs_you <ms|floor|decided>`, `text <ms>` and counts; the summary line
+prints the decision p50/p95 and the band size. Rows before Phase 6 are the
+TriageTask + NeedsYouTask + ExtractTask pipeline on the bulk slot (the
+baseline for the Phase 6 comparison is `p6-baseline-4b`).
 
 Gold records, per stage, which rung a label needs, so
 `BREAKDOWN=derivable_from` answers the question the ladder was built for: what
@@ -292,7 +307,7 @@ carry.
 ```sh
 make golden                               # bulk slot, tail3 — the shipping rung
 make golden GOLDEN_CTX=none               # the same, message alone
-make golden GOLDEN_CTX=digest GOLDEN_EXTRACT_CTX=digest   # the digest as its own fence, extraction on the same rung
+make golden GOLDEN_CTX=digest            # the digest as its own fence
 make golden GOLDEN_CTX=compressed         # the digest rung, with its caveat (superseded)
 make golden BENCH_URL=… BENCH_LABEL=…     # point it at a candidate
 make golden-prose                         # prose slot: decisions + drafts
@@ -332,10 +347,12 @@ baseline's all-items pass: the baseline reads those items as "not attempted",
 the replay as answers. The keep-only pass, which a ledger row quotes, is
 unaffected.
 
-The prose run differs in three ways worth stating. First, its decision context
-is the plain tail whatever `GOLDEN_CTX` says, because the decision keeps six
-messages at 500 characters and the tail already fits it whole — the ladder is a
-question about the two stages that clip. Second, a draft gets the message and
+The prose run differs in three ways worth stating. First, its reply decision
+is the decision model's: each gold-keep item's decision state (rendered from
+the packer's parts, as `make golden` renders it) goes to the decide server, and
+the verdict is p(reply_expected = yes) against `DecisionPolicy.replyYes` —
+`GOLDEN_CTX` does not touch it. (Before 2026-09-28 it was the 27B
+`ReplyDecisionTask` over the plain tail.) Second, a draft gets the message and
 its tail and nothing else: no style examples, no about-me, no storyline summary, no
 directory pack, because the set carries none of them, so a prose row measures
 the model rather than the retrieval that would feed it in the app. Third, in a
@@ -343,7 +360,8 @@ prose run file `triage.reply_expected` IS the reply decision: the scorer's
 `triage.reply_expected` asks "is the sender waiting on an answer", which is
 exactly what the reply-decision stage answers and what gold has one label for,
 so a decision-only row writes its verdict there and repeats it in a `decision`
-object with the model's reason beside it.
+object, `{source: decision_model, p, needs_reply}` (older files carry the 27B's
+`reason` instead of `p`).
 
 A `compressed` row carries the lower-bound caveat above, printed by the run
 itself so it travels with the number rather than being remembered.
@@ -773,6 +791,8 @@ not in date order.
 | 2026-09-20 | bulk | llamacpp/Qwen3-4B-Instruct-2507-Q8_0-GGUF | tail3 | `golden-run-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-20260920-144740.json` | 88% / 88% / 71% / 74% / 92% / 75% / 39% / 66% / 26% / 87% | label 84% · action items 60% · summary 64% · needs-you evidence 28% · extract evidence 25% | 2840 / 1608 / 1977 (triage / needs_you / extraction) | 44.9 (62.9 srv) | 8.3 | $0.00 | Round F Phase 5: the local matrix on the final tree, `feat/pipeline-round-f` @ efca7b1, the tree the PR ships; second of two passes and the keeper, judged from ten Opus packets with 0 rubric keys unmatched over 76 of 76 keep-only items. Against the round B phase 1 row of record every enum and every rubric field sits inside the four-point floor: reply_expected up 2, label down 2, summary up 1, everything else identical. K=1, so the throughput is read against that row's 8.9 at K=1 and not against its 12.5 at K=4; deadline 92%, orgs 93%; 0 failures and 0 retries; prompt tokens 138,331 / 97,697 / 104,548 per stage, identical across both passes, which is the check that no prompt moved; all-items rubric 74 / 61 / 65 / 29 / 27; pass 1 `…-20260920-143526.json` read 88 / 89 / 70 / 72; wall 724 s |
 | 2026-09-20 | prose | llamacpp/Qwen3.8-27B-GGUF:Q4_K_M | tail (fixed) | `golden-run-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260920-153701.json` | — / — / — / 82% / — / — / — / — / — / — | draft 20% (not re-judged) | 6063 / 12677 (reply_decision / draft_reply) | 5.8 decision · 12.1 draft (16.3 / 17.6 srv) | 5.0 | $0.00 | Round F Phase 5 on the final tree; second of two passes and the keeper. All 25 drafts are byte-identical to the 2026-09-17 v4 row of record and to pass 1 (`draft_compare.py`: common 25, identical 25, different 0), so the run was NOT re-judged and the 5 of 25 stands. The decision reads 62 of 76 on both passes; p95 12,460 / 28,313 ms; 0 failures, 0 retries, 0 reasoning leaks; the local 27B at temperature 0 with MTP is deterministic on this build; pass 1 `…-20260920-152144.json`; wall 909 s |
 | 2026-09-20 | prose | vllm-g6e/Qwen3.8-27B-FP8+MTP | tail (fixed) | `golden-run-vllm-g6e-qwen3-8-27b-fp8-mtp-20260920-165412.json` | — / — / — / 83% / — / — / — / — / — / — | draft 24% (not re-judged) | 1376 / 3760 (reply_decision / draft_reply) | 29.5 decision · 42.8 draft | 21.2 | not taken | Round F Phase 5: the box 27B-FP8 with MTP re-read on the final tree `feat/pipeline-round-f` @ efca7b1 at 16:54 UTC, after the local matrix, with the embedding and the confirm local. 63 of 76 on the reply decision, the same count as the Phase 1 pass on `main @ e9fee6f`; all 25 drafts byte-identical to that pass's `…-062529.json`, so this run was NOT re-judged and its 6 of 25 stands. 0 failures. One pass, because the box rows reproduce to the count. This row and the box sweep row of the same afternoon close the construction argument from the box's side |
+
+**Reply decision, retired 2026-09-28.** The prose rows' `reply_expected` column above is the 27B `ReplyDecisionTask` (82% on the 76 gold-keep items). The decision model's `reply_expected` head scores 84% on the same field and population, so the decision-model round replaced the 27B call with it; `make golden-prose` now writes the decision model's verdict there.
 
 **What the first rows say** (2026-09-14, all at `GOLDEN_K=1`, keep-only, every
 row the second of two passes unless its note says otherwise; the 2026-09-16
@@ -1809,6 +1829,205 @@ storyline-core 23/23, storyline-trap 12/12, thread-recap 6/6, triage-spread
 is not `no_reply` — `identity_service`, `machine_sender` and
 `teams_missed_activity_digest` — which is why the verdict column counts them
 and the reason column does not.
+
+### Decision model ledger
+
+The decision model is the fine-tuned ModernBERT-large classifier distilled in
+jev-prototype. It has nine calibrated heads and question hash `6eba387492208260`.
+Here it runs as a GGUF on llama-server, pooling `mean`, with the heads applied
+outside the server (the round's plan, kept out of the repo, D1).
+
+This ledger answers one question per row: does that runtime give the same
+answers as the PyTorch model it was exported from? The reference is the stored
+PyTorch predictions (fp32 on CUDA, rounded to 5 decimals) over the same
+rendered states:
+- the dev split: 5,956 messages. It is not held out from calibration, because
+  it also fitted the temperatures;
+- golden: the 100-item set.
+
+The keep-only columns come from `score_run.py --keep-only`. The column order is
+gate.verdict / category / urgency / needs_action / reply_expected / needs_you /
+intent / importance.
+
+The request that matters:
+- `POST /v1/embeddings` with `"embd_normalize": -1`. Without it llama-server
+  returns an L2-normalized vector, and the linear heads were trained on the raw
+  mean.
+- A state over 2048 tokens is refused with HTTP 500 rather than truncated. It
+  goes as the id array `[CLS] + the first 2046 ids + [SEP]`: `/tokenize` with
+  `add_special: false`, then those ids as `input`. That reproduced HF's
+  truncation on all 43 long states in the two sets.
+
+The latency sample held no state over 2048 tokens. The truncated path, a refused
+call then `/tokenize` then the id array, is therefore untimed. It applies to
+about 0.7% of states.
+
+| date | runtime | file | dev argmax agreement (min field) | golden argmax | keep-only | tokenizer ids | p50 / p95 ms, batch 1 (≥700 tokens) | batch 16 ms/msg | RSS idle / peak seen | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-27 | PyTorch, stored predictions | `model.pt` (1.58 GB) | reference | reference | 94 / 96 / 89 / 86 / 84 / 88 / 83 / 74 | reference | — | — | — | jev-prototype round two, v2-swap |
+| 2026-09-27 | llama-server b10896 (the bundled build), F16 | `bond-decide-mbl-v2swap-f16.gguf` (791 MB) | 99.97% (urgency); drop_reason on gated rows 100% (n 2,282) | 100% on all 9 fields, max \|Δp\| 0.006 | identical | 300 / 300 | 38.7 / 115.7 (117.4 / 254.1) | 42.6 | 802 / 1,234 MB | **row of record, and the shipped quant.** Dev max \|Δp\| 0.0124. Not under load |
+| 2026-09-27 | llama-server b10621 (Homebrew), F16 | same file | 99.80% (gate), dev 500 rows | 100% on all 9 fields | identical | 300 / 300 | not timed | — | — | the build `make decide` runs |
+| 2026-09-27 | llama-server b10896, Q8_0 | `bond-decide-mbl-v2swap-q8_0.gguf` (421 MB) | 99.75% (urgency); drop_reason gated 99.87% | 100% on 8 fields, importance 99% | identical | 300 / 300 | 41.2 / 122.0 (125.0 / 277.5) | 45.7 | 446 / 885 MB | passes the bar but is 3× further from the reference (dev max \|Δp\| 0.039) and no faster on Metal; not shipped |
+
+The pre-registered bar was:
+- at least 99.5% dev argmax agreement on every field;
+- the golden keep-only table within ±1 point;
+- tokenizer ids identical on at least 99% of states;
+- p50 at or under 100 ms.
+
+Both quants pass every item. The Mac's decision call therefore costs about
+40 ms. The 4B triage call it replaces reads 2.4 s p50 at K=1 and 7.6 s at K=4 in
+the Golden ledger's Qwen3-4B rows above.
+
+**Through the app's own Dart path** (`make golden-decision`, 2026-09-28, Homebrew
+b10621 F16 on :8083, owner line set). The state is rendered by
+`renderDecisionStateFromParts`, the heads run in Dart, and long states take the
+client's tokenize path (16 of the 100 golden states were over 2048 tokens):
+
+| gate rule | keep-only | gate.verdict (all 100) | gate.reason | p50 / p95 ms per item |
+| --- | --- | --- | --- | --- |
+| argmax (the row of record's rule) | 94 / 96 / 89 / 86 / 84 / 88 / 83 / 74 — identical to the PyTorch row | 94 | 16/20 (80%) | 43 / 289 |
+| the app's policy (drop at p ≥ 0.70, never cold outreach) | same eight fields | 92 | 13/17 (76%) | same pass |
+
+The acceptance for the cutover was the ModernBERT row within ±2 points on every
+field; it is identical, so the Dart renderer, heads and truncation path add no
+error. The policy gate drops four fewer messages than argmax (18 against 22),
+which is the cautious direction for a drop.
+
+**One text call per message** (2026-09-28, `make golden`, keep-only 76 items; text judged by Opus
+subagents under one judge tag, `opus-subagent-2026-09-28`, packets of 25). "Old" is the pre-round
+pipeline (TriageTask + NeedsYouTask + ExtractTask, three calls) from a clean copy of commit 68540a4;
+"new" is the decision model on this Mac for every classification plus one `MessageTextTask` call and
+the needs-you band on the generative model.
+
+| generative | pipeline | wall, 100 items | summary | action items | deadline | project | topics | category / urgency / needs_action / reply / needs_you / intent / importance |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| box 27B (vLLM FP8, `/prose`) | old | 771 s | 68% | 28/45 | 89 | 59 | 30 | 91 / 96 / 72 / 82 / 93 / 87 / 70 |
+| box 27B | new, first prompt | 354 s | 74% | 26/45 | 83 | 61 | 34 | 96 / 89 / 86 / 84 / 89 / 83 / 74 |
+| box 27B | new, deadline rule tightened (shipped) | 346 s | 74% | 25/45 | 89 | 64 | 30 | same classification |
+| local 4B (`make fast`) | old | 718 s | 63% | 29/45 | 89 | 66 | 25 | 88 / 91 / 70 / 71 / 91 / 74 / 39 |
+| local 4B | new, first prompt | 328 s | 65% | 27/45 | 87 | 56 | 24 | 96 / 89 / 85 / 84 / 89 / 83 / 73 |
+
+Reading it: the new pipeline is 2.2× faster on the same server, summaries rise six points on the
+27B, and deadline returned to 89 once the rule said only a deadline set for the READER counts (the
+first prompt invented deadlines on 8 of 66 messages that have none; the shipped one on 3, the old
+pipeline on 4). Action items slip by two to three items of 45 on every new row, at the edge of this
+set's noise. Against the 27B as a classifier the decision model gives up urgency (89 against 96),
+needs-you (89 against 93) and intent (83 against 87) and gains category, needs_action, reply and
+importance; against the 4B it wins or ties everywhere. Label and extraction evidence are no longer
+produced, and a model-decided needs-you verdict carries a templated reason, so the needs-you evidence
+rubric is not comparable across the two pipelines.
+
+**Storyline model-free fixes** (2026-09-28, `make golden-sweep`, the box 27B as confirm and namer,
+embeddings on this Mac, `GOLDEN_RUN` = the shipped one-text-call run above). The baseline was run
+twice and gave identical counts, so on this setup a changed count is the change, not noise.
+
+| SWEEP_CARD | SWEEP_POSSIBLE_ROOM | storyline.id | forbidden hits | correct positives | formed / tombstoned / incoherent | confirms / namer calls | shipped |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| topics (shipped card) | 1 (today) | 59/98 | 1 | 10 | 2 / 3 / 2 | 43 / 5 | baseline, twice |
+| thread (thread topics + project + no names on untitled chats) | 1 | 58/98 | 0 | 9 | 2 / 4 / 4 | 48 / 6 | no |
+| topics_untitled (shipped card + no names on untitled chats) | 1 | 58/98 | 0 | 9 | 2 / 4 / 3 | 50 / 6 | no |
+| topics | 0 (possible rows hold no room) | 59/98 | 1 | 10 | 2 / 3 / 2 | 43 / 5 | yes |
+| thread | 0 | 58/98 | 0 | 9 | 2 / 4 / 4 | 48 / 6 | no |
+
+Reading it: taking participant names off untitled Teams chats (14 of the set's 36) is what moves the
+row, alone or inside the thread card: it removes the one forbidden hit and loses one correct item.
+The rule written before the runs was "no regression on storyline.id or forbidden hits", so neither
+card change ships; both stay as bench variants. Letting `possible` rows hold no room is identical on
+the bench (the harness dismisses them after every pass, so it shows only inside a pass: 15 then 0
+proposals instead of 11, 4, 0) and ships for what it does over days in the app.
+
+**The pipeline end to end** (`make bench-pipeline`, 2026-09-28, pre-PR, shape `lanes`, width 1,
+3 copies = 48 ungated messages, policy `all`, BOTH slots on the box 27B-FP8 with MTP, one pass
+each). `main` (41422f0) from a clean `git archive` copy is the baseline; the branch's bench stand-in
+decision model is instant (no live decision server; its real cost is the ~43 ms p50 above) and
+answers p(reply_expected) 0.9, so no draft is gated for want of a reply (the first branch pass,
+with the fixture's 0.2, gated all 49 and is not a row). `PIPE_NEEDS_YOU_P` sets its p(needs_you):
+0.5 is inside the band (every needs-you still asks the 27B, the old worst case), 0.9 is the default
+path (on the owner's inbox, 52 of 55 messages fell outside the band).
+
+| tree | needs-you | 27B calls per message | fast wall s | drafts wall s | fast msgs/min | drafts written / gated | late arrival s | result json |
+|---|---|---|---|---|---|---|---|---|
+| `main` | LLM | triage + needs-you + extraction (+ reply decision on 37) | 185.8 | 338.2 | 15.5 | 37 (34 drafted) / 12 | 13.2 | `pipeline-prpre-pipeline-main-27b-box-20260928-184341.json` |
+| branch | in the band, LLM | needs-you + message text | 123.6 | 281.6 | 23.3 | 49 / 0 | 11.4 | `pipeline-prpre-pipeline-27b-box-20260928-183645.json` |
+| branch | outside the band | message text | 78.9 | 257.6 | 36.5 | 49 / 0 | 9.6 | `pipeline-prpre-pipeline-27b-box-ny09-20260928-190948.json` |
+
+Reading it: the inbox is usable 2.35 times sooner on the default path (1.5 times at the worst
+case), and the drafts wall drops although the branch writes 15 more drafts than `main` does. The
+drafts walls are not a like-for-like comparison. On `main`, 12 messages never got a draft row
+(`_queueDraft`'s cue gate reads the 27B triage labels), and the 27B reply decision ran on the 37
+that did and skipped 3 of them (`draft_reply` n = 34; the bench counts those 3 as written, since the
+skip closes the row). On the branch the stand-in's reply probability lets all 49 through.
+
+**Against the owner's stored labels** (`make decision-agreement`, 2026-09-28, a copy of the app
+database: 55 triaged inbound messages, all mail, labelled by the old 4B pipeline; not gold, so this
+is how much changes, not accuracy). Agreement: urgency 34/55, category 26/55, needs_action 41/55,
+reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreements, 26 are the 4B's
+`personal` read as `work` and 3 its `work` read as `notification`; of the 21 urgency disagreements,
+17 are the 4B's `normal` read as `low` and 4 its `normal` read as `high`. The learned gate would add 2 drops to the rules' 55 keeps. Needs-you:
+41 yes, 11 no and 3 in the band, the only 3 of 55 that still cost a generative call.
+
+### Recommendations (decision-model round, 2026-09-28)
+
+What the round ships, and the rows that justify each. All numbers are keep-only
+over the 76 gold-keep items unless a row says otherwise.
+
+1. **The decision model classifies every kept message.** One forward pass of
+   the F16 GGUF (managed router id `bond-decide`, or `make decide` by hand)
+   answers the learned gate, category, urgency, needs_action, reply_expected,
+   needs-you, intent and importance; no chat model is asked any of them. Its
+   export is lossless and the app's Dart path reproduces it exactly: golden
+   keep-only identical to the PyTorch row (94 / 96 / 89 / 86 / 84 / 88 / 83 /
+   74), p50 43 ms per item, 16 of 100 golden states on the tokenize path
+   ([Decision model ledger](#decision-model-ledger), "Through the app's own Dart
+   path"). The policy gate (drop at p ≥ 0.70, never cold outreach) drops 18
+   where argmax drops 22.
+2. **One text call per message on the generative model.** `MessageTextTask`
+   (summary, action items, deadline, topics, project) replaces the triage and
+   extraction calls. On the box 27B the pipeline is 2.2× faster (346 s against
+   771 s for 100 items), summaries rise from 68% to 74%, deadline holds at 89,
+   project rises from 59 to 64 ("One text call per message" under the same
+   ledger). On the local 4B, the first prompt measured project 66 → 56 (and
+   328 s against 718 s), and the shipped prompt, with its tightened deadline
+   rule, was not re-measured on the 4B, which is the default generative model
+   on Macs under 40 GiB.
+3. **The reply gate.** The decision model's `reply_expected` probability, read
+   before any context is gathered, replaces the 27B `ReplyDecisionTask`: 84%
+   against the 27B's 82% and the 4B's 64% on the same field and population
+   ([Golden ledger](#golden-ledger), "Reply decision, retired 2026-09-28"). A
+   no now costs no embedding, retrieval or context pick.
+4. **The storyline room rule.** `possible` rows no longer hold the sweep's
+   room, bounded by at most three model questions per pass and a skip for a
+   cluster that a live possible row already holds. The sweep is identical to
+   the baseline on the bench (storyline.id 59/98, forbidden hits 1, correct
+   positives 10), on the candidate tree and again on the final tree with the
+   bound in ("Storyline model-free fixes" under the same ledger).
+
+**The honest trade-off.** Against the 4B it replaced, the decision model wins
+or ties on every field. Against the 27B as a classifier (the box 27B's old
+pipeline in "One text call per message") it gives up a few points: urgency
+89 against 96, needs-you 89 against 93 (the app's pipeline, with the band still
+asked of the generative model), intent 83 against 87. It is better on category
+(96 against 91), needs_action (86 against 72), reply (84 against 82) and
+importance (74 against 70). In exchange the pipeline is 2.2× faster, a
+message is classified in about 40 ms on this Mac, and classification needs no
+box at all: with the generative model down, remote or slow, the gate,
+urgency, category and the asks still land within a pass; what reads the
+text (a thread's ask on the rail, the summaries) waits for it. The `DecisionPolicy` bars were fitted on this set; any move needs a
+golden row on each side.
+
+**Not shipped, kept as bench variants.** The thread card (`SWEEP_CARD=thread`:
+the thread's topics and project) and the untitled-subject rule
+(`topics_untitled`: no participant names on untitled Teams chats) both read
+58/98 against 59/98. The untitled rule is what moves both rows: it removes the
+one forbidden hit and loses one correct item. Shipping it is an owner call.
+
+**Owed measurements.**
+- The box `decide` slot (`tools/inference.sh --decide-gguf`) run live: image,
+  key, GPU memory beside prose, `/tokenize` through Caddy, `test --decide`.
+- The golden judge flow re-run on any future change to the `MessageTextTask`
+  prompt (summary and action items are judged, not scored; action items sit
+  two to three items of 45 under the old pipeline on every new row).
 
 ### Recommendations (golden set, 2026-09)
 

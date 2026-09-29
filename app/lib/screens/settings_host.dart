@@ -20,10 +20,10 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; the placement enum is not re-exported.
-import '../services/llm/model_slots.dart' show ModelPlacement;
+import '../services/llm/model_slots.dart'
+    show MachineTier, ModelPlacement, managedGenerativeIdFor;
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
-import '../widgets/settings_models_page.dart' show RoleLine;
 import '../widgets/settings_screen.dart';
 
 /// The settings surface, and every mutator only settings calls.
@@ -181,6 +181,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     // Read ONCE, because the rows are one join over both: a second watch of
     // the same provider is a second subscription for one answer.
     final statuses = ref.watch(managedModelsStatusProvider).valueOrNull;
+    // What this Mac could hold, for the 27B's segment. Null for the two
+    // seconds a test's hardware channel takes to answer, read as full.
+    final hardwareTier = ref.watch(machineTierProvider).valueOrNull;
     final supervisor = ref.read(modelServerSupervisorProvider);
     // Watched so a rename's refusal sentence lands under the field that
     // caused it while the pane is open; the notifier is read at call time
@@ -321,76 +324,104 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       // the notifier's cache at the moment a Check or a Connect is pressed,
       // hands it to the probe and drops it. Nothing holds it.
       storedBearer: (id) => ref.read(appPrefsProvider.notifier).bearerFor(id),
-      modelPlacement: prefs.modelPlacement,
-      // The four values the form opens on, already resolved: the stored ones
-      // where there are stored ones, the build's otherwise. Never a key.
-      boxBigUrl: prefs.effectiveBoxBigUrl,
-      boxSmallUrl: prefs.effectiveBoxSmallUrl,
-      boxBigModel: prefs.effectiveBoxBigModel,
-      boxSmallModel: prefs.effectiveBoxSmallModel,
-      boxKeyStored: prefs.boxKeyStored,
-      boxBigKeyStored: prefs.boxBigKeyStored,
-      boxSmallKeyStored: prefs.boxSmallKeyStored,
-      // The app's own server. Watched, so a load that finishes behind an open
-      // Settings pane moves the bar and the three rows without the reader
-      // touching anything.
-      serverState: serverState,
-      // The whole fact, not just the two words the old block could answer
-      // for: the page decides which reasons it can speak to, and it can speak
-      // to the embedding server's as well now.
-      parked: ref.watch(parkedProvider).valueOrNull,
-      // Resolved by two pure functions beside the widget, so both the
-      // grouping rule and the join with this Mac's own files are pinned by
-      // tests that never pump this screen.
-      roleLines: RoleLine.withStatus(
-        RoleLine.fromPrefs(prefs),
-        statuses: statuses,
-        serverState: serverState,
-        placement: prefs.modelPlacement,
+      decisionPlacement: prefs.decisionPlacement,
+      generativePlacement: prefs.modelPlacement,
+      // The managed choice as this Mac's tier resolves it: the 27B is never
+      // the answer on the inbox tier.
+      generativeManagedId: managedGenerativeIdFor(
+        hardwareTier ?? MachineTier.full,
+        prefs.generativeManagedModel,
       ),
-      // The same statuses, read the other way round: the files this Mac holds
-      // that the placement is not serving.
-      idleModelLines: RoleLine.idleOnThisMac(statuses, serverState),
-      // This Mac's HARDWARE tier, not the effective one, and READ at the
-      // press rather than closed over, so a press cannot write last frame's
-      // answer.
-      onUseBox: ({
-        required bigUrl,
-        required smallUrl,
-        required bigModel,
-        required smallModel,
-        bigKey,
-        smallKey,
+      inboxTier: hardwareTier == MachineTier.inbox,
+      // The values the forms open on, already resolved: the stored ones where
+      // there are stored ones, the build's otherwise. Never a key.
+      decisionUrl: prefs.effectiveDecisionUrl,
+      decisionModel: prefs.effectiveDecisionModel,
+      decisionKeyStored: prefs.decisionKeyStored,
+      generativeUrl: prefs.effectiveGenerativeUrl,
+      generativeModel: prefs.effectiveGenerativeModel,
+      generativeKeyStored: prefs.boxBigKeyStored,
+      // The app's own server. Watched, so a load that finishes behind an open
+      // Settings pane moves the bar and the three roles' lines without the
+      // reader touching anything.
+      serverState: serverState,
+      parked: ref.watch(parkedProvider).valueOrNull,
+      modelStatuses: statuses,
+      decideInstallDir: ref.watch(decideInstallDirProvider),
+      onUseDecision: ({
+        required placement,
+        managedModel,
+        url,
+        model,
+        key,
+        clearKey = false,
+      }) async {
+        if (!mounted) return;
+        if (placement == ModelPlacement.box && url != null && model != null) {
+          await refuseWrongDecisionServer(
+            ref.read(decisionClientProvider),
+            notifier,
+            url: url,
+            model: model,
+            key: key,
+            clearKey: clearKey,
+          );
+          if (!mounted) return;
+        }
+        await notifier.useDecision(
+          placement: placement,
+          url: url,
+          model: model,
+          key: key,
+          clearKey: clearKey,
+        );
+        // The decision model enters or leaves this Mac's preset. Fire and
+        // forget on `ServerBootstrap`'s reasoning: a load is tens of seconds
+        // and the press has to return.
+        unawaited(supervisor.ensurePreset());
+      },
+      // This Mac's HARDWARE tier, READ at the press rather than closed over,
+      // so a press cannot write last frame's answer.
+      onUseGenerative: ({
+        required placement,
+        managedModel,
+        url,
+        model,
+        key,
+        clearKey = false,
       }) async {
         if (!mounted) return;
         final tier = await ref.read(machineTierProvider.future);
         if (!mounted) return;
-        await notifier.useBox(
-          bigUrl: bigUrl,
-          smallUrl: smallUrl,
-          bigModel: bigModel,
-          smallModel: smallModel,
-          bigKey: bigKey,
-          smallKey: smallKey,
+        await notifier.useGenerative(
+          placement: placement,
+          managedModel: managedModel,
+          url: url,
+          model: model,
+          key: key,
+          clearKey: clearKey,
           hardwareTier: tier,
         );
-        // The write moved the placement and the app's own server follows it:
-        // under User defined this Mac serves the embedding model alone, so
-        // the two chat models leave memory. Fire and forget on
-        // `ServerBootstrap`'s reasoning — a load is tens of seconds and the
-        // press has to return.
         unawaited(supervisor.ensurePreset());
       },
-      onUseManaged: () async {
-        if (!mounted) return;
-        final tier = await ref.read(machineTierProvider.future);
-        if (!mounted) return;
-        await notifier.usePlacement(ModelPlacement.local, hardwareTier: tier);
-        // Same rule the other way: this Mac's set comes back, and the bar and
-        // the three rows show the load. Fire and forget for the same reason.
-        unawaited(supervisor.ensurePreset());
-      },
-      onRemoveKey: notifier.clearBoxKey,
+      onCheckDecision: _checkDecision,
+      onRemoveKey: notifier.clearRoleKey,
+      cloudDraftsUrl: prefs.cloudDraftsUrl,
+      cloudDraftsModel: prefs.cloudDraftsModel,
+      cloudDraftsKeyStored: prefs.cloudDraftsKeyStored,
+      cloudDraftsConsent: prefs.cloudDraftsConsent,
+      onUseCloudDrafts: ({
+        required url,
+        required model,
+        key,
+        required clearKey,
+      }) =>
+          notifier.useCloudDrafts(
+        url: url,
+        model: model,
+        key: key,
+        clearKey: clearKey,
+      ),
       // Clears the wizard's own bookkeeping — everything in `setup_state`
       // but the migration record and the download ledger — and bumps the
       // counter `SetupGate` watches. The inbox unmounts and the wizard opens
@@ -402,16 +433,12 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       onShowLog: () => unawaited(launchUrl(Uri.file(supervisor.logFile.path))),
       onCloudDraftsConsent: () => notifier.setCloudDraftsConsent(true),
       // The grant's order reversed, and that order is the protection.
-      // `AppPrefs.specForStage` sends a third-party draft target back to the
-      // local one while the flag is false, so clearing the two stages first
-      // and the flag last means the stages are already local by the moment
-      // consent goes. Consent first would leave two stage entries pointing
-      // off this machine with nothing but the resolver between them and a
-      // draft. Awaited in turn rather than fired together: three writes to
-      // one prefs row.
+      // `AppPrefs.specForStage` sends the drafts back to the generative
+      // model once the cloud-drafts target is gone, so clearing it first and
+      // the flag last means the drafts are already home by the moment
+      // consent goes. Awaited in turn rather than fired together.
       onStopCloudDrafts: () async {
-        await notifier.clearStageTarget('draft_reply');
-        await notifier.clearStageTarget('draft_improve');
+        await notifier.clearCloudDrafts();
         await notifier.setCloudDraftsConsent(false);
       },
       cloudDraftsStanding: prefs.cloudDraftsStanding,
@@ -530,6 +557,28 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         );
       },
     );
+  }
+
+  /// The Decision model's **Check** on This Mac.
+  ///
+  /// `make decide-install` can land while the app runs, and nothing else
+  /// notices: the install state was read once and the router's preset left
+  /// the decision model out while its files were missing. So Check asks the
+  /// supervisor for the placements' preset (which restarts the router only
+  /// when the hash moved, which a newly installed model makes it do) and
+  /// re-reads the disk, and the press returns once the disk has answered.
+  ///
+  /// The heads cache is NOT dropped: `DecisionHeadsFile` re-reads on a new
+  /// modification time and never caches a missing file, and invalidating
+  /// its provider would rebuild the decision client, the triage queue under
+  /// it mid-drain and everything that watches that.
+  Future<void> _checkDecision() async {
+    if (!mounted) return;
+    // Fire and forget: a restart onto the new preset is tens of seconds, the
+    // bar above says so, and the status provider re-reads again at ready.
+    unawaited(ref.read(modelServerSupervisorProvider).ensurePreset());
+    ref.invalidate(managedModelsStatusProvider);
+    await ref.read(managedModelsStatusProvider.future);
   }
 
   /// Saves the Needs You rules and re-asks the recent window under them.

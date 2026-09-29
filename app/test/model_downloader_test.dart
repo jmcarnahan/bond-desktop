@@ -276,6 +276,23 @@ void main() {
     expect(hub.cdnRanges, [null, null]);
   });
 
+  test('a hand-installed entry is never fetched, listed or recorded',
+      () async {
+    // `source: local` (the decision model) has no URL to fetch: it arrives by
+    // `make decide-install`. Handed to a run, whether by the caller or through
+    // the whole manifest, it must cost no request and no ledger row.
+    final embed = manifest.byId(routerEmbedId);
+    final decide = testDecideFile();
+
+    final events = await build().run([decide, embed]).toList();
+
+    expect(events.where((e) => e.id == routerDecideId), isEmpty);
+    expect(statusesFor(events, routerEmbedId).last, DownloadStatus.done);
+    expect(ledger[routerDecideId], isNull);
+    expect(hub.resolveRanges, [null]);
+    expect(File(destOf(decide)).existsSync(), isFalse);
+  });
+
   test('a half-written part resumes at its own length', () async {
     final embed = manifest.byId(routerEmbedId);
     await seedPart(embed, 700);

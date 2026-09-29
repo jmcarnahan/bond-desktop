@@ -43,8 +43,9 @@ enforce the ones that are commands.
   and no-looping-animation rule): three bare `tester.pump()` calls is the
   idiom; `pump(Duration(milliseconds: 400))` for scoring passes.
 - Read pills and rows BY LABEL, never by count.
-- Eight `@Skip`'d live harnesses (`test/llm_*_live_test.dart`,
-  `llm_target_verify_test.dart`) sit in every run as skipped; they never get
+- The `@Skip`'d live harnesses (`test/*_live_test.dart`,
+  `llm_target_verify_test.dart`, `golden_storyline_test.dart`,
+  `golden_sweep_test.dart`) sit in every run as skipped; they never get
   accuracy thresholds (`docs/model-bakeoff.md`).
 - Never run `flutter test` or `flutter analyze` while a live `make` bench is
   running: any load moves the timings the bench exists to measure, and the
@@ -78,7 +79,9 @@ enforce the ones that are commands.
   first')` while the switch is on.
 - `--plain-name` on a live `make` target is a SUBSTRING filter, so a new live
   test's name must not contain another target's word (`storyline`, `triage`,
-  `reply`, `gates`, `sweep`) or it runs under that target too.
+  `reply`, `gates`, `sweep`) or it runs under that target too. The
+  decision-model legs are named `golden decision pass` and `db agreement` for
+  that reason; a new leg says `decision` or `text`.
 - A live bench prints counts, ms, ratios and enum words only, never a subject,
   title, charter, slug, participant or thread key. That is
   `SweepTally.table()`'s rule, and it holds because the golden storylines are
@@ -99,14 +102,26 @@ enforce the ones that are commands.
   the fixture's own THREAD counts, which is why this set reads 35 formable and
   a ceiling of 74 of 100 where an estimate by items said 40 and 77 of 98. A
   row is read against the ceiling, never against 98.
-- A bench runs from a DETACHED checkout whenever a later phase is editing the
-  main one: `git worktree add --detach ~/projects/bond-desktop-bench <commit>`,
-  copy the gitignored machine files in, `flutter pub get` in its `app/`, then
-  `make -C` that checkout with `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_RUN` and
-  `BENCH_OUT` pointed back at the main one. It compiles the committed tree, its
-  build directory is its own so narrow tests cannot race it over the native
-  assets, and its results still land in the main `tmp/bench`. A wall taken this
-  way while the main checkout is busy is under load, and the row says so.
+- A bench runs from a CLEAN COPY of a commit whenever the main checkout is
+  being edited. `git worktree` is hook-blocked for agents, so the copy is
+  `git archive <commit> | tar -x -C <scratch>/<name>`, then `cp local.mk .env`
+  into it (the gitignored machine files), `flutter pub get` in its `app/`, then
+  `make -C <scratch>/<name> …` with `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_RUN`
+  and `BENCH_OUT` pointed back at the main checkout. It compiles the committed
+  tree, its build directory is its own so narrow tests cannot race it over the
+  native assets, and its results still land in the main `tmp/bench`. A wall
+  taken this way while the main checkout is busy is under load, and the row
+  says so. A test-only comparison against HEAD is the same with `git archive
+  HEAD app`.
+- The shell is zsh, which does NOT word-split an unquoted `$v`: a bench loop
+  that keeps `make` arguments in a variable hands make ONE argument with the
+  spaces inside it. Write each argument out, or use an array.
+- The golden judge flow (`make golden-judge-pack` → one Opus agent per packet
+  → `make golden-judge-tally`) reads one file per item whose envelope is
+  `{"id": <item id>, "judged": <the verdict object>, "_meta": {"model":
+  "<judge tag>"}}` (`golden/tools/judge_pack.py`). The packet prompt describes
+  only the inner object, so a judge prompt states the envelope and the ONE tag
+  both sides of a comparison are judged under.
 - The gate runs ALONE. A concurrent `flutter test`, typically an agent
   re-checking its own files, rebuilds
   `build/native_assets/macos/libsqlite3.dylib` while the gate's isolates are
@@ -150,9 +165,13 @@ enforce the ones that are commands.
   attachments, context — on `fastDrainGateProvider`, shared with
   `TriageQueue`), the STORYLINE lane (the six passes in ONE worker, which is
   what keeps `docs/pipeline/06-storylines.md`'s ordering true), the DRAFT lane
-  (`draft` alone, at `AppPrefs.proseParallel` wide). A new handler goes on the
-  lane whose server it calls, and order ACROSS lanes is enqueue-and-pump, not
-  list position. A handler that must wake the drain it runs INSIDE is handed
+  (`draft` alone, at `AppPrefs.proseParallel` wide). Since the decision-model
+  round every lane's chat calls go to the ONE generative model (drafts may go
+  to Cloud drafts), so the lanes are an ORDER cut, not a server cut: a new
+  handler goes on the lane whose ordering it needs, and order ACROSS lanes is
+  enqueue-and-pump, not list position. Triage makes no chat call but still
+  shares `fastDrainGateProvider` for the yield ticket, so a triage pump can wait
+  behind a message-text call already in flight. A handler that must wake the drain it runs INSIDE is handed
   the worker through a `late final` local in the lane's body, never
   `ref.read` of that lane's own provider: Riverpod asserts self-dependency on
   a `read` as much as on a `watch`, so a debug build throws `A provider cannot
@@ -189,8 +208,10 @@ enforce the ones that are commands.
   its `_quietTimeout`, because it reads the `_mailPulling`/`_teamsPulling`
   flags the inbox's syncs write.
 - The clustering card is ONE recipe (`clusteringCardForConversationRow` in
-  `clustering_card.dart`, whose `ClusteringCardVariant` holds the five cards
-  and `shippedClusteringCard` names the one that ships) behind
+  `clustering_card.dart`, whose `ClusteringCardVariant` holds the seven cards
+  and `shippedClusteringCard` names the one that ships, `topics`; `thread` and
+  `topicsUntitled` are bench-only variants from the decision-model round,
+  measured 58/98 against the shipped card's 59/98) behind
   `EmbeddingsClient.modelTag`; a tag bump orphans every stored
   conversation vector by construction, so it ships with a one-shot re-embed
   in `sync_service.dart` (Round A's pref idiom).
@@ -263,53 +284,69 @@ enforce the ones that are commands.
   added to that loop or it is skipped after every clear.
 - Stages resolve their client through `stageLlmClientProvider(stageId)`, whose
   resolver reads `ref.read(appPrefsProvider.notifier).targetForStage(stageId)`
-  at request time. Nothing in `lib/` watches `appPrefsProvider` for a target,
-  so a prefs write rebuilds no worker, and `llm_routing_test` pins all four
-  queues identical across a `setStageTarget`. A null `LlmTarget.wire` means
+  at request time, and `decisionClientProvider` binds the same way through
+  `targetForStage('decision')`. Nothing in `lib/` watches `appPrefsProvider`
+  for a target, so a prefs write rebuilds no worker, and `llm_routing_test`
+  pins the same client instances across a `useGenerative`. A null `LlmTarget.wire` means
   the client's own wire; `toTarget` stamps only Converse.
-- `box` in code means the USER DEFINED placement, historically the GPU box:
-  the enum value (`ModelPlacement.box`), the prefs, the two ids `box-prose` and
-  `box-bulk` and the keychain entries all keep that word, and only the words on
-  screen say `Your server`.
-- Stages resolve through the PLACEMENT as well as the stage map, and the
-  placement is a RULE rather than stored rows. FOUR prefs carry the pair:
-  `box_big_url` and `box_small_url` (chat-completions URLs) and `box_big_model`
-  and `box_small_model` (the names DISCOVERED from each server's `/v1/models`),
-  each '' meaning "follow the build", which derives both URLs from the compiled
-  `BOND_BOX_URL` under `/prose` and `/bulk` and both names from the two
-  constants that box serves. `hasBox` is BOTH effective URLs non-empty.
-  `AppPrefs.boxProseSpec` and `boxBulkSpec` are DERIVED from those four and
-  never stored, which is why `LlmTargetSpec.isBox` exists, why `isFixed =
-  isBuiltIn || isBox` guards the editors, and why `_targets()` drops the two
-  box ids at load; each spec's `wire` is `wireForHost(url)` and its `parallel`
-  is 4 only when that URL pref is empty (the compiled box is vLLM with four
-  sequences) and 1 for a stored address, which a one-slot llama-server would
-  queue past the prose client's ceiling. The stage map's default is
-  `placementDefaultTargetId`: the seven prose stages plus
-  `storyline_membership` on `box-prose`, the other seven bulk stages on
-  `box-bulk`, whenever the placement is box and both addresses exist, and the
-  slot's built-in otherwise. `targetIdForStage` is a stored override that
-  resolves, else that default. `usePlacement(p, hardwareTier:)` is the one door
-  between placements: it drops the entries the app itself writes and keeps user
-  `t-…` picks. `useBox({bigUrl, smallUrl, bigModel, smallModel, bigKey,
-  smallKey, hardwareTier})` is `setBoxServers` plus `setBoxKey` (a token PER
-  ID, since two addresses can be two operators) plus `usePlacement(box)`, and
-  it is the one door the Models page and the wizard both write through.
-  `setBoxServers` refuses a big URL whose host
-  `isThirdPartyHost` while consent is false, refuses a third-party SMALL URL
-  whatever the flag says (the consent covers drafts on the big model; the
-  small model reads every message body and no cloud service serves that
-  role from any screen), and `draftFallbackSpec` is never third party for
-  the same reason. THREE one-shot migrations run in
-  `AppPrefsNotifier.read`, in this order: `box_targets_derived` (Round G's
-  stored pair into the `box_url` origin), `box_servers_derived` (that origin
-  into the two URLs), `stage_targets_cleared` (the per-step picks, which no
-  screen can show since the stage picker went). A test asserting where a stage
-  resolves says which placement it means (`AppPrefs(modelPlacement: box,
-  boxBigUrl: '…', boxSmallUrl: '…')`, since `boxUrlDefault` is empty under
-  `flutter test`), and the effective manifest tier is `effectiveTierProvider`
-  (`remote` on the box) rather than `machineTierProvider`, which still answers
-  what this Mac could run.
+- `box` in code means YOUR SERVER, historically the GPU box: the enum value
+  `ModelPlacement.box` is the Your server placement of EITHER role, the prefs
+  `model_placement`, `box_big_url` and `box_big_model` ARE the generative
+  role's placement, remote address and discovered model (keys reused so no
+  keychain re-key was needed), and the keychain ids are `box-prose`
+  (generative remote), `box-decide` (decision remote) and `cloud-drafts`. Only
+  the words on screen say `Your server` and `This Mac`. `box-bulk` is
+  `legacyBoxBulkId`, read only by the frozen one-shot migrations.
+- Three ROLES, not slots: **Decision**, **Generative**, **Embeddings**.
+  `ModelSlot {generative, decide, embed}` and `StageRole {decision,
+  generative, embed}` in `model_slots.dart`; every chat stage in
+  `pipelineStages` is `generative`, `decision` is the one `decide` row, and
+  `embeddings` is not routed. The router ids stay `bond-prose` (27B),
+  `bond-bulk` (4B), `bond-embed`, plus `bond-decide`: they are the `model`
+  field on every managed request, the `ServerLoading` keys and the preset
+  hash, so a role rename never touches them.
+- Routing is a RULE in `AppPrefs.specForStage`, with no stored rows:
+  `decision` → `decisionSpec`; the two `draftStageIds` → `cloudDraftsSpec`
+  when one is set AND it is the owner's own host or `cloudDraftsConsent`
+  stands; every other stage → `generativeSpec`. Each role spec is Your server
+  (placement `box`, a non-empty effective URL, and `_ownServer`, the
+  resolution-time belt that refuses a vendor host or the Converse wire), else
+  the managed router (`/v1/chat/completions` with `managedGenerativeId`, or
+  `/v1/embeddings` with `bond-decide`), else the `BOND_DEV_HAND_SERVERS`
+  defines (`LLAMA_URL`, `DECIDE_URL`). A stored URL of `''` means follow the
+  build (`$BOND_BOX_URL/prose/v1/chat/completions`,
+  `$BOND_BOX_URL/decide/v1/embeddings`); the generative remote is four wide
+  only while it follows the build, one for a stored address. A test asserting
+  where a stage resolves says which placement it means, since
+  `boxUrlDefault` is empty under `flutter test`. The writers are
+  `useGenerative({placement, managedModel, url, model, key, clearKey,
+  hardwareTier})`, `useDecision({placement, url, model, key, clearKey})`,
+  `useCloudDrafts` / `clearCloudDrafts` and `clearRoleKey(id)`: each validates
+  BEFORE it writes, moves the keychain BEFORE the URL, and `clearKey: true` (a
+  host change) forgets the old host's token rather than sending it on. Both
+  role URLs refuse a third-party host with their own sentence, because both
+  models read every message; only Cloud drafts may be third party, behind
+  consent. FOUR one-shots run in `AppPrefsNotifier.read`, in this order:
+  `box_targets_derived`, `box_servers_derived`, `stage_targets_cleared`,
+  `model_roles_derived` (a vendor big URL becomes Cloud drafts; its PENDING
+  value carries keychain moves that `finishModelRoles` completes once a token
+  store is there, and no `box-prose` token is attached while one is owed).
+  `box_small_*`, `llm_targets`, `stage_targets`, `fast_llm_*` and
+  `prose_llm_*` are inert.
+- What the managed router serves is `managedManifestProvider`
+  (`ModelManifest.forRoles`): embed, plus `bond-decide` while the decision
+  role is on this Mac, plus the chosen generative model while that role is
+  (`managedGenerativeIdFor`: full tier → 27B, inbox → 4B, a stored 27B on the
+  inbox tier falls back to the 4B). The supervisor's `buildPreset` serves only
+  `withPresentFiles(folder)`, because the server refuses a preset with a
+  missing file and one absent model must not cost the others, and records the
+  served ids with `setServedManagedIds`; `AppPrefs.unavailableFor(spec)` then
+  puts a sentence on `LlmTarget.unavailable` for a managed target the router
+  does not serve, and `LlmClient` and `DecisionClient` throw on it before any
+  HTTP, so only that role parks (`not_installed`). `machineTierProvider` still
+  answers what this Mac could hold. The decide entry is `source: local` (repo
+  `local/bond-decide`, no download): the downloader and the ledger skip it,
+  and it is installed when the GGUF AND the heads file are both in the folder.
 - Whether the app runs its own llama-server is `managedServerDefault`, a
   CONSTANT read off `--dart-define=BOND_DEV_HAND_SERVERS` the way
   `SetupGate.skipDefine` reads its own, not a preference: `AppPrefs
@@ -318,56 +355,55 @@ enforce the ones that are commands.
   router. A busy port is not a question either — the supervisor takes a free
   one and AWAITS `onPortMoved` (wired to `setRouterPort`) before it spawns, so
   the preference, the pid record and the clients agree.
-- `storyline_membership` is the ONE stage whose role depends on the placement,
-  big on the box and small here, and `placementDefaultTargetId` is where that
-  lives. `setStageTarget` and `applyPreset` compare against the PLACEMENT
-  default, so picking `box-bulk` for it on the box stores an entry and picking
-  `box-prose` clears one; `applyTierDefaults` keeps the SLOT default because it
-  runs only on the local placement.
-- The Models page is ONE question, where the models run, answered by two
-  modes and nothing else. `SettingsModelsPage`
-  (`widgets/settings_models_page.dart`) carries the keys `settings-mode`,
+- The Models page (`SettingsModelsPage`, `widgets/settings_models_page.dart`)
+  is THREE role blocks, top to bottom, and prop-only. **Decision model** and
+  **Generative model** are each a `SettingsSegments` of **This Mac** | **Your
+  server** (`settings-decision-mode`, `settings-generative-mode`);
+  **Embeddings** is a status line (`settings-embed-status`). This Mac is a
+  status block: `settings-decision-status` with **Check**
+  (`settings-role-check-decision`: `ensurePreset()` and refresh the status,
+  which is how a `make decide-install` done while the app runs is picked up;
+  the heads are re-read by the client when the file's mtime moves), and
+  `settings-generative-status` with the 27B | 4B pick
+  `settings-generative-managed` (the 27B disabled on the inbox tier). Also
   `settings-models-status`, `settings-models-progress`, `settings-show-log`,
-  `settings-set-up-again` and `settings-role-check-<big|small|embed>`; the
-  section renders only when `onUseBox` is wired. **Managed** is a status block
-  fed by `serverStateProvider` and `managedModelsStatusProvider`; **User
-  defined** renders `ModelServersForm` (`widgets/model_servers_form.dart`),
-  the ONE form for named servers, with the keys `servers-big-url`,
-  `servers-small-url`, `servers-key`, `servers-small-key`,
-  `servers-big-model`, `servers-small-model`, `servers-connect` and
-  `servers-remove-key`. The form OWNS both address rules (`isBoxOrigin`, the
-  same rule `setBoxServers` throws on, and a path that must contain `/v1/`
-  unless `wireForHost` answers Converse) and refuses under the field rather
-  than letting a host throw past a fire-and-forget press; the model name is
-  DISCOVERED from `/v1/models` rather than typed, a second key field appears
-  only when the two addresses name different hosts, and a third-party big
-  address raises `onThirdParty` so `SettingsScreen` can open the consent pane
-  and call the form's own `resume` on Continue. The Advanced fold, the slot
-  editors, the stage picker, the targets list and the Local server card were
-  DELETED in Round H; the routing data they edited is still there and no
-  screen shows it. `RoleLine.fromPrefs` groups a role's steps by
-  `defaultTargetIdForStage` and describes the modal target, and
-  `RoleLine.withStatus` joins this Mac's own files onto the rows by ROUTER
-  id. A placement write is followed by `supervisor.ensurePreset()`, from the
-  host after either mode and from the wizard's Finish, which restarts the
-  router only when the preset hash changed; `managedModelsStatusProvider`
-  lists the MACHINE tier's files with an `inUse` flag off the effective
-  tier's manifest, and the page shows the unused ones under User defined
-  under **Also on this Mac, not in use** as `on disk · not loaded`.
+  `settings-set-up-again` and `settings-idle-models`. Your server renders
+  `ModelServersForm` (`widgets/model_servers_form.dart`), ONE one-address form
+  per target, `ServerFormRole {decision, generative, cloudDrafts}`, keyed
+  `servers-<decision|generative>-{url,key,model,model-text,refusal,error,connect,remove-key}`
+  and, in the Cloud drafts section, `cloud-drafts-*` plus
+  `cloud-drafts-target`. The form OWNS the address rules (`isBoxOrigin`, a
+  path containing `/v1/` unless `wireForHost` answers Converse, the
+  third-party refusal) and refuses under the field rather than letting a host
+  throw past a fire-and-forget press; the model name is DISCOVERED from
+  `/v1/models`, and an origin change sends `clearKey`. A decision on Your
+  server still reads this Mac's heads file, so its status needs that file too.
+  `SettingsHost` wires `onUseDecision`, `onUseGenerative`, `onCheckDecision`
+  and `onRemoveKey` (null takes a control off), and every role write is
+  followed by `supervisor.ensurePreset()`, which restarts the router only when
+  the preset hash changed. The Advanced fold, the stage picker, the targets
+  list, the Local server card (Round H) and `useBox` / `usePlacement` /
+  `RoleLine` (the decision-model round) are gone.
 - The wizard's Where step (`screens/setup/setup_where_body.dart`,
-  `SetupWhereBody`) is two cards, `setup-where-managed` and
-  `setup-where-custom`, and nothing else: User defined renders the same
-  `ModelServersForm` with `connectLabel: 'Continue'` and `onThirdParty: null`,
-  so a vendor address is refused there with `thirdPartyRefusalText` and cloud
-  services stay a Settings decision. The form's press IS the step's way
-  forward, and there is no second Continue under it: `SetupFlow` returns
-  `continueFromWhere(servers:)` from `onConnect`, which writes through the
-  four-value `useBox` and moves to Models, and a throw comes back to the form,
-  which is the thing that can draw it. Under Managed the step's own Continue
-  calls `continueFromWhere()` with no payload, which is `usePlacement(local,
-  hardwareTier:)` with the HARDWARE tier. `SetupState` carries the placement
-  and nothing of the pair; the addresses, the discovered names and the keys
-  live in the form until its press.
+  `SetupWhereBody`) asks the Models page's two questions: decision cards
+  `setup-where-decision-managed` | `setup-where-decision-custom`, generative
+  cards `setup-where-managed` | `setup-where-custom`, and under This Mac the
+  27B | 4B pick `setup-where-generative-model`. Your server renders the same
+  `ModelServersForm` per role with `onThirdParty: null`, so a vendor address
+  is refused with its sentence and cloud services stay a Settings decision.
+  The decision form says **Connect** and writes at once
+  (`SetupController.connectDecision` → `useDecision`), staying on the step
+  (`setup-where-decision-connected`). The generative form's press says
+  **Continue** and IS the way forward: `SetupFlow` returns
+  `continueFromWhere(generative:)` from `onConnect`, and a throw comes back to
+  the form, which is the thing that can draw it. Under This Mac the step's
+  own Continue calls `continueFromWhere()`, which writes `useGenerative(local,
+  managedModel:, hardwareTier:)` with the HARDWARE tier and `useDecision(local)`
+  when the decision is on this Mac. A decision sent to Your server and not
+  yet connected refuses the Continue with `decisionFirstText` before anything
+  is written. `SetupState` carries `placement`, `decisionPlacement` and
+  `generativeManaged` and nothing of any address or key; the Models step
+  lists the decision model under `setup-models-decision`.
 - Under `flutter test` `hardwareInfoProvider` answers `HardwareInfo.unknown` at
   its two-second timeout, so the tier is `AsyncLoading` for the first two
   seconds. A test that needs a readable machine overrides
@@ -389,9 +425,10 @@ enforce the ones that are commands.
   `LlmTarget.bearer` and in the `Authorization` header, and nowhere else:
   never `app_prefs`, a `toString`, an `LlmCallRecord`, an exception message, a
   log line, an activity row or a draft row.
-- Consent for a third-party target on `draft_reply` or `draft_improve` is
-  enforced in `AppPrefs.specForStage` and in `applyPreset`, never on the
-  screen alone.
+- Consent for a third-party Cloud drafts target on `draft_reply` or
+  `draft_improve` is enforced in `AppPrefs.specForStage` and in
+  `useCloudDrafts`, never on the screen alone. Consent is machine-wide: a
+  second vendor connects without a new pane once one was consented.
 - THIRD PARTY means Bedrock and the three model vendors, not AWS.
   `isThirdPartyHost` lives in `app/lib/services/llm/model_slots.dart`, beside
   `LlmTargetSpec`, and is true for a host under `anthropic.com`, `openai.com`
@@ -399,7 +436,8 @@ enforce the ones that are commands.
   `bedrock` and ending `.amazonaws.com`. The owner's own inference box under a
   Route 53 name or an EC2 public name is the owner's machine and needs no
   drafts consent; `LlmTargetSpec.isThirdParty` still ORs the Converse wire, so
-  a Converse target is third party wherever it lives.
+  a Converse target is third party wherever it lives. It is a DENYLIST: any
+  other vendor's host counts as the owner's own server for both roles.
 - Cloud drafts: every door reads `CloudDraftLedger.refusal()`, meaning
   Improve, the standing rule, a prefetched draft on a third-party target and
   an asked-for one before its row is touched. The handler notes `cloud: N` on
@@ -414,8 +452,9 @@ enforce the ones that are commands.
   sentence had a URL. The exception itself keeps the full sentence for the
   screen. `llm_error_redaction_test` pins the existing sites; a new place that
   writes an exception's text into a row must go through it as well.
-- `draft_improve` is a prose stage like the six beside it, routed by the
-  placement rule, and it is the one row with NO SCHEMA of its own: it runs
+- `draft_improve` is a generative stage like the rest, routed by the role
+  rule exactly as `draft_reply` is (Cloud drafts when set and consented), and
+  it is the one row with NO SCHEMA of its own: it runs
   `DraftTask` and its call record is labelled `draft_reply`, which is the
   exemption `model_slots_test` pins literally. It was the one
   `PipelineStageInfo.optional` row until Round H, when the stage picker that
@@ -423,14 +462,19 @@ enforce the ones that are commands.
   and nothing branches on it any more.
 - The machine tier is `MachineTier` in `model_slots.dart`, chosen from
   `hw.memsize` by `machineTierFor` and never persisted, so a models folder
-  carried to another Mac is re-read on the Mac it is on. It is applied by the
-  wizard at Finish and by every `usePlacement(local, hardwareTier:)`, which is
-  what the Models page's **Managed** segment calls; unknown memory resolves to
-  `full` because unknown never refuses.
+  carried to another Mac is re-read on the Mac it is on. `AppPrefs.machineTier`
+  is set by the supervisor's `buildPreset` (before any managed request) and by
+  every `useGenerative(hardwareTier:)`, the wizard's included; it decides the
+  managed generative model. Unknown memory resolves to `full` because unknown
+  never refuses.
 - The manifest and the Makefile are two worlds joined by
   `manifest_makefile_parity_test.dart`, so a change to any of them edits both
-  or fails the test: the three repos, the quant either from a `:quant` suffix
-  or from the repo name having to carry the manifest file's own quant token,
+  or fails the test: the four entries, three by `-hf` repo (`MODEL_HF`,
+  `FAST_HF`, `EMBED_HF`, the quant either from a `:quant` suffix or from the
+  repo name having to carry the manifest file's own quant token) and the
+  source-local decide entry by folder, file and heads (`DECIDE_DIR`,
+  `DECIDE_FILE`, `DECIDE_QUANT` f16, `DECIDE_HEADS`) and by its server args
+  (`DECIDE_ARGS`: pooling, `-c`, `-ub`, `-b`, `-np` against the preset);
   `CTX_SIZE`, `MODEL_CTX`, `SLOTS`, `FAST_SLOTS`, the embed `--pooling` word
   and the prose spec type. One blind spot remains: the recipes launch the
   servers from `MODEL_FLAGS` and `FAST_FLAGS`, so a literal written into those
@@ -468,3 +512,67 @@ enforce the ones that are commands.
   four points on a triage enum, under three drafts on the rubric, anything but
   an identical count on the storyline benches, and a timing outside the
   idle-machine band are all NOT findings.
+- `DecisionClient` THROWS, unlike `EmbeddingsClient` (which returns an
+  `EmbedResult` and never throws), so the triage queue PARKS and never falls
+  back to a language model: transport, timeout, 5xx and 429 →
+  `DecisionUnavailableException` (an `LlmUnavailableException`, park reason
+  `decision_unavailable`, its own rail sentence); 401/403 →
+  `LlmUnauthorizedException`; bad JSON, a width other than 1024, a
+  NORMALIZED vector (norm within 1e-3 of 1.0: the server ignored
+  `embd_normalize: -1`, and the heads read the raw mean), a refused heads
+  file, and a server whose `/tokenize` does not answer ModernBERT's `[50281 …
+  50282]` for `"a"` with the specials (the identity probe, once per client
+  and target, passes cached, which is what tells the embedding model's 1024
+  raw numbers apart) or has no `/tokenize` at all →
+  `DecisionMisconfiguredException`, park reason `decision_misconfigured`;
+  any other 4xx → `LlmFormatException`. A test that points a real
+  `DecisionClient` at a `MockClient` answers `/tokenize` too. The one 500 it
+  does NOT treat as unavailable is llama-server's `too large to process`: that is the signal to `/tokenize`
+  (the router routes it by the body's `model` and requires it), keep the first
+  2046 ids and send `[50281] + ids + [50282]`; it costs no attempt and never
+  parks.
+- The decision state is rendered in Dart (`services/decision/decision_state.dart`,
+  a port of jev-prototype's `distill/state.py` + `build_states.py`) and pinned
+  BYTE FOR BYTE by `test/fixtures/decision/render_cases.json`: fictional cases
+  regenerated by jev-prototype `distill/export/render_fixtures.py` after any
+  renderer change there, and never edited by hand. Its marker strip is
+  `stripDecisionMarkers`, NOT the app's `stripAttachmentMarkers` (which also
+  strips `[[img:…]]` and trims with Dart's rules), whitespace collapses ONLY
+  when a marker was present, and `message_block.dart` is never reused for the
+  state. The date line is the Mac's LOCAL zone, as in training: render on the
+  Mac, never on a server. The golden leg composes through the same
+  `renderDecisionStateFromParts`, so the two cannot drift.
+  `decisionRendererVersion` (`'bond-state/1'`) beside it names the state
+  format for the next round's model bundles (a bundle naming another is
+  refused); it is bumped only with a change to the bytes, fixtures and all.
+- The heads file (`decide-heads.json`, installed beside the GGUF under
+  `<models>/local_bond-decide/` by `make decide-install`) is needed on THIS
+  Mac even when the decision server is remote: the nine heads, temperatures
+  and softmax run in Dart. `decisionHeadsProvider` re-reads it when its mtime
+  moves and refuses a file whose `qhash` differs from
+  `DecisionHeads.expectedQhash`; a missing file parks the decision pass.
+- The `DecisionPolicy` constants (`services/decision/decision_policy.dart`:
+  `gateDrop`, `needsYouYes`, `needsYouYesCold`, `needsYouNo`, `booleanYes`,
+  `replyYes`) were fitted on the golden set and move only with a golden row
+  on each side (`make golden-decision`, plus `make golden-prose` for
+  `replyYes`), the `StorylineTuning` rule.
+- `message_decisions` is DERIVED (Clear AI results empties it; the triage
+  pass writes it again), keyed by `(source, source_message_id)`. The four
+  `*_p` columns are the probabilities read by hand; `answers_json` is every
+  option's calibrated probability plus `owner_known`. A row decided WITHOUT an
+  owner line (the keychain had not answered yet) has an untrusted `needs_you_p`,
+  so that message's needs-you goes to the language model. A learned drop can
+  carry an ingest word (`outbound`, a chat's `auto_generated`), so Clear AI
+  results tells it from an ingest verdict by the `message_decisions` row
+  (`clearDerived`'s `keptGate`, read before that table is emptied).
+- An inbox-level widget test that builds a triage queue overrides
+  `decisionClientProvider` with `keepingDecisionClient()`
+  (`test/fixtures/fake_decision_client.dart`: keep, needs-you 0.5 so the band
+  still asks the scripted model). Without it the real client finds no heads
+  file under `flutter test` and parks every message, which shows up as rows
+  stuck at "triaging" or as RenderFlex overflows, not as a clear failure.
+- Generated drift schema files (`drift_schemas/bond/drift_schema_vN.json`,
+  `test/drift/bond/generated/`) are never deleted or rewritten by hand from a
+  session; the hook blocks it. Design around a schema bump you do not need:
+  a new flag on an existing row can ride a JSON column (`owner_known` in
+  `answers_json` is the example).

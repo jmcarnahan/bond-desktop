@@ -1,7 +1,8 @@
 import 'dart:async';
 
 import 'package:bond_inbox/providers/app_providers.dart' show ParkedFact;
-import 'package:bond_inbox/providers/prefs_provider.dart' show AppPrefs;
+import 'package:bond_inbox/services/decision/decision_client.dart'
+    show noTokenizeText, notDecisionModelText;
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/managed_model_status.dart';
@@ -11,461 +12,672 @@ import 'package:bond_inbox/widgets/settings_models_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The Models page: one question, two modes, one status line and three rows.
+/// The Models page: three roles, top to bottom, each saying where it runs.
 ///
 /// Prop-only, so this file pumps it alone with no screen and no host around
-/// it — which is what makes `pumpAndSettle` safe here. What the HOST resolves
+/// it, which is what makes `pumpAndSettle` safe here. What the HOST resolves
 /// into those props is `settings_models_host_test.dart`'s job; what the form
 /// does with an address is `model_servers_form_test.dart`'s.
 ///
-/// The access key in these fixtures is `sk-fixture-…`, and the Check case
-/// asserts that no rendered `Text` carries it.
+/// Rows and statuses are read BY KEY, never by position.
 
-const _bigUrl = 'https://box.example.com/prose/v1/chat/completions';
-const _smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+const _generativeUrl = 'https://box.example.com/prose/v1/chat/completions';
+const _decisionUrl = 'https://box.example.com/decide/v1/embeddings';
 
-const _boxProse = LlmTargetSpec(
-  id: boxProseId,
-  name: boxProseName,
-  url: _bigUrl,
-  model: boxProseModel,
-  hasBearer: true,
-  parallel: 4,
-);
+/// One write the page made, as the host would receive it.
+typedef Write = ({
+  String role,
+  ModelPlacement placement,
+  String? managedModel,
+  String? url,
+  String? model,
+  String? key,
+  bool clearKey,
+});
 
-const _boxBulk = LlmTargetSpec(
-  id: boxBulkId,
-  name: boxBulkName,
-  url: _smallUrl,
-  model: boxBulkModel,
-  hasBearer: true,
-  parallel: 4,
-);
-
-const _localProse = LlmTargetSpec(
-  id: builtInProseId,
-  name: builtInProseName,
-  url: 'http://localhost:8080/v1/chat/completions',
-  model: 'qwen3.8',
-);
-
-const _localFast = LlmTargetSpec(
-  id: builtInFastId,
-  name: builtInFastName,
-  url: 'http://localhost:8082/v1/chat/completions',
-  model: 'qwen3-4b',
-);
-
-/// The three rows a Managed install reports, built the way the host builds
-/// them.
-List<RoleLine> _localLines() => [
-      RoleLine(
-        id: 'big',
-        title: 'Big model',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.big,
-          spec: _localProse,
-        ),
-        checkUrl: _localProse.url,
-      ),
-      RoleLine(
-        id: 'small',
-        title: 'Small model',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.small,
-          spec: _localFast,
-        ),
-        checkUrl: _localFast.url,
-      ),
-      RoleLine(
-        id: 'embed',
-        title: 'Embeddings',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.embed,
-          spec: null,
-        ),
-        checkUrl: 'http://localhost:8081/v1/embeddings',
-      ),
-    ];
-
-/// And the three a user-defined install reports, both chat rows carrying a
-/// stored key.
-List<RoleLine> _boxLines() => [
-      RoleLine(
-        id: 'big',
-        title: 'Big model',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.big,
-          spec: _boxProse,
-        ),
-        checkUrl: _boxProse.url,
-        bearerId: _boxProse.id,
-      ),
-      RoleLine(
-        id: 'small',
-        title: 'Small model',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.small,
-          spec: _boxBulk,
-        ),
-        checkUrl: _boxBulk.url,
-        bearerId: _boxBulk.id,
-      ),
-      RoleLine(
-        id: 'embed',
-        title: 'Embeddings',
-        detail: SettingsModelsPage.roleDetail(
-          role: StageRole.embed,
-          spec: null,
-        ),
-        checkUrl: 'http://localhost:8081/v1/embeddings',
-      ),
-    ];
-
-ManagedModelStatus _status(
-  String roleId,
-  String name, {
-  required String routerId,
-  int bytes = 20 * 1024 * 1024 * 1024,
+ManagedModelStatus _row(
+  String roleId, {
+  String name = 'A model',
+  int bytes = 1024 * 1024 * 1024,
   bool onDisk = true,
+  String? routerId,
   bool inUse = true,
+  bool local = false,
+  bool headsOnDisk = true,
 }) =>
     ManagedModelStatus(
       roleId: roleId,
       displayName: name,
       bytes: bytes,
       onDisk: onDisk,
-      routerId: routerId,
+      routerId: routerId ??
+          switch (roleId) {
+            'decision' => routerDecideId,
+            'generative' => routerProseId,
+            _ => routerEmbedId,
+          },
       inUse: inUse,
+      local: local,
+      headsOnDisk: headsOnDisk,
     );
 
 void main() {
+  late List<Write> writes;
+  late int checks;
+
+  setUp(() {
+    writes = [];
+    checks = 0;
+  });
+
+  RoleWrite recorder(String role) => ({
+        required placement,
+        managedModel,
+        url,
+        model,
+        key,
+        clearKey = false,
+      }) async =>
+          writes.add((
+            role: role,
+            placement: placement,
+            managedModel: managedModel,
+            url: url,
+            model: model,
+            key: key,
+            clearKey: clearKey,
+          ));
+
   Future<void> open(
     WidgetTester tester, {
-    ModelPlacement placement = ModelPlacement.local,
+    ModelPlacement decision = ModelPlacement.local,
+    ModelPlacement generative = ModelPlacement.local,
+    String managedId = routerProseId,
+    bool inboxTier = false,
     bool processingOn = true,
     ServerState serverState = const ServerStopped(),
-    String boxBigUrl = _bigUrl,
-    String boxSmallUrl = _smallUrl,
-    bool boxKeyStored = false,
-    bool? boxBigKeyStored,
-    bool? boxSmallKeyStored,
-    Future<ModelProbeResult> Function(String, {String? bearer})? probe,
-    String? Function(String)? storedBearer,
-    Future<void> Function()? onUseManaged,
-    VoidCallback? onSetUpAgain,
-    VoidCallback? onShowLog,
-    bool wireForm = true,
-    List<RoleLine> roleLines = const [],
-    List<String> idleModelLines = const [],
+    bool decisionKeyStored = false,
+    bool generativeKeyStored = false,
+    String generativeUrl = _generativeUrl,
+    List<ManagedModelStatus>? statuses,
     ParkedFact? parked,
-    // An indeterminate bar never stops animating, so the two cases that put
-    // one up pump by hand rather than waiting for a tree that will not settle.
+    String? decideInstallDir,
+    Future<ModelProbeResult> Function(String, {String? bearer})? probe,
+    Future<void> Function()? onCheckDecision,
+    VoidCallback? onShowLog,
+    VoidCallback? onSetUpAgain,
+    bool wireRoles = true,
     bool settle = true,
   }) async {
-    await tester.binding.setSurfaceSize(const Size(900, 1600));
+    await tester.binding.setSurfaceSize(const Size(900, 1800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: SingleChildScrollView(
           child: SettingsModelsPage(
-            modelPlacement: placement,
+            decisionPlacement: decision,
+            generativePlacement: generative,
+            generativeManagedId: managedId,
+            inboxTier: inboxTier,
             processingOn: processingOn,
             serverState: serverState,
-            boxBigUrl: boxBigUrl,
-            boxSmallUrl: boxSmallUrl,
-            boxKeyStored: boxKeyStored,
-            boxBigKeyStored: boxBigKeyStored ?? boxKeyStored,
-            boxSmallKeyStored: boxSmallKeyStored ?? boxKeyStored,
-            probe: probe,
-            storedBearer: storedBearer,
-            onUseBox: !wireForm
-                ? null
-                : ({
-                    required bigUrl,
-                    required smallUrl,
-                    required bigModel,
-                    required smallModel,
-                    bigKey,
-                    smallKey,
-                  }) async {},
-            onUseManaged: onUseManaged,
-            onSetUpAgain: onSetUpAgain,
-            onShowLog: onShowLog,
-            roleLines: roleLines,
-            idleModelLines: idleModelLines,
+            decisionUrl: _decisionUrl,
+            decisionModel: 'bond-decide-fixture',
+            decisionKeyStored: decisionKeyStored,
+            generativeUrl: generativeUrl,
+            generativeModel: 'qwen3.8-27b',
+            generativeKeyStored: generativeKeyStored,
+            statuses: statuses,
             parked: parked,
+            decideInstallDir: decideInstallDir,
+            probe: probe ??
+                (url, {bearer}) async => const ModelProbeResult(
+                      reachable: true,
+                      modelIds: ['listed-model'],
+                    ),
+            onUseDecision: wireRoles ? recorder('decision') : null,
+            onUseGenerative: wireRoles ? recorder('generative') : null,
+            onCheckDecision: onCheckDecision ?? () async => checks++,
+            onShowLog: onShowLog,
+            onSetUpAgain: onSetUpAgain,
           ),
         ),
       ),
     ));
-    if (settle) {
-      await tester.pumpAndSettle();
-    } else {
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-    }
+    // An indeterminate bar animates forever, so a settle would never land.
+    settle ? await tester.pumpAndSettle() : await tester.pump();
   }
 
-  Future<void> press(WidgetTester tester, Finder finder) async {
-    await tester.ensureVisible(finder);
+  String textOf(WidgetTester tester, Key key) =>
+      tester.widget<Text>(find.byKey(key)).data!;
+
+  Future<void> tapSegment(WidgetTester tester, Key control, String label) async {
+    final target =
+        find.descendant(of: find.byKey(control), matching: find.text(label));
+    await tester.ensureVisible(target);
     await tester.pumpAndSettle();
-    await tester.tap(finder);
+    await tester.tap(target);
     await tester.pumpAndSettle();
   }
 
-  Finder segment(String label) => find.descendant(
-        of: find.byType(SegmentedButton<ModelPlacement>),
-        matching: find.text(label),
-      );
-
-  String status(WidgetTester tester) =>
-      tester.widget<Text>(find.byKey(SettingsModelsPage.statusKey)).data!;
-
-  List<String> rendered(WidgetTester tester) => [
-        for (final t in tester.widgetList<Text>(find.byType(Text))) t.data ?? '',
-      ];
-
-  group('the two modes', () {
-    testWidgets('the question, both modes and the caption are up',
+  group('the three roles', () {
+    testWidgets('are titled in order, and embeddings has no control',
         (tester) async {
       await open(tester);
 
-      expect(find.text(SettingsModelsPage.whereHeading), findsOneWidget);
-      expect(segment(SettingsModelsPage.managedLabel), findsOneWidget);
-      expect(segment(SettingsModelsPage.userDefinedLabel), findsOneWidget);
-      expect(find.text(SettingsModelsPage.modeCaption), findsOneWidget);
-    });
-
-    testWidgets('Managed is a status block with no form on it', (tester) async {
-      await open(tester);
-
-      expect(find.byKey(ModelServersForm.bigUrlKey), findsNothing);
-      expect(find.byKey(ModelServersForm.connectKey), findsNothing);
-    });
-
-    testWidgets('choosing Managed from a user-defined install acts at once',
-        (tester) async {
-      var managed = 0;
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        onUseManaged: () async => managed++,
+      final decision = tester.getTopLeft(
+        find.text(SettingsModelsPage.decisionTitle),
       );
-
-      await press(tester, segment(SettingsModelsPage.managedLabel));
-
-      expect(managed, 1);
+      final generative = tester.getTopLeft(
+        find.text(SettingsModelsPage.generativeTitle),
+      );
+      final embed = tester.getTopLeft(find.text(SettingsModelsPage.embedTitle));
+      expect(decision.dy, lessThan(generative.dy));
+      expect(generative.dy, lessThan(embed.dy));
+      expect(find.byKey(SettingsModelsPage.decisionModeKey), findsOneWidget);
+      expect(find.byKey(SettingsModelsPage.generativeModeKey), findsOneWidget);
+      expect(find.byKey(SettingsModelsPage.embedStatusKey), findsOneWidget);
+      // Both placement controls say the same two words.
+      for (final control in [
+        SettingsModelsPage.decisionModeKey,
+        SettingsModelsPage.generativeModeKey,
+      ]) {
+        for (final label in [
+          SettingsModelsPage.thisMacLabel,
+          SettingsModelsPage.yourServerLabel,
+        ]) {
+          expect(
+            find.descendant(of: find.byKey(control), matching: find.text(label)),
+            findsOneWidget,
+          );
+        }
+      }
     });
 
-    testWidgets('choosing User defined opens the form and writes nothing',
+    testWidgets('a host that cannot write draws no role controls',
         (tester) async {
-      var managed = 0;
-      await open(tester, onUseManaged: () async => managed++);
+      await open(tester, wireRoles: false);
 
-      await press(tester, segment(SettingsModelsPage.userDefinedLabel));
-
-      expect(find.byKey(ModelServersForm.bigUrlKey), findsOneWidget);
-      expect(find.byKey(ModelServersForm.smallUrlKey), findsOneWidget);
-      expect(status(tester), SettingsModelsPage.untilConnectText);
-      expect(managed, 0);
-
-      // And back again: the form closes and nothing was written either way.
-      await press(tester, segment(SettingsModelsPage.managedLabel));
-      expect(find.byKey(ModelServersForm.bigUrlKey), findsNothing);
-      expect(managed, 0);
-    });
-
-    testWidgets('a user-defined install opens on the form, prefilled',
-        (tester) async {
-      await open(tester, placement: ModelPlacement.box, boxKeyStored: true);
-
-      expect(
-        tester
-            .widget<TextField>(find.byKey(ModelServersForm.bigUrlKey))
-            .controller!
-            .text,
-        _bigUrl,
-      );
-      expect(
-        tester
-            .widget<TextField>(find.byKey(ModelServersForm.smallUrlKey))
-            .controller!
-            .text,
-        _smallUrl,
-      );
+      expect(find.byKey(SettingsModelsPage.decisionModeKey), findsNothing);
+      expect(find.byKey(SettingsModelsPage.generativeModeKey), findsNothing);
+      expect(find.byKey(SettingsModelsPage.embedStatusKey), findsOneWidget);
     });
   });
 
-  group('the status line', () {
-    testWidgets('the switch being off is said before anything else',
+  group('the decision model', () {
+    testWidgets('on this Mac, not installed, says how to install it',
         (tester) async {
-      // The last parked fact outlives the drains it came from, and a park
-      // sentence promises a retry nothing is going to make.
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        processingOn: false,
-        parked: const ParkedFact(reason: 'model_unavailable', waiting: 3),
-      );
+      await open(tester, statuses: [
+        _row('decision', onDisk: false, local: true),
+      ]);
 
-      expect(status(tester), SettingsModelsPage.processingOffText);
+      expect(
+        textOf(tester, SettingsModelsPage.decisionStatusKey),
+        SettingsModelsPage.decisionNotInstalledText,
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Not installed · run make decide-install');
+      expect(find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
+          findsNothing);
     });
 
-    testWidgets('a user-defined install says whether it has a key',
+    testWidgets('a moved models folder is named in the command, park or not',
         (tester) async {
-      await open(tester, placement: ModelPlacement.box);
-      expect(status(tester), SettingsModelsPage.keyNeededText);
+      const dir = '/Volumes/Models/bond/local_bond-decide';
+      const sentence =
+          "Not installed · run make decide-install DECIDE_DIR='$dir'";
+      await open(
+        tester,
+        decideInstallDir: dir,
+        statuses: [_row('decision', onDisk: false, local: true)],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey), sentence);
 
-      await open(tester, placement: ModelPlacement.box, boxKeyStored: true);
-      expect(status(tester), SettingsModelsPage.connectedText);
+      await open(
+        tester,
+        decideInstallDir: dir,
+        parked: const ParkedFact(reason: 'decision_not_installed', waiting: 3),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey), sentence);
     });
 
-    testWidgets('a key stored for one server does not answer for the other',
-        (tester) async {
-      // `boxKeyStored` is "either", and two different hosts are two
-      // operators: a line reading Connected with the big server unkeyed
-      // would be describing an install that cannot draft.
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxSmallUrl: 'https://box2.example.com/bulk/v1/chat/completions',
-        boxKeyStored: true,
-        boxBigKeyStored: false,
-        boxSmallKeyStored: true,
+    test("a folder with an apostrophe is quoted the shell's way", () {
+      expect(
+        SettingsModelsPage.decisionNotInstalledIn(
+            "/Volumes/Sam's Models/local_bond-decide"),
+        'Not installed · run make decide-install '
+        "DECIDE_DIR='/Volumes/Sam'\\''s Models/local_bond-decide'",
       );
-      expect(status(tester), SettingsModelsPage.keyNeededText);
-
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxSmallUrl: 'https://box2.example.com/bulk/v1/chat/completions',
-        boxKeyStored: true,
-        boxBigKeyStored: true,
-        boxSmallKeyStored: false,
-      );
-      expect(status(tester), SettingsModelsPage.keyNeededText);
-
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxSmallUrl: 'https://box2.example.com/bulk/v1/chat/completions',
-        boxKeyStored: true,
-        boxBigKeyStored: true,
-        boxSmallKeyStored: true,
-      );
-      expect(status(tester), SettingsModelsPage.connectedText);
     });
 
-    testWidgets('a server on this machine is asked for no key, whichever side '
-        'it is on', (tester) async {
+    testWidgets('installed reads loaded or not from the router',
+        (tester) async {
       await open(
         tester,
-        placement: ModelPlacement.box,
-        boxBigUrl: 'http://localhost:8080/v1/chat/completions',
-        boxSmallUrl: 'http://127.0.0.1:8082/v1/chat/completions',
+        statuses: [_row('decision', name: 'Bond decision model', local: true)],
+        serverState: const ServerLoading(
+          port: 8080,
+          pid: 1,
+          loaded: {routerDecideId: true, routerEmbedId: false},
+        ),
       );
-      expect(status(tester), SettingsModelsPage.connectedText);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.installedLoadedText);
+      expect(find.text('Bond decision model · 1.0 GB'), findsOneWidget);
 
-      // One of each: the remote side still wants its own key.
       await open(
         tester,
-        placement: ModelPlacement.box,
-        boxBigUrl: 'http://localhost:8080/v1/chat/completions',
-        boxSmallUrl: _smallUrl,
+        statuses: [_row('decision', local: true)],
+        serverState: const ServerStopped(),
       );
-      expect(status(tester), SettingsModelsPage.keyNeededText);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.installedNotLoadedText);
     });
 
-    testWidgets('all three parks are answered under User defined',
+    testWidgets('Check calls the host, and is off while it runs',
         (tester) async {
-      for (final (reason, sentence) in [
-        ('model_unavailable', SettingsModelsPage.serverParkedText),
-        ('unauthorized', SettingsModelsPage.serverUnauthorizedText),
-        ('embed_unavailable', SettingsModelsPage.embedUnavailableText),
+      final hold = Completer<void>();
+      await open(tester, onCheckDecision: () {
+        checks++;
+        return hold.future;
+      });
+
+      await tester.tap(find.byKey(SettingsModelsPage.checkDecisionKey));
+      await tester.pump();
+      expect(checks, 1);
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.byKey(SettingsModelsPage.checkDecisionKey),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.checkingText);
+
+      hold.complete();
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.byKey(SettingsModelsPage.checkDecisionKey),
+            )
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('Your server opens the form and writes nothing until Connect',
+        (tester) async {
+      await open(tester);
+
+      await tapSegment(tester, SettingsModelsPage.decisionModeKey,
+          SettingsModelsPage.yourServerLabel);
+
+      expect(writes, isEmpty);
+      expect(find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
+          findsOneWidget);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.untilConnectText);
+      // No Check on somebody's server: the form's Connect is the question.
+      expect(find.byKey(SettingsModelsPage.checkDecisionKey), findsNothing);
+
+      final connect = find.byKey(
+        ModelServersForm.connectKey(ServerFormRole.decision),
+      );
+      await tester.ensureVisible(connect);
+      await tester.tap(connect);
+      await tester.pumpAndSettle();
+
+      expect(writes.single.role, 'decision');
+      expect(writes.single.placement, ModelPlacement.box);
+      expect(writes.single.url, _decisionUrl);
+      expect(writes.single.model, 'listed-model');
+    });
+
+    testWidgets('This Mac from Your server acts at once', (tester) async {
+      await open(tester, decision: ModelPlacement.box);
+
+      await tapSegment(tester, SettingsModelsPage.decisionModeKey,
+          SettingsModelsPage.thisMacLabel);
+
+      expect(writes.single.role, 'decision');
+      expect(writes.single.placement, ModelPlacement.local);
+    });
+
+    testWidgets('a vendor is refused with the decision sentence',
+        (tester) async {
+      await open(tester, decision: ModelPlacement.box);
+      await tester.enterText(
+        find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
+        'https://api.openai.com/v1/embeddings',
+      );
+      final connect = find.byKey(
+        ModelServersForm.connectKey(ServerFormRole.decision),
+      );
+      await tester.ensureVisible(connect);
+      await tester.tap(connect);
+      await tester.pumpAndSettle();
+
+      expect(find.text(ModelServersForm.decisionThirdPartyRefusalText),
+          findsOneWidget);
+      expect(writes, isEmpty);
+    });
+
+    testWidgets('Your server says whether a key is needed', (tester) async {
+      await open(tester, decision: ModelPlacement.box);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.keyNeededText);
+
+      await open(tester, decision: ModelPlacement.box, decisionKeyStored: true);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Connected · bond-decide-fixture at box.example.com');
+    });
+  });
+
+  group('the decision model on your server', () {
+    testWidgets('without the heads file on this Mac is not installed, '
+        'whatever the server says', (tester) async {
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        statuses: [
+          _row('decision',
+              onDisk: false, local: true, inUse: false, headsOnDisk: false),
+        ],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionNotInstalledText);
+
+      // The heads alone are enough: the GGUF is the server's business.
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        statuses: [
+          _row('decision', onDisk: false, local: true, inUse: false),
+        ],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Connected · bond-decide-fixture at box.example.com');
+    });
+  });
+
+  group('a not-installed park that the install has overtaken', () {
+    const park = ParkedFact(reason: 'decision_not_installed', waiting: 3);
+
+    testWidgets('says Installed · loading once both files are on disk',
+        (tester) async {
+      await open(
+        tester,
+        parked: park,
+        statuses: [_row('decision', local: true, inUse: false)],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.installedLoadingText);
+    });
+
+    testWidgets('and Installed · loaded once the router serves it',
+        (tester) async {
+      await open(
+        tester,
+        parked: park,
+        serverState: const ServerReady(port: 8080, pid: 1),
+        statuses: [_row('decision', local: true)],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.installedLoadedText);
+    });
+
+    testWidgets('keeps the park while either file is still missing',
+        (tester) async {
+      for (final row in [
+        _row('decision', local: true, onDisk: false),
+        _row('decision', local: true, headsOnDisk: false),
       ]) {
+        await open(tester, parked: park, statuses: [row]);
+        expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+            SettingsModelsPage.decisionNotInstalledText);
+      }
+    });
+  });
+
+  group('the generative model', () {
+    testWidgets('on this Mac offers the 27B and the 4B, and a pick writes '
+        'the managed model', (tester) async {
+      await open(tester);
+
+      expect(find.byKey(SettingsModelsPage.generativeManagedKey),
+          findsOneWidget);
+      await tapSegment(tester, SettingsModelsPage.generativeManagedKey,
+          SettingsModelsPage.model4bLabel);
+
+      expect(writes.single.role, 'generative');
+      expect(writes.single.placement, ModelPlacement.local);
+      expect(writes.single.managedModel, routerBulkId);
+    });
+
+    testWidgets('the inbox tier cannot pick the 27B, and says why',
+        (tester) async {
+      await open(tester, inboxTier: true, managedId: routerBulkId);
+
+      expect(find.text(SettingsModelsPage.inboxTierCaption), findsOneWidget);
+      final segmented = tester.widget<SegmentedButton<String>>(
+        find.descendant(
+          of: find.byKey(SettingsModelsPage.generativeManagedKey),
+          matching: find.byType(SegmentedButton<String>),
+        ),
+      );
+      final prose =
+          segmented.segments.firstWhere((s) => s.value == routerProseId);
+      expect(prose.enabled, isFalse);
+
+      await tester.tap(find.text(SettingsModelsPage.model27bLabel));
+      await tester.pumpAndSettle();
+      expect(writes, isEmpty);
+    });
+
+    testWidgets('a chosen model not on disk says to set up again',
+        (tester) async {
+      await open(
+        tester,
+        managedId: routerBulkId,
+        statuses: [_row('generative', onDisk: false, routerId: routerBulkId)],
+        onSetUpAgain: () {},
+      );
+
+      expect(textOf(tester, SettingsModelsPage.generativeStatusKey),
+          'Not downloaded · Set up again to download it');
+      expect(find.byKey(SettingsModelsPage.setUpAgainKey), findsOneWidget);
+    });
+
+    testWidgets('a row about the other model is not read as the chosen one',
+        (tester) async {
+      await open(
+        tester,
+        managedId: routerBulkId,
+        statuses: [_row('generative', routerId: routerProseId)],
+      );
+
+      expect(textOf(tester, SettingsModelsPage.generativeStatusKey),
+          'Qwen3 4B on this Mac');
+    });
+
+    testWidgets('on disk reads loaded from the router', (tester) async {
+      await open(
+        tester,
+        statuses: [_row('generative', name: 'Qwen3.8 27B')],
+        serverState: const ServerReady(port: 8080, pid: 1),
+      );
+
+      expect(textOf(tester, SettingsModelsPage.generativeStatusKey),
+          SettingsModelsPage.onDiskLoadedText);
+    });
+
+    testWidgets('Your server connects through the generative form',
+        (tester) async {
+      await open(tester);
+      await tapSegment(tester, SettingsModelsPage.generativeModeKey,
+          SettingsModelsPage.yourServerLabel);
+      expect(writes, isEmpty);
+      expect(find.byKey(SettingsModelsPage.generativeManagedKey), findsNothing);
+
+      final connect = find.byKey(
+        ModelServersForm.connectKey(ServerFormRole.generative),
+      );
+      await tester.ensureVisible(connect);
+      await tester.tap(connect);
+      await tester.pumpAndSettle();
+
+      expect(writes.single.role, 'generative');
+      expect(writes.single.placement, ModelPlacement.box);
+      expect(writes.single.url, _generativeUrl);
+      expect(writes.single.model, 'listed-model');
+    });
+
+    testWidgets('a cloud service is pointed at Cloud drafts', (tester) async {
+      await open(tester, generative: ModelPlacement.box);
+      await tester.enterText(
+        find.byKey(ModelServersForm.urlKey(ServerFormRole.generative)),
+        'https://api.openai.com/v1/chat/completions',
+      );
+      final connect = find.byKey(
+        ModelServersForm.connectKey(ServerFormRole.generative),
+      );
+      await tester.ensureVisible(connect);
+      await tester.tap(connect);
+      await tester.pumpAndSettle();
+
+      expect(find.text(ModelServersForm.generativeThirdPartyRefusalText),
+          findsOneWidget);
+      expect(writes, isEmpty);
+    });
+
+    testWidgets('This Mac from Your server acts at once', (tester) async {
+      await open(tester, generative: ModelPlacement.box);
+
+      await tapSegment(tester, SettingsModelsPage.generativeModeKey,
+          SettingsModelsPage.thisMacLabel);
+
+      expect(writes.single.role, 'generative');
+      expect(writes.single.placement, ModelPlacement.local);
+    });
+
+    testWidgets('a server on this machine is asked for no key',
+        (tester) async {
+      await open(
+        tester,
+        generative: ModelPlacement.box,
+        generativeUrl: 'http://localhost:8080/v1/chat/completions',
+      );
+
+      expect(textOf(tester, SettingsModelsPage.generativeStatusKey),
+          'Connected · qwen3.8-27b at localhost:8080');
+    });
+
+    testWidgets('the weights left behind are listed as on disk, not loaded',
+        (tester) async {
+      await open(
+        tester,
+        generative: ModelPlacement.box,
+        generativeKeyStored: true,
+        statuses: [_row('generative', name: 'Qwen3.8 27B', inUse: false)],
+      );
+
+      expect(textOf(tester, SettingsModelsPage.idleGenerativeKey),
+          'Qwen3.8 27B · 1.0 GB · on disk · not loaded');
+    });
+  });
+
+  group('the parks, each under its own role', () {
+    const parkedAt = {
+      'decision_unavailable': SettingsModelsPage.decisionStatusKey,
+      'embed_unavailable': SettingsModelsPage.embedStatusKey,
+      'model_unavailable': SettingsModelsPage.generativeStatusKey,
+      'unauthorized': SettingsModelsPage.generativeStatusKey,
+      // The managed generative model, said on this Mac's server line.
+      'not_installed': SettingsModelsPage.statusKey,
+      'decision_not_installed': SettingsModelsPage.decisionStatusKey,
+      'decision_misconfigured': SettingsModelsPage.decisionStatusKey,
+      'decision_unauthorized': SettingsModelsPage.decisionStatusKey,
+    };
+    const sentence = {
+      'decision_unavailable': SettingsModelsPage.decisionUnavailableText,
+      'embed_unavailable': SettingsModelsPage.embedUnavailableText,
+      'model_unavailable': SettingsModelsPage.serverParkedText,
+      'unauthorized': SettingsModelsPage.serverUnauthorizedText,
+      'not_installed': SettingsModelsPage.notInstalledText,
+      'decision_not_installed': SettingsModelsPage.decisionNotInstalledText,
+      'decision_misconfigured': SettingsModelsPage.decisionMisconfiguredText,
+      'decision_unauthorized': SettingsModelsPage.decisionUnauthorizedText,
+    };
+
+    for (final reason in parkedAt.keys) {
+      testWidgets('$reason is said under its role', (tester) async {
         await open(
           tester,
-          placement: ModelPlacement.box,
-          boxKeyStored: true,
+          generative: ModelPlacement.box,
+          generativeKeyStored: true,
           parked: ParkedFact(reason: reason, waiting: 3),
         );
-        expect(status(tester), sentence, reason: reason);
-      }
-    });
 
-    testWidgets('under Managed only the embedding park is this page’s to '
-        'answer', (tester) async {
-      // The other two are about a server whose own line is right here, and
-      // the rail already says `Model server unreachable`.
+        expect(textOf(tester, parkedAt[reason]!), sentence[reason]);
+        // And under no other role.
+        for (final other in parkedAt.values.toSet()..remove(parkedAt[reason])) {
+          expect(textOf(tester, other), isNot(sentence[reason]));
+        }
+      });
+    }
+
+    testWidgets('on this Mac the generative model leaves a server park to the '
+        'server line', (tester) async {
       await open(
         tester,
-        serverState: const ServerReady(port: 8080, pid: 42),
         parked: const ParkedFact(reason: 'model_unavailable', waiting: 3),
       );
-      expect(status(tester), SettingsModelsPage.runningText);
 
-      await open(
-        tester,
-        serverState: const ServerReady(port: 8080, pid: 42),
-        parked: const ParkedFact(reason: 'embed_unavailable', waiting: 3),
-      );
-      expect(status(tester), SettingsModelsPage.embedUnavailableText);
+      expect(find.text(SettingsModelsPage.serverParkedText), findsNothing);
     });
 
-    testWidgets('a park word this page cannot answer for is left alone',
-        (tester) async {
+    testWidgets('nothing waiting, nothing said', (tester) async {
       await open(
         tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        parked: const ParkedFact(reason: 'session', waiting: 3),
+        parked: const ParkedFact(reason: 'decision_unavailable'),
       );
 
-      expect(status(tester), SettingsModelsPage.connectedText);
+      expect(find.text(SettingsModelsPage.decisionUnavailableText),
+          findsNothing);
     });
 
-    testWidgets('Managed says what the app’s own server is doing',
-        (tester) async {
-      for (final (state, sentence) in <(ServerState, String)>[
-        (const ServerStopped(), SettingsModelsPage.notRunningText),
-        (const ServerStarting(port: 8080), SettingsModelsPage.startingText),
-        (
-          const ServerLoading(port: 8080, pid: 42, loaded: {
-            'bond-prose': false,
-            'bond-bulk': true,
-            'bond-embed': false,
-          }),
-          'Loading models · 1 of 3',
-        ),
-        (const ServerReady(port: 8080, pid: 42), SettingsModelsPage.runningText),
-        (
-          const ServerFailed('exited (code 1)'),
-          'Not running: exited (code 1)',
-        ),
-        (const ServerPortInUse(8080), 'Port 8080 is in use'),
-        (
-          const ServerPortInUse(8080, holder: 'llama-server'),
-          'Port 8080 is in use by llama-server',
-        ),
-        (const ServerDisabled(), SettingsModelsPage.handServersText),
-      ]) {
-        await open(tester, serverState: state, settle: false);
-        expect(status(tester), sentence, reason: '$state');
-      }
+    testWidgets('the switch being off outranks every park', (tester) async {
+      await open(
+        tester,
+        processingOn: false,
+        parked: const ParkedFact(reason: 'embed_unavailable', waiting: 2),
+      );
+
+      expect(textOf(tester, SettingsModelsPage.statusKey),
+          SettingsModelsPage.processingOffText);
+      expect(find.text(SettingsModelsPage.embedUnavailableText), findsNothing);
     });
   });
 
-  group('the loading bar and the log', () {
+  group('the server line, the bar and the log', () {
+    testWidgets('say what the app’s own server is doing', (tester) async {
+      await open(tester, serverState: const ServerReady(port: 8080, pid: 1));
+      expect(textOf(tester, SettingsModelsPage.statusKey),
+          SettingsModelsPage.runningText);
+      expect(find.byKey(SettingsModelsPage.progressKey), findsNothing);
+    });
+
     testWidgets('a starting server gets an indeterminate bar', (tester) async {
       await open(
         tester,
         serverState: const ServerStarting(port: 8080),
         settle: false,
       );
-
       final bar = tester.widget<LinearProgressIndicator>(
         find.byKey(SettingsModelsPage.progressKey),
       );
@@ -476,23 +688,18 @@ void main() {
         (tester) async {
       await open(
         tester,
-        serverState: const ServerLoading(port: 8080, pid: 42, loaded: {
-          'bond-prose': false,
-          'bond-bulk': true,
-          'bond-embed': false,
-        }),
+        serverState: const ServerLoading(
+          port: 8080,
+          pid: 1,
+          loaded: {routerDecideId: true, routerEmbedId: false},
+        ),
       );
-
+      expect(textOf(tester, SettingsModelsPage.statusKey),
+          SettingsModelsPage.loadingText(1, 2));
       final bar = tester.widget<LinearProgressIndicator>(
         find.byKey(SettingsModelsPage.progressKey),
       );
-      expect(bar.value, closeTo(1 / 3, 0.001));
-    });
-
-    testWidgets('a running server has no bar at all', (tester) async {
-      await open(tester, serverState: const ServerReady(port: 8080, pid: 42));
-
-      expect(find.byKey(SettingsModelsPage.progressKey), findsNothing);
+      expect(bar.value, 0.5);
     });
 
     testWidgets('Show log is offered under a failure and nowhere else',
@@ -500,577 +707,108 @@ void main() {
       var shown = 0;
       await open(
         tester,
-        serverState: const ServerReady(port: 8080, pid: 42),
+        serverState: const ServerFailed('exited'),
         onShowLog: () => shown++,
       );
-      expect(find.byKey(SettingsModelsPage.showLogKey), findsNothing);
-
-      await open(
-        tester,
-        serverState: const ServerFailed('exited (code 1)'),
-        onShowLog: () => shown++,
-      );
-      await press(tester, find.byKey(SettingsModelsPage.showLogKey));
+      await tester.tap(find.byKey(SettingsModelsPage.showLogKey));
       expect(shown, 1);
 
-      // And a host that cannot open one offers nothing rather than a dead
-      // button.
-      await open(tester, serverState: const ServerFailed('exited (code 1)'));
+      await open(tester, onShowLog: () => shown++);
       expect(find.byKey(SettingsModelsPage.showLogKey), findsNothing);
     });
   });
 
-  group('the three role rows', () {
-    testWidgets('a Managed install names each model, its size and its state',
-        (tester) async {
+  group('embeddings', () {
+    testWidgets('are a status line about this Mac', (tester) async {
       await open(
         tester,
-        serverState: const ServerReady(port: 8080, pid: 42),
-        roleLines: RoleLine.withStatus(
-          _localLines(),
-          statuses: [
-            _status('big', 'Qwen3.8 27B', routerId: routerProseId),
-            _status('small', 'Qwen3 4B Instruct', routerId: routerBulkId),
-            _status(
-              'embed',
-              'Qwen3 Embedding 0.6B',
-              routerId: routerEmbedId,
-              bytes: 1234567890,
-              onDisk: false,
-            ),
-          ],
-          serverState: const ServerReady(port: 8080, pid: 42),
-          placement: ModelPlacement.local,
-        ),
+        statuses: [_row('embed', name: 'Qwen3 Embedding 0.6B')],
+        serverState: const ServerReady(port: 8080, pid: 1),
       );
 
-      expect(find.text('Big model'), findsOneWidget);
-      expect(
-        find.text('Qwen3.8 27B on this Mac · 20.0 GB · on disk · loaded'),
-        findsOneWidget,
-      );
-      expect(
-        find.text('Qwen3 4B Instruct on this Mac · 20.0 GB · on disk · loaded'),
-        findsOneWidget,
-      );
-      expect(
-        find.text('Qwen3 Embedding 0.6B on this Mac · 1.1 GB · not downloaded'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('a user-defined install names the model and the host',
-        (tester) async {
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        roleLines: RoleLine.withStatus(
-          _boxLines(),
-          statuses: [
-            _status(
-              'embed',
-              'Qwen3 Embedding 0.6B',
-              routerId: routerEmbedId,
-              bytes: 1234567890,
-            ),
-          ],
-          serverState: const ServerReady(port: 8080, pid: 42),
-          placement: ModelPlacement.box,
-        ),
-      );
-
-      expect(find.text('qwen3.8 at box.example.com'), findsOneWidget);
-      expect(find.text('qwen3-4b at box.example.com'), findsOneWidget);
-      expect(
-        find.text(
-          'Qwen3 Embedding 0.6B on this Mac · 1.1 GB · on disk · loaded',
-        ),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('each Check asks that role’s own URL with its stored key',
-        (tester) async {
-      final asked = <(String, String?)>[];
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        roleLines: _boxLines(),
-        storedBearer: (id) => 'sk-fixture-stored-$id',
-        probe: (url, {bearer}) async {
-          asked.add((url, bearer));
-          return const ModelProbeResult(reachable: true, modelIds: ['a']);
-        },
-      );
-
-      await press(tester, find.byKey(SettingsModelsPage.roleCheckKey('small')));
-
-      expect(asked, [(_smallUrl, 'sk-fixture-stored-$boxBulkId')]);
-      expect(find.text('Reachable · 1 model'), findsOneWidget);
-      expect(rendered(tester), everyElement(isNot(contains('sk-fixture'))));
-    });
-
-    testWidgets('a row that moves to another server drops its old answer',
-        (tester) async {
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        storedBearer: (_) => 'sk-fixture-stored',
-        probe: (url, {bearer}) async =>
-            const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
-        roleLines: _boxLines(),
-      );
-      await press(tester, find.byKey(SettingsModelsPage.roleCheckKey('big')));
-      expect(find.textContaining('Reachable'), findsOneWidget);
-
-      await open(tester, roleLines: _localLines());
-
-      expect(find.textContaining('Reachable'), findsNothing);
-    });
-
-    testWidgets('a Check that outlives its row renders nothing under the new '
-        'one', (tester) async {
-      final hold = Completer<ModelProbeResult>();
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        storedBearer: (_) => 'sk-fixture-stored',
-        probe: (url, {bearer}) => hold.future,
-        roleLines: _boxLines(),
-      );
-
-      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('big')));
-      await tester.pump();
-      expect(find.text('Checking…'), findsOneWidget);
-
-      // The host moved the install to this Mac while the answer was out.
-      await open(tester, roleLines: _localLines());
-      expect(find.text('Checking…'), findsNothing);
-
-      hold.complete(
-        const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
-      );
-      await tester.pumpAndSettle();
-
-      // The server that answered is not the server the row now asks.
-      expect(find.textContaining('Reachable'), findsNothing);
-    });
-
-    testWidgets('a Check landing after the page is gone does nothing',
-        (tester) async {
-      final hold = Completer<ModelProbeResult>();
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        storedBearer: (_) => 'sk-fixture-stored',
-        probe: (url, {bearer}) => hold.future,
-        roleLines: _boxLines(),
-      );
-
-      await tester.tap(find.byKey(SettingsModelsPage.roleCheckKey('big')));
-      await tester.pump();
-
-      // The host left Settings while the answer was still out.
-      await tester.pumpWidget(const SizedBox());
-      hold.complete(
-        const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
-      );
-      await tester.pumpAndSettle();
-
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('a host that cannot ask offers no Check anywhere',
-        (tester) async {
-      await open(tester, roleLines: _localLines());
-
-      for (final id in ['big', 'small', 'embed']) {
-        expect(
-          find.byKey(SettingsModelsPage.roleCheckKey(id)),
-          findsNothing,
-          reason: '$id still offers a check with no probe wired',
-        );
-      }
-    });
-  });
-
-  group('the rows the host joins', () {
-    RoleLine row(List<RoleLine> rows, String id) =>
-        rows.singleWhere((r) => r.id == id);
-
-    test('a file that has not landed says so, and quotes what it will cost',
-        () {
-      final rows = RoleLine.withStatus(
-        _localLines(),
-        statuses: [
-          _status(
-            'big',
-            'Qwen3.8 27B',
-            routerId: routerProseId,
-            onDisk: false,
-          ),
-        ],
-        serverState: const ServerReady(port: 8080, pid: 42),
-        placement: ModelPlacement.local,
-      );
-
-      expect(row(rows, 'big').detail, 'Qwen3.8 27B on this Mac');
-      expect(row(rows, 'big').size, '20.0 GB');
-      expect(row(rows, 'big').state, 'not downloaded');
-      // The rows the statuses say nothing about keep what the prefs said.
-      expect(row(rows, 'small').size, isNull);
-      expect(row(rows, 'small').detail, 'Qwen3 4B on this Mac');
-    });
-
-    test('on disk is not loaded until the router says so', () {
-      List<RoleLine> join(ServerState state) => RoleLine.withStatus(
-            _localLines(),
-            statuses: [_status('big', 'Qwen3.8 27B', routerId: routerProseId)],
-            serverState: state,
-            placement: ModelPlacement.local,
-          );
-
-      expect(
-        row(join(const ServerStopped()), 'big').state,
-        'on disk · not loaded',
-      );
-      expect(
-        row(join(const ServerReady(port: 8080, pid: 42)), 'big').state,
-        'on disk · loaded',
-      );
-      // Keyed by ROUTER id, which on a small Mac is the bulk file's even for
-      // the big row.
-      expect(
-        row(
-          join(const ServerLoading(port: 8080, pid: 42, loaded: {
-            routerProseId: true,
-            routerBulkId: false,
-          })),
-          'big',
-        ).state,
-        'on disk · loaded',
-      );
-      expect(
-        row(
-          join(const ServerLoading(port: 8080, pid: 42, loaded: {
-            routerProseId: false,
-          })),
-          'big',
-        ).state,
-        'on disk · not loaded',
-      );
-    });
-
-    test('a host still reading changes nothing at all', () {
-      final lines = _localLines();
-      final rows = RoleLine.withStatus(
-        lines,
-        statuses: null,
-        serverState: const ServerReady(port: 8080, pid: 42),
-        placement: ModelPlacement.local,
-      );
-
-      expect(rows, same(lines));
-    });
-
-    test('under User defined only the embedding row is dressed', () {
-      final rows = RoleLine.withStatus(
-        _boxLines(),
-        statuses: [
-          // A big row resolved a frame before the mode moved. It names a
-          // machine this app cannot see, and the placement is what says so.
-          _status('big', 'Qwen3.8 27B', routerId: routerProseId),
-          _status(
-            'embed',
-            'Qwen3 Embedding 0.6B',
-            routerId: routerEmbedId,
-            bytes: 1234567890,
-          ),
-        ],
-        serverState: const ServerReady(port: 8080, pid: 42),
-        placement: ModelPlacement.box,
-      );
-
-      expect(row(rows, 'big').size, isNull);
-      expect(row(rows, 'big').state, isNull);
-      expect(row(rows, 'big').detail, 'qwen3.8 at box.example.com');
-      expect(row(rows, 'embed').size, '1.1 GB');
-      expect(row(rows, 'embed').state, 'on disk · loaded');
-    });
-
-    test('a role whose steps disagree names the count and nothing else', () {
-      // The screen that could have shown which ones went with the fold.
-      expect(
-        SettingsModelsPage.roleDetail(
-          role: StageRole.big,
-          spec: _localProse,
-          overrides: 1,
-        ),
-        'Custom · 1 step points elsewhere',
-      );
-      expect(
-        SettingsModelsPage.roleDetail(
-          role: StageRole.small,
-          spec: _localFast,
-          overrides: 3,
-        ),
-        'Custom · 3 steps point elsewhere',
-      );
-    });
-
-    test('a fresh install on this Mac reads the two built-ins and embeddings',
-        () {
-      const prefs = AppPrefs();
-      final rows = RoleLine.fromPrefs(prefs);
-
-      expect([for (final r in rows) r.id], ['big', 'small', 'embed']);
-      expect(row(rows, 'big').detail, 'Qwen3.8 27B on this Mac');
-      expect(row(rows, 'small').detail, 'Qwen3 4B on this Mac');
-      expect(row(rows, 'embed').detail, 'Qwen3 Embedding 0.6B on this Mac');
-    });
-
-    test('a user-defined install reads the two servers it was given', () {
-      const prefs = AppPrefs(
-        modelPlacement: ModelPlacement.box,
-        boxBigUrl: _bigUrl,
-        boxSmallUrl: _smallUrl,
-        boxKeyStored: true,
-      );
-      final rows = RoleLine.fromPrefs(prefs);
-
-      expect(row(rows, 'big').detail, 'qwen3.8 at box.example.com');
-      expect(row(rows, 'big').bearerId, boxProseId);
-      expect(row(rows, 'small').detail, 'qwen3-4b at box.example.com');
-      expect(row(rows, 'small').bearerId, boxBulkId);
-    });
-  });
-
-  group('the models this Mac holds and the placement does not use', () {
-    /// The three files a full Mac downloaded, under the user-defined
-    /// placement: the chat models are still on the disk and nothing is asked
-    /// to hold them.
-    List<ManagedModelStatus> idleStatuses() => [
-          _status('big', 'Qwen3.8 27B', routerId: routerProseId, inUse: false),
-          _status(
-            'small',
-            'Qwen3 4B Instruct',
-            routerId: routerBulkId,
-            inUse: false,
-          ),
-          _status(
-            'embed',
-            'Qwen3 Embedding 0.6B',
-            routerId: routerEmbedId,
-            bytes: 1234567890,
-          ),
-        ];
-
-    test('idleOnThisMac describes the unused files and nothing else', () {
-      // The server this Mac is left running holds the embedding model alone,
-      // so the two chat models read as on disk and not loaded.
-      final lines = RoleLine.idleOnThisMac(
-        idleStatuses(),
-        const ServerLoading(
-          port: 8080,
-          pid: 42,
-          loaded: {routerEmbedId: true},
-        ),
-      );
-
-      expect(lines, [
-        'Qwen3.8 27B · 20.0 GB · on disk · not loaded',
-        'Qwen3 4B Instruct · 20.0 GB · on disk · not loaded',
-      ]);
-    });
-
-    test('an idle file is not loaded even once the small server is Ready', () {
-      // The steady state under User defined: the embedding-only router came
-      // up and reports Ready. Ready means every model in ITS preset is
-      // resident, and the two chat models are not in it.
-      final lines = RoleLine.idleOnThisMac(
-        idleStatuses(),
-        const ServerReady(port: 8080, pid: 42),
-      );
-
-      expect(lines, [
-        'Qwen3.8 27B · 20.0 GB · on disk · not loaded',
-        'Qwen3 4B Instruct · 20.0 GB · on disk · not loaded',
-      ]);
-    });
-
-    test('a file that was never downloaded is not listed as held', () {
-      final lines = RoleLine.idleOnThisMac(
-        [
-          _status(
-            'big',
-            'Qwen3.8 27B',
-            routerId: routerProseId,
-            inUse: false,
-            onDisk: false,
-          ),
-          _status(
-            'small',
-            'Qwen3 4B Instruct',
-            routerId: routerBulkId,
-            inUse: false,
-          ),
-        ],
-        const ServerReady(port: 8080, pid: 42),
-      );
-
-      expect(lines, ['Qwen3 4B Instruct · 20.0 GB · on disk · not loaded']);
-    });
-
-    test('a small Mac whose two rows share one file reads it once', () {
-      // The inbox tier has no writing model, so the big row describes the
-      // bulk file too. One file, one line.
-      final lines = RoleLine.idleOnThisMac(
-        [
-          _status('big', 'Qwen3 4B Instruct',
-              routerId: routerBulkId, inUse: false),
-          _status('small', 'Qwen3 4B Instruct',
-              routerId: routerBulkId, inUse: false),
-        ],
-        const ServerStopped(),
-      );
-
-      expect(lines, ['Qwen3 4B Instruct · 20.0 GB · on disk · not loaded']);
-    });
-
-    test('idleOnThisMac says nothing while the host is still reading', () {
-      expect(RoleLine.idleOnThisMac(null, const ServerStopped()), isEmpty);
-    });
-
-    testWidgets(
-        'under User defined the two chat models this Mac holds read as on '
-        'disk and not loaded', (tester) async {
-      await open(
-        tester,
-        placement: ModelPlacement.box,
-        boxKeyStored: true,
-        serverState: const ServerLoading(
-          port: 8080,
-          pid: 42,
-          loaded: {routerEmbedId: true},
-        ),
-        idleModelLines: RoleLine.idleOnThisMac(
-          idleStatuses(),
-          const ServerLoading(
-            port: 8080,
-            pid: 42,
-            loaded: {routerEmbedId: true},
-          ),
-        ),
-      );
-
-      expect(find.byKey(SettingsModelsPage.idleModelsKey), findsOneWidget);
-      expect(find.text(SettingsModelsPage.idleModelsTitle), findsOneWidget);
-      expect(
-        find.text('Qwen3.8 27B · 20.0 GB · on disk · not loaded'),
-        findsOneWidget,
-      );
-      expect(
-        find.text('Qwen3 4B Instruct · 20.0 GB · on disk · not loaded'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('Managed has no such block, whatever it is handed',
-        (tester) async {
-      await open(
-        tester,
-        idleModelLines: const ['Qwen3.8 27B · 20.0 GB · on disk · not loaded'],
-      );
-
-      expect(find.byKey(SettingsModelsPage.idleModelsKey), findsNothing);
-    });
-
-    testWidgets('no idle files, no block', (tester) async {
-      await open(tester, placement: ModelPlacement.box, boxKeyStored: true);
-
-      expect(find.byKey(SettingsModelsPage.idleModelsKey), findsNothing);
-    });
-  });
-
-  group('the way out', () {
-    testWidgets('Set up again is offered when the host wires it',
-        (tester) async {
-      var again = 0;
-      await open(tester);
-      expect(find.byKey(SettingsModelsPage.setUpAgainKey), findsNothing);
-
-      await open(tester, onSetUpAgain: () => again++);
-      await press(tester, find.byKey(SettingsModelsPage.setUpAgainKey));
-
-      expect(again, 1);
+      expect(textOf(tester, SettingsModelsPage.embedStatusKey),
+          SettingsModelsPage.onDiskLoadedText);
+      expect(find.text('Qwen3 Embedding 0.6B · 1.0 GB'), findsOneWidget);
     });
   });
 
   group('the collapsed summary', () {
-    test('Managed carries the server’s own state', () {
+    test('names where each role runs, then the server', () {
       expect(
         SettingsModelsPage.summary(
-          placement: ModelPlacement.local,
-          serverLine: SettingsModelsPage.runningText,
-          bigUrl: _bigUrl,
-          smallUrl: _smallUrl,
+          decisionPlacement: ModelPlacement.local,
+          generativePlacement: ModelPlacement.local,
+          generativeUrl: _generativeUrl,
+          serverLine: 'Running',
         ),
-        'Managed · Running',
-      );
-    });
-
-    test('User defined names the hosts, and one when they are the same', () {
-      expect(
-        SettingsModelsPage.summary(
-          placement: ModelPlacement.box,
-          serverLine: SettingsModelsPage.runningText,
-          bigUrl: _bigUrl,
-          smallUrl: _smallUrl,
-        ),
-        'User defined · box.example.com',
+        'Decision on this Mac · Generative on this Mac · Running',
       );
       expect(
         SettingsModelsPage.summary(
-          placement: ModelPlacement.box,
-          serverLine: SettingsModelsPage.runningText,
-          bigUrl: _bigUrl,
-          smallUrl: 'http://localhost:8082/v1/chat/completions',
+          decisionPlacement: ModelPlacement.box,
+          generativePlacement: ModelPlacement.box,
+          generativeUrl: _generativeUrl,
+          serverLine: 'Running',
         ),
-        'User defined · box.example.com · localhost:8082',
+        'Decision on your server · Generative at box.example.com · Running',
       );
-    });
-
-    test('a user-defined install with no address says so rather than lying',
-        () {
       expect(
         SettingsModelsPage.summary(
-          placement: ModelPlacement.box,
-          serverLine: SettingsModelsPage.notRunningText,
-          bigUrl: '',
-          smallUrl: '',
+          decisionPlacement: ModelPlacement.local,
+          generativePlacement: ModelPlacement.box,
+          generativeUrl: '',
+          serverLine: 'Not running',
         ),
-        'User defined · no address yet',
+        'Decision on this Mac · Generative on your server · Not running',
       );
     });
   });
 
+  testWidgets('no user-facing sentence carries an em-dash', (tester) async {
+    for (final text in [
+      SettingsModelsPage.decisionCaption,
+      SettingsModelsPage.generativeCaption,
+      SettingsModelsPage.embedCaption,
+      SettingsModelsPage.managedCaption,
+      SettingsModelsPage.inboxTierCaption,
+      SettingsModelsPage.decisionNotInstalledText,
+      SettingsModelsPage.decisionNotInstalledIn('/Volumes/Models/x'),
+      SettingsModelsPage.decisionMisconfiguredText,
+      SettingsModelsPage.installedLoadingText,
+      SettingsModelsPage.notInstalledText,
+      SettingsModelsPage.notDownloadedText,
+      notDecisionModelText('http://127.0.0.1:8081'),
+      noTokenizeText('http://127.0.0.1:8081'),
+      ModelServersForm.generativeThirdPartyRefusalText,
+      ModelServersForm.decisionThirdPartyRefusalText,
+      ModelServersForm.otherHostHint,
+    ]) {
+      expect(text, isNot(contains('—')), reason: text);
+    }
+  });
+
   testWidgets('the whole page survives a doubled text scale', (tester) async {
-    tester.platformDispatcher.textScaleFactorTestValue = 2.0;
-    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-
-    await open(
-      tester,
-      placement: ModelPlacement.box,
-      boxKeyStored: true,
-      roleLines: _boxLines(),
-      probe: (_, {bearer}) async => const ModelProbeResult(reachable: true),
-    );
-
+    await tester.binding.setSurfaceSize(const Size(900, 2400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MaterialApp(
+      home: MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+        child: Scaffold(
+          body: SingleChildScrollView(
+            child: SettingsModelsPage(
+              decisionPlacement: ModelPlacement.box,
+              generativePlacement: ModelPlacement.local,
+              statuses: [_row('decision'), _row('generative'), _row('embed')],
+              onUseDecision: recorder('decision'),
+              onUseGenerative: recorder('generative'),
+              onCheckDecision: () async {},
+              onSetUpAgain: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 }

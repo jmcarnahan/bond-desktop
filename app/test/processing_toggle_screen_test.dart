@@ -21,7 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-import 'fixtures/scripted_llm.dart';
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// The processing switch, as the assembled screen carries it.
@@ -87,8 +87,8 @@ class _StubRepair extends PipelineRepairService {
 class _RecordingTriage extends TriageQueue {
   final List<String> order;
 
-  _RecordingTriage(MessageStore store, this.order)
-      : super(store, ScriptedLlm.never());
+  _RecordingTriage(super.store, this.order)
+      : super(decisionClient: FakeDecisionClient.never());
 
   @override
   Future<void> pump() async => order.add('triage');
@@ -177,6 +177,7 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        keepingDecisionClient(),
         // People by default, because the thread this file opens is reached
         // through its sender's room — the route `thread_suggestions_test`
         // uses. Home for the tests about the feed's own controls.

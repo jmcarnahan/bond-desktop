@@ -15,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// A handler that does nothing, so a [AiWorker.pump] emits one [WorkProgress]
 /// of the kind asked for and finishes. The real worker is used rather than a
@@ -814,17 +815,16 @@ void main() {
       await seedConversation('c1');
       await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
       await seedMessage('c1', 'm2', receivedAt: '2026-08-01T10:00:00Z');
-      await store.writeTriage(
+      await writeTriaged(
+        store,
         'email',
         'm2',
         status: 'ok',
-        result: const TriageResult(
-          urgency: 'normal',
-          category: 'other',
-          summary: 'The studio wants the hero paragraph cut.',
-          needsAction: false,
-          actionItems: [],
-        ),
+        urgency: 'normal',
+        category: 'other',
+        summary: 'The studio wants the hero paragraph cut.',
+        needsAction: false,
+        actionItems: [],
       );
       await seedStoryline('sl-1', status: 'active');
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');

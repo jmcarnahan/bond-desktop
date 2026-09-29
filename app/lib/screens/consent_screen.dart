@@ -43,13 +43,12 @@ class CloudDraftsConsentPane extends StatelessWidget {
     required this.onNotNow,
   });
 
-  /// What this target would be answering, which is the whole big model now
-  /// rather than one stage: the picker that could point a single step
-  /// somewhere went with the Advanced fold, and the address a person types is
-  /// the address every prose step reaches.
+  /// What this target would be answering: the cloud-drafts target serves
+  /// the two draft stages and nothing else since the decision-model round,
+  /// because every other step reads every message and runs on this Mac or a
+  /// server of the owner's own.
   static const String scopeLine =
-      'It would answer every step on the big model: drafts, replies, recaps '
-      'and the rest.';
+      'It would write suggested replies and improve drafts, and nothing else.';
 
   static const Key continueKey = ValueKey('consent-continue');
   static const Key notNowKey = ValueKey('consent-not-now');

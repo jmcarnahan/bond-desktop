@@ -2,8 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
 import '../services/deadline_parse.dart' show showableDeadline;
-import '../services/llm/extract_task.dart' show ExtractionResult;
+import '../services/decision/stored_decision.dart';
+import '../services/decision/decision_policy.dart'
+    show DecisionPolicy, learnedGateReasons;
+import '../models/extraction_models.dart';
 import '../theme/tokens.dart';
+import 'home_result.dart' show homeDropLabels;
 import 'time_format.dart';
 
 /// Why one message got the verdict it did, in plain words.
@@ -42,6 +46,10 @@ class WhyPanelBody extends StatelessWidget {
   /// because three columns is not a model.
   final Map<String, Object?>? ai;
 
+  /// The decision model's stored answers, or null when it never read this
+  /// message. One line under the verdict when present.
+  final StoredDecision? decision;
+
   /// The reader's own needs-you threshold, so the score is reported against
   /// the line they actually set rather than against a default.
   final double threshold;
@@ -63,6 +71,7 @@ class WhyPanelBody extends StatelessWidget {
     required this.threshold,
     required this.now,
     this.onWhatHappened,
+    this.decision,
   });
 
   static const Key verdictKey = ValueKey('why-verdict');
@@ -195,8 +204,48 @@ class WhyPanelBody extends StatelessWidget {
             : _reasonSentence(reason));
     }
     final gate = m.gateReason?.trim() ?? '';
-    if (gate.isNotEmpty) lines.add('Skipped by the gate: ${_words(gate)}.');
+    if (gate.isNotEmpty) {
+      lines.add('Skipped by the gate: '
+          '${homeDropLabels[gate]?.toLowerCase() ?? _words(gate)}.');
+    }
+    // Dropped means the LEARNED gate took it: one of its words AND a stored
+    // p(drop) over its bar. Any other gate word (an owner's Ignore is `user`)
+    // is not the model's verdict, so its line reads what the model said.
+    final learnedDrop = learnedGateReasons.contains(gate) &&
+        (decision?.gateP ?? 0) >= DecisionPolicy.gateDrop;
+    final line = decisionLine(decision, dropped: learnedDrop);
+    if (line != null) lines.add(line);
     return lines;
+  }
+
+  /// The decision model's numbers in one line: `Decision model: gate keep
+  /// 0.94, needs you 0.71, action 0.66, reply 0.12 · 58 ms`, fixed to two
+  /// places. Null when the model never read the message.
+  ///
+  /// The gate is worded by the VERDICT ([dropped]: the LEARNED gate took the
+  /// message), not by the head's argmax: a dropped message reads `gate drop
+  /// 0.91`; every other one reads `gate keep 0.94`, or `gate keep (drop
+  /// 0.60)` when the head leaned drop but under the bar, from a cold
+  /// approach, or on a message the owner restored. A message another gate
+  /// took (an owner's Ignore) is not dropped here: it reads as the model saw
+  /// it. The other three are each field's probability of yes.
+  static String? decisionLine(StoredDecision? d, {required bool dropped}) {
+    if (d == null) return null;
+    String p2(double? p) => p == null ? '–' : p.toStringAsFixed(2);
+    final drop = d.gateP;
+    final String gate;
+    if (drop == null) {
+      gate = dropped ? 'gate drop' : 'gate keep';
+    } else if (dropped) {
+      gate = 'gate drop ${p2(drop)}';
+    } else if (drop >= 0.5) {
+      gate = 'gate keep (drop ${p2(drop)})';
+    } else {
+      gate = 'gate keep ${p2(1 - drop)}';
+    }
+    final ms = d.latencyMs == null ? '' : ' · ${d.latencyMs!.round()} ms';
+    return 'Decision model: $gate, needs you ${p2(d.needsYouP)}, '
+        'action ${p2(d.needsActionP)}, reply ${p2(d.replyExpectedP)}$ms';
   }
 
   /// The one reason the pass writes as a token rather than as a sentence. Every

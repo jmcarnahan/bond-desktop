@@ -5,11 +5,12 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/corpus.dart';
+import 'fixtures/fake_decision_client.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
-import 'fixtures/fake_llama_server.dart';
 
-/// A whole inbox drained end to end: the real queue, the real store, the real
-/// `LlmClient`, and a socket that answers like llama-server.
+/// A whole inbox drained end to end: the real queue and the real store, with
+/// the decision model scripted — triage's only model call.
 ///
 /// `triage_queue_test.dart` covers the queue's decisions one contrived message
 /// at a time. This file runs the corpus through all of it at once, which is
@@ -45,8 +46,7 @@ List<CorpusEmail> byRecency(Iterable<CorpusEmail> entries) {
 void main() {
   late BondDatabase db;
   late MessageStore store;
-  late FakeLlamaServer fake;
-  late LlmClient client;
+  late ScriptedLlm llm;
 
   /// Every email entry, seeded the way a delta page plus a detail fetch would
   /// have left it — body, headers and all, so the queue's own fetch step has
@@ -88,12 +88,10 @@ void main() {
   setUp(() async {
     db = testDb();
     store = MessageStore(db);
-    fake = await FakeLlamaServer.start();
-    client = LlmClient(baseUrl: fake.chatUrl);
+    llm = ScriptedLlm();
   });
 
   tearDown(() async {
-    await fake.close();
     db.close();
   });
 
@@ -107,7 +105,7 @@ void main() {
       // The redesign thread's newest inbound is the escalation email, so that
       // is the message whose ask the row should end up carrying.
       await seedConversation('conv-website-redesign', '2026-08-30T16:05:00Z');
-      fake.scriptFor('triage', [
+      llm.scriptFor('decision', [
         triageAnswer(
           urgency: 'urgent',
           category: 'work',
@@ -115,7 +113,7 @@ void main() {
         ),
       ]);
 
-      await TriageQueue(store, client, userAddress: userAddress).pump();
+      await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), userAddress: userAddress).pump();
     });
 
     test('every gated message is skipped with its own reason', () async {
@@ -137,13 +135,14 @@ void main() {
     test('the gated mail costs no model time at all', () {
       // The economics of the whole gate tier, in one number: the sockets
       // opened are exactly the messages no gate caught.
-      expect(fake.requests.length, ungated.length);
+      expect(llm.calls.length, ungated.length);
     });
 
-    test('the newest inbound message\'s ask lands on the thread', () async {
+    test('the newest inbound message\'s verdict lands on the thread',
+        () async {
+      // The ask itself is the message-text stage's, which lands later.
       final row =
           (await store.getConversationRow('email', 'conv-website-redesign'))!;
-      expect(row['cta_text'], 'Confirm the launch date with Marisa');
       expect(row['cta_urgency'], 'urgent');
       expect(row['category'], 'work');
     });
@@ -157,14 +156,17 @@ void main() {
       emailCorpus.where((entry) => entry.expectedGate == null),
     );
     await seedCorpus(ungated);
-    fake.scriptFor('triage', [triageAnswer(), 503]);
+    llm.scriptFor('decision', [
+      triageAnswer(),
+      const DecisionUnavailableException('the decision server went down'),
+    ]);
 
     // Serial on purpose. The claims below are about drain SHAPE — which
     // message the 503 lands on, and that exactly two sockets were opened —
     // and both need the requests to go out one at a time. What a park does
     // with three requests already in flight is `triage_queue_test.dart`'s
     // job, and it owns that coverage.
-    await TriageQueue(store, client, userAddress: userAddress, concurrency: 1)
+    await TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), userAddress: userAddress, concurrency: 1)
         .pump();
 
     expect((await messageRow(ungated.first.id))['triage_status'], 'triaged');
@@ -183,6 +185,6 @@ void main() {
     }
 
     // One answered, one refused, and then nothing.
-    expect(fake.requests.length, 2);
+    expect(llm.calls.length, 2);
   });
 }

@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -289,7 +290,7 @@ void main() {
       await seedMessage('m2');
       final llm = ScriptedLlm.never();
       final gate = _CountingGate();
-      final queue = TriageQueue(store, llm, gate: gate, enabled: () => false);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), gate: gate, enabled: () => false);
       addTearDown(queue.dispose);
 
       await queue.pump();
@@ -313,7 +314,7 @@ void main() {
       await seedMessage('m2');
       await seedMessage('m3');
       final queue =
-          TriageQueue(store, ScriptedLlm.never(), enabled: () => false);
+          TriageQueue(store, decisionClient: ScriptedDecisionClient(ScriptedLlm.never()), enabled: () => false);
       addTearDown(queue.dispose);
       final seen = <TriageProgress>[];
       final sub = queue.progress.listen(seen.add);
@@ -332,7 +333,7 @@ void main() {
       await seedMessage('m1');
       var on = false;
       final llm = ScriptedLlm.never();
-      final queue = TriageQueue(store, llm, enabled: () => on);
+      final queue = TriageQueue(store, decisionClient: ScriptedDecisionClient(llm), enabled: () => on);
       addTearDown(queue.dispose);
 
       await queue.pump();

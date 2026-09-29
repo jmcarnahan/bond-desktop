@@ -19,8 +19,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/memory_token_store.dart';
-import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
 /// The one sentence that tells somebody the pipeline is stuck, and why.
@@ -67,7 +67,8 @@ class _FakeSync implements MailSync {
 
 /// A triage queue that drains nothing and publishes whatever a test pushes.
 class _FeedTriage extends TriageQueue {
-  _FeedTriage(MessageStore store) : super(store, ScriptedLlm.never());
+  _FeedTriage(super.store)
+      : super(decisionClient: FakeDecisionClient.never());
 
   final StreamController<TriageProgress> _feed =
       StreamController<TriageProgress>.broadcast();
@@ -201,6 +202,99 @@ void main() {
       }
     });
 
+    test('a dead decision model reads the same on both placements', () {
+      // The decision model can run on either placement, so the sentence names
+      // the model rather than a machine.
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'decision_unavailable',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'Decision model unreachable · 3 waiting · retrying each minute',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
+    test('a model this Mac has not downloaded says so on both placements', () {
+      // The server is answering fine, and waiting will not fix it, so the
+      // sentence claims no retry and says where the fix is.
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'not_installed',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'A model this Mac runs is not downloaded · 3 waiting · set up again '
+          'in Settings',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
+    test('the decision model not installed says the command, on both '
+        'placements', () {
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'decision_not_installed',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'The decision model is not installed · 3 waiting · run make '
+          'decide-install, then Check in Settings',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
+    test('a decision server of the wrong kind names both causes and fixes, '
+        'and promises no retry', () {
+      for (final onBox in [true, false]) {
+        final line = railProgressLine(
+          on: true,
+          remaining: 3,
+          reason: 'decision_misconfigured',
+          waiting: 3,
+          onBox: onBox,
+        );
+        expect(
+          line,
+          'The decision server is not the decision model, or its heads file '
+          'does not match · 3 waiting · check its address in Settings, or run '
+          'make decide-install',
+          reason: 'onBox: $onBox',
+        );
+        expect(line, isNot(contains('retrying')));
+      }
+    });
+
+    test('a refused decision key names the decision server, whatever the '
+        'generative placement', () {
+      for (final onBox in [true, false]) {
+        expect(
+          railProgressLine(
+            on: true,
+            remaining: 3,
+            reason: 'decision_unauthorized',
+            waiting: 3,
+            onBox: onBox,
+          ),
+          'The decision server refused the access key · 3 waiting',
+          reason: 'onBox: $onBox',
+        );
+      }
+    });
+
     test('session keeps the wording it always had', () {
       // A sign-out is already routed by the inbox notifier, and a second
       // sentence about it here would be the app saying the same thing twice.
@@ -239,6 +333,11 @@ void main() {
         'model_unavailable',
         'unauthorized',
         'embed_unavailable',
+        'decision_unavailable',
+        'not_installed',
+        'decision_not_installed',
+        'decision_misconfigured',
+        'decision_unauthorized',
       ]) {
         expect(
           railProgressLine(
@@ -275,6 +374,11 @@ void main() {
         'model_unavailable',
         'unauthorized',
         'embed_unavailable',
+        'decision_unavailable',
+        'not_installed',
+        'decision_not_installed',
+        'decision_misconfigured',
+        'decision_unauthorized',
         'session',
       ]) {
         for (final on in [true, false]) {
@@ -308,6 +412,7 @@ void main() {
       workers = _FeedWorkers(store);
       container = ProviderContainer(overrides: [
         dbProvider.overrideWithValue(db),
+        keepingDecisionClient(),
         triageQueueProvider.overrideWithValue(triage),
         aiWorkersProvider.overrideWithValue(workers),
       ]);
@@ -490,6 +595,7 @@ void main() {
       await tester.pumpWidget(ProviderScope(
         overrides: [
           dbProvider.overrideWithValue(db),
+          keepingDecisionClient(),
           initialSectionProvider.overrideWithValue(RailSection.home),
           initialAppPrefsProvider.overrideWithValue(prefs),
           graphAuthProvider.overrideWithValue(auth),

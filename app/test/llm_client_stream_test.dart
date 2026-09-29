@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HandshakeException;
 
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -326,6 +327,28 @@ void main() {
         throwsA(isA<LlmFormatException>()),
       );
       expect(records.single.outcome, 'format');
+    });
+
+    test('a TLS failure mid-stream parks like one at the handshake',
+        () async {
+      final broken = StreamController<List<int>>();
+      final client = LlmClient(
+        baseUrl: 'https://box.example.test/v1/chat/completions',
+        httpClient: MockClient.streaming(
+          (request, body) async => http.StreamedResponse(broken.stream, 200),
+        ),
+      );
+      broken.add(utf8.encode(event(contentChunk('{"evid'))));
+      scheduleMicrotask(() {
+        broken.addError(const HandshakeException('certificate expired'));
+        broken.close();
+      });
+
+      await expectLater(
+        draft(client, onText: (_) {}),
+        throwsA(isA<LlmUnavailableException>()
+            .having((e) => parkReasonFor(e), 'park word', 'model_unavailable')),
+      );
     });
 
     test('a stalled stream times out with the plain path\'s own message',

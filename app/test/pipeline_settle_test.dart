@@ -7,13 +7,13 @@ import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/chat_mentions.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// The settle pass — what the inbox does once its two queues have drained.
@@ -65,8 +65,8 @@ class FakeTriage extends TriageQueue {
   /// Run at the end of each pump: what triage learning something looks like.
   final Future<void> Function()? onPumped;
 
-  FakeTriage(MessageStore store, this.log, {this.onPumped})
-      : super(store, LlmClient(baseUrl: 'http://127.0.0.1:1/never-dialled'));
+  FakeTriage(super.store, this.log, {this.onPumped})
+      : super(decisionClient: FakeDecisionClient.never());
 
   @override
   Future<void> pump() async {

@@ -31,12 +31,17 @@ class SettingsSegments<T> extends StatelessWidget {
   /// words a person would use rather than the segment's own label.
   final String caption;
 
+  /// Segments drawn but not pressable, such as a model this Mac has too
+  /// little memory for. The caption is where the reason goes.
+  final Set<T> disabled;
+
   const SettingsSegments({
     super.key,
     required this.segments,
     required this.selected,
     required this.onChanged,
     required this.caption,
+    this.disabled = const {},
   });
 
   @override
@@ -53,7 +58,11 @@ class SettingsSegments<T> extends StatelessWidget {
             showSelectedIcon: false,
             segments: [
               for (final segment in segments)
-                ButtonSegment(value: segment.value, label: Text(segment.label)),
+                ButtonSegment(
+                  value: segment.value,
+                  label: Text(segment.label),
+                  enabled: !disabled.contains(segment.value),
+                ),
             ],
             selected: {selected},
             onSelectionChanged: (selection) => onChanged(selection.first),

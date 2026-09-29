@@ -3,11 +3,10 @@
 library;
 
 import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
-import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The tests that talk to the real model.
@@ -44,53 +43,15 @@ Marisa
 
 void main() {
   test(
-    'a real everyday email comes back triaged',
-    () async {
-      final client = LlmClient();
-      final message = liveMessage();
-
-      final stopwatch = Stopwatch()..start();
-      final result = await runTask(
-        client,
-        const TriageTask(),
-        TriageInput(message, DateTime.now()),
-      );
-      stopwatch.stop();
-
-      // ignore: avoid_print
-      print(
-        'urgency:      ${result.urgency}\n'
-        'category:     ${result.category}\n'
-        'label:        ${result.label}\n'
-        'summary:      ${result.summary}\n'
-        'needs_action: ${result.needsAction}\n'
-        'action_items: ${result.actionItems}\n'
-        'elapsed:      ${stopwatch.elapsed.inMilliseconds} ms',
-      );
-
-      expect(
-        result.urgency,
-        anyOf('low', 'normal', 'high', 'urgent'),
-      );
-      expect(result.summary, isNotEmpty);
-      expect(result.category, anyOf('work', 'personal', 'notification', 'other'));
-      // Shape, not judgement: the words are the model's to choose, but a
-      // message that came back with no label at all is a call that went wrong.
-      expect(result.label, isNotEmpty);
-    },
-    timeout: const Timeout(Duration(minutes: 3)),
-  );
-
-  test(
-    'a real everyday email comes back with facts extracted',
+    'a real everyday email comes back with its text',
     () async {
       final client = LlmClient();
 
       final stopwatch = Stopwatch()..start();
       final result = await runTask(
         client,
-        const ExtractTask(),
-        ExtractionInput(liveMessage(), DateTime.now()),
+        const MessageTextTask(),
+        MessageTextInput(liveMessage(), DateTime.now()),
         // As the handler runs it: the same email twice must be the same facts.
         temperature: 0,
       );
@@ -98,26 +59,18 @@ void main() {
 
       // ignore: avoid_print
       print(
-        'evidence:      ${result.evidence}\n'
-        'topics:        ${result.topics}\n'
-        'people:        ${result.people}\n'
-        'organizations: ${result.organizations}\n'
-        'project:       ${result.project}\n'
-        'intent:        ${result.intent}\n'
-        'importance:    ${result.importance}\n'
-        'elapsed:       ${stopwatch.elapsed.inMilliseconds} ms',
+        'summary:      ${result.summary}\n'
+        'action_items: ${result.actionItems}\n'
+        'deadline:     ${result.deadline}\n'
+        'topics:       ${result.topics}\n'
+        'project:      ${result.project}\n'
+        'elapsed:      ${stopwatch.elapsed.inMilliseconds} ms',
       );
 
       // The shape is the grammar's job; what a live run proves is that this
       // build accepts the schema at all and that the answer means something.
-      expect(result.evidence, isNotEmpty);
+      expect(result.summary, isNotEmpty);
       expect(result.topics, isNotEmpty);
-      expect(
-        result.intent,
-        anyOf('request', 'question', 'approval', 'scheduling', 'fyi',
-            'transactional', 'social'),
-      );
-      expect(result.importance, anyOf('low', 'normal', 'high'));
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );

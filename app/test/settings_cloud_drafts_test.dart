@@ -29,10 +29,10 @@ class _RouteCounter extends NavigatorObserver {
   }
 }
 
-/// Somebody else's service on the big model's address, which is the one
+/// Somebody else's service on the cloud drafts address, which is the one
 /// thing that opens the pane. The only place this name appears.
 const _openAiUrl = 'https://api.openai.com/v1/chat/completions';
-const _smallUrl = 'https://box.example.com/bulk/v1/chat/completions';
+const _ownUrl = 'https://box.example.com/prose/v1/chat/completions';
 
 void main() {
   late _RouteCounter routes;
@@ -53,19 +53,17 @@ void main() {
     int? cloudDraftsToday,
     int cloudDraftsDailyCap = 50,
     ValueChanged<int>? onCloudDraftsDailyCapChanged,
-    bool models = false,
-    ModelPlacement placement = ModelPlacement.local,
-    String boxBigUrl = '',
-    String boxSmallUrl = '',
+    bool cloudSection = false,
+    String cloudDraftsUrl = '',
+    String cloudDraftsModel = '',
+    bool cloudDraftsConsent = false,
     Future<ModelProbeResult> Function(String, {String? bearer})? probe,
     Future<void> Function({
-      required String bigUrl,
-      required String smallUrl,
-      required String bigModel,
-      required String smallModel,
-      String? bigKey,
-      String? smallKey,
-    })? onUseBox,
+      required String url,
+      required String model,
+      String? key,
+      required bool clearKey,
+    })? onUseCloudDrafts,
     Future<void> Function()? onCloudDraftsConsent,
     // A second pump into the SAME tree, to change a prop under a screen that
     // is already up: the sections keep their own open state across it, so
@@ -95,22 +93,16 @@ void main() {
           cloudDraftsDailyCap: cloudDraftsDailyCap,
           onCloudDraftsDailyCapChanged: onCloudDraftsDailyCapChanged ??
               (value) => capWrites.add(value),
-          // Wired only for the consent case: the Models section needs a way
-          // to connect behind it before it will render at all.
-          modelPlacement: placement,
-          boxBigUrl: boxBigUrl,
-          boxSmallUrl: boxSmallUrl,
+          // Wired only for the target cases: the Cloud drafts section needs
+          // a way to connect before it will render at all.
           probeServer: probe,
-          onUseBox: models
-              ? (onUseBox ??
-                  ({
-                    required bigUrl,
-                    required smallUrl,
-                    required bigModel,
-                    required smallModel,
-                    bigKey,
-                    smallKey,
-                  }) async {})
+          cloudDraftsUrl: cloudDraftsUrl,
+          cloudDraftsModel: cloudDraftsModel,
+          cloudDraftsConsent: cloudDraftsConsent,
+          onUseCloudDrafts: cloudSection
+              ? (onUseCloudDrafts ??
+                  ({required url, required model, key, required clearKey})
+                      async {})
               : null,
           onCloudDraftsConsent: onCloudDraftsConsent,
         ),
@@ -226,9 +218,9 @@ void main() {
 
     testWidgets('follows the host when the rule is forced back off',
         (tester) async {
-      // `AppPrefs.specForStage` and `applyPreset` can refuse a third-party
-      // target and put the standing rule back off with nobody touching this
-      // switch. It is seeded from the prop once, so without the resync in
+      // `AppPrefs.specForStage` and Stop cloud drafts can refuse a
+      // third-party target and put the standing rule back off with nobody
+      // touching this switch. It is seeded from the prop once, so without the resync in
       // `didUpdateWidget` it would go on reading on over a rule that is off.
       await open(
         tester,
@@ -396,44 +388,119 @@ void main() {
     });
   });
 
+  group('the Cloud drafts section', () {
+    testWidgets('is absent when the host wires no target writer',
+        (tester) async {
+      await open(tester);
+      expect(find.byKey(SettingsSection.toggleKey('Cloud drafts')),
+          findsNothing);
+    });
+
+    testWidgets('says Off, and that drafts stay on the generative model, with '
+        'no target', (tester) async {
+      await open(tester, section: 'Cloud drafts', cloudSection: true);
+
+      expect(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Cloud drafts'),
+            matching: find.byType(SettingsSection),
+          ),
+          matching: find.text('Off'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester.widget<Text>(find.byKey(SettingsScreen.cloudDraftsTargetKey)).data,
+        'No cloud drafts. Drafts are written by the generative model.',
+      );
+      for (final key in [
+        const ValueKey('cloud-drafts-url'),
+        const ValueKey('cloud-drafts-key'),
+        const ValueKey('cloud-drafts-connect'),
+      ]) {
+        expect(find.byKey(key), findsOneWidget);
+      }
+    });
+
+    testWidgets('names the target in force', (tester) async {
+      await open(
+        tester,
+        section: 'Cloud drafts',
+        cloudSection: true,
+        cloudDraftsUrl: _openAiUrl,
+        cloudDraftsModel: 'gpt-x',
+      );
+
+      expect(find.text('gpt-x at api.openai.com'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(SettingsScreen.cloudDraftsTargetKey)).data,
+        'Drafts go to gpt-x at api.openai.com.',
+      );
+    });
+
+    testWidgets('the owner\'s own server connects with no consent asked',
+        (tester) async {
+      final order = <String>[];
+      await open(
+        tester,
+        section: 'Cloud drafts',
+        cloudSection: true,
+        probe: (url, {bearer}) async =>
+            const ModelProbeResult(reachable: true, modelIds: ['qwen3.8']),
+        onCloudDraftsConsent: () async => order.add('consent'),
+        onUseCloudDrafts: ({required url, required model, key, required clearKey})
+            async => order.add('connect $url $model'),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('cloud-drafts-url')),
+        _ownUrl,
+      );
+      final connect = find.byKey(const ValueKey('cloud-drafts-connect'));
+      await tester.ensureVisible(connect);
+      await tester.pumpAndSettle();
+      await tester.tap(connect);
+      await tester.pumpAndSettle();
+
+      expect(order, ['connect $_ownUrl qwen3.8']);
+      expect(find.byType(CloudDraftsConsentPane), findsNothing);
+    });
+  });
+
   group('the consent pane', () {
-    /// The Models section open on a user-defined install whose BIG address is
-    /// somebody else's service, with both servers answering one model each.
+    /// The Cloud drafts section with a vendor's address typed in, and the
+    /// vendor answering one model.
     Future<void> openConsent(
       WidgetTester tester, {
       required List<String> order,
       int cloudDraftsDailyCap = 50,
       Object? connectThrows,
       bool wireConsent = true,
+      bool consented = false,
     }) async {
       await open(
         tester,
-        section: 'Models',
-        models: true,
-        placement: ModelPlacement.box,
-        boxBigUrl: _openAiUrl,
-        boxSmallUrl: _smallUrl,
+        section: 'Cloud drafts',
+        cloudSection: true,
         cloudDraftsDailyCap: cloudDraftsDailyCap,
-        probe: (url, {bearer}) async => ModelProbeResult(
-          reachable: true,
-          modelIds: [url == _openAiUrl ? 'gpt-x' : 'qwen3-4b'],
-        ),
+        cloudDraftsConsent: consented,
+        probe: (url, {bearer}) async =>
+            const ModelProbeResult(reachable: true, modelIds: ['gpt-x']),
         onCloudDraftsConsent:
             wireConsent ? () async => order.add('consent') : null,
-        onUseBox: ({
-          required bigUrl,
-          required smallUrl,
-          required bigModel,
-          required smallModel,
-          bigKey,
-          smallKey,
-        }) async {
+        onUseCloudDrafts: ({required url, required model, key, required clearKey})
+            async {
           order.add('connect');
           if (connectThrows != null) throw connectThrows;
         },
       );
+      await tester.enterText(
+        find.byKey(const ValueKey('cloud-drafts-url')),
+        _openAiUrl,
+      );
+      await tester.pumpAndSettle();
 
-      final connect = find.byKey(ModelServersForm.connectKey);
+      final connect = find.byKey(const ValueKey('cloud-drafts-connect'));
       await tester.ensureVisible(connect);
       await tester.pumpAndSettle();
       await tester.tap(connect);
@@ -446,7 +513,7 @@ void main() {
       await openConsent(tester, order: order, cloudDraftsDailyCap: 200);
 
       expect(find.byType(CloudDraftsConsentPane), findsOneWidget);
-      expect(find.text('Send drafts to $boxProseName?'), findsOneWidget);
+      expect(find.text('Send drafts to $cloudDraftsName?'), findsOneWidget);
       expect(find.text(CloudDraftsConsentPane.scopeLine), findsOneWidget);
       expect(
         find.text(
@@ -470,28 +537,34 @@ void main() {
       await tester.tap(find.byKey(CloudDraftsConsentPane.continueKey));
       await tester.pumpAndSettle();
 
-      // That order is the protection: `setBoxServers` refuses a third-party
-      // big address while the flag is false, so a connect made first would
-      // throw rather than write.
+      // That order is the protection: `useCloudDrafts` refuses a third-party
+      // address while the flag is false, so a connect made first would throw
+      // rather than write.
       expect(order, ['consent', 'connect']);
       // And the pane closed onto the sections it replaced.
       expect(find.byType(CloudDraftsConsentPane), findsNothing);
-      expect(find.text('Models'), findsOneWidget);
+      expect(find.text('Cloud drafts'), findsOneWidget);
+    });
+
+    testWidgets('consent already given connects without asking again',
+        (tester) async {
+      final order = <String>[];
+      await openConsent(tester, order: order, consented: true);
+
+      expect(find.byType(CloudDraftsConsentPane), findsNothing);
+      expect(order, ['connect']);
     });
 
     testWidgets('a connect that refuses keeps the pane open and says why',
         (tester) async {
-      // The form is unmounted by the pane that replaced it, so it has
-      // nowhere to draw its own sentence: a pane that closed here would put
-      // the person back on an unchanged section with nothing said.
       final order = <String>[];
       await openConsent(
         tester,
         order: order,
         connectThrows: ArgumentError.value(
           _openAiUrl,
-          'bigUrl',
-          'a third-party server needs cloud drafts consent first',
+          'url',
+          'a third-party service needs cloud drafts consent first',
         ),
       );
 
@@ -502,7 +575,7 @@ void main() {
       expect(find.byType(CloudDraftsConsentPane), findsOneWidget);
       expect(find.byKey(CloudDraftsConsentPane.errorKey), findsOneWidget);
       expect(
-        find.text('a third-party server needs cloud drafts consent first'),
+        find.text('a third-party service needs cloud drafts consent first'),
         findsOneWidget,
       );
 
@@ -517,8 +590,6 @@ void main() {
       final order = <String>[];
       await openConsent(tester, order: order, wireConsent: false);
 
-      // A pane whose Continue wrote no consent would hand the connect
-      // straight back to a refusal, so the question is not asked at all.
       expect(find.byType(CloudDraftsConsentPane), findsNothing);
       expect(find.text(ModelServersForm.thirdPartyRefusalText), findsOneWidget);
       expect(order, isEmpty);

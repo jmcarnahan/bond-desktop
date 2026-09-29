@@ -67,7 +67,7 @@ class ContextDigestInput {
 class ContextDigestTask implements JsonTask<ContextFileDigest> {
   const ContextDigestTask();
 
-  /// The file. Past six thousand characters a fast model is reading
+  /// The file. Past six thousand characters a model is reading
   /// appendices, and the passages are indexed separately anyway — a search
   /// finds line four hundred; this record is about what the file IS.
   static const int textCap = 6000;

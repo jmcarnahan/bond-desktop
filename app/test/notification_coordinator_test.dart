@@ -8,6 +8,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The decision table: for one admitted message, which of `notified` and
 /// `suppressed` it settles to, and when it settles at all.
@@ -74,6 +75,9 @@ void main() {
     bool? needsYouVerdict = true,
     String extractState = 'done',
     String storylineState = 'done',
+    // False: triage wrote the row from the decision model and the
+    // message-text stage has not landed yet, so there is no summary.
+    bool textLanded = true,
   }) async {
     await store.upsertConversation({
       'source': source,
@@ -91,6 +95,7 @@ void main() {
       'subject': 'Subject of $id',
       'from_name': 'Sarah',
       'received_at': '2026-09-02T11:55:00.000Z',
+      'body_preview': 'The preview of $id',
       'is_read': isRead,
       'created_at': '2026-09-02T12:01:00.000Z',
     });
@@ -116,14 +121,15 @@ void main() {
           ? TriageResult(
               urgency: urgency,
               category: 'work',
-              summary: 'what $id says',
               needsAction: needsAction,
-              actionItems: const [],
               replyExpected: replyExpected,
-              deadline: deadline,
             )
           : null,
     );
+    if (triageVerdict && textLanded) {
+      await store.writeMessageText(source, id,
+          summary: 'what $id says', actionItems: const [], deadline: deadline);
+    }
     // The stages, on `message_progress` rather than on `messages`, so neither
     // write disturbs the stamp ordering above.
     await store.writeExtractProgress(source, id, state: extractState);
@@ -682,6 +688,46 @@ void main() {
       expect(emitted, isEmpty);
     });
 
+    test("a triaged message whose text never landed does not own the thread's "
+        'older ask at the deadline', () async {
+      // Triage wrote the row from the decision model and left the thread's
+      // older ask in place for the text stage to refold; the text never
+      // landed. That ask is somebody else's: neither counted nor quoted.
+      await seedCandidate(
+        replyExpected: false,
+        ctaText: 'Send the appraisal',
+        needsYouVerdict: null,
+        textLanded: false,
+        extractState: 'pending',
+      );
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'suppressed');
+      expect(row['reason'], 'deadline');
+      expect(emitted, isEmpty);
+    });
+
+    test('a worthy message whose text never landed is not quoted the older '
+        'ask', () async {
+      await seedCandidate(
+        ctaText: 'Send the appraisal',
+        textLanded: false,
+        extractState: 'pending',
+      );
+      await sweep();
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+
+      final event = emitted.single;
+      expect(event.ctaText, isNull);
+      expect(event.summary, 'The preview of m-1');
+    });
+
     test('an unfinished, unremarkable message is dropped when time runs out',
         () async {
       // Unfinished on the storyline stage and scored below the threshold. The
@@ -719,6 +765,72 @@ void main() {
     });
   });
 
+  group('the toast body', () {
+    test('the summary, once the text stage has landed', () async {
+      await seedCandidate();
+      await sweep();
+
+      expect(emitted.single.summary, 'what m-1 says');
+    });
+
+    test('the settle waits on the text stage exactly as it waited on '
+        'extraction', () async {
+      // The text is the `extract` kind's work, so `extract_state` is still
+      // the stage the settle holds for — no longer, and no shorter.
+      await seedCandidate(textLanded: false, extractState: 'pending');
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+      expect(emitted, isEmpty);
+
+      await store.writeMessageText(
+        'email',
+        'm-1',
+        summary: 'Sarah needs the survey by Friday.',
+        actionItems: const [],
+        deadline: '',
+      );
+      // The text stamps the message (the word index files the summary by
+      // it), so the thread's attention row must be newer again — in the app
+      // the handler's card refresh re-stamps it right after the text.
+      await sweep();
+      expect(emitted, isEmpty, reason: 'the stage is still pending');
+      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await store.writeExtractProgress('email', 'm-1', state: 'done');
+      await sweep();
+
+      expect(emitted.single.summary, 'Sarah needs the survey by Friday.');
+      expect(emitted.single.settledOnDeadline, isFalse);
+    });
+
+    test('a toast that fires before the text lands says the preview',
+        () async {
+      await seedCandidate(textLanded: false, extractState: 'pending');
+      await sweep();
+      expect(emitted, isEmpty);
+
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+
+      final event = emitted.single;
+      expect(event.settledOnDeadline, isTrue);
+      expect(event.summary, 'The preview of m-1');
+    });
+
+    test('toastSummary: summary, else preview, else nothing', () {
+      expect(
+        NotificationCoordinator.toastSummary(
+            const {'summary': 'S', 'body_preview': 'P'}),
+        'S',
+      );
+      expect(
+        NotificationCoordinator.toastSummary(
+            const {'summary': '  ', 'body_preview': 'P'}),
+        'P',
+      );
+      expect(NotificationCoordinator.toastSummary(const {}), isNull);
+    });
+  });
+
   group('the event', () {
     test('carries the storyline the thread belongs to', () async {
       await seedCandidate();
@@ -752,15 +864,17 @@ void main() {
       });
       await store.writeNeedsYouVerdict('email', 'm-1',
           verdict: true, reason: 'seeded');
-      await store.writeTriage('email', 'm-1',
-          status: 'triaged',
-          result: const TriageResult(
-            urgency: 'high',
-            category: 'work',
-            summary: 'no subject line',
-            needsAction: false,
-            actionItems: [],
-          ));
+      await writeTriaged(
+        store,
+        'email',
+        'm-1',
+        status: 'triaged',
+        urgency: 'high',
+        category: 'work',
+        summary: 'no subject line',
+        needsAction: false,
+        actionItems: [],
+      );
       // The stages the pipeline would have written. Hand-seeded here because
       // this row is built column by column rather than through `seedCandidate`.
       await store.writeExtractProgress('email', 'm-1', state: 'done');
