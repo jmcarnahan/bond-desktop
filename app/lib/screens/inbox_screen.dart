@@ -25,6 +25,7 @@ import '../providers/context_provider.dart';
 import '../providers/day_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/event_providers.dart';
 import '../providers/drafts_inbox_provider.dart';
 import '../providers/files_provider.dart';
 import '../providers/home_provider.dart';
@@ -48,6 +49,8 @@ import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
 import '../services/calendar/day_items.dart';
+import '../services/calendar/event_view.dart';
+import '../services/calendar/overlaps.dart' show Overlaps, overlapsForEvent;
 import '../services/external_sender.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
@@ -71,6 +74,7 @@ import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/day_pane.dart';
 import '../widgets/drafts_pane.dart';
+import '../widgets/event_panel.dart';
 import '../widgets/files_pane.dart';
 import '../widgets/find_field.dart';
 import '../widgets/find_filter.dart';
@@ -80,11 +84,13 @@ import '../widgets/label_picker.dart';
 import '../widgets/icon_rail.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/linked_text.dart' show linkTargetOf;
+import '../widgets/meeting_card_host.dart';
 import '../widgets/message_history_host.dart';
 import '../widgets/needs_you_tabs.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/people_directory_pane.dart';
 import '../widgets/people_rooms.dart';
+import '../widgets/person_meeting_line.dart';
 import '../widgets/person_panel.dart';
 import '../widgets/person_room_pane.dart';
 import '../widgets/possible_storylines_fold.dart';
@@ -1337,9 +1343,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// directory file asked for from the Context panel beside — where the thing
   /// underneath is what the reader came from and the ✕ owes it back to them.
   /// Pushing what is already on top replaces it, so a second tap on the same
-  /// chip cannot stack a panel on itself.
+  /// chip cannot stack a panel on itself. Pushing what already sits DEEPER
+  /// unwinds the stack back to it — [_restoreSideThread]'s rule — so a
+  /// meeting → its thread → that thread's invite card cannot cycle into
+  /// meeting, thread, meeting.
   void _openBeside(SidePanel panel, {bool push = false}) => setState(() {
-        if (push && _sideStack.isNotEmpty && !_samePanel(_sideStack.last, panel)) {
+        final at = push
+            ? _sideStack.lastIndexWhere((p) => _samePanel(p, panel))
+            : -1;
+        if (at >= 0) {
+          _sideStack.removeRange(at + 1, _sideStack.length);
+          _sideStack[at] = panel;
+        } else if (push && _sideStack.isNotEmpty) {
           _sideStack.add(panel);
         } else if (_sideStack.isEmpty) {
           _sideStack.add(panel);
@@ -1392,6 +1407,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         (ContextFilePanel a, ContextFilePanel b) =>
           a.fileId == b.fileId && a.locator == b.locator,
         (CheatSheetPanel(), CheatSheetPanel()) => true,
+        (EventPanel a, EventPanel b) => a.eventId == b.eventId,
         _ => false,
       };
 
@@ -1473,6 +1489,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ContextPanel() => 'Context',
         ContextFilePanel() => 'the file',
         CheatSheetPanel() => 'Keyboard shortcuts',
+        EventPanel() => 'the meeting',
       };
 
   /// A thread's own name for that row: [_roomNameFor]'s rule, and a phrase
@@ -1498,9 +1515,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Everything [_select] does except take the main pane: the thread and its
   /// draft are loaded the same way, and opening it still counts as reading it.
-  void _openThreadBeside(String source, String conversationKey) {
+  ///
+  /// [push] is [_openBeside]'s: a thread asked for from INSIDE a panel — the
+  /// event panel's Conversations — goes on top of it, so the ✕ comes back to
+  /// the meeting.
+  void _openThreadBeside(
+    String source,
+    String conversationKey, {
+    bool push = false,
+  }) {
     _openBeside(
       ThreadPanel(source: source, conversationKey: conversationKey),
+      push: push,
     );
     final target = (source: source, conversationKey: conversationKey);
     ref.read(conversationsProvider.notifier).noteThreadOpened(conversationKey);
@@ -1508,6 +1534,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     ref.read(threadProvider(target).notifier).load();
     ref.read(draftProvider(target).notifier).load();
   }
+
+  /// Opens one meeting beside the main pane, by its Graph id — from a Day row,
+  /// the Today section, a person's room, or (with [push]) an invite card in the
+  /// thread beside, whose ✕ should land back on that thread.
+  void _openEvent(String eventId, {bool push = false}) =>
+      _openBeside(EventPanel(eventId: eventId), push: push);
 
   /// Which file the side panel is showing, for the chips that mark it. Both
   /// panes read this one getter — a chip highlighted in the transcript and not
@@ -3902,6 +3934,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       showingInvites: _showingInvites,
       onSelectDay: _selectDay,
       onOpenInvites: _openInvites,
+      onOpenEvent: _openEvent,
     );
   }
 
@@ -4727,6 +4760,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenConversation: (source, id) => _select(id, source: source),
       onOpenLink: (url) => unawaited(_launchExternal(url)),
       onOpenSettings: _openSettings,
+      onOpenEvent: _openEvent,
     );
   }
 
@@ -5345,10 +5379,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               photos: photos,
               onOpenThread: _openThreadBeside,
               emptyNotice: _scopeNotice(),
+              meetingLine: _personMeetingLine(room),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  /// The next meeting with this room's people and when they last met, or null
+  /// when there is no calendar to ask or nothing to say.
+  ///
+  /// "Now" is read HERE and handed to the provider floored to the quarter
+  /// hour (`invitesAsOf`), the Day stop's rule: a provider that read the clock
+  /// itself would keep calling a meeting "next" after it had started.
+  Widget? _personMeetingLine(PersonRoom room) {
+    if (!calendarShowsMirror(ref.watch(calendarAvailabilityProvider))) {
+      return null;
+    }
+    final zone = ref.watch(calendarZoneProvider).valueOrNull;
+    if (zone == null) return null;
+    final addresses = personMeetingsKey(room.people.map((p) => p.email));
+    if (addresses.isEmpty) return null;
+    final now = DateTime.now();
+    final meetings = ref
+        .watch(personMeetingsProvider(
+          (addresses: addresses, asOf: invitesAsOf(now)),
+        ))
+        .valueOrNull;
+    if (meetings == null || meetings.isEmpty) return null;
+    return PersonMeetingLine(
+      meetings: meetings,
+      zone: zone,
+      today: zone.dateOf(now.toUtc()),
+      onOpenEvent: _openEvent,
     );
   }
 
@@ -5561,6 +5625,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The suggestions sit with the messages they answer. The panel places
       // them and never learns what they are.
       suggestionFor: cardFor,
+      // An invite or a cancellation carries its meeting under it. Opened from
+      // the thread beside, the event goes ON that thread, so its ✕ comes back.
+      meetingCardFor: (m) => showsMeetingCard(m)
+          ? MeetingCardHost(
+              message: m,
+              onOpenEvent: (id) => _openEvent(id, push: inSidePanel),
+              onOpenLink: (url) => unawaited(_launchExternal(url)),
+            )
+          : null,
       // The same path `e` takes, named on this panel's own thread: one dismiss
       // in the app, with one undo and one auto-advance behind it, rather than a
       // button that quietly does less than the key.
@@ -5784,6 +5857,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       ContextPanel() => _contextPanel(side),
       ContextFilePanel() => _contextFilePanel(side),
       CheatSheetPanel() => _cheatSheetPanel(),
+      EventPanel() => _eventPanel(side),
     };
     return PageStorage(
       bucket: _sideStorage,
@@ -5804,6 +5878,87 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             child: panel,
           ),
         ),
+      ),
+    );
+  }
+
+  /// One meeting, read beside whatever named it.
+  ///
+  /// The event is resolved from the mirror first and by a live read outside
+  /// it (`eventByIdProvider`); its conversations come from the messages that
+  /// name it, named here by what the list already calls them, with the
+  /// storyline each is filed in. The overlaps are worked out against the day
+  /// of the occurrence the panel SHOWS — the next one, for a series — because
+  /// that is the slot the reader is deciding about.
+  ///
+  /// Until the zone has resolved a found event has no honest time to print,
+  /// so the body says it is still reading; the other answers are sentences
+  /// and need no zone. No ⤢: a meeting is a card's worth of facts, and the
+  /// threads it links to open beside it, on top, with the ✕ to come back.
+  Widget _eventPanel(EventPanel side) {
+    final lookup = ref.watch(eventByIdProvider(side.eventId)).valueOrNull;
+    final zoneRead = ref.watch(calendarZoneProvider).valueOrNull;
+    final found = lookup != null && lookup.isFound && lookup.event != null;
+    final zone = zoneRead ?? CalendarZone.utc();
+    final now = DateTime.now();
+    final today = zone.dateOf(now.toUtc());
+    final links = ref.watch(eventLinksProvider(side.eventId)).valueOrNull ??
+        const <EventLink>[];
+
+    Overlaps? overlaps;
+    if (found && zoneRead != null) {
+      final shown = displayOccurrence(
+        lookup.event!,
+        lookup.occurrences,
+        now.toUtc(),
+        zone,
+      );
+      final start = shown.startUtc;
+      if (shown.isTimed && !shown.isCancelled && start != null) {
+        final events =
+            ref.watch(dayEventsProvider(zone.dateOf(start))).valueOrNull;
+        if (events != null) {
+          overlaps = overlapsForEvent(shown, events, zone: zone);
+        }
+      }
+    }
+
+    final subject = found ? lookup.event!.subject.trim() : '';
+    return SidePanelHost(
+      title: found ? (subject.isEmpty ? '(no subject)' : subject) : 'Meeting',
+      leading: const Icon(Icons.event_outlined, size: 18),
+      onClose: _closeSide,
+      onBack: _sideBack,
+      backLabel: _sideBackLabel,
+      child: EventPanelBody(
+        // A found event with no zone yet reads as still loading.
+        lookup: found && zoneRead == null ? null : lookup,
+        zone: zone,
+        now: now,
+        today: today,
+        overlaps: overlaps,
+        links: [
+          for (final link in links)
+            link.withView(
+              title: _conversationFor(link.source, link.conversationKey) != null
+                  ? _threadLabelFor(link.source, link.conversationKey)
+                  : link.title,
+              storylineTitle: link.storylineId == null
+                  ? null
+                  : _storylineById(link.storylineId!)?.title,
+            ),
+        ],
+        onOpenLink: (url) => unawaited(_launchExternal(url)),
+        onOpenThread: (source, key) =>
+            _openThreadBeside(source, key, push: true),
+        onOpenStoryline: _selectStoryline,
+        onOpenSettings: _openSettings,
+        // Unreachable is a kept value, not an error, so it stands until the
+        // calendar next changes unless the reader asks again.
+        onRetry: () {
+          ref.invalidate(eventByIdProvider(side.eventId));
+          ref.invalidate(eventLinksProvider(side.eventId));
+        },
       ),
     );
   }

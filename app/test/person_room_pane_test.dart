@@ -199,6 +199,7 @@ void main() {
       void Function(RoomFilter)? onFilter,
       void Function(RoomSort)? onSort,
       void Function(String)? onSearch,
+      Widget? meetingLine,
     }) async {
       await tester.binding.setSurfaceSize(const Size(900, 1000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -218,12 +219,29 @@ void main() {
             photos: const NoProfilePhotos(),
             onOpenThread: (source, key) => opened.add((source, key)),
             emptyNotice: emptyNotice,
+            meetingLine: meetingLine,
           ),
         ),
       ));
       await tester.pump();
       return opened;
     }
+
+    testWidgets('the meeting line heads the room, above the filter',
+        (tester) async {
+      await pump(
+        tester,
+        room: _room([_thread('c1', subject: 'One')]),
+        meetingLine: const Text('Next meeting: Planning'),
+      );
+      final lineY = tester.getTopLeft(find.text('Next meeting: Planning')).dy;
+      expect(lineY, lessThan(tester.getTopLeft(find.byType(TextField)).dy));
+    });
+
+    testWidgets('no meeting line, nothing above the filter', (tester) async {
+      await pump(tester, room: _room([_thread('c1', subject: 'One')]));
+      expect(find.textContaining('Next meeting'), findsNothing);
+    });
 
     double topOf(WidgetTester tester, String source, String id) =>
         tester.getTopLeft(find.byKey(RootMessageCard.keyFor(source, id))).dy;

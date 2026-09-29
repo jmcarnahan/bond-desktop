@@ -314,6 +314,11 @@ class PersonRoomPane extends StatelessWidget {
   /// The host's scope notice — see [PeopleDirectoryPane].
   final Widget? emptyNotice;
 
+  /// The line about this person's meetings — the next one and when the
+  /// reader last met them — built by the host, which holds the calendar.
+  /// Null draws nothing, and nothing takes its place.
+  final Widget? meetingLine;
+
   const PersonRoomPane({
     super.key,
     required this.room,
@@ -328,6 +333,7 @@ class PersonRoomPane extends StatelessWidget {
     required this.photos,
     required this.onOpenThread,
     this.emptyNotice,
+    this.meetingLine,
   });
 
   static const Key listKey = ValueKey('person-room-list');
@@ -347,6 +353,10 @@ class PersonRoomPane extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (meetingLine != null) ...[
+          meetingLine!,
+          const SizedBox(height: BondSpacing.s8),
+        ],
         FilterField(
           controller: searchController,
           onChanged: onSearch,

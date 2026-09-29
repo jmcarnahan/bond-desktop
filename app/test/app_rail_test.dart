@@ -2163,6 +2163,7 @@ void main() {
       void Function(CalendarDate)? onSelectDay,
       VoidCallback? onOpenInvites,
       void Function(RailSection)? onSelectSection,
+      void Function(String)? onOpenEvent,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -2188,8 +2189,37 @@ void main() {
         showingInvites: showingInvites,
         onSelectDay: onSelectDay,
         onOpenInvites: onOpenInvites,
+        onOpenEvent: onOpenEvent,
       )));
     }
+
+    testWidgets('a Today meeting row opens the event beside', (tester) async {
+      final opened = <String>[];
+      final sections = <RailSection>[];
+      await pumpRail(
+        tester,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        onOpenEvent: opened.add,
+        onSelectSection: sections.add,
+      );
+      await tester.tap(find.text('10:00 AM · Standup with Fabrikam'));
+      await tester.pump();
+      expect(opened, ['m1']);
+      expect(sections, isNot(contains(RailSection.day)));
+    });
+
+    testWidgets('without an event handler the row goes to the Day stop',
+        (tester) async {
+      final sections = <RailSection>[];
+      await pumpRail(
+        tester,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        onSelectSection: sections.add,
+      );
+      await tester.tap(find.text('10:00 AM · Standup with Fabrikam'));
+      await tester.pump();
+      expect(sections, [RailSection.day]);
+    });
 
     testWidgets('the Inbox stack carries a Today section with up to three '
         'meetings and the invites owed', (tester) async {

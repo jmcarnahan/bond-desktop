@@ -392,6 +392,12 @@ class MessageRow extends StatefulWidget {
   /// only places it, beneath the ask it answers.
   final Widget? suggestion;
 
+  /// The meeting this message invites to, or cancels, drawn under it when the
+  /// row is open. The host decides whether the message is an invite and builds
+  /// the card; the row only places it — as with [suggestion], it knows nothing
+  /// about calendars.
+  final Widget? meetingCard;
+
   /// Whether the header folds this message away. False renders exactly what it
   /// always did: no chevron, no tap, nothing to fold.
   final bool collapsible;
@@ -477,6 +483,7 @@ class MessageRow extends StatefulWidget {
     this.openAsk = false,
     this.onAskTap,
     this.suggestion,
+    this.meetingCard,
     this.collapsible = false,
     this.initiallyCollapsed = false,
     this.unfoldRequest = 0,
@@ -712,6 +719,12 @@ class _MessageRowState extends State<MessageRow> {
                     style:
                         BondType.caption.copyWith(color: BondColors.inkMuted),
                   ),
+                ],
+                // The meeting the mail is about, straight under what was said
+                // about it and above the files.
+                if (widget.meetingCard != null) ...[
+                  const SizedBox(height: BondSpacing.s8),
+                  widget.meetingCard!,
                 ],
                 // The files, last: under everything that was said about them,
                 // and above the ask that is probably about them too.

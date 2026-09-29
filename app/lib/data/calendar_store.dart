@@ -157,6 +157,27 @@ class CalendarStore {
     return rows.isEmpty ? null : CalendarEvent.fromDbRow(rows.first.data);
   }
 
+  /// The mirrored occurrences (and exceptions) of the series [seriesMasterId],
+  /// by start — what the event panel picks the next one out of when it is
+  /// handed a master, whose own times are the series' FIRST meeting.
+  ///
+  /// Ordered on `COALESCE(start_utc, start_date)`, the key [eventsBetween]
+  /// sorts on, so an all-day series and a timed one both come out in date
+  /// order. Only what the mirror's window holds: an occurrence months out is
+  /// simply not here. An empty id is no series at all.
+  Future<List<CalendarEvent>> occurrencesOf(String seriesMasterId) async {
+    if (seriesMasterId.isEmpty) return const [];
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM calendar_events WHERE series_master_id = ? '
+          'AND $_notMaster '
+          'ORDER BY COALESCE(start_utc, start_date), id',
+          variables: _args([seriesMasterId]),
+        )
+        .get();
+    return [for (final r in rows) CalendarEvent.fromDbRow(r.data)];
+  }
+
   /// What a span of the display zone holds: timed events overlapping
   /// [startUtc, endUtc) and all-day events overlapping
   /// [fromDate, toDateExclusive).

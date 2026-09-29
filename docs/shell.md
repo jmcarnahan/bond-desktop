@@ -155,7 +155,7 @@ one line — From · Subject · Ask · When, an ask keeping its tone as a dot �
 no bar and no Result cell: the thread beside carries both, and its Why panel's
 `What happened ›` is the door to the history.
 
-`SidePanel` has eight kinds, and the panel shows one of them at a time — the
+`SidePanel` has nine kinds, and the panel shows one of them at a time — the
 innermost of a stack:
 
 | Kind | What it holds | Opened by |
@@ -167,6 +167,8 @@ innermost of a stack:
 | `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, an Inbox row's stage bar or Result cell, an Archive row |
 | `ContextPanel` | which directories a room reads when a reply is drafted | the room header's **Context** on a thread and on a storyline |
 | `ContextFilePanel` | one file out of one of those directories — its words, the passage a citation named, its `AI` summary, and **Consult for the reply** | a provenance chip under the composer's caption, a `Files ›` row on the Context panel, a tile in the search's **In your directories** list |
+| `CheatSheetPanel` | the keyboard shortcuts | `?` |
+| `EventPanel` | one calendar event — when, where, who organised it, your answer, Join and **Open in Outlook**, the attendees with their answers and a tally, the overlap line, the conversations that carried the invite (and the Teams meeting chat), and the invite's own text as plain words | a Day agenda, all-day or invite row; a Today-section meeting row; **Open event** on an invite card in a thread (pushed when the thread is the one beside); a person room's next / last meeting line |
 
 The side is a STACK (`_sideStack`; `_side` is the innermost panel). A panel
 opened from INSIDE the one beside — a file, a Why or a history asked for from
@@ -176,7 +178,9 @@ pops back to what it was opened from, closing the side only when nothing is
 left underneath. A panel opened from OUTSIDE the side replaces the whole
 stack's top, because nobody navigated into it and there is nothing to return
 to. Pushing the panel already on top replaces it, so a second tap on the same
-chip cannot stack a panel on itself. None of Why, History, Context or the context file
+chip cannot stack a panel on itself; pushing one that already sits deeper
+unwinds back to it, so a meeting and its thread opened from each other in
+turn cannot grow the stack without end. None of Why, History, Context or the context file
 carries ⤢: each is prose or a short list about one thing, and neither improves
 by being given the whole window.
 The history takes the thread's minimum width (`threadMinWidth`) rather than the
@@ -206,8 +210,9 @@ alone, and only the setters that move `_section` clear it.
 | the Day stop, or a day row in its column | `DayPane`'s agenda for that day (`_selectDay`); the stop's arrival forces a calendar sync tick |
 | `Invites · N` (in the Day column or the Inbox stack's Today section) | `DayPane` in invites mode (`_openInvites`); `‹ Day` returns to the day it left |
 | a Due or Back-from-Later row on the agenda | that thread, in main (`_select`) |
-| a meeting row | nothing yet — the event panel lands in a later phase |
-| a Today-section meeting row | the Day stop |
+| a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
+| a Today-section meeting row | the event, beside, over whatever main is showing |
+| a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
 
 ---
 
@@ -538,6 +543,12 @@ Tapping a room opens `_room()`: a `RoomHeader` titled by the person, subtitled
 - A done card reads `Done · N messages…` and a deferred one `Later · …`. The
   room holds both, and an unmarked closed thread in a list of live ones is a
   thread the reader answers twice.
+- **The meeting line**, first in the pane when the calendar knows either
+  answer: `Next meeting: Design review · Tomorrow 10:00 AM · Last met 12 days
+  ago`, read from the mirror over every address in the room
+  (`personMeetingsProvider`). Each half opens that event beside. Absent while
+  the calendar is not shown (no permission, SDK mode) and when neither
+  answer exists.
 - Above the list: a `FilterField` (`Filter threads…`), the pills
   `All · Direct · Groups`, and a `SortMenu` offering
   `Newest first · Oldest first`. The needle reaches the subject (reply prefix

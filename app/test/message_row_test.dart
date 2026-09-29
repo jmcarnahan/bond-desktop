@@ -394,6 +394,34 @@ void main() {
       expect(find.text('AI: Wants the rate sheet.'), findsOneWidget);
     });
 
+    testWidgets('a meeting card sits under the summary when given',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(summary: 'Invites you to planning.'),
+        meetingCard: const Text('the meeting', key: ValueKey('card')),
+      )));
+
+      expect(find.byKey(const ValueKey('card')), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('card'))).dy,
+        greaterThan(
+            tester.getTopLeft(find.text('AI: Invites you to planning.')).dy),
+      );
+    });
+
+    testWidgets('no meeting card draws nothing extra', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(message: _msg())));
+
+      expect(find.text('the meeting'), findsNothing);
+      expect(find.text('Hello there.'), findsOneWidget);
+    });
+
     testWidgets('an open ask renders its action item and deadline',
         (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));

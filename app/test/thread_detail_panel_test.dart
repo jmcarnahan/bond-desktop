@@ -31,8 +31,10 @@ Message _msg({
   String? bodyText,
   bool addressedMe = false,
   List<AttachmentRef> attachments = const [],
+  String? sourceMetaJson,
 }) {
   return Message(
+    sourceMetaJson: sourceMetaJson,
     id: id,
     outbound: outbound,
     fromName: outbound ? null : 'Dana Ruiz',
@@ -56,6 +58,7 @@ Message _twoLine({
   required String receivedAt,
   bool? needsAction,
   List<String> actionItems = const [],
+  String? sourceMetaJson,
 }) =>
     _msg(
       id: id,
@@ -63,6 +66,7 @@ Message _twoLine({
       needsAction: needsAction,
       actionItems: actionItems,
       bodyText: 'First line of $id.\nSecond line of $id.',
+      sourceMetaJson: sourceMetaJson,
     );
 
 /// One status line from a meeting application, gated at ingest the way
@@ -102,6 +106,7 @@ void main() {
     VoidCallback? onReopen,
     VoidCallback? onCompose,
     Widget? Function(Message message)? suggestionFor,
+    Widget? Function(Message message)? meetingCardFor,
     void Function(AttachmentRef attachment)? onOpenAttachment,
     AttachmentRef? selectedAttachment,
     ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
@@ -143,6 +148,7 @@ void main() {
           onOpenReply: onOpenReply,
           onCompose: onCompose,
           suggestionFor: suggestionFor,
+          meetingCardFor: meetingCardFor,
           onOpenAttachment: onOpenAttachment,
           selectedAttachment: selectedAttachment,
           thumbnailFor: thumbnailFor,
@@ -624,6 +630,51 @@ void main() {
 
       expect(find.textContaining('Second line of a.'), findsOneWidget);
       expect(find.text('card for a'), findsOneWidget);
+    });
+
+    testWidgets('nor one carrying a meeting card', (tester) async {
+      final asked = <String>[];
+      await pump(
+        tester,
+        messages: [
+          _twoLine(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _twoLine(id: 'b', receivedAt: '2026-08-25T11:00:00'),
+        ],
+        meetingCardFor: (m) {
+          asked.add(m.id);
+          return m.id == 'a' ? const Text('meeting for a') : null;
+        },
+      );
+
+      expect(asked, containsAll(['a', 'b']));
+      expect(find.textContaining('Second line of a.'), findsOneWidget);
+      expect(
+        find.descendant(of: rowFor('a'), matching: find.text('meeting for a')),
+        findsOneWidget,
+      );
+      expect(chevronOn('a', collapsed: false), findsOneWidget);
+    });
+
+    testWidgets('but a cancellation card folds like history', (tester) async {
+      // A cancelled meeting leaves nothing to answer or join: its card does
+      // not hold the row open the way an invite's does.
+      await pump(
+        tester,
+        messages: [
+          _twoLine(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            sourceMetaJson:
+                '{"meeting": "meetingCancelled", "event_id": "evt-1"}',
+          ),
+          _twoLine(id: 'b', receivedAt: '2026-08-25T11:00:00'),
+        ],
+        meetingCardFor: (m) =>
+            m.id == 'a' ? const Text('cancelled meeting for a') : null,
+      );
+
+      expect(find.textContaining('Second line of a.'), findsNothing);
+      expect(chevronOn('a', collapsed: true), findsOneWidget);
     });
 
     testWidgets('a folded message still says it needs an answer',

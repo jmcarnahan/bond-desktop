@@ -328,8 +328,8 @@ Times print on the display zone's wall clock (`zone.toLocal`, never
 `now`) inside the hour before it and while it runs, and carries **Join** from
 fifteen minutes before its start until its end. The agenda sits under one
 30-second clock tick, so the Now marker, the countdowns and Join follow the
-clock on a pane nobody touches. Meeting rows are not tappable
-yet; the event panel arrives with Phase 4.
+clock on a pane nobody touches. A meeting, all-day or invite row opens the
+event beside ([Events, invite cards and people](#events-invite-cards-and-people)).
 
 ### What shows, per availability
 
@@ -378,6 +378,75 @@ meetings still ahead today — not cancelled, not declined, not ended
 (`remainingToday`) — each with its countdown, then `Invites · N`. It shows
 only while the calendar is `available` or `unavailable`, so a launch does not
 grow the section and then lose it.
+
+## Events, invite cards and people
+
+A meeting opens as the ninth side panel, `EventPanel(eventId)`
+(`app/lib/widgets/event_panel.dart`, hosted by `InboxScreen._eventPanel`).
+The id resolves through `eventByIdProvider`
+(`app/lib/providers/event_providers.dart`):
+
+1. Calendar not shown (no permission, SDK mode) → `blocked`, and the panel
+   says the Day stop's sentence. Neither the store nor the server is asked.
+2. The mirror row, when there is one. A series master brings its mirrored
+   occurrences (`CalendarStore.occurrencesOf`), and every view shows the
+   first one that has not ended (`displayOccurrence`), marked `· series`.
+   A date outside the current year carries its year.
+3. Otherwise a live `get_calendar_event` — an invite for a meeting outside the
+   121-day window, say, or a recurring invite: the mail names the series
+   MASTER, and calendarView mirrors the occurrences without it, so a live
+   master still takes its occurrences from the mirror. The answer is held in memory ONLY: a row written
+   outside `CalendarSync` would be swept by the next run (gotcha 36).
+   `CalendarEventGone` → "This event no longer exists."; any other failure →
+   "Couldn't reach the calendar."
+
+The panel holds: when (`Tomorrow · Wednesday, Sep 30 · 10:00–10:30 AM`, or
+`All day · …`) with a live countdown; Join (emphasised from fifteen minutes
+before the start, absent once it has ended, when cancelled, or with no link);
+**Open in Outlook** (`web_link`); where; who organised it; your own answer
+(`You accepted`, `You haven't answered`, …); the overlap line; the attendees
+with their answers under a tally; the conversations linked to the
+event; and the invite's own text as plain words (untrusted — never a link,
+never HTML). Every link it offers goes through `_launchExternal`'s scheme
+guard.
+
+**The tally** counts people, never rooms, the organiser, or an entry whose
+answer is `organizer`. On a meeting you organised it is the whole picture —
+`4 of 6 accepted · Sam declined · 1 no reply`. On an attendee's copy Exchange
+does not reliably track the other attendees' answers (they commonly read
+`none`), so the tally names only definite answers — `2 accepted · Sam
+declined` — and is absent when there are none. Whether an attendee's copy
+carries answers at all is an owner live check.
+
+A live read that fails leaves the panel saying so with a **Retry**, which
+drops the cached answer (`ref.invalidate`) and asks again; a failed mirror
+read reads as the same "Couldn't reach the calendar", never as a panel stuck
+on "Reading…".
+
+**Linked conversations** (`eventLinksProvider`): every stored message whose
+`source_meta_json.event_id` is the event — or, for an occurrence, its series
+master — folded to one row per conversation, newest first, each with its
+storyline chip when the thread is in one. The Teams meeting chat is added when
+`teamsThreadId` parses out of the join link AND a `teams` conversation with
+exactly that chat id is stored; a short join link carries no id, and nothing
+is guessed from one. A conversation row opens the thread pushed on the event,
+so ✕ comes back to it.
+
+**Invite cards.** A message whose `meetingMessageType` is `meetingRequest` or
+`meetingCancelled` (compared lowercased) AND whose `meetingEventId` is set
+carries a card under its body (`MeetingCardHost` → `MeetingCard`). No id, no
+card — nothing is matched by subject. Responses never get one; the gates have
+already kept them out of the list. A request card shows the when line, the
+overlap line, the tally, Join and **Open event**; a cancellation, or a request
+whose event has since been cancelled, is one line — `Cancelled: Design review
+· Thursday, Oct 2 · 10:00–10:30 AM`. An event the calendar no longer has says
+so in one line. A message with a request card never starts folded in the transcript; a
+cancellation folds like any other history.
+
+**People.** A person's room leads with `Next meeting: … · Last met 12 days
+ago`, from `nextMeetingWith` / `lastMetWith` over every address in the room
+(`personMeetingsProvider`, keyed by the addresses and the host's quarter-hour
+"as of" instant). "Days ago" counts display-zone dates, not 24-hour spans.
 
 ## Later phases
 

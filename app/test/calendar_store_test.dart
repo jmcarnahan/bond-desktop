@@ -383,4 +383,50 @@ void main() {
       expect(await calendar.messagesForEvent('evt-missing'), isEmpty);
     });
   });
+
+  group('occurrencesOf', () {
+    test('a series in start order, without its master or other series',
+        () async {
+      CalendarEvent occ(String id, DateTime start, {String master = 'm-1'}) =>
+          CalendarEvent(
+            id: id,
+            subject: 'Weekly',
+            eventType: 'occurrence',
+            seriesMasterId: master,
+            startUtc: start,
+            endUtc: start.add(const Duration(minutes: 30)),
+          );
+      await calendar.upsertEvents([
+        timed('m-1', start: inHours(-200), eventType: 'seriesMaster'),
+        occ('o-3', inHours(48)),
+        occ('o-1', inHours(-24)),
+        occ('o-2', inHours(24)),
+        occ('x-1', inHours(1), master: 'm-2'),
+      ], syncRun: 'run-a');
+
+      final list = await calendar.occurrencesOf('m-1');
+      expect([for (final e in list) e.id], ['o-1', 'o-2', 'o-3']);
+      expect(await calendar.occurrencesOf(''), isEmpty);
+      expect(await calendar.occurrencesOf('m-missing'), isEmpty);
+    });
+
+    test('an all-day series comes out by date', () async {
+      final day = CalendarDate.ofDateTime(now);
+      CalendarEvent occ(String id, CalendarDate d) => CalendarEvent(
+            id: id,
+            subject: 'Offsite',
+            eventType: 'occurrence',
+            seriesMasterId: 'm-ad',
+            isAllDay: true,
+            startDate: d,
+            endDate: d.addDays(1),
+          );
+      await calendar.upsertEvents([
+        occ('b', day.addDays(7)),
+        occ('a', day),
+      ], syncRun: 'run-a');
+      final list = await calendar.occurrencesOf('m-ad');
+      expect([for (final e in list) e.id], ['a', 'b']);
+    });
+  });
 }

@@ -62,6 +62,7 @@ void main() {
     void Function(String, String)? onOpenConversation,
     void Function(String)? onOpenLink,
     VoidCallback? onOpenSettings,
+    void Function(String)? onOpenEvent,
     DateTime? at,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -83,6 +84,7 @@ void main() {
           onOpenConversation: onOpenConversation ?? (_, _) {},
           onOpenLink: onOpenLink ?? (_) {},
           onOpenSettings: onOpenSettings ?? () {},
+          onOpenEvent: onOpenEvent,
         ),
       ),
     ));
@@ -349,6 +351,68 @@ void main() {
       );
       expect(find.text(DayPane.offlineText), findsOneWidget);
       expect(find.text('No invites to answer.'), findsOneWidget);
+    });
+  });
+
+  group('opening an event', () {
+    testWidgets('a meeting row and an all-day row open the event',
+        (tester) async {
+      final opened = <String>[];
+      await pumpPane(
+        tester,
+        onOpenEvent: opened.add,
+        events: [
+          const CalendarEvent(
+            id: 'banner',
+            subject: 'Fabrikam offsite',
+            isAllDay: true,
+            startDate: today,
+            endDate: CalendarDate(2026, 9, 30),
+          ),
+          timed('m1', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 20)),
+        ],
+      );
+      await tester.tap(find.text('Contoso kickoff'));
+      await tester.pump();
+      await tester.tap(find.text('Fabrikam offsite'));
+      await tester.pump();
+      expect(opened, ['m1', 'banner']);
+    });
+
+    testWidgets('an invite row opens the event', (tester) async {
+      final opened = <String>[];
+      await pumpPane(
+        tester,
+        mode: DayPaneMode.invites,
+        onOpenEvent: opened.add,
+        invites: [
+          InviteEntry(timed('inv-1', 'Budget review',
+              DateTime.utc(2026, 10, 1, 17),
+              responseStatus: 'none')),
+        ],
+      );
+      await tester.tap(find.text('Budget review'));
+      await tester.pump();
+      expect(opened, ['inv-1']);
+    });
+
+    testWidgets('without a handler the rows stay inert', (tester) async {
+      await pumpPane(
+        tester,
+        events: [
+          timed('m1', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 20)),
+        ],
+      );
+      expect(
+        find.ancestor(
+          of: find.text('Contoso kickoff'),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+      await tester.tap(find.text('Contoso kickoff'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
     });
   });
 }

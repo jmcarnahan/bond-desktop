@@ -592,6 +592,11 @@ class AppRail extends StatefulWidget {
   /// Opens the invites list. Null leaves the Invites rows inert.
   final VoidCallback? onOpenInvites;
 
+  /// Opens one event beside the main pane, by its Graph id. Null sends a
+  /// Today meeting row to the Day stop instead, so the row still goes
+  /// somewhere on a host that has no side panel to open it in.
+  final void Function(String eventId)? onOpenEvent;
+
   const AppRail({
     super.key,
     required this.conversations,
@@ -643,6 +648,7 @@ class AppRail extends StatefulWidget {
     this.showingInvites = false,
     this.onSelectDay,
     this.onOpenInvites,
+    this.onOpenEvent,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -1000,8 +1006,10 @@ class _AppRailState extends State<AppRail> {
   /// [AppRail.todayShown] — so the stack does not grow a section and lose it
   /// again on a launch whose first answer is "no calendar".
   ///
-  /// A meeting row goes to the Day stop for now; the event panel it will open
-  /// arrives in a later phase.
+  /// A meeting row opens the event panel beside whatever the main pane is
+  /// showing — the reader glancing at "what's next" wants the meeting, not a
+  /// change of stop. Without [AppRail.onOpenEvent] it falls back to the Day
+  /// stop, which is the next best answer to the same question.
   List<Widget> _todaySection() {
     if (!widget.todayShown) return const [];
     final zone = widget.calendarZone;
@@ -1014,7 +1022,9 @@ class _AppRailState extends State<AppRail> {
               label: '${formatEventTime(zone, e.startUtc!)} · '
                   '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}',
               selected: false,
-              onTap: () => widget.onSelectSection(RailSection.day),
+              onTap: widget.onOpenEvent != null
+                  ? () => widget.onOpenEvent!(e.id)
+                  : () => widget.onSelectSection(RailSection.day),
               trailing: ClockTick(
                 initial: now,
                 builder: (_, t) => Text(

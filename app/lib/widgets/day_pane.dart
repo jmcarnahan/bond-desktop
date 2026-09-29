@@ -25,9 +25,10 @@ enum DayPaneMode { agenda, invites }
 /// is the join URL, behind a button, through [onOpenLink] and the screen's
 /// guarded launcher.
 ///
-/// Meeting rows are not tappable yet: the event panel they will open arrives
-/// in a later phase, and a row that reacted to a tap by doing nothing would be
-/// a row that looked broken.
+/// Meeting, all-day and invite rows open the event panel beside the pane
+/// through [onOpenEvent]. Without it they stay inert — no ink, no hover —
+/// because a row that reacted to a tap by doing nothing would be a row that
+/// looked broken.
 class DayPane extends StatelessWidget {
   const DayPane({
     super.key,
@@ -45,6 +46,7 @@ class DayPane extends StatelessWidget {
     required this.onOpenConversation,
     required this.onOpenLink,
     required this.onOpenSettings,
+    this.onOpenEvent,
   });
 
   /// How far back and forward the arrows go: the mirror's window. A day
@@ -86,6 +88,16 @@ class DayPane extends StatelessWidget {
   final void Function(String source, String conversationKey) onOpenConversation;
   final void Function(String url) onOpenLink;
   final VoidCallback onOpenSettings;
+
+  /// Opens one event beside the pane, by its Graph id. Null leaves the event
+  /// rows inert.
+  final void Function(String eventId)? onOpenEvent;
+
+  /// [onOpenEvent] bound to [e], or null when there is nothing to open with.
+  VoidCallback? _openEvent(CalendarEvent e) {
+    final open = onOpenEvent;
+    return open == null ? null : () => open(e.id);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -348,6 +360,7 @@ class DayPane extends StatelessWidget {
 
     final row = _row(
       when: _when(range),
+      onTap: _openEvent(e),
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -368,6 +381,7 @@ class DayPane extends StatelessWidget {
         multi ? 'All day · until ${shortDate(end.addDays(-1))}' : 'All day';
     return _row(
       when: _when(label),
+      onTap: _openEvent(e),
       body: Text(
         _subject(e.subject),
         style: BondType.body.copyWith(
@@ -500,6 +514,7 @@ class DayPane extends StatelessWidget {
     final overlap = overlapLine(entry.overlaps);
     return _row(
       when: _when(when),
+      onTap: _openEvent(e),
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
