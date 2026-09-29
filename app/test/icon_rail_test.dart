@@ -11,7 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// is no sixty-second timer here, and the menu opens on an animation that has
 /// to finish before its items are tappable.
 
-/// Loose height so all seven stops lay out; the rail sizes its own width.
+/// Loose height so all eight stops lay out; the rail sizes its own width.
 Widget _host(Widget rail) => MaterialApp(
       home: Scaffold(
         body: Row(children: [rail, const Expanded(child: SizedBox())]),
@@ -50,12 +50,13 @@ void main() {
   }
 
   group('the stops', () {
-    testWidgets('all seven, each with its label', (tester) async {
+    testWidgets('all eight, each with its label', (tester) async {
       await pumpRail(tester);
 
       for (final label in const [
         'Inbox',
         'Needs You',
+        'Day',
         'Storylines',
         'People',
         'Files',
@@ -64,6 +65,18 @@ void main() {
       ]) {
         expect(find.text(label), findsOneWidget, reason: label);
       }
+    });
+
+    testWidgets('Day sits right after Needs You', (tester) async {
+      // "What's next" is the question after "what do I owe", so the calendar
+      // stop follows the pile of asks directly.
+      final sections = [for (final (section, _) in IconRail.stops) section];
+
+      expect(
+        sections.indexOf(RailSection.day),
+        sections.indexOf(RailSection.needsYou) + 1,
+      );
+      expect(sections.length, 8);
     });
 
     testWidgets('Files sits between People and Later', (tester) async {
@@ -87,7 +100,7 @@ void main() {
       await pumpRail(tester);
 
       // It is a ROW in the Home stack, not a stop: what it holds is the
-      // model's unsent work rather than a pile of mail, and a seventh icon for
+      // model's unsent work rather than a pile of mail, and a ninth icon for
       // a list that is usually empty would cost a permanent stop for an
       // occasional one. `stops` is an explicit list so this cannot drift.
       expect(

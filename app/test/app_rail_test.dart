@@ -1,7 +1,10 @@
+import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/files_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/needs_you_sort.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart'
     show NameStorylineTask;
 import 'package:bond_inbox/theme/tokens.dart';
@@ -2129,6 +2132,186 @@ void main() {
           reason: kind.name,
         );
       }
+    });
+  });
+  group('the calendar rows', () {
+    setUpAll(initCalendarZones);
+
+    // A fixed clock in a named zone: Tuesday Sep 29 2026, 9:00 AM in
+    // Los Angeles (16:00 UTC).
+    final now = DateTime.utc(2026, 9, 29, 16);
+    const today = CalendarDate(2026, 9, 29);
+
+    CalendarEvent meeting(String id, String subject, int startHourUtc) =>
+        CalendarEvent(
+          id: id,
+          subject: subject,
+          startUtc: DateTime.utc(2026, 9, 29, startHourUtc),
+          endUtc: DateTime.utc(2026, 9, 29, startHourUtc, 30),
+        );
+
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      RailSection scope = RailSection.home,
+      bool calendarShown = true,
+      bool todayShown = true,
+      List<CalendarEvent> todayMeetings = const [],
+      int invitesCount = 0,
+      List<(CalendarDate, DaySummary)> dayRows = const [],
+      CalendarDate? selectedDay,
+      bool showingInvites = false,
+      void Function(CalendarDate)? onSelectDay,
+      VoidCallback? onOpenInvites,
+      void Function(RailSection)? onSelectSection,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: const [],
+        onSelectRoom: (_) {},
+        conversations: const [],
+        selectedId: null,
+        selectedSection: scope,
+        onSelectConversation: (_, _) {},
+        onSelectSection: onSelectSection ?? (_) {},
+        calendarShown: calendarShown,
+        todayShown: todayShown,
+        todayMeetings: todayMeetings,
+        calendarZone: CalendarZone.tryNamed('America/Los_Angeles')!,
+        now: now,
+        invitesCount: invitesCount,
+        dayRows: dayRows,
+        today: today,
+        selectedDay: selectedDay,
+        showingInvites: showingInvites,
+        onSelectDay: onSelectDay,
+        onOpenInvites: onOpenInvites,
+      )));
+    }
+
+    testWidgets('the Inbox stack carries a Today section with up to three '
+        'meetings and the invites owed', (tester) async {
+      await pumpRail(
+        tester,
+        todayMeetings: [
+          meeting('m1', 'Standup with Fabrikam', 17),
+          meeting('m2', 'Design review', 18),
+          meeting('m3', 'Vendor call', 19),
+          meeting('m4', 'Late sync', 20),
+        ],
+        invitesCount: 2,
+      );
+
+      expect(find.text('TODAY'), findsOneWidget);
+      expect(find.text('10:00 AM · Standup with Fabrikam'), findsOneWidget);
+      expect(find.text('11:00 AM · Design review'), findsOneWidget);
+      expect(find.text('12:00 PM · Vendor call'), findsOneWidget);
+      expect(find.text('1:00 PM · Late sync'), findsNothing);
+      expect(find.text('Invites · 2'), findsOneWidget);
+      // The countdown reads the injected clock: an hour out is not "in".
+      expect(find.text('in 60m'), findsNothing);
+      // It sits between Needs You and Drafts & sent.
+      final todayY = tester.getTopLeft(find.text('TODAY')).dy;
+      expect(tester.getTopLeft(find.text('NEEDS YOU')).dy, lessThan(todayY));
+      expect(
+          tester.getTopLeft(find.text('DRAFTS & SENT')).dy, greaterThan(todayY));
+    });
+
+    testWidgets('the countdown shows inside the hour', (tester) async {
+      await pumpRail(tester, todayMeetings: [
+        CalendarEvent(
+          id: 'soon',
+          subject: 'Budget check-in',
+          startUtc: now.add(const Duration(minutes: 18)),
+          endUtc: now.add(const Duration(minutes: 48)),
+        ),
+      ]);
+
+      expect(find.text('in 18m'), findsOneWidget);
+    });
+
+    testWidgets('no Today section until the calendar has answered',
+        (tester) async {
+      await pumpRail(
+        tester,
+        todayShown: false,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        invitesCount: 2,
+      );
+
+      expect(find.text('TODAY'), findsNothing);
+      expect(find.text('Invites · 2'), findsNothing);
+    });
+
+    testWidgets('an empty Today says so', (tester) async {
+      await pumpRail(tester);
+
+      expect(find.text('TODAY'), findsOneWidget);
+      expect(find.text('Nothing else today'), findsOneWidget);
+    });
+
+    testWidgets('a Today meeting row goes to the Day stop', (tester) async {
+      final sections = <RailSection>[];
+      await pumpRail(
+        tester,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        onSelectSection: sections.add,
+      );
+
+      await tester.tap(find.text('10:00 AM · Standup with Fabrikam'));
+      expect(sections, [RailSection.day]);
+    });
+
+    testWidgets('the Day column lists the invites and the days',
+        (tester) async {
+      final summaries = [
+        (today, const DaySummary(meetings: 2, due: 1)),
+        (today.addDays(1), const DaySummary()),
+        (const CalendarDate(2026, 10, 2), const DaySummary(invites: 1)),
+      ];
+      final picked = <CalendarDate>[];
+      var invitesOpened = 0;
+      await pumpRail(
+        tester,
+        scope: RailSection.day,
+        invitesCount: 3,
+        dayRows: summaries,
+        onSelectDay: picked.add,
+        onOpenInvites: () => invitesOpened++,
+      );
+
+      expect(find.text('DAY'), findsOneWidget);
+      expect(find.text('Invites · 3'), findsOneWidget);
+      for (final (day, summary) in summaries) {
+        expect(find.text(dayRowLabel(day, today, summary)), findsOneWidget);
+      }
+      expect(find.text('Today · 2 meetings · 1 due'), findsOneWidget);
+      expect(find.text('Tomorrow · clear'), findsOneWidget);
+      expect(find.text('Fri Oct 2 · 1 invite'), findsOneWidget);
+      // The Today section belongs to the Inbox stack, not this column.
+      expect(find.text('TODAY'), findsNothing);
+
+      await tester.tap(find.text('Tomorrow · clear'));
+      expect(picked, [today.addDays(1)]);
+      await tester.tap(find.text('Invites · 3'));
+      expect(invitesOpened, 1);
+    });
+
+    testWidgets('the Day column says when there is no calendar',
+        (tester) async {
+      await pumpRail(
+        tester,
+        scope: RailSection.day,
+        calendarShown: false,
+        invitesCount: 3,
+        dayRows: [(today, const DaySummary())],
+      );
+
+      expect(find.text('Calendar not connected'), findsOneWidget);
+      expect(find.text('Invites · 3'), findsNothing);
+      expect(find.text('Today · clear'), findsNothing);
     });
   });
 }

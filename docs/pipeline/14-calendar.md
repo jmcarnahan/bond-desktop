@@ -11,8 +11,9 @@ No chat model is involved. The mirror is `sync_calendar` pages written into
 sqlite.
 
 > **Live as of schema v21** (calendar round, Phase 2): the table, the sync,
-> the store's reads, the inbox wiring and the mailbox-settings cache. The
-> screens that read it arrive in later phases — see the end of this file.
+> the store's reads, the inbox wiring and the mailbox-settings cache. Phase 3
+> adds the first screen that reads it, [the Day stop](#the-day-stop); the rest
+> arrive in later phases — see the end of this file.
 
 ## MCP mode only
 
@@ -278,10 +279,108 @@ runs while the pref is absent or `attempt:…`; the third failed pass writes
 `regated_meeting_responses`) on the `sync_mail` row. `wipeAll` deletes the
 pref; Clear AI results keeps it, because it keeps `source_meta_json`.
 
+## The Day stop
+
+**What happens.** The icon rail's Day stop (after Needs You) shows one day at a
+time as a MERGE of three things the app already holds: the mirror's events,
+the deadlines triage read out of the mail, and the threads coming back from
+Later. The merge is pure (`app/lib/services/calendar/day_items.dart`,
+`buildDayItems`); `DayPane` only draws it. The reads are
+`app/lib/providers/day_providers.dart` — `dayEventsProvider(day)`,
+`upcomingEventsProvider(today)` and `invitesOwedProvider(asOf)` — and every
+one reads the store, never the backend, and watches `calendarRevisionProvider`.
+Every family argument is computed by the inbox from the clock on each build —
+a date for the two event reads, and for the invites an "as of" UTC instant
+floored to the quarter hour (`invitesAsOf`) — so a stop left open across
+midnight moves on with the next rebuild and a started invite drops off within
+fifteen minutes. Picking today stores no date: an explicit Today follows the
+clock just as arriving on the stop does.
+
+### What a day holds, in order
+
+1. **All-day events**, in the store's order. They are dates, not instants, and
+   head the day rather than sitting at a midnight they do not have.
+2. **Deadlines**: every thread that is not done whose `latestDeadline` passes
+   `showableDeadline` and whose `parseDeadline` day is this day. Relative
+   deadlines resolve against the inbound message that named them
+   (`lastInboundAt`, falling back to now), so "EOD" said three weeks ago is not
+   due today; a deadline whose day has passed does not appear on today's
+   agenda — overdue work lives in Needs You.
+3. **Everything with an instant**, by that instant: meetings, **returns**
+   (threads in Later — `bucket = 'later'`, not done — whose `snoozed_until`
+   falls on this day in the display zone) and the **Now marker**. The marker
+   sits after every row that started strictly before now and before every row
+   starting at or after it, so a meeting starting this minute reads as next.
+   A meeting and a return at the same instant put the meeting first.
+
+A thread gives ONE row per day: a deadline beats a return. Declined and
+cancelled meetings stay on the day, faded and struck through, because a
+meeting that silently vanished is one somebody turns up to. Each meeting's
+overlap line comes from `overlapsForEvent` against that same day's events,
+which skips cancelled, declined, free and workingElsewhere. A timed event sits
+on every local date it touches, from the date of its start through the date of
+the instant just before its end; an all-day event on every date in
+`[startDate, endDate)`.
+
+Times print on the display zone's wall clock (`zone.toLocal`, never
+`DateTime.toLocal()`), in the house 12-hour style: `10:00–10:30 AM`,
+`11:30 AM–12:30 PM`, `11:00 PM–Wed 1:00 AM`. A meeting counts down (`in 18m`,
+`now`) inside the hour before it and while it runs, and carries **Join** from
+fifteen minutes before its start until its end. The agenda sits under one
+30-second clock tick, so the Now marker, the countdowns and Join follow the
+clock on a pane nobody touches. Meeting rows are not tappable
+yet; the event panel arrives with Phase 4.
+
+### What shows, per availability
+
+| `CalendarAvailability` | Day pane | Today section |
+|---|---|---|
+| `available` | rows; an empty day says `Nothing on your calendar.` | shown |
+| `unavailable` (offline) | rows as saved, under `Can't reach the calendar right now — showing what was saved.` | shown |
+| `unknown` (no tick yet) | rows; an empty day says `Reading your calendar…` | hidden |
+| `scopeMissing` | no rows; `Calendar permission needed — Settings › Connection` and **Open Settings** | hidden |
+| `sdkMode` | no rows; the SDK-mode backend's own sentence | hidden |
+
+The Invites view follows the same table: the same sentences for `scopeMissing`
+and `sdkMode` (never `No invites to answer.`), the offline caption for
+`unavailable`, and nothing at all while the read is still in flight.
+
+`calendarShowsMirror` (the first three) is the providers' gate too, so a switch
+to SDK mode stops the stale rows showing without deleting them.
+
+### Invites owed
+
+`invitesOwed` answers every expanded occurrence of an unanswered series, so
+`collapseInvites` folds them by `seriesMasterId`: one entry, the SOONEST
+occurrence shown, the rest counted (`· series` on the row). An invite is
+**pinned** when any linked invite message — linked to the occurrence, or to
+its series master, through `messagesForEvent` — has a stored decision with
+urgency `high` or `urgent`, or importance `high`. Pinned entries come first,
+then soonest first. A decision read that throws costs that invite its pin,
+never the list. Overlaps for all invites come from ONE `eventsBetween` over
+the span they cover, capped at 121 days. The list is read-only this phase;
+RSVP arrives with Phase 5.
+
+### The list column and the Today section
+
+The Day stop's column is `Invites · N` (when any are owed), then today and
+tomorrow ALWAYS, then each later day up to fourteen out that has anything on
+it (`upcomingDays`), labelled by `dayRowLabel`: `Today · 2 meetings · 1 due`,
+`Tomorrow · clear`, `Fri Oct 2 · 1 back · 1 invite`. The threads are narrowed
+once to those whose deadline or return lands inside the window, by the same
+rules the merge uses, and the column is only worked out while the Day stop is
+showing. Meetings counted are the
+commitments — timed and all-day, not cancelled, not declined. The arrows on
+the pane stop at the mirror's window, thirty days back and 120 ahead.
+
+The Inbox stack's **Today** section sits under Needs You: up to three timed
+meetings still ahead today — not cancelled, not declined, not ended
+(`remainingToday`) — each with its countdown, then `Invites · N`. It shows
+only while the calendar is `available` or `unavailable`, so a launch does not
+grow the section and then lose it.
+
 ## Later phases
 
-- The Day stop and the Today section, reading `eventsBetween` and
-  `invitesOwed`.
 - Writes (`respond`, `update`, `cancel`, `delete`, `create`) and their
   `noteWrite` calls.
 - Pre-meeting briefs into `event_briefs`.

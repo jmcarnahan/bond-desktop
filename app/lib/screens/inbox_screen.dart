@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
+import '../models/calendar_models.dart' show CalendarDate, CalendarEvent;
 import '../models/context_models.dart' show ContextScopeKind;
 import '../models/draft_provenance.dart';
 import '../models/label_models.dart';
@@ -21,6 +22,7 @@ import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/archive_provider.dart';
 import '../providers/context_provider.dart';
+import '../providers/day_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/drafts_inbox_provider.dart';
@@ -44,6 +46,8 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
+import '../services/calendar/calendar_zone.dart' show CalendarZone;
+import '../services/calendar/day_items.dart';
 import '../services/external_sender.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
@@ -65,6 +69,7 @@ import '../widgets/composer.dart';
 import '../widgets/context_file_panel.dart';
 import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
+import '../widgets/day_pane.dart';
 import '../widgets/drafts_pane.dart';
 import '../widgets/files_pane.dart';
 import '../widgets/find_field.dart';
@@ -387,6 +392,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// list on every build, so holding one would be holding a snapshot that
   /// stops agreeing with the rail the moment mail arrives.
   String? _selectedRoomKey;
+
+  /// The day the Day stop is showing; null is today. Null rather than a
+  /// stored date so a stop left open across midnight follows the clock.
+  ///
+  /// Cleared, with [_showingInvites], wherever [_section] is assigned — a
+  /// day only means anything on the Day stop — and deliberately NOT by
+  /// [_select] and the other openers that leave the stop in place, so
+  /// closing a thread opened from a Day row lands back on the same day.
+  CalendarDate? _selectedDay;
+
+  /// Whether the Day stop is showing the invites owed rather than a day.
+  bool _showingInvites = false;
 
   /// Which pile Archive is showing. Kept here rather than in the pane so the
   /// tab survives every rebuild the sixty-second poll causes.
@@ -1598,12 +1615,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (section == RailSection.files) {
       ref.read(filesProvider.notifier).load(sources: _activeSources);
     }
+    // And the Day stop asks the calendar for a forced tick: the mirror is
+    // only as current as the last sync, and arriving is when a reader is
+    // looking at it.
+    if (section == RailSection.day) _syncCalendar(force: true);
     setState(() {
       _clearOverlays();
       // Moving the rail ends the sit-down: the next visit to the overview
       // snapshots its own pile — see [_pileAtSessionStart].
       _resetPileProgress();
       _section = section;
+      _selectedDay = null;
+      _showingInvites = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -1627,6 +1650,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _clearOverlays();
       _section = RailSection.people;
+      _selectedDay = null;
+      _showingInvites = false;
       _selectedRoomKey = key;
       _selectedId = null;
       _selectedSource = null;
@@ -1644,11 +1669,54 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _clearOverlays();
       _section = RailSection.archive;
+      _selectedDay = null;
+      _showingInvites = false;
       _archiveTab = ArchiveTab.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
+      _selectedRoomKey = null;
+    });
+  }
+
+  /// Opens one day on the Day stop. The section moves with it, for
+  /// [_selectLaterDay]'s reason: backing out of whatever opens next lands on
+  /// the Day stop, and the column beside it is the days.
+  ///
+  /// Picking TODAY stores no date at all, the same as arriving on the stop:
+  /// today is a moving thing, and a pinned date would leave a pane left open
+  /// across midnight titled "Yesterday" — the reader asked for today, not for
+  /// the date today happened to be.
+  void _selectDay(CalendarDate day) {
+    final today = ref
+        .read(calendarZoneProvider)
+        .valueOrNull
+        ?.dateOf(DateTime.now().toUtc());
+    setState(() {
+      _clearOverlays();
+      _section = RailSection.day;
+      _selectedDay = day == today ? null : day;
+      _showingInvites = false;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _selectedRoomKey = null;
+    });
+  }
+
+  /// Opens the invites owed on the Day stop. The day stays what it was, so
+  /// the pane's back affordance returns to the day the reader left.
+  void _openInvites() {
+    setState(() {
+      _clearOverlays();
+      _section = RailSection.day;
+      _showingInvites = true;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
       _selectedRoomKey = null;
     });
   }
@@ -3070,6 +3138,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _find = text;
       _section = sectionForLabelFind(_section);
+      _selectedDay = null;
+      _showingInvites = false;
     });
     _focusFind(selectAll: false);
   }
@@ -3734,6 +3804,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Widget _rail(List<Conversation> conversations, List<PersonRoom> rooms) {
     final later = laterRows(conversations);
+    final calendar = _railCalendar(conversations);
     return AppRail(
       conversations: conversations,
       storylines: _scopedStorylines(),
@@ -3819,6 +3890,83 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The live rows' own selection. Reading the threads is the whole point
       // of opening one of these before answering.
       onOpenPossible: _selectStoryline,
+      calendarShown: calendar.shown,
+      todayShown: calendar.todayShown,
+      todayMeetings: calendar.todayMeetings,
+      calendarZone: calendar.zone,
+      now: calendar.now,
+      invitesCount: calendar.invites,
+      dayRows: calendar.dayRows,
+      today: calendar.today,
+      selectedDay: _selectedDay,
+      showingInvites: _showingInvites,
+      onSelectDay: _selectDay,
+      onOpenInvites: _openInvites,
+    );
+  }
+
+  /// What the list column shows of the calendar, read once per build.
+  ///
+  /// The mirror's providers are watched only while the calendar is shown at
+  /// all ([calendarShowsMirror]), so a session in SDK mode reads nothing from
+  /// the table. Every read is the store's, never the backend's; an empty
+  /// table is simply no rows.
+  ({
+    bool shown,
+    bool todayShown,
+    CalendarZone? zone,
+    DateTime now,
+    CalendarDate? today,
+    List<CalendarEvent> todayMeetings,
+    List<(CalendarDate, DaySummary)> dayRows,
+    int invites,
+  }) _railCalendar(List<Conversation> conversations) {
+    final availability = ref.watch(calendarAvailabilityProvider);
+    final shown = calendarShowsMirror(availability);
+    final now = DateTime.now();
+    final zone = shown ? ref.watch(calendarZoneProvider).valueOrNull : null;
+    if (zone == null) {
+      return (
+        shown: shown,
+        todayShown: false,
+        zone: null,
+        now: now,
+        today: null,
+        todayMeetings: const [],
+        dayRows: const [],
+        invites: 0,
+      );
+    }
+    final today = zone.dateOf(now.toUtc());
+    final upcoming =
+        ref.watch(upcomingEventsProvider(today)).valueOrNull ?? const [];
+    final invites =
+        ref.watch(invitesOwedProvider(invitesAsOf(now))).valueOrNull ??
+            const [];
+    return (
+      shown: shown,
+      todayShown: calendarShowsToday(availability),
+      zone: zone,
+      now: now,
+      today: today,
+      todayMeetings:
+          remainingToday(events: upcoming, nowUtc: now.toUtc(), zone: zone),
+      // The day rows are the Day stop's column and nobody else's, and they
+      // are the one costly part of this — fifteen merges on every build — so
+      // they are worked out only while that column is on screen. The Today
+      // meetings and the invite count still are: Home's Today section reads
+      // them.
+      dayRows: _section == RailSection.day
+          ? upcomingDays(
+              today: today,
+              events: upcoming,
+              conversations: conversations,
+              invites: invites,
+              now: now,
+              zone: zone,
+            )
+          : const [],
+      invites: invites.length,
     );
   }
 
@@ -4520,6 +4668,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return _home();
     }
 
+    // The Day stop, below every selection above: a thread opened from a Day
+    // row shows the thread, and closing it lands back on the same day because
+    // [_select] leaves [_selectedDay] alone.
+    if (_section == RailSection.day) return _dayPane(conversations);
+
     // The AI stop's pane IS Settings, narrowed to the sections that are about
     // the model. It sits here rather than with the other panes above because
     // it is a SECTION and not an overlay: nothing opened it, the user is
@@ -4532,6 +4685,49 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
 
     return _overview(conversations, loadError);
+  }
+
+  /// The Day stop: one day's agenda, or the invites owed.
+  ///
+  /// "Today" is worked out HERE, from the clock, on every build, and handed to
+  /// the providers as a date — so a pane left open across midnight moves on
+  /// with the next rebuild rather than holding yesterday.
+  ///
+  /// Until the zone has resolved there is nothing honest to draw, except where
+  /// the calendar is not shown at all: those states are sentences, and a
+  /// sentence needs no zone.
+  Widget _dayPane(List<Conversation> conversations) {
+    final availability = ref.watch(calendarAvailabilityProvider);
+    final shows = calendarShowsMirror(availability);
+    final zone = ref.watch(calendarZoneProvider).valueOrNull ??
+        (shows ? null : CalendarZone.utc());
+    if (zone == null) return const SizedBox.shrink();
+    final now = DateTime.now();
+    final today = zone.dateOf(now.toUtc());
+    final day = _selectedDay ?? today;
+    final events =
+        shows ? ref.watch(dayEventsProvider(day)).valueOrNull : const <Never>[];
+    // Null while the read is in flight, so the invites view draws nothing
+    // rather than a false "No invites to answer."
+    final invites = shows
+        ? ref.watch(invitesOwedProvider(invitesAsOf(now))).valueOrNull
+        : const <InviteEntry>[];
+    return DayPane(
+      mode: _showingInvites ? DayPaneMode.invites : DayPaneMode.agenda,
+      day: day,
+      today: today,
+      now: now,
+      zone: zone,
+      availability: availability,
+      events: events,
+      conversations: conversations,
+      invites: invites,
+      onSelectDay: _selectDay,
+      onBackToDay: () => setState(() => _showingInvites = false),
+      onOpenConversation: (source, id) => _select(id, source: source),
+      onOpenLink: (url) => unawaited(_launchExternal(url)),
+      onOpenSettings: _openSettings,
+    );
   }
 
   /// Every suggestion still waiting, and everything already sent.
@@ -7133,7 +7329,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // rather than a `(label, rows)` pair the list pane could draw.
     if (section == RailSection.people) return _peopleDirectory();
 
-    // Unreachable: [_main] routes Home, Drafts & sent and AI to their own
+    // Unreachable: [_main] routes Home, Drafts & sent, Day and AI to their own
     // panes, and every stop with an overview returned above. Nothing rather
     // than a throw, so a stop added without an arm here draws an empty pane
     // and not a red screen.
