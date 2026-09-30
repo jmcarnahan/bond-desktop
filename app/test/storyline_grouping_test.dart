@@ -134,17 +134,23 @@ void main() {
     ..answer('charter_specific', const {'p': 0.9})
     ..answer('member_of', const {'p': 0.9});
 
-  test('a parked decision model asks nothing and writes nothing', () async {
+  test('a parked decision model asks nothing, fetches nothing and writes '
+      'nothing', () async {
     await seedNear(4);
     final decision = FakeDecisionClient.storyline()
       ..askError = const DecisionUnavailableException('decide is down');
+    var fetches = 0;
     final llm = llmWith();
 
     await expectLater(
       StorylineService(
         store,
         llm,
-        judge: StorylineJudge(decision: decision, store: store),
+        judge: StorylineJudge(
+          decision: decision,
+          store: store,
+          ensureBodies: (_, _, _) async => fetches++,
+        ),
       ).sweep(),
       throwsA(isA<DecisionUnavailableException>()),
     );
@@ -152,6 +158,7 @@ void main() {
     expect(decision.readyChecks, 1);
     expect(decision.asks, isEmpty);
     expect(llm.calls, isEmpty);
+    expect(fetches, 0);
     expect(await store.loadStorylines(), isEmpty);
   });
 

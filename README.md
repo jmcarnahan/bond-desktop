@@ -48,17 +48,18 @@ placed on its own (Settings → Models, or the first-run wizard):
   F16 GGUF plus a heads file) that sorts and flags every kept message in one
   forward pass of about 40 ms on this Mac: the learned gate, urgency,
   category, the asks, needs-you, intent, importance, and whether a reply is
-  expected — and judges storylines: which threads are one effort, which
-  storyline a thread belongs to, whether a charter is specific. That is twelve
-  questions: nine message fields and three storyline questions. It is served
+  expected — and judges storylines: which storyline a thread belongs to and
+  whether a charter is specific. Its heads answer twelve questions: nine
+  message fields and three storyline questions, the third (`same_effort`,
+  whether two threads are one effort) asked only by `make golden-pairs`. It is served
   as a mean-pooled embedding model, and the app applies its heads itself from
   the heads file on this Mac. It is not published yet: `make decide-install` copies
   it, sha256-checked, from the training project's export (`DECIDE_SRC`) into
   the app's models folder, where the app's own server (the managed router)
-  picks it up; `make decide` serves it by hand on `:8083`. On this branch it
-  still copies the v2 model, whose nine-field heads file the app now refuses
-  (the heads are schema 2: the nine fields plus three storyline questions),
-  so triage parks until the v3 decision model is installed.
+  picks it up; `make decide` serves it by hand on `:8083`. It copies the v3
+  model (`bond-decide-mbl-v3`, a schema-2 heads file); an older v2 install,
+  whose nine-field heads file the app refuses, parks triage until
+  `make decide-install` is run again.
 
   **Decision model on your server.** Under Settings → Models the Decision
   role can instead be **Your server**, a URL, and what that URL serves decides
@@ -244,10 +245,9 @@ Home without re-running anything.
 
 **Storylines** are groups of threads about the same thing — one project, one
 trip, one event — proposed by the model and kept or dismissed by the user. A
-clustering sweep uses conversation embeddings only to propose pairs, the
-decision model judges which threads are the same effort and whether a
-candidate really belongs, a chat model only writes the title, summary and
-charter, and the result opens as a single merged
+clustering sweep forms clusters by conversation-embedding cosine, the
+decision model judges each cluster's charter and whether each member really
+belongs, a chat model only writes the title, summary and charter, and the result opens as a single merged
 transcript with a chip at each seam naming the thread it just crossed into.
 Removing a thread by hand blocks it, so the model cannot put it straight back.
 

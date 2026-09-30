@@ -1731,11 +1731,11 @@ around with `memberOfEach(storylines, thread)`: the thread's text is built
 once, with at most one body fetch, and one batch carries a state per
 retrieved candidate (at most six).
 
-**Park before anything is asked.** A sweep with a pool to judge or a series to
-propose calls `StorylineJudge.ensureReady()` (`DecisionClient.ensureReady`: a
+**Park before anything is asked.** A sweep with at least one cluster to ask
+about calls `StorylineJudge.ensureReady()` (`DecisionClient.ensureReady`: a
 managed model the router does not serve, Your server's kind, the heads file on
-this Mac — no question asked) before its first pair, body fetch or naming
-call, so a decision model that cannot answer parks the pass without a 27B call
+this Mac — no question asked) before its first naming call, and a sweep with
+no cluster does not call it, so a decision model that cannot answer parks the pass without a 27B call
 or a written row. A decision server that is merely down is found by the first
 question.
 

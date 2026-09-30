@@ -311,31 +311,6 @@ void main() {
     );
   });
 
-  test('sameEffort asks both orders of each pair and averages them', () async {
-    await thread('c1');
-    await thread('c2', subject: 'Venue deposit', body: 'Deposit is due.');
-    await thread('c3', subject: 'Quarterly invoices', body: 'Invoice 42.');
-    // The first match wins: A-then-B reads the venues first, B-then-A reads
-    // the deposit first, so the two orders answer differently.
-    decision.yes(StorylineQuestion.sameEffort,
-        'Thread A:\nSubject: Lisbon offsite', 0.9);
-    decision.yes(StorylineQuestion.sameEffort,
-        'Thread A:\nSubject: Venue deposit', 0.7);
-    decision.yes(StorylineQuestion.sameEffort, 'Invoice 42', 0.1);
-    final judge = StorylineJudge(decision: decision, store: store);
-
-    final p = await judge.sameEffort([
-      ((source: 'email', key: 'c1'), (source: 'email', key: 'c2')),
-      ((source: 'email', key: 'c2'), (source: 'email', key: 'c3')),
-    ]);
-
-    expect(p[0], closeTo(0.8, 1e-9));
-    expect(p[1], closeTo(0.4, 1e-9));
-    // One batch, both orders of both pairs.
-    expect(decision.asks, hasLength(1));
-    expect(decision.asks.single.states, hasLength(4));
-  });
-
   group('MembershipAnswer', () {
     test('the evidence is a templated sentence carrying the percentage', () {
       expect(

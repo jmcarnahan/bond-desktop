@@ -3236,6 +3236,49 @@ void main() {
           lastMessageAt: '2026-08-29T02:00:00Z');
     }
 
+    test('a decision failure after the naming call parks the sweep, writes '
+        'nothing and leaves the cluster to be asked again', () async {
+      // Readiness passes and the 27B names the cluster; the decision model
+      // then goes down on the first member confirm.
+      await seedTrio(store);
+      final llm = fakeLlm({
+        'storyline_name': [nameAnswer()],
+        'member_of': [const DecisionUnavailableException('decide went down')],
+      });
+      final service =
+          StorylineService(store, llm, judge: sweepJudge(store, llm));
+
+      await expectLater(
+        service.sweep(),
+        throwsA(isA<DecisionUnavailableException>()),
+      );
+
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(llm.callsFor('member_of'), 1);
+      // No storyline row in any status, so no member and no hash on file.
+      expect(
+        await store.loadStorylines(
+            statuses: const ['suggested', 'active', 'possible', 'dismissed']),
+        isEmpty,
+      );
+      for (final key in ['q1', 'q2', 'q3']) {
+        expect(await store.storylineIdsFor('email', key), isEmpty);
+      }
+      expect(await store.assignedOrBlockedKeys('email'), isEmpty);
+
+      // The cluster is not answered: the next pass names it again and, with
+      // the decision model back, forms it.
+      final back = fakeLlm({
+        'storyline_name': [nameAnswer()],
+        'member_of': [confirmAnswer()],
+      });
+      await StorylineService(store, back, judge: sweepJudge(store, back))
+          .sweep();
+      expect(back.callsFor('storyline_name'), 1);
+      expect(await store.loadStorylines(statuses: const ['suggested']),
+          hasLength(1));
+    });
+
     test('a charter the decision model reads as unspecific files the cluster '
         'as possible', () async {
       await seedTrio(store);

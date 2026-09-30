@@ -256,7 +256,7 @@ enforce the ones that are commands.
   actions in `storyline_edits.dart` (`StorylineEdits`), the clustering in
   `storyline_grouper.dart` (`StorylineGrouper`), the shared card statics in
   `storyline_cards.dart`, and `storyline_service.dart` keeping one-line
-  delegates so its twenty-two importers, six in `lib` and sixteen in `test`, did
+  delegates so its twenty importers, six in `lib` and fourteen in `test`, did
   not change. A new pass goes in the file whose job it is, and the service gets
   a delegate only if callers outside already reach for it.
 - A cluster the models DECLINE is a `possible` storyline WITH its members, in

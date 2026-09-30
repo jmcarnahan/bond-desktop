@@ -195,7 +195,7 @@ typedef PipelineHealth = ({
 /// as a press made it. See `schema.drift` for the columns and
 /// [MessageStore.writeDecisionLabels] for the writer.
 typedef DecisionLabel = ({
-  /// `member_of`, `same_effort` or `charter_specific`.
+  /// `member_of` or `charter_specific` (`same_effort` is reserved).
   String question,
 
   /// `yes` or `no`.

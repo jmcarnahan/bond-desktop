@@ -770,7 +770,7 @@ behind a recap and a new message never waits behind either:
 | Lane | Kinds, in drain order | Server(s) | Gate | Provider |
 |---|---|---|---|---|
 | Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | decision (`needs_you` re-decides), generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
-| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative | `storylineDrainGateProvider` | `storylineWorkerProvider` |
+| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative + decision (`member_of`, `charter_specific`; a decision failure parks the lane) | `storylineDrainGateProvider` | `storylineWorkerProvider` |
 | Draft | `draft` | generative, or cloud drafts | `draftDrainGateProvider` | `draftWorkerProvider` |
 
 The lanes were cut when the fast lane had a 4B of its own. With one generative

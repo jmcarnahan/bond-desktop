@@ -50,8 +50,9 @@ slider:
   (`app/lib/data/progress_sql.dart`) says the same in SQL for the settle
   sweep's backstop, with the read guard the coordinator applies first. The
   frozen v8 migration keeps its own text, `needsYouSqlV8Frozen`, byte for byte.
-  `_isComplete` still holds a candidate open while its `needs_you` work item is
-  `pending` or `processing`.
+  `_isComplete` counts a candidate's needs-you as judged as soon as its
+  `needs_you_p` is not NULL, whatever work item is pending (or, with the p
+  still NULL, once its `needs_you` item is `done` or `error`).
 - **Bucket filing and attention scoring** (see
   [08-attention.md](08-attention.md)): a thread holding an unanswered message
   over the slider is never filed to Later by the automatic rule, and the newest
@@ -356,7 +357,7 @@ loaded — opened from a side thread, from a room — and a provider that depend
 on the thread provider would show an empty panel exactly then.
 
 **The number the slider is set in.** The headline is `Needs you: 72%`, the
-message's `needs_you_p` as a rounded whole percentage, which is the unit the
+message's `needs_you_p` as a floored whole percentage, which is the unit the
 Settings slider states its threshold in, so the two read as one number. Under
 it come the reason sentence and one line against the reader's own slider: "In
 Needs You: at or above your 35% line." or "Not in Needs You: below your 35%

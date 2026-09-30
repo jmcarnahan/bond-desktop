@@ -34,7 +34,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
-| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep's grouping, the naming pass, the charter check, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`same_effort`, `charter_specific`, `member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector; `SWEEP_CHARTER` picks the charter check. See "The golden set". |
+| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep's grouping, the naming pass, the charter check, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`charter_specific`, `member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector; `SWEEP_CHARTER` picks the charter check. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
@@ -1581,7 +1581,7 @@ positives against five, declined clusters 75% pure against 54% — and the
 model-read grouping was built on top of it in the same phase. The grouping then
 grouped nothing: six calls over three passes, zero groups, four empty answers
 and six neighbourhoods judged unfit, on the box 27B and on the local 27B alike.
-It ships dark behind `GroupingMode.cosine`, with its rows above, because a pass
+It ships dark behind `GroupingMode.cosine` (since deleted), with its rows above, because a pass
 that abstains costs seven seconds and teaches the next round where to look.
 
 The namer is the lever the rows exposed by accident. The same two formed
@@ -1643,7 +1643,7 @@ naming no group, six pieces judged unfit, 6.9 s of wall and no wire failures.
 Two box passes and one local 27B pass were identical. `storyline.id` reads
 50 of 98 by abstention with no correct positive. Its ship rule wanted
 positives at or above 10, forbidden hits at or below 3, an id above 50 and a
-formed purity at or above 60%, so `GroupingMode.cosine` stays the default and
+formed purity at or above 60%, so `GroupingMode.cosine` (since deleted) stays the default and
 the task ships dark behind it. The reason is the base rate again: at the
 neighbourhood cosine the pool's linked pairs run about three cross-effort to
 one same-effort, and a model shown six such threads declines to call any two
@@ -2722,8 +2722,9 @@ behind `StorylineTuning.groupingMode = cosine`, beside `model`. Both dark modes
 now say the same thing: the base rate, 1,346 cross-effort pairs against 85, is
 not a prompt problem and no amount of context shown at once dissolves it.
 (History: both dark modes, `GroupThreadsTask` and the `storyline_group` stage
-were deleted in the decision-questions round, when the sweep moved to the
-decision model's `same_effort`.)
+were deleted in the decision-questions round, and the `same_effort` pair
+grouping that briefly replaced them was removed on 2026-09-30; the cosine
+grouping is the one left.)
 
 **The 1024-token budgets.** `NameStorylineTask.maxTokens` and
 `GroupThreadsTask.maxTokens` became task constants then, rather than the generic 512.

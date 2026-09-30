@@ -816,9 +816,10 @@ CREATE TABLE message_decisions (
 -- word; it is what a later calibration of `member_of` and `charter_specific`
 -- reads.
 --
--- `question` is `member_of`, `same_effort` or `charter_specific`; `answer` is
--- `yes` or `no`. The thread is (`source`, `conversation_key`), and a pair's
--- second thread (`other_*`) is NULL for the other two questions. `title` and
+-- `question` is `member_of` or `charter_specific`; `answer` is `yes` or `no`.
+-- The thread is (`source`, `conversation_key`). `same_effort` and a pair's
+-- second thread (`other_*`) are RESERVED: nothing writes them yet, so
+-- `other_*` is NULL on every row. `title` and
 -- `charter` are the storyline's words at the moment of the press, because the
 -- storyline itself can be renamed, re-chartered or cleared afterwards and the
 -- label must still say what it answered. `origin` names the press: keep,

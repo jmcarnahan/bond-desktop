@@ -15,7 +15,7 @@ server you have not named:
 
 | Role | Hand-started server | Port | Model | Size |
 |---|---|---|---|---|
-| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected; and judges storylines: which threads are one effort, which storyline a thread belongs to, whether a charter is specific) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
+| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected; and judges storylines: which storyline a thread belongs to, whether a charter is specific) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
 | **Generative** (message summaries, storyline titles, charters and recaps, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
 | **Embeddings** (clustering, search) | `make embed` | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
 
@@ -196,8 +196,8 @@ What happens:
   refusing unless both match the export's `SHA256SUMS`. The app reads the
   heads file from there whichever server runs the model, so it is needed on
   the hand-started path too. It fails with a pointer when the export is not on
-  this machine (see step 0). Until the v3 install updates it, it copies
-  the v2 model, which this build refuses (step 0).
+  this machine (see step 0). It copies the v3 model; an older v2 install
+  is refused and parks triage until it is run again (step 0).
 - `make decide` serves the installed model on :8083.
 - `make status` should show `model`, `embed`, `fast` and `decide` as `[up]`
   with a pid. `fast` is up because `make setup` starts it for the benches; the

@@ -746,6 +746,43 @@ void main() {
       expect(server.embeds, isEmpty);
     });
 
+    test('a sibling run whose name only STARTS with the heads model is '
+        'refused', () async {
+      // Another fine-tune of the same line: a substring or prefix match would
+      // pass it, and its vectors are not the ones these heads were fitted on.
+      server.listing = listingOf('/Users/sam/models/local_bond-decide/'
+          'bond-decide-synthetic-cont2-f16.gguf');
+      await expectLater(
+        paired().decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>()),
+      );
+      expect(server.embeds, isEmpty);
+    });
+
+    test('the pairing rule: the model, at most one quant, then .gguf', () {
+      const model = 'bond-decide-mbl-v3';
+      for (final file in [
+        'bond-decide-mbl-v3',
+        'bond-decide-mbl-v3.gguf',
+        'bond-decide-mbl-v3-f16.gguf',
+        'bond-decide-mbl-v3-BF16.gguf',
+        'bond-decide-mbl-v3-q8_0.gguf',
+      ]) {
+        expect(DecisionClient.servesHeadsModel(file, model), isTrue,
+            reason: file);
+      }
+      for (final file in [
+        'bond-decide-mbl-v3-cont2-f16.gguf',
+        'bond-decide-mbl-v3-cont2',
+        'bond-decide-mbl-v31-f16.gguf',
+        'x-bond-decide-mbl-v3-f16.gguf',
+        'bond-decide-mbl-v2-f16.gguf',
+      ]) {
+        expect(DecisionClient.servesHeadsModel(file, model), isFalse,
+            reason: file);
+      }
+    });
+
     test("a served bond-decide- alias is paired like a file: the heads' "
         'model passes', () async {
       server.listing = listingOf('bond-decide-synthetic');

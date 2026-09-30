@@ -171,32 +171,8 @@ class StorylineJudge {
     return p.single;
   }
 
-  /// p(same_effort = yes) for each pair of threads, in order: the mean over
-  /// both orders ([DecisionClient.askPairs]). Each thread's text is built
-  /// once however many pairs it is in.
-  Future<List<double>> sameEffort(
-    List<
-            (
-              ({String source, String key}),
-              ({String source, String key}),
-            )>
-        pairs,
-  ) async {
-    if (pairs.isEmpty) return const [];
-    final texts = <String, String>{};
-    Future<String> textOf(({String source, String key}) thread) async {
-      final id = '${thread.source}\n${thread.key}';
-      return texts[id] ??= (await threadText(thread.source, thread.key)).text;
-    }
-
-    final rendered = <(String, String)>[];
-    for (final (a, b) in pairs) {
-      rendered.add((await textOf(a), await textOf(b)));
-    }
-    return sameEffortOfTexts(rendered);
-  }
-
-  /// [sameEffort] over thread texts the caller already built — the golden
+  /// p(same_effort = yes) for each pair of thread texts, in order: the mean
+  /// over both orders ([DecisionClient.askPairs]). Asked only by the golden
   /// pairs bench (`make golden-pairs`), which builds each pool thread's text
   /// once for every pair it is in.
   Future<List<double>> sameEffortOfTexts(List<(String, String)> pairs) =>

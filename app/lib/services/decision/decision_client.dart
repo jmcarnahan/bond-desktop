@@ -755,8 +755,10 @@ class DecisionClient {
   }
 
   /// The heads↔GGUF pairing, once per target and heads model: the name of
-  /// the file the server serves must CONTAIN the heads' `model`
-  /// (`bond-decide-mbl-v3` in `bond-decide-mbl-v3-f16.gguf`). The identity
+  /// the file the server serves must BE the heads' `model` plus at most a
+  /// quant and the extension ([servesHeadsModel]: `bond-decide-mbl-v3` in
+  /// `bond-decide-mbl-v3-f16.gguf`, never in `bond-decide-mbl-v3-cont2-f16.gguf`,
+  /// another fine-tune whose name merely starts the same). The identity
   /// probe cannot see this — every ModernBERT tokenizes alike — and heads
   /// applied to another fine-tune's vectors answer confidently and wrongly,
   /// so a mismatch is a [DecisionModelMismatchException] and parks.
@@ -795,11 +797,23 @@ class DecisionClient {
     }
     if (file != null &&
         heads.model.isNotEmpty &&
-        !file.contains(heads.model)) {
+        !servesHeadsModel(file, heads.model)) {
       throw DecisionModelMismatchException(
           modelMismatchText(file, heads.model));
     }
     _paired[key] = heads.model;
+  }
+
+  /// Whether [file], a served GGUF's last path segment or a `bond-decide-…`
+  /// served name, is [model]'s: [model] itself, then at most one quant
+  /// segment (`-f16`, `-bf16`, `-f32`, `-q8_0`, …) and `.gguf`. A plain
+  /// substring or prefix match would let a sibling run such as
+  /// `<model>-cont2-f16.gguf` pass heads it was not trained with.
+  static bool servesHeadsModel(String file, String model) {
+    if (!file.startsWith(model)) return false;
+    return RegExp(r'^(-(f16|bf16|f32|q\d[a-z0-9_]*))?(\.gguf)?$',
+            caseSensitive: false)
+        .hasMatch(file.substring(model.length));
   }
 
   /// The GGUF file name [listing] names for [destination], or null. The entry
