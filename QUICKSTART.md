@@ -365,7 +365,8 @@ app's working directory.
   year-long recording are out of reach.
 - Teams is pulled with **Refresh**, as always. Chats never show unread in the
   sandbox: the recording has no chat read state, so every chat message is
-  stored as read.
+  stored as read. Mail read state is the recording's, so most mail arrives
+  read.
 - The first sync of each launch waits while the sample is parsed: about 20
   seconds for a year-long mailbox.
 - **Sign out** wipes the sandbox database and lands back in an empty inbox,

@@ -303,6 +303,7 @@ void main() {
     // A failure's reason is an error body; it never reaches the chip.
     expect(r('failed', 'HTTP 403 {"error": "denied"}'), 'unavailable');
     expect(r('skipped', 'not_fetched'), 'unavailable');
+    expect(r('not_fetched', null), 'unavailable');
     expect(r('skipped', 'reference'), 'reference');
     expect(r('skipped', 'something new'), 'unsupported');
   });
@@ -385,6 +386,26 @@ void main() {
     // The record after the bad line still re-reads from its own line.
     final detail = await backend.getMessageDetail('g-b');
     expect((detail['uniqueBody'] as Map)['content'], '<p>Body of b.</p>');
+  });
+
+  test('detail falls back to the raw header pairs when the map is absent', () {
+    final detail = SampleData.detailFromRecord({
+      'sample_id': 's-x',
+      'unique_body_html': '<p>x</p>',
+      'headers_raw': [
+        ['X-First', 'one'],
+        ['X-First', 'two'],
+        ['X-Null', null],
+        ['bad'],
+      ],
+      'has_attachments': false,
+      'attachments': const [],
+    }, const {});
+    expect(detail['internetMessageHeaders'], [
+      {'name': 'X-First', 'value': 'one'},
+      {'name': 'X-First', 'value': 'two'},
+    ]);
+    expect(detail['attachments'], isEmpty);
   });
 
   test('the sandbox has its own database file name', () {

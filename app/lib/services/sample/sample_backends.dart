@@ -410,9 +410,10 @@ class SampleAttachmentBackend implements AttachmentBackend {
 
   /// The recorded status and reason, as one word of the closed vocabulary.
   static String skipReasonFor(String? status, String? reason) {
-    // A failed fetch's reason is an error body, never a word; the status is
-    // the whole of what can be said.
-    if (status == 'failed') return 'unavailable';
+    // A failed fetch's reason is an error body, never a word, and a fetch the
+    // recording never made has none; the status is the whole of what can be
+    // said for both.
+    if (status == 'failed' || status == 'not_fetched') return 'unavailable';
     final r = reason ?? '';
     if (r == 'too_large') return 'too_large';
     if (r == 'no_extractor') return 'no_extractor';

@@ -62,8 +62,10 @@ class SampleOwner {
         final raw = await File(p.join(key, 'manifest.json')).readAsString();
         return _ownerFrom(jsonDecode(raw));
       } catch (_) {
-        // Not memoised as a failure: a directory fixed while the app runs is
-        // picked up by the next call rather than by a rebuild.
+        // Not memoised as a failure, so a later `load` asks again. The
+        // provider that called this holds the failed future for the run, so
+        // in the app a fixed directory still takes a relaunch; the retry is
+        // for the next caller, not a live repair.
         _loads.remove(key);
         rethrow;
       }
@@ -74,7 +76,6 @@ class SampleOwner {
 /// One mail message as the delta page needs it, and where its full record is.
 class SampleMailEntry {
   final String graphId;
-  final String sampleId;
   final String? internetMessageId;
   final String? conversationId;
   final String receivedAt;
@@ -100,7 +101,6 @@ class SampleMailEntry {
 
   const SampleMailEntry({
     required this.graphId,
-    required this.sampleId,
     required this.internetMessageId,
     required this.conversationId,
     required this.receivedAt,
@@ -188,19 +188,12 @@ class SamplePerson {
   final String? name;
   final String? address;
   final String? teamsUserId;
-  final bool internal;
 
-  const SamplePerson({
-    this.name,
-    this.address,
-    this.teamsUserId,
-    this.internal = false,
-  });
+  const SamplePerson({this.name, this.address, this.teamsUserId});
 }
 
 /// The parsed sample.
 class SampleData {
-  final String dir;
   final SampleOwner owner;
 
   /// The index, per served folder (`inbox`, `sentitems`), oldest first.
@@ -221,7 +214,6 @@ class SampleData {
   final Map<String, SampleMailEntry> _mailByGraphId;
 
   SampleData._({
-    required this.dir,
     required this.owner,
     required this.mailByFolder,
     required this.chats,
@@ -258,14 +250,13 @@ class SampleData {
         }
         return data;
       } catch (_) {
+        // Same rule as [SampleOwner.load]: the failure is not memoised here,
+        // though the provider holding this future keeps it for the run.
         _loads.remove(key);
         rethrow;
       }
     });
   }
-
-  /// The mail entry for [graphId], or null.
-  SampleMailEntry? mailEntry(String graphId) => _mailByGraphId[graphId];
 
   /// The recently read shards, most recent last. A thread's messages tend to
   /// share a shard, and triage walks newest first, so a small cache turns most
@@ -399,13 +390,12 @@ class SampleData {
             (full?['content_url'] as String?),
       };
 
-  static SampleData _build(String dir, Map<String, Object?> raw) {
+  static SampleData _build(Map<String, Object?> raw) {
     final mailByFolder = <String, List<SampleMailEntry>>{};
     for (final m in raw['mail'] as List) {
       final e = m as Map;
       final entry = SampleMailEntry(
         graphId: e['g'] as String,
-        sampleId: e['s'] as String,
         internetMessageId: e['imid'] as String?,
         conversationId: e['cid'] as String?,
         receivedAt: e['at'] as String,
@@ -458,7 +448,6 @@ class SampleData {
     }
 
     return SampleData._(
-      dir: dir,
       owner: _ownerFrom(raw['manifest']),
       mailByFolder: mailByFolder,
       chats: chats,
@@ -468,7 +457,6 @@ class SampleData {
             name: (x as Map)['name'] as String?,
             address: x['address'] as String?,
             teamsUserId: x['teamsUserId'] as String?,
-            internal: x['internal'] == true,
           ),
       ],
       attachments: {
@@ -525,7 +513,7 @@ const Set<String> _teamsKinds = {'file', 'card', 'message_reference', 'image'};
 // string and nothing else.
 Future<(SampleData, int)> _parseInIsolate(String dir) => Isolate.run(() {
       final raw = _parseSample(dir);
-      return (SampleData._build(dir, raw), raw['skipped'] as int);
+      return (SampleData._build(raw), raw['skipped'] as int);
     });
 
 Future<List<String>> _readShardInIsolate(String path) =>
@@ -802,7 +790,6 @@ List<Map<String, Object?>> _people(String path, _Skips skips) {
       'name': _str(r['name']),
       'address': _str(r['address']),
       'teamsUserId': _str(r['teams_user_id']),
-      'internal': r['internal'] == true,
     });
   }
   return out;
