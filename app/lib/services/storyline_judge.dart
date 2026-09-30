@@ -83,8 +83,8 @@ abstract final class StorylinePolicy {
   /// p 0.01, 13% at 70% recall at p 0.002), so a neutral 0.5 links nothing.
   /// Golden sweep rows on 2026-09-30 (id score / correct positives /
   /// forbidden hits / formed): 0.0018 → 57/98, 13, 5, 6; 0.004 → 55/98, 13,
-  /// 4, 8; 0.008 → 51/98, 18, 7, 10; 0.0135 → 50/98, 0, 0 on one
-  /// budget-bound pass. 0.008 is the row with the most correct positives.
+  /// 4, 8 and 0.008 → 51/98, 18, 7, 10 (both at a 2,000-pair budget, not the
+  /// shipped 400); 0.0135 → 50/98, 0, 0 on one budget-bound pass. 0.008 is the row with the most correct positives.
   static const double linkTau = 0.008;
 
   /// A named cluster's title and charter pass the charter check at

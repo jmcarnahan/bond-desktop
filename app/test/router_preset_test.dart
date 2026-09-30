@@ -170,7 +170,7 @@ spec-type = draft-mtp
       expect(start, greaterThan(0));
       expect(lines.sublist(start, start + 9), [
         '[bond-decide]',
-        'model = /tmp/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf',
+        'model = /tmp/models/local_bond-decide/bond-decide-mbl-v3-f16.gguf',
         'embedding = true',
         'pooling = mean',
         'c = 2048',
@@ -183,7 +183,7 @@ spec-type = draft-mtp
       expect(preset.draftPath(preset.models[1]), isNull);
       expect(
         preset.missingFiles().where((f) => f.contains('local_bond-decide')),
-        ['/tmp/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf'],
+        ['/tmp/models/local_bond-decide/bond-decide-mbl-v3-f16.gguf'],
       );
     });
 

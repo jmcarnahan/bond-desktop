@@ -225,7 +225,7 @@ enforce the ones that are commands.
   parks the lane; no language model is asked about membership (the
   `storyline_membership` stage is gone). Both stayed in the service through
   the split, because one rule at five sites is not a seam. `acceptActive`
-  0.50, `acceptSuggested` 0.74 and `charterSpecificTau` 0.50 are FITTED on
+  0.50, `acceptSuggested` 0.74 and `charterSpecificTau` 0.50 (validated at 0.50 only) are FITTED on
   the v3 student (2026-09-30) and move only with a `make golden-storyline`,
   `golden-declared` or `golden-sweep` row on each side; a test's `member_of`
   yes must clear 0.74 for a suggested storyline. Storyline tests script `member_of`

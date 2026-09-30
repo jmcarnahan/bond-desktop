@@ -3928,7 +3928,7 @@ void main() {
           {'p': 0.91},
           {'p': 0.82},
           {'p': 0.76},
-          {'p': 0.74},
+          {'p': 0.78},
         ],
       });
 
@@ -3942,7 +3942,7 @@ void main() {
       final joinedMember = members.firstWhere((m) => m.conversationKey == 'd1');
       expect(joinedMember.addedBy, 'auto');
       // The model's own sentence about the finished thread, not the cluster's.
-      expect(joinedMember.evidence, evidenceAt(0.74));
+      expect(joinedMember.evidence, evidenceAt(0.78));
       // Three members plus the one candidate the probe put in front of it.
       expect(llm.callsFor('member_of'), 4);
       // d1 is the newest thread in the group, so the activity stamp follows

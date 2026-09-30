@@ -2032,8 +2032,8 @@ the cosine grouping with the model charter check (`CharterCheck.model`: 59 and 6
 lint's 54) and `acceptSuggested` 0.74. `acceptActive` stays 0.50 (storyline 89/98; declared 84 at
 both 0.50 and 0.60, four more correct positives at 0.50 for no more forbidden). `linkTau` sits at
 0.008 as a provisional bench value (the most correct positives), and the golden sweep now keeps
-passing while a quiet pass defers clusters, up to eight passes, so the budget-bound row above would
-converge.
+passing while a quiet pass defers clusters, up to eight passes; the budget-bound 0.0135 row was taken before that change and has not been
+re-measured.
 
 Run files, all under `tmp/bench/`: `golden-decision-golden-decision-20260930-145158.json`
 (with `golden-run-decision-argmax-…` and `golden-run-decision-policy-20260930-145158.json`);

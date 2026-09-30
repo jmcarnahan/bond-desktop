@@ -1274,7 +1274,7 @@ a pass that only re-read its cache and proposed nothing stays quiet.
 `pairRetrievalFloor`, are read only by this bench arm and are not shipped.
 `linkTau` sits at 0.008 because a neutral 0.5 links nothing on the v3 scale;
 the rows taken on 2026-09-30 (id score / correct positives / forbidden hits)
-were 0.0018 → 57/98, 13, 5; 0.004 → 55/98, 13, 4; 0.008 → 51/98, 18, 7 (the
+were 0.0018 → 57/98, 13, 5; 0.004 → 55/98, 13, 4; 0.008 → 51/98, 18, 7 (the 0.004 and 0.008 rows at a 2,000-pair budget, not the shipped 400; the
 most correct positives); 0.0135 → 50/98, 0, 0 on one budget-bound pass. They
 move with a `make golden-sweep SWEEP_GROUPING=decision` row on each side, the
 `StorylineTuning` rule; the bench's commands are in `docs/model-bakeoff.md`.
@@ -1285,7 +1285,7 @@ After the namer writes, and before a single confirm is spent,
 `StorylineTuning.charterCheck` decides whether the title and charter name one
 specific effort. `CharterCheck.model` ships: the decision model's
 `charter_specific` over `renderStorylineCharter(title, charter)`, refused under
-`StorylinePolicy.charterSpecificTau` (0.50, FITTED) and noted `charter_model`.
+`StorylinePolicy.charterSpecificTau` (0.50, validated at that one point: model 59–60 vs lint 54) and noted `charter_model`.
 A title the namer could not write (`NameStorylineTask.fallbackTitle`) or an
 empty charter names no effort by construction, and the model arm refuses it
 without asking, under the same `charter_model`.
@@ -1876,7 +1876,9 @@ golden set against the ModernBERT v3 student (2026-09-30):
 - `acceptActive` 0.50: the confirm bench scores 89/98 (40 of 48 must-links,
   6 of 88 forbidden accepts, 7%) against the box 27B's 84/98 and 8%, and the
   declared bench 84/98 at both 0.50 and 0.60, with 39 correct positives at
-  0.50 against 35 and 4 forbidden at both.
+  0.50 against 35 and 4 forbidden at both. On that bench the box 27B's confirm
+  scored 86/98 with 1 forbidden, so recruit on member_of is two items and three
+  forbidden hits behind it; the threshold does not move those hits.
 - `acceptSuggested` 0.74: the golden sweep on the cosine grouping scored 59/98
   (14 correct positives, 3 forbidden) at 0.70 and 60/98 (16, 3) at 0.74.
 - `charterSpecificTau` 0.50: *The charter check*, above.
