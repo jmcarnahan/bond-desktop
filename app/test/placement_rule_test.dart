@@ -158,6 +158,24 @@ void main() {
           .parallel, 2);
       expect(onBox.specForStage('draft_reply')!.parallel, 1);
     });
+
+    test('the text width: this Mac at least three, a stored address three', () {
+      // Message text (extraction and the attachment digests) reads its own
+      // width. This Mac gives it the server's slots, never fewer than three;
+      // a stored address keeps the three it always had. (Eight is for an
+      // address that FOLLOWS the build, which `flutter test` cannot
+      // construct: `boxUrlDefault` is empty here.)
+      expect(const AppPrefs(proseParallel: 1)
+          .specForStage('message_text')!.textParallel, 3);
+      expect(const AppPrefs(proseParallel: 6)
+          .specForStage('message_text')!.textParallel, 6);
+      expect(const AppPrefs(proseParallel: 6, managedServer: false)
+          .specForStage('message_text')!.textParallel, 6);
+      expect(const AppPrefs(proseParallel: 2, managedServer: false)
+          .specForStage('message_text')!.textParallel, 3);
+      expect(onBox.specForStage('message_text')!.textParallel, 3);
+      expect(onBox.specForStage('attachment_digest')!.textParallel, 3);
+    });
   });
 
   group('the decision stage is the decision model', () {

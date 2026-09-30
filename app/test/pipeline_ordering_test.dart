@@ -381,10 +381,11 @@ void main() {
     expect((await store.getConversationRow('email', 'conv-1'))!['cta_text'],
         'Confirm the launch date');
 
-    // The fan-out extraction owns: the thread is embedded and queued for
-    // filing, which is what must not happen for gated mail.
-    expect(await embeddingOf('conv-1'), isNotNull);
+    // The fan-out extraction owns: the thread is queued for filing, which is
+    // what must not happen for gated mail. Extraction no longer embeds it —
+    // the assign pass on the storyline lane does, and this pipeline has none.
     expect(await storylineRows(), 1);
+    expect(await embeddingOf('conv-1'), isNull);
   });
 
   test('a priority ref is refused before triage and taken after it', () async {

@@ -2053,6 +2053,33 @@ and then a grouping built on it scoring above 60/98 on `make golden-sweep` with 
 forbidden hits, taken on the same day and tree as a cosine row. A move of any `StorylinePolicy`
 number takes a row on each side.
 
+**Pre-extraction cards (2026-09-30, after the owner's sample-sandbox replay).** The question: can
+the clustering vector be built from the rows alone, so the storyline lane runs beside the
+message-text stage instead of behind it? Two cards were added as bench arms (`SWEEP_CARD=text`,
+the judge's own thread text from `storylineThreadTextFor`; `SWEEP_CARD=excerpt`, the subject and
+the newest kept message's first 300 code points, no topics), the rule written first: the one with
+the lower cross-effort rate at its recall-70 rung ships if its sweep row stays within four of
+60/98 with at most three forbidden hits. Same servers as the v3 rows (embed :8081, `make decide`
+:8083 serving v3, the box 27B as namer), same `GOLDEN_RUN`, the golden mailbox seeded with bodies.
+
+| card | `golden-vector` recall-70 cosine / cross | cross-5 cosine | `golden-sweep` storyline.id | correct positives | forbidden | items filed into a non-effort |
+|---|---|---|---|---|---|---|
+| `topics` (ships; the 27B's topics and summary) | 0.43 / 15% | 0.48 | **60/98** (reproduced on the same tree, 2 passes) | 16 | 3 | 0 |
+| `excerpt` | 0.42 / 20% | 0.49 | 47/98 (summary namer) · 45/98 (excerpt namer) | 5 · 6 | 2 · 0 | 24 · 32 |
+| `text` | 0.43 / 36% | 0.52 | 45/98 (summary namer) | 7 | 1 | 23 |
+| `topics`, namer reading the message excerpt instead of the summary | — | — | 55/98 | 19 | 2 | 18 |
+
+The vector read on `golden-vector` says the excerpt is nearly the topics card; the sweep says
+otherwise: every card built before extraction proposes junk — two dozen threads filed into
+storylines that are no effort at all, where the topics card files none. The 27B's abstraction is
+what makes a cluster clean, and the namer, too, reads a summary better than raw text (55 against
+60, with 18 junk filings). So nothing here ships: the card stays `topics`, the assign stays behind
+the message-text stage, the two cards stay as measured arms. What DID come out of the round is
+the width (message text and attachment digests eight wide on the build's box, `textParallel`) and
+the storyline lane being woken per queued assign rather than at the end of the whole fast drain.
+Run files `golden-vector-embed-local-{text,excerpt}-prefix-86-20260930-2241*.json` and
+`golden-sweep-decision-20260930-224520/224804/224912/225110/225221/225409/225511.json`.
+
 ### Recommendations (decision-model round, 2026-09-28)
 
 What the round ships, and the rows that justify each. All numbers are keep-only

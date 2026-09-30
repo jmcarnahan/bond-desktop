@@ -21,9 +21,13 @@ import 'attachment_policy.dart';
 /// — and the words are what search, retrieval and the panel's Text segment
 /// want whether or not any model has read them.
 ///
-/// Concurrency stays at the inherited 1. It is one generative call per
-/// document, and the queue behind it is already draining as fast as the server
-/// answers.
+/// Concurrency is the generative target's text width, the one extraction
+/// reads (`LlmTargetSpec.textParallel`). Its items are independent — one
+/// document in, that document's own digest row out — so running several at
+/// once reorders nothing, and the build's box would otherwise read a backlog
+/// of documents one call at a time. Attachments still run after the message
+/// text: the fast lane reaches this kind only when no kind above it has
+/// anything claimable.
 class AttachmentDigestHandler extends WorkHandler {
   /// A digest is a RECORD of one document, never a rewrite of it: a summary, a
   /// few facts and any asks, which is a fraction of this even for a long file.
@@ -34,15 +38,24 @@ class AttachmentDigestHandler extends WorkHandler {
   final EmbeddingsClient _embeddings;
   final ActivityLog _log;
 
+  /// The target's text width, read on every claim. Null answers 1, the width
+  /// this kind had before, so every test and bench that builds the handler
+  /// bare measures what it did.
+  final int Function()? _textParallel;
+
   AttachmentDigestHandler(
     this._store,
     this._client,
     this._embeddings, {
     ActivityLog? activityLog,
+    this._textParallel,
   }) : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'attachment_digest';
+
+  @override
+  int get concurrency => _textParallel?.call() ?? 1;
 
   @override
   Future<void> run(Map<String, Object?> item) async {

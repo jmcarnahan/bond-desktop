@@ -1,16 +1,22 @@
 /// The card and vector statics both halves of the storyline work read.
 ///
 /// They came out of `storyline_service.dart` when that file was split into the
-/// service, `StorylineEdits` and `StorylineGrouper`: every one of them is a
-/// pure function of its arguments, and the passes that build a card or order
-/// a cluster have to do it the same way. Public rather than private to one
-/// half for exactly that reason, and re-exported by `storyline_service.dart`
-/// so nothing that imported the service for them has to change.
+/// service, `StorylineEdits` and `StorylineGrouper`: every one of them but
+/// [clusteringCardFor] is a pure function of its arguments, and the passes
+/// that build a card or order a cluster have to do it the same way.
+/// [clusteringCardFor] reads the store (the thread text, the card data), and
+/// lives here because it is the one entry to a thread's card. Public rather
+/// than private to one half for exactly that reason, and re-exported by
+/// `storyline_service.dart` so nothing that imported the service for them
+/// has to change.
 library;
 
+import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'clustering_card.dart';
 import 'conversation_state.dart';
+import 'decision/storyline_state.dart' show renderStorylineCharter;
+import 'decision/storyline_thread_input.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/storyline_tasks.dart';
 
@@ -110,7 +116,10 @@ String threadKey(String source, String conversationKey) =>
 /// Naming sees every member thread at once under one 4000-character cap, and
 /// a topic list is the segment that says least per character it costs — the
 /// sentence describing what was last said is what a title comes out of. The
-/// membership prompt, which reads ONE card, can afford both.
+/// membership prompt, which reads ONE card, can afford both. The newest
+/// message's own words ([newestMessageExcerpt]) in place of the summary were
+/// measured on 2026-09-30 at 55/98 against the summary's 60/98 on `make
+/// golden-sweep` and do not ship.
 String namingCardForConversationRow(
   Map<String, Object?> row,
   Map<String, Object?>? cardData,
@@ -126,3 +135,54 @@ String namingCardForConversationRow(
     summary: cardData?['summary'] as String?,
   );
 }
+
+/// The card a THREAD is embedded from under [variant]: the one entry every
+/// place that embeds a thread goes through (the assign pass and the golden
+/// seed), so a bench and the app cannot build two cards.
+///
+/// [ClusteringCardVariant.text] is the thread text the decision model's
+/// storyline questions read ([storylineThreadTextFor]), rendered over the
+/// store, and [row] is not read. Every other variant is the pure
+/// [clusteringCardForConversationRow] over [row] — the conversation row the
+/// caller already holds — and the store's [MessageStore.clusteringCardData]
+/// for that variant.
+Future<String> clusteringCardFor(
+  MessageStore store,
+  String source,
+  String conversationKey,
+  Map<String, Object?> row, {
+  ClusteringCardVariant variant = shippedClusteringCard,
+}) async {
+  if (variant == ClusteringCardVariant.text) {
+    return (await storylineThreadTextFor(store, source, conversationKey)).text;
+  }
+  return clusteringCardForConversationRow(
+    row,
+    await store.clusteringCardData(source, conversationKey, variant: variant),
+    variant: variant,
+  );
+}
+
+/// The text a storyline's CHARTER is embedded from, for a storyline with no
+/// member vector to average.
+///
+/// Under [ClusteringCardVariant.text] it is the decision model's own charter
+/// rendering ([renderStorylineCharter]), so a charter and a thread text are
+/// the same renderer family in one space. Every other card is
+/// [buildClusteringCard] with the title in the subject slot and the charter
+/// in the summary slot — `title |  |  | charter` for the shipped shapes, the
+/// shape the threads it is compared with were built in.
+String charterCardFor(
+  String title,
+  String charter, {
+  ClusteringCardVariant variant = shippedClusteringCard,
+}) =>
+    variant == ClusteringCardVariant.text
+        ? renderStorylineCharter(title: title, charter: charter)
+        : buildClusteringCard(
+            subject: title,
+            participants: const [],
+            topics: const [],
+            summary: charter,
+            variant: variant,
+          );

@@ -16,8 +16,14 @@ of a new message's triage, and all six together because the order below is an
 argument rather than a habit: refresh before recruit, audit between them,
 recap after the sweep. See [10-model-routing.md](10-model-routing.md).
 
-1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
-   conversation's card changes, RETRIEVE its candidates by cosine and ask the
+1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — queued by
+   EXTRACTION when a thread's clustering card changed (`_queueAssign` compares
+   the card's hash and tag with `conversation_ai`, see
+   [04-extraction.md](04-extraction.md)), and the extract handler pumps this
+   lane as it queues each one (`onStorylineQueued`), so an assign runs as its
+   thread's card lands rather than after the whole extraction backlog. It
+   first reads the thread's vector through `_keptVectorFor` (below), then
+   RETRIEVES its candidates by cosine and asks the
    decision model's `member_of` about each (*Membership on the decision
    model*, below). Retrieval takes the top `StorylinePolicy.assignTopK` (3)
    live storylines by centroid cosine and the top 3 by nearest-member cosine,
@@ -46,15 +52,49 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    gets that far: the pass returns `AssignOutcome.gated` before it looks for a
    vector, so no embedding is written and no model is asked, and the handler
    closes the storyline stage `skipped` rather than `done` — nothing was
-   judged, so there is no verdict to claim. `_reembed` carries the same guard
-   as a belt, since it is the only place outside extraction that writes a
-   conversation embedding. Six endings in all, and
-   the handler treats them in three ways: `assigned` closes the stage `done`
-   with the storyline it landed in; `rejected`, `blocked` and `catchAll` close
-   it `done` with status `skipped` and the outcome on the row, because each is
-   a verdict that deliberately filed nothing; `noCandidate` closes it `done`
-   and notes nothing, so a quiet pass writes no row; and only `gated` closes
-   the stage `skipped` without a verdict.
+   judged, so there is no verdict to claim. Seven endings in all, and the
+   handler treats them in three ways: `assigned` closes the stage `done` with
+   the storyline it landed in; `rejected`, `blocked` and `catchAll` close it
+   `done` with status `skipped` and the outcome on the row, because each is a
+   verdict that deliberately filed nothing; `noCandidate` closes it `done` and
+   notes nothing, so a quiet pass writes no row; and `gated` and `unembedded`
+   (the embedding server refused a vector for the card) close the stage
+   `skipped` without a verdict.
+
+   **The pass re-checks its card when it ends.** Another message of the
+   thread can finish extraction while the pass runs, and its `requeueWork` is
+   swallowed by this `processing` row. So the card is rebuilt and hashed when
+   a lap ends, and a lap whose card moved runs again, at most
+   `StorylineTuning.assignRecheckLaps` (2) more; the last lap's outcome is
+   returned, except that an earlier filing is not unsaid by a later lap that
+   filed nothing (`recruit`'s re-read of the charter, for the same kind of
+   race).
+
+   **`_keptVectorFor`** is the one writer of a conversation vector, inside
+   the assign pass, and `vectorFor(source, key, row)` (`@visibleForTesting`)
+   is its test face with the kept-inbound gate in front: the card through `clusteringCardFor` (the one entry in
+   `storyline_cards.dart`: `text` → the thread text the decision model reads,
+   every other variant → `clusteringCardForConversationRow` over
+   `clusteringCardData`), hashed with `cardHash`; a stored vector under
+   `EmbeddingsClient.modelTag` with the same `embedded_hash` is returned with
+   no embedding call; anything else is embedded and written back (vector,
+   hash, tag). An unavailable server or no client THROWS
+   `EmbedUnavailableException` and parks the lane with the attempt unspent,
+   so the thread comes back the moment the server does; a REJECTED answer
+   returns null (`noCandidate`, nothing stored), because the same server will
+   answer the same nonsense next time. The service's card is
+   `shippedClusteringCard` unless a bench passes `clusteringCard:`
+   (`SWEEP_CARD`), so a seeding under another variant reads as current rather
+   than being re-embedded under the shipped card. The two cards buildable
+   before extraction, `text` (the thread text the judge reads) and `excerpt`
+   (the newest message's own words), are measured arms and do not ship: on
+   2026-09-30 `make golden-vector` read `text` at recall-70 0.43 with 36%
+   cross (cross-5 0.52) and `excerpt` at 0.42 with 20% (0.49) against
+   `topics`' 0.43 with 15% (0.48), and `make golden-sweep` read 45/98 (text,
+   23 items filed into non-efforts) and 47/98 (excerpt, 5 correct positives,
+   24 into non-efforts) against `topics`' 60/98 (16 correct, 3 forbidden, 0
+   into non-efforts). The 27B's topics and summary are what make a cluster
+   clean, which is why the assign waits for extraction.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — groups *unassigned*
    threads by the cosine clustering over their clustering vectors (gate:
    three threads that cluster, or a recurring series of three, form a
@@ -389,7 +429,7 @@ message — and converges as silence.
 
 | Trigger | When |
 |---|---|
-| `ExtractHandler` tail | a message's facts land in a thread that is already in ≥1 storyline (`storylineIdsFor`), one requeue per storyline. Deliberately outside `_refreshCard` and not behind a successful embed — the recap has nothing to do with the vector, and a down embedding server must not cost it a message |
+| `ExtractHandler` tail | a message's facts land in a thread that is already in ≥1 storyline (`storylineIdsFor`), one requeue per storyline. Not behind any embedding — the recap has nothing to do with the vector, and a down embedding server must not cost it a message |
 | `addThread` | always — a hand-filed thread brings its own messages, and the user is looking. The membership clear is what lets that recap past the gate when those messages are old ones |
 | `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story. This is `removeThread`'s route in |
 | `_propose` | always, on the kept path — the recap handler drains after the sweep's, so a storyline born in this pass shows its recap in the same drain rather than a sync later |
@@ -678,12 +718,15 @@ that would describe it.
 
 **How the recruit ranks with no members.** It embeds the storyline's own words
 as a **clustering card**, through the same one recipe every thread vector goes
-through: `buildClusteringCard` at the shipped variant, with the title in the
-subject slot, the charter in the summary slot and both middle segments empty,
-under the clustering prefix. That is the card shape a thread whose extraction
-found no topics already has, so the charter's vector lands in the same space
-and at the same shape as every thread vector it is about to be measured
-against, and it moves with them when the shipped variant moves. A bare sentence
+through: `charterCardFor(title, charter)` at the shipped variant, under the
+clustering prefix. Under a four-segment card it is `buildClusteringCard` with
+the title in the subject slot, the charter in the summary slot and both middle
+segments empty — the card shape a thread with no topics already has; under
+the `text` card it is the decision model's own charter rendering
+(`renderStorylineCharter`), the thread text's family. Either way the
+charter's vector lands in the same space and at the same shape as every
+thread vector it is about to be measured against, and it moves with them when
+the shipped variant moves. A bare sentence
 would sit in that space at a different shape and every
 cosine would be reading the formatting as much as the meaning. That lap takes
 16 candidates rather than 8, and the hunt laps while it is still filing, at
@@ -851,8 +894,9 @@ at all where an automatic row has none. "Grouped automatically." was filler.
 task kind `storyline_sweep`, entity id `sweep`, under the historical label
 `email`, which is a row name and not a scope. The fast lane calls the same
 method after any drain whose `AiWorker.lastDrainCount` is above zero, before it
-wakes the storyline lane. A person's own actions queue their own passes and
-never this one. `requeueWork` revives a `done` or an `error` row only, so a
+wakes the storyline lane. (The extract handler's per-assign pump,
+`onStorylineQueued`, wakes the lane without requeueing the sweep.) A person's
+own actions queue their own passes and never this one. `requeueWork` revives a `done` or an `error` row only, so a
 sweep that is `processing` is at the server and is never doubled, and nothing
 here passes `refreshCreatedAt`: the pipeline noticing that the mailbox moved is
 not a person asking for something now.
@@ -867,30 +911,34 @@ never run on it, so the deadlock the expiry exists to break would survive the
 thing meant to break it.
 
 **The settle gate.** The sweep that formed every storyline on screen in
-September 2026 ran over a quarter-synced mailbox. A first sync queues thousands
-of extractions and the pool grows for as long as they drain, so clustering
+September 2026 ran over a quarter-synced mailbox. A first sync keeps thousands
+of messages and the pool grows for as long as they arrive, so clustering
 early proposes the storylines the first tenth of a mailbox happens to hold,
 then files them as possible when the model says no, and can never ask again
 once the rest arrives, because the hash on that row recognises the cluster. So
-the
-pass reads the backlog once and stands down while any of three floors is
-exceeded.
+the pass reads the backlog once and stands down while any of three floors is
+exceeded. The pool fills as extraction queues assigns and the assign pass
+embeds their threads. There is no floor on `embed_message` (it was 25 until
+2026-09-30): search vectors never fed the pool.
 
 | stage | floor | what is counted |
 |---|---|---|
-| extract | 10 | `work_items` rows of kind `extract`, pending plus processing |
-| embed | 25 | `work_items` rows of kind `embed_message`, pending plus processing |
-| triage | 20 | `messages` whose `triage_status` is pending or processing |
+| extract | 10 (`sweepExtractFloor`) | `work_items` rows of kind `extract`, pending plus processing |
+| triage | 20 (`sweepTriageFloor`) | `messages` whose `triage_status` is pending or processing |
+| assign | 10 (`sweepAssignFloor`) | `work_items` rows of kind `storyline` (the assign alone, not the other storyline passes), pending plus processing |
 
-All three come from ONE `MessageStore.pipelinePulse` call, which already
-returns per-kind queue counts and the triage count across three tables, so the
-gate costs no query the pass could not already make. It is read over
+All three come from ONE `MessageStore.pipelinePulse` call, which already returns
+per-kind queue counts and the triage count, so the gate costs no query the
+pass could not already make; the assign count is `PipelinePulse.kindCount
+('storyline')`, the kind before it folds onto the `storyline` stage (which
+also counts the sweep row that is asking). It is read over
 `AiWorker.sources` rather than the service's own connector list, because what
 is being measured is the backlog the worker drains, and the worker's list is
 the one that grows the day a connector is added. The comparison is strictly
 greater than the floor, so a backlog sitting exactly at one of these numbers is
 settled enough. A pass that stands down notes `deferred: unsettled` with the
-three counts and returns, and its work row closes `done` like any other sweep.
+`extract`, `triage` and `assign` counts and returns, and its work row closes
+`done` like any other sweep.
 The triage count filters on no direction and needs none:
 `triageStatusOnInsert(outbound: true)` writes every outbound row `skipped` at
 the moment it is inserted, so a row still at `pending` is an inbound one
@@ -1375,9 +1423,9 @@ pool whose same-effort pairs already share subject words is one a much cheaper
 rule could have grouped. A last line says how far apart the two populations
 lie at the shipped threshold, what a 70%-recall threshold would cost in
 cross-effort pairs and what a 5%-cross threshold would cost in same-effort
-ones. `SWEEP_CARD` picks which of the five clustering cards is
-embedded, `SWEEP_EMBED_PREFIX` what the model is told the card is for, and
-`EMBED_URL` which server answers, so a candidate model is one `make embed` on
+ones. `SWEEP_CARD` picks which of the clustering cards is embedded (`text`
+and `excerpt` are the two built before extraction), `SWEEP_EMBED_PREFIX` what
+the model is told the card is for, and `EMBED_URL` which server answers, so a candidate model is one `make embed` on
 another port away. Counts, ratios and enums only, like every other bench here.
 The fragment fold IS applied, exactly as the sweep applies it, and its count
 prints beside the pool size. The series pre-pass is not: it is private to the
@@ -1815,6 +1863,12 @@ judged against it, and must name the specific thing, because a charter that
 would admit every thread from one person or one team is not a charter. The doc
 comment above the prompts explains the charter-vs-summary distinction — the
 charter is the membership contract, the summary is display text.
+
+Each card is `namingCardForConversationRow`: `subject | participants |  |
+summary`, the newest kept inbound message's triage summary. The newest
+message's own words in its place (`newestMessageExcerpt`) were measured on
+2026-09-30: `make golden-sweep` read 55/98 (18 items filed into non-efforts)
+against the summary's 60/98, so the namer stays on the summary.
 
 The cards it reads are the cluster's `namingCards`, twelve, nearest the
 centroid, most central first, each clamped whole to `cardCap`, 600 characters,

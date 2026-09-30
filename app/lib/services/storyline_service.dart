@@ -301,18 +301,27 @@ class StorylineTuning {
   ///
   /// All three floors are read from ONE [MessageStore.pipelinePulse] call:
   /// that query already returns pending and processing per `task_kind` AND the
-  /// pending triage count, over three tables, so the whole gate costs the pass
-  /// no query it was not already able to make.
+  /// pending triage count, so the whole gate costs the pass no query it was
+  /// not already able to make. There is no floor on `embed_message`: search
+  /// vectors never fed the storyline pool.
   ///
   /// The comparison is strictly greater than the floor, so a backlog sitting
   /// exactly AT one of these numbers is settled enough and the pass proceeds.
   static const int sweepExtractFloor = 10;
 
-  /// Pending plus processing `embed_message` rows above which the sweep
-  /// defers. Higher than [sweepExtractFloor] because an embed is seconds of a
-  /// small server rather than a model call, so a backlog of them drains while
-  /// the sweep would still be reading its pool.
-  static const int sweepEmbedFloor = 25;
+  /// Pending plus processing `storyline` (assign) rows above which the sweep
+  /// defers: the threads extraction has queued and the assign pass has not
+  /// yet embedded and judged are pool still arriving. The KIND alone
+  /// ([PipelinePulse.kindCount]), not the `storyline` stage, which also
+  /// counts the sweep row that is asking and every recap.
+  static const int sweepAssignFloor = 10;
+
+  /// How many more laps an assign pass may run when the thread's card moved
+  /// while it ran (another message's extraction landed, and its requeue was
+  /// swallowed by this `processing` row). Two, because a lap takes a second
+  /// or two and a thread rarely lands more than a couple of messages in that
+  /// window; past it, the thread's next card change queues the pass again.
+  static const int assignRecheckLaps = 2;
 
   /// Messages whose `triage_status` is pending or processing, above which the
   /// sweep defers.
@@ -401,6 +410,12 @@ enum AssignOutcome {
   /// card that would say anything true about a thread the gates threw out,
   /// and a vector built from one is what grows a junk storyline.
   gated,
+
+  /// The embedding server REFUSED a vector for the thread's card (it answered
+  /// something that is not one). No card was embedded and no model was asked,
+  /// so, like [gated], it is a pass that declined to look rather than a
+  /// verdict.
+  unembedded,
 }
 
 /// What one storyline's membership looks like to the two comparison passes:
@@ -567,6 +582,14 @@ class StorylineService {
   /// (`make golden-sweep SWEEP_CHARTER=lint`).
   final CharterCheck _charterCheck;
 
+  /// The card [vectorFor] builds and [_charterCentroid] follows:
+  /// [shippedClusteringCard] unless a bench passed otherwise (`make
+  /// golden-sweep SWEEP_CARD=…`). A parameter because [vectorFor] rebuilds
+  /// and hash-checks the card: a bench whose seeding embedded another variant
+  /// would otherwise see every hash differ and re-embed the whole pool under
+  /// the shipped card, mixing two geometries in one row.
+  final ClusteringCardVariant _clusteringCard;
+
   /// The user actions, which touch no model — see [StorylineEdits]. Every one
   /// of this service's twelve is a delegate onto it.
   late final StorylineEdits _edits;
@@ -589,6 +612,7 @@ class StorylineService {
     @visibleForTesting
     this._possibleHoldsRoom = StorylineTuning.possibleHoldsRoom,
     @visibleForTesting this._charterCheck = StorylineTuning.charterCheck,
+    @visibleForTesting this._clusteringCard = shippedClusteringCard,
   })  : _client = client,
         _refreshClient = refreshClient ?? client,
         _recapClient = recapClient ?? client,
@@ -633,7 +657,53 @@ class StorylineService {
   /// day of mail that was never considered for a storyline. Only the
   /// `storyline` kind parks; extraction, the sweep and drafting are on other
   /// servers and carry on.
+  ///
+  /// The card can move while the pass runs: another message of the thread
+  /// finishes extraction, and its `requeueWork` is swallowed by this
+  /// `processing` row. So when a lap ends, the card is rebuilt and hashed
+  /// again, and a lap whose card moved is run again — at most
+  /// [StorylineTuning.assignRecheckLaps] more — so the stored vector is never
+  /// left describing a card that no longer exists (`recruit`'s re-read of
+  /// the charter, for the same kind of race). Once a lap has FILED the
+  /// thread, a moved card only refreshes the vector, and no candidate is
+  /// judged again in THIS pass. That refresh can still throw
+  /// [EmbedUnavailableException] and park the row — deliberately, since the
+  /// park is what heals a missing vector — and the park's retry is a plain
+  /// requeue whose semantics are unchanged: a full lap, which skips the
+  /// storyline the thread is in and could file it into another, as any later
+  /// requeue of the thread could.
   Future<AssignOutcome> assignConversation(
+    String source,
+    String conversationKey,
+  ) async {
+    var lap = await _assignLap(source, conversationKey);
+    for (var extra = 0;
+        extra < StorylineTuning.assignRecheckLaps && lap.hash != null;
+        extra++) {
+      final row = await _store.getConversationRow(source, conversationKey);
+      if (row == null) break;
+      final card = await clusteringCardFor(
+        _store,
+        source,
+        conversationKey,
+        row,
+        variant: _clusteringCard,
+      );
+      if (cardHash(card) == lap.hash) break;
+      if (lap.outcome == AssignOutcome.assigned) {
+        // Filed already: the vector is brought level with the card and no
+        // candidate is judged again.
+        await _keptVectorFor(source, conversationKey, row);
+        break;
+      }
+      lap = await _assignLap(source, conversationKey);
+    }
+    return lap.outcome;
+  }
+
+  /// One lap of [assignConversation], with the hash of the card its vector
+  /// was taken over (null when no vector was read: no row, gated, refused).
+  Future<({AssignOutcome outcome, String? hash})> _assignLap(
     String source,
     String conversationKey,
   ) async {
@@ -641,23 +711,28 @@ class StorylineService {
     // Read BEFORE the vector: a conversation that no longer exists has no
     // embedding coming, so parking on it would hold the queue open forever
     // for a thread nothing can ever file.
-    if (row == null) return AssignOutcome.noCandidate;
+    if (row == null) return (outcome: AssignOutcome.noCandidate, hash: null);
 
-    // Before the vector, so [_reembed] is never reached for such a thread and
-    // no embedding call is spent on one. A conversation whose every inbound
-    // message was gated has nothing kept to file: the card would be built out
-    // of mail the pipeline already decided was never said, and one sender's
-    // gated threads look alike enough to cluster into a proposal about them.
+    // Before the vector, so no embedding call is spent on such a thread. A
+    // conversation whose every inbound message was gated has nothing kept to
+    // file: the card would be built out of mail the pipeline already decided
+    // was never said, and one sender's gated threads look alike enough to
+    // cluster into a proposal about them. [vectorFor] checks the same thing
+    // for its callers; this pass reads it itself to name its own ending.
     if (await _store.keptInboundCount(source, conversationKey) == 0) {
-      return AssignOutcome.gated;
+      return (outcome: AssignOutcome.gated, hash: null);
     }
 
-    // Written here when the store has none — see [_reembed]. Null comes back
-    // only from an embedding the server refused to give; the other two endings
+    // Built, hashed and embedded here when the stored vector is missing or
+    // stale — see [_keptVectorFor]. Null comes back only from an embedding
+    // the server refused to give, which is its own ending; the other failures
     // throw and park.
-    final vector = await _vectorFor(source, conversationKey) ??
-        await _reembed(source, conversationKey, row);
-    if (vector == null) return AssignOutcome.noCandidate;
+    final kept = await _keptVectorFor(source, conversationKey, row);
+    final vector = kept.vector;
+    if (vector == null) {
+      return (outcome: AssignOutcome.unembedded, hash: null);
+    }
+    final hash = kept.hash;
 
     final conversation = Conversation.fromRow(row);
 
@@ -790,8 +865,11 @@ class StorylineService {
       if (asked.every((s) => s.id != storyline.id)) asked.add(storyline);
     }
     if (asked.isEmpty) {
-      if (skippedCatchAll) return AssignOutcome.catchAll;
-      return blocked ? AssignOutcome.blocked : AssignOutcome.noCandidate;
+      if (skippedCatchAll) return (outcome: AssignOutcome.catchAll, hash: hash);
+      return (
+        outcome: blocked ? AssignOutcome.blocked : AssignOutcome.noCandidate,
+        hash: hash,
+      );
     }
 
     // Every candidate asked, and the highest p that clears its own bar wins:
@@ -814,7 +892,9 @@ class StorylineService {
         result = answer;
       }
     }
-    if (chosen == null || result == null) return AssignOutcome.rejected;
+    if (chosen == null || result == null) {
+      return (outcome: AssignOutcome.rejected, hash: hash);
+    }
     final confirmed = asked.length;
 
     await _store.addStorylineMember(
@@ -858,7 +938,7 @@ class StorylineService {
     }
 
     await _enqueueRefreshAfterAssign(chosen);
-    return AssignOutcome.assigned;
+    return (outcome: AssignOutcome.assigned, hash: hash);
   }
 
   /// Decides whether one automatically filed thread is worth re-describing a
@@ -1841,20 +1921,20 @@ class StorylineService {
   /// Null when there is no charter or no embedding client.
   ///
   /// The text is a CLUSTERING CARD, not free prose, and it is built through
-  /// [buildClusteringCard] at [shippedClusteringCard] rather than assembled
-  /// here: the card is ONE recipe, and a second assembly of it would be a
-  /// second thing to move whenever the shipped variant moves. Every thread
-  /// vector this is compared against came out of that same call, so the
-  /// charter's vector lands in the same space at the same shape. A bare
-  /// `'title. charter'` would sit in that space at a different shape and every
-  /// cosine against it would be reading the formatting as much as the meaning.
+  /// [charterCardFor] at [shippedClusteringCard] rather than assembled here:
+  /// the card is ONE recipe, and a second assembly of it would be a second
+  /// thing to move whenever the shipped variant moves. Under the four-segment
+  /// cards it is the title in the subject slot and the charter in the summary
+  /// slot, exactly the card a thread with no topics has; under the `text`
+  /// card it is the decision model's charter rendering, the thread text's
+  /// family. Either way the charter's vector lands in the same space at the
+  /// same shape as the threads it is compared with. A bare `'title. charter'`
+  /// would sit there at a different shape and every cosine against it would
+  /// be reading the formatting as much as the meaning. The prefix is passed
+  /// explicitly although it is the default, so the corpus this vector
+  /// belongs to is readable here.
   ///
-  /// Title in the subject slot, charter in the summary slot, no participants
-  /// and no topics — exactly the card a thread whose extraction found no
-  /// topics already has. The prefix is passed explicitly although it is the
-  /// default, so the corpus this vector belongs to is readable here.
-  ///
-  /// The failure reactions are [_reembed]'s, for [_reembed]'s reasons: an
+  /// The failure reactions are [vectorFor]'s, for [vectorFor]'s reasons: an
   /// UNAVAILABLE server throws, which parks the row with its attempt unspent
   /// so the hunt happens the moment `make embed` is running; a REJECTED answer
   /// returns null and takes the caller's no-centroid ending, because the
@@ -1867,13 +1947,8 @@ class StorylineService {
     final embeddings = _embeddings;
     if (embeddings == null) return null;
 
-    final text = buildClusteringCard(
-      subject: storyline.title,
-      participants: const [],
-      topics: const [],
-      summary: charter,
-      variant: shippedClusteringCard,
-    );
+    final text =
+        charterCardFor(storyline.title, charter, variant: _clusteringCard);
     final embedded = await embeddings.embedResult(
       text,
       prefix: EmbeddingsClient.clusteringPrefix,
@@ -2472,21 +2547,21 @@ class StorylineService {
       sources: AiWorker.sources,
     );
     final extract = pulse.countFor('extract');
-    final embed = pulse.countFor('embed');
     final triage = pulse.countFor('triage');
+    final assign = pulse.kindCount('storyline');
     // Strictly greater, so a backlog sitting exactly at a floor does not
     // defer: the floors name how much outstanding work is tolerable, not how
     // much is too much by one.
     if (extract <= StorylineTuning.sweepExtractFloor &&
-        embed <= StorylineTuning.sweepEmbedFloor &&
-        triage <= StorylineTuning.sweepTriageFloor) {
+        triage <= StorylineTuning.sweepTriageFloor &&
+        assign <= StorylineTuning.sweepAssignFloor) {
       return false;
     }
     _log.note({
       'deferred': 'unsettled',
       'extract': extract,
-      'embed': embed,
       'triage': triage,
+      'assign': assign,
     });
     return true;
   }
@@ -3497,54 +3572,69 @@ class StorylineService {
 
   // ── helpers ────────────────────────────────────────────────────────────
 
-  /// One conversation's stored vector, or null when it has none this model can
-  /// compare. The model tag check is not optional: vectors from two embedding
-  /// models occupy different spaces, and a cosine across them is a number with
-  /// no meaning that still sorts.
-  Future<List<double>?> _vectorFor(
-    String source,
-    String conversationKey,
-  ) async {
-    final ai = await _store.getConversationAi(source, conversationKey);
-    if (ai == null) return null;
-    if (ai['embed_model'] != EmbeddingsClient.modelTag) return null;
-    final blob = ai['embedding'];
-    if (blob is! Uint8List) return null;
-    final vector = decodeEmbedding(blob);
-    return vector.isEmpty ? null : vector;
-  }
-
-  /// Writes the embedding a thread is missing, so that a park on it can heal
-  /// itself once the server is back.
+  /// A thread's clustering vector, current for the card it has NOW: the card
+  /// is built through [clusteringCardFor] and hashed, a stored vector under
+  /// [EmbeddingsClient.modelTag] with the same `embedded_hash` is returned as
+  /// it is, and anything else is embedded and written back (vector, hash and
+  /// tag) before it is returned.
   ///
-  /// Nothing else in the app will write it. Extraction embeds a thread once,
-  /// and by the time the storyline pass parks the extract row is already
-  /// `done` — `enqueueExtractBacklog` will not re-queue it and nothing
-  /// requeues the `extract` kind — so a park on a missing vector used to park
-  /// again on every drain, forever, for a thread whose extraction call had
-  /// already been spent. No re-extraction is needed to fix that: the card the
-  /// vector comes from is rebuilt out of the conversation row and the facts
-  /// already stored, exactly as [ExtractHandler] built it at extraction time.
+  /// The assign pass writes through [_keptVectorFor], the gate-less body of
+  /// this method, and nothing else writes a thread vector; this is its test
+  /// face, gate included. Extraction decides by the same card hash whether
+  /// the assign pass is owed and queues it, but never embeds: two writers once
+  /// built their cards two ways and wrote one `embedded_hash` column for two
+  /// different texts. The tag check is not optional: vectors from two
+  /// embedding models occupy different spaces, and a cosine across them is a
+  /// number with no meaning that still sorts. The hash check is what makes a
+  /// reply or a newly kept message move the vector without re-embedding a
+  /// thread nothing happened to.
   ///
-  /// Null comes back only from a REJECTED answer — a server that answered
-  /// something that is not a vector will answer the same thing next time, so
-  /// parking on it would park forever. Unavailable throws instead: that park
-  /// is what brings this thread back the moment `make embed` is running, and
-  /// the retry it waits for is this same re-embed.
-  Future<List<double>?> _reembed(
+  /// Null for a thread with nothing kept (no vector is read or written for
+  /// one: its card would be built out of mail the pipeline decided was never
+  /// said) and for a REJECTED answer — a server that answered something that
+  /// is not a vector will answer the same thing next time, so parking on it
+  /// would park forever. Unavailable, or no embedding client at all, THROWS
+  /// [EmbedUnavailableException] instead: the park is what brings this
+  /// thread back the moment `make embed` is running, and the retry it waits
+  /// for is this same call.
+  @visibleForTesting
+  Future<List<double>?> vectorFor(
     String source,
     String conversationKey,
     Map<String, Object?> row,
   ) async {
-    // The belt to [assignConversation]'s braces, and it is here because this
-    // is the only place that WRITES an embedding outside extraction: the
-    // sweep, the recruit lap and a future caller all arrive through it. A
-    // thread with nothing kept gets no vector — `null` is this method's
-    // existing "rejected, do not park" ending, which is the right one: the
-    // answer will not change on the next drain either.
     if (await _store.keptInboundCount(source, conversationKey) == 0) {
       _log.note({'embed': 'gated'});
       return null;
+    }
+    return (await _keptVectorFor(source, conversationKey, row)).vector;
+  }
+
+  /// [vectorFor] past its gate, with the hash of the card the vector is for:
+  /// the writer inside the assign pass, which has already read the kept count
+  /// to name its own ending and compares the hash when its lap ends.
+  Future<({List<double>? vector, String hash})> _keptVectorFor(
+    String source,
+    String conversationKey,
+    Map<String, Object?> row,
+  ) async {
+    final card = await clusteringCardFor(
+      _store,
+      source,
+      conversationKey,
+      row,
+      variant: _clusteringCard,
+    );
+    final hash = cardHash(card);
+    final ai = await _store.getConversationAi(source, conversationKey);
+    if (ai != null &&
+        ai['embed_model'] == EmbeddingsClient.modelTag &&
+        ai['embedded_hash'] == hash) {
+      final blob = ai['embedding'];
+      if (blob is Uint8List) {
+        final stored = decodeEmbedding(blob);
+        if (stored.isNotEmpty) return (vector: stored, hash: hash);
+      }
     }
 
     final embeddings = _embeddings;
@@ -3557,10 +3647,6 @@ class StorylineService {
       );
     }
 
-    final card = clusteringCardForConversationRow(
-      row,
-      await _store.clusteringCardData(source, conversationKey),
-    );
     final embedded = await embeddings.embedResult(card);
     final vector = embedded.vector;
     if (vector == null) {
@@ -3570,24 +3656,22 @@ class StorylineService {
           'No embedding for this thread yet. Start the embedding server.',
         );
       }
-      // Quiet, the same deliberate drop the extraction path makes on
-      // deterministic nonsense. The thread embeds again with its next real
-      // message.
+      // Quiet and stored nothing: the thread embeds again when its card
+      // next changes.
       _log.note({'embed': 'rejected'});
-      return null;
+      return (vector: null, hash: hash);
     }
 
-    // The identical write [ExtractHandler._refreshCard] makes, hash included:
-    // a vector stored without one would be re-embedded by the next extraction
-    // whether or not the thread had changed.
+    // Hash and tag with the vector, or the next call could not tell this
+    // vector is current and would embed the thread again.
     await _store.upsertConversationAi(
       source,
       conversationKey,
       embedding: encodeEmbedding(vector),
-      embeddedHash: cardHash(card),
+      embeddedHash: hash,
       embedModel: EmbeddingsClient.modelTag,
     );
-    return vector;
+    return (vector: vector, hash: hash);
   }
 
   /// The best [take] of [candidates] against one [centroid]: scored by cosine,
@@ -3660,7 +3744,7 @@ class StorylineService {
           .add(threadKey(source, key));
 
       // Null on a member the store found no comparable vector for — the join
-      // is what enforces the embedding model, for the reason [_vectorFor]
+      // is what enforces the embedding model, for the reason [vectorFor]
       // gives. Such a member is still a member; it just cannot be averaged.
       final blob = row['embedding'];
       if (blob is Uint8List) {

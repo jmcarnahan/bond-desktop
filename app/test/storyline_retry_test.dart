@@ -5,10 +5,10 @@ import 'dart:convert';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/storyline_handler.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -23,17 +23,15 @@ import 'fixtures/test_db.dart';
 /// The gap this closes: an embedding server that is down used to mean a thread
 /// was never considered for a storyline again.
 ///
-/// The only `requeueWork('storyline', …)` in the app sits in the extraction
-/// handler, and it sat BEHIND a successful embed — so no server meant no
-/// vector, no requeue, and a thread that had already spent its extraction call
-/// silently left the clustering pipeline. Nothing failed, nothing retried,
-/// nothing said so.
+/// The storyline requeue once sat in the extraction handler BEHIND a
+/// successful embed — so no server meant no vector, no requeue, and a thread
+/// that had already spent its extraction call silently left the clustering
+/// pipeline. Nothing failed, nothing retried, nothing said so.
 ///
-/// The requeue alone only got the thread back into the QUEUE. Nothing wrote
-/// the vector it was missing — the extraction that would have is `done` and
-/// never runs again — so the pass parked on the same absent embedding every
-/// drain, forever. The assignment pass now embeds the thread itself, which is
-/// what turns that park into a retry.
+/// Extraction queues the assign now whatever any server is doing — it only
+/// decides, by the card's hash, that the pass is owed — and the assignment
+/// pass embeds the thread itself (`vectorFor`), so a park on a down server
+/// is a retry that heals once the server is back.
 
 /// A client that answers from a per-schema script, so an extraction and a
 /// membership confirmation can be scripted independently of the order the
@@ -168,6 +166,7 @@ void main() {
               judge: scriptedJudge(store, llm),
               embeddings: embeddings(state, vector: vector),
             ),
+            progress: PipelineProgress(store),
           ),
           ?draft,
         ],
@@ -183,8 +182,8 @@ void main() {
 
       // The extraction is the work and it succeeded.
       expect(await store.getExtraction('email', 'm1'), isNotNull);
-      // No vector and no hash, so the next extraction embeds again rather
-      // than reading its own stale answer.
+      // No vector and no hash, so the next pass embeds rather than reading a
+      // stale answer.
       final ai = await store.getConversationAi('email', 'conv-1');
       expect(ai?['embedding'], isNull);
       expect(ai?['embedded_hash'], isNull);
@@ -222,9 +221,8 @@ void main() {
       });
       await workerWith(EmbedServer.down, llm).pump();
 
-      // A storyline for it to join. Nothing writes conv-1's own vector: the
-      // extraction that would have is already `done` and never runs again, so
-      // the pass has to embed the thread itself or park forever.
+      // A storyline for it to join. Nothing else writes conv-1's own vector,
+      // so the pass has to embed the thread itself or park forever.
       await store.insertStoryline(
         id: 'sl-1',
         title: 'Website redesign',
@@ -251,7 +249,7 @@ void main() {
 
       await workerWith(EmbedServer.up, llm).pump();
 
-      // The requeued row is what got it here: without it there would be
+      // The parked row is what got it here: without it there would be
       // nothing left in the queue to run once the server came back.
       expect((await workRow('storyline', 'conv-1'))!['status'], 'done');
       expect(
@@ -259,14 +257,14 @@ void main() {
         containsAll(['member', 'conv-1']),
       );
 
-      // And the vector it filed on is stored, hashed over the same CLUSTERING
-      // card the extraction would have embedded — the one recipe both writers
-      // go through, so the next extraction of this thread sees its own answer
-      // rather than embedding it again. Not the enriched card: that one is a
-      // prompt recipe and keeps its people whatever the vector does.
-      final card = clusteringCardForConversationRow(
+      // And the vector it filed on is stored, hashed over the CLUSTERING card
+      // the one entry builds, so the next pass over this thread sees its own
+      // answer rather than embedding it again.
+      final card = await clusteringCardFor(
+        store,
+        'email',
+        'conv-1',
         (await store.getConversationRow('email', 'conv-1'))!,
-        await store.newestInboundCardData('email', 'conv-1'),
       );
       final ai = (await store.getConversationAi('email', 'conv-1'))!;
       expect(ai['embedding'], isNotNull);
@@ -283,7 +281,7 @@ void main() {
         embeddings: embeddings(EmbedServer.down),
       );
 
-      // The re-embed is the retry the park waits for, so a failed one has to
+      // The embed is the retry the park waits for, so a failed one has to
       // park again rather than answer — and it must leave the column empty,
       // because a half-written vector is one nothing would ever correct.
       await expectLater(
@@ -299,7 +297,7 @@ void main() {
   });
 
   group('an embedding server that answered nonsense', () {
-    test('queues nothing — the next pass would only park again', () async {
+    test('closes the assign rather than parking it', () async {
       await seedThread();
       await store.enqueueWork('extract', 'email', 'm1');
       final llm = scripted({'message_text': [extractAnswer()]});
@@ -308,8 +306,21 @@ void main() {
 
       expect(await store.getExtraction('email', 'm1'), isNotNull);
       // A server that answers nonsense answers the same nonsense next time,
-      // so a queued pass could only park forever.
-      expect(await workRow('storyline', 'conv-1'), isNull);
+      // so a parked pass would park forever.
+      expect((await workRow('storyline', 'conv-1'))?['status'], 'done');
+      expect(
+        (await store.getConversationAi('email', 'conv-1'))?['embedding'],
+        isNull,
+      );
+      // `skipped`, not `done`: no card was embedded and no model was asked,
+      // so there is no verdict for the stage to claim.
+      final progress = await db
+          .customSelect(
+            'SELECT storyline_state FROM message_progress '
+            "WHERE source = 'email' AND source_message_id = 'm1'",
+          )
+          .getSingle();
+      expect(progress.data['storyline_state'], 'skipped');
     });
 
     test('ends an assignment pass quietly rather than parking it', () async {
@@ -326,11 +337,12 @@ void main() {
         embeddings: embeddings(EmbedServer.nonsense),
       );
 
-      // The re-embed gets the same answer next time, so parking on it would
-      // park forever. The thread embeds again with its next real message.
+      // The embed gets the same answer next time, so parking on it would
+      // park forever. The thread embeds again when its card next changes.
+      // Its own ending: no card was embedded and no model was asked.
       expect(
         await service.assignConversation('email', 'conv-1'),
-        AssignOutcome.noCandidate,
+        AssignOutcome.unembedded,
       );
       expect(
         (await store.getConversationAi('email', 'conv-1'))?['embedding'],

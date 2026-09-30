@@ -482,11 +482,21 @@ class AppPrefs {
   ///
   /// Your server when the placement says so and there is an address to dial;
   /// else this Mac: the managed router with the tier's chosen model, or the
-  /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The remote
-  /// is four requests wide only when its URL FOLLOWS THE BUILD (the compiled
-  /// box is vLLM with four sequences); a stored address is one at a time,
-  /// because a one-slot llama-server queues the rest past the prose client's
-  /// ceiling. The wire is read off the host.
+  /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The wire is
+  /// read off the host.
+  ///
+  /// The widths are sized to what is known about the server. A remote whose
+  /// URL FOLLOWS THE BUILD is the compiled box (`tools/inference.sh`): drafts
+  /// four wide, message text eight. Its PROSE-ONLY profile runs vLLM at
+  /// `--max-num-seqs 16`, which leaves the rest to the storyline lane; with a
+  /// bulk slot (`--bulk-model`) the prose slot has 8 sequences and vLLM
+  /// queues the extra requests, their wait counting against the client's
+  /// 120 s timeout. The attachment digests share extraction's eight: they
+  /// drain after it on the same lane, one kind at a time.
+  /// A stored address is an unknown server — drafts one at a time, because a
+  /// one-slot llama-server queues the rest past the prose client's ceiling,
+  /// and message text three, the width it always had. This Mac's server
+  /// gives message text its [proseParallel] slots, never fewer than three.
   LlmTargetSpec get generativeSpec {
     final url = effectiveGenerativeUrl;
     if (modelPlacement == ModelPlacement.box &&
@@ -500,6 +510,7 @@ class AppPrefs {
         wire: wireForHost(url),
         hasBearer: boxBigKeyStored,
         parallel: boxBigUrl.isEmpty ? 4 : 1,
+        textParallel: boxBigUrl.isEmpty ? 8 : 3,
       );
     }
     if (managedServer) {
@@ -509,6 +520,7 @@ class AppPrefs {
         url: '$routerBase/v1/chat/completions',
         model: managedGenerativeId,
         parallel: proseParallel,
+        textParallel: proseParallel < 3 ? 3 : proseParallel,
       );
     }
     return LlmTargetSpec(
@@ -517,6 +529,7 @@ class AppPrefs {
       url: generativeUrlDefault,
       model: generativeModelDefault,
       parallel: proseParallel,
+      textParallel: proseParallel < 3 ? 3 : proseParallel,
     );
   }
 

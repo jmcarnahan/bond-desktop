@@ -15,9 +15,13 @@ import 'package:bond_inbox/services/activity_log.dart';
 // and this file pins its bytes against that same call rather than against a
 // literal that would agree only until the shipped variant moved.
 import 'package:bond_inbox/services/clustering_card.dart'
-    show buildClusteringCard, shippedClusteringCard;
+    show buildClusteringCard, ClusteringCardVariant, shippedClusteringCard;
 // `show`: the one thing this file wants from the extraction pass is the hash
 // function behind both storyline hash recipes.
+import 'package:bond_inbox/services/decision/storyline_state.dart'
+    show renderStorylineCharter;
+import 'package:bond_inbox/services/decision/storyline_thread_input.dart'
+    show storylineThreadTextFor;
 import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 // `show`: what this file wants from the storyline tasks is the recap's own
@@ -397,11 +401,15 @@ void main() {
         'triage_status': 'triaged',
       });
     }
+    // The hash of the card the app would build for this thread NOW, so the
+    // seeded vector reads as current and `vectorFor` returns it rather than
+    // embedding the thread again — the state the assign pass leaves behind.
+    final row = await into.getConversationRow(source, key);
     await into.upsertConversationAi(
       source,
       key,
       embedding: encodeEmbedding(vector),
-      embeddedHash: 'h-$key',
+      embeddedHash: cardHash(await clusteringCardFor(into, source, key, row!)),
       embedModel: embedModel,
     );
   }
@@ -7840,25 +7848,66 @@ void main() {
 
         expect(detail['deferred'], 'unsettled');
         expect(detail['extract'], 11);
-        expect(detail['embed'], 0);
         expect(detail['triage'], 0);
+        expect(detail['assign'], 0);
         expect(llm.schemas, isEmpty);
         expect(await store.loadStorylines(), isEmpty);
       });
 
-      test('embeddings still running defers the pass', () async {
+      test('assigns still queued defer the pass', () async {
         await seedTrio(store);
-        for (var i = 0; i < 26; i++) {
-          await store.enqueueWork('embed_message', 'email', 'm$i');
+        for (var i = 0; i < 11; i++) {
+          await store.enqueueWork('storyline', 'email', 'q$i');
         }
+        // No scripts at all: this fake throws on its first call, which is how
+        // "not one model was dialled" is proved rather than counted.
         final llm = fakeLlm(const {});
 
         final detail = await sweepAndRecord(llm);
 
         expect(detail['deferred'], 'unsettled');
-        expect(detail['embed'], 26);
+        expect(detail['assign'], 11);
+        expect(detail['triage'], 0);
         expect(detail['extract'], 0);
+        expect(detail.containsKey('embed'), isFalse);
         expect(llm.schemas, isEmpty);
+        expect(await store.loadStorylines(), isEmpty);
+      });
+
+      test('message embeddings do not defer the pass', () async {
+        // Search vectors never fed the storyline pool.
+        await seedTrio(store);
+        for (var i = 0; i < 26; i++) {
+          await store.enqueueWork('embed_message', 'email', 'e$i');
+        }
+        final llm = fakeLlm({
+          'storyline_name': [nameAnswer()],
+          'member_of': [confirmAnswer()],
+        });
+
+        final detail = await sweepAndRecord(llm);
+
+        expect(detail['deferred'], isNull);
+        expect(detail['proposed'], 1);
+      });
+
+      test('the other storyline passes do not count as assigns', () async {
+        // The floor reads the `storyline` KIND, not the stage the pulse
+        // folds all six passes onto: a queue of recaps is not the pool
+        // filling.
+        await seedTrio(store);
+        for (var i = 0; i < 11; i++) {
+          await store.enqueueWork('storyline_recap', 'email', 'sl-$i');
+        }
+        final llm = fakeLlm({
+          'storyline_name': [nameAnswer()],
+          'member_of': [confirmAnswer()],
+        });
+
+        final detail = await sweepAndRecord(llm);
+
+        expect(detail['deferred'], isNull);
+        expect(detail['proposed'], 1);
       });
 
       test('a triage backlog defers the pass', () async {
@@ -7874,18 +7923,19 @@ void main() {
 
         expect(detail['deferred'], 'unsettled');
         expect(detail['triage'], 21);
+        expect(detail['assign'], 0);
         expect(llm.schemas, isEmpty);
       });
 
       test('a backlog exactly at the floors is settled enough', () async {
         await seedTrio(store);
-        for (var i = 0; i < 10; i++) {
+        for (var i = 0; i < StorylineTuning.sweepExtractFloor; i++) {
           await store.enqueueWork('extract', 'email', 'm$i');
         }
-        for (var i = 0; i < 25; i++) {
-          await store.enqueueWork('embed_message', 'email', 'e$i');
+        for (var i = 0; i < StorylineTuning.sweepAssignFloor; i++) {
+          await store.enqueueWork('storyline', 'email', 'q$i');
         }
-        for (var i = 0; i < 20; i++) {
+        for (var i = 0; i < StorylineTuning.sweepTriageFloor; i++) {
           await seedMessage(store, 'unjudged$i', 'u$i');
         }
         final llm = fakeLlm({
@@ -7904,32 +7954,32 @@ void main() {
       test('an item at the server counts toward its floor', () async {
         await seedTrio(store);
         for (var i = 0; i < 11; i++) {
-          await store.enqueueWork('extract', 'email', 'm$i');
+          await store.enqueueWork('storyline', 'email', 'q$i');
         }
         // Ten pending and one claimed is eleven outstanding: an item a worker
         // is holding is work the pool is still waiting on.
         final claimed =
-            await store.claimPendingWork('extract', sources: const ['email']);
+            await store.claimPendingWork('storyline', sources: const ['email']);
         expect(claimed, isNotNull);
 
         final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['deferred'], 'unsettled');
-        expect(detail['extract'], 11);
+        expect(detail['assign'], 11);
       });
 
       test('work queued under local counts too', () async {
         await seedTrio(store);
         // The floors read `AiWorker.sources`, which is what the worker
-        // drains, and a context directory queues under `local`.
+        // drains, and `local` is one of them.
         for (var i = 0; i < 11; i++) {
-          await store.enqueueWork('extract', 'local', 'f$i');
+          await store.enqueueWork('storyline', 'local', 'f$i');
         }
 
         final detail = await sweepAndRecord(fakeLlm(const {}));
 
         expect(detail['deferred'], 'unsettled');
-        expect(detail['extract'], 11);
+        expect(detail['assign'], 11);
       });
 
       test('a deferred pass still heals a refresh and still expires',
@@ -7945,7 +7995,7 @@ void main() {
             status: 'done');
         await seedSuggestion('sl-stale', daysOld: 15);
         for (var i = 0; i < 11; i++) {
-          await store.enqueueWork('extract', 'email', 'm$i');
+          await store.enqueueWork('storyline', 'email', 'q$i');
         }
 
         final detail = await sweepAndRecord(fakeLlm(const {}));
@@ -8839,6 +8889,326 @@ void main() {
           isNot(keysAt(pool, once.representatives)),
         );
       });
+    });
+  });
+
+  // An extraction of the thread can land while its assign is in flight, and
+  // its requeue is swallowed by the `processing` row. The pass re-checks the
+  // card when a lap ends and runs again when it moved, so the stored vector
+  // never describes a card that no longer exists.
+  group('the assign re-checks its card', () {
+    Future<String> currentHash(String key) async => cardHash(
+          await clusteringCardFor(
+            store,
+            'email',
+            key,
+            (await store.getConversationRow('email', key))!,
+          ),
+        );
+
+    Future<void> summarise(String text) => db.customStatement(
+          'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+          [text, 'kept-c1'],
+        );
+
+    test('a card that moved mid-pass is embedded and judged again', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      // Stale before the pass, so the first lap embeds.
+      await summarise('Sarah asked about the homepage copy.');
+      final embeddings = FakeEmbeddings.at(0.8);
+      final llm = fakeLlm({
+        'member_of': [
+          // The first lap's judgement, during which the thread's newest
+          // message gets its text: what a concurrent extraction does.
+          (LlmCall _) async {
+            await summarise('The studio sent the homepage copy back.');
+            return confirmAnswer(belongs: false);
+          },
+          confirmAnswer(),
+        ],
+      });
+      final service = StorylineService(store, llm,
+          judge: sweepJudge(store, llm), embeddings: embeddings);
+
+      final outcome = await service.assignConversation('email', 'c1');
+
+      // Two laps, two embeds, two judgements, and the second lap's answer.
+      expect(embeddings.texts, hasLength(2));
+      expect(llm.callsFor('member_of'), 2);
+      expect(outcome, AssignOutcome.assigned);
+      expect(
+        (await store.membersOf('sl-1')).map((m) => m.conversationKey),
+        contains('c1'),
+      );
+      expect(
+        (await store.getConversationAi('email', 'c1'))!['embedded_hash'],
+        await currentHash('c1'),
+      );
+    });
+
+    test('a card that moved after a filing refreshes the vector only',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await summarise('Sarah asked about the homepage copy.');
+      final embeddings = FakeEmbeddings.at(0.8);
+      final llm = fakeLlm({
+        'member_of': [
+          // Filed on the first lap, and the card moves under it.
+          (LlmCall _) async {
+            await summarise('The studio sent the homepage copy back.');
+            return confirmAnswer();
+          },
+          confirmAnswer(),
+        ],
+      });
+
+      final outcome = await StorylineService(store, llm,
+              judge: sweepJudge(store, llm), embeddings: embeddings)
+          .assignConversation('email', 'c1');
+
+      // Two embeds, ONE judgement: the thread has its storyline, and the
+      // second embed only brings the stored vector level with the card.
+      expect(outcome, AssignOutcome.assigned);
+      expect(embeddings.texts, hasLength(2));
+      expect(llm.callsFor('member_of'), 1);
+      expect(
+        (await store.getConversationAi('email', 'c1'))!['embedded_hash'],
+        await currentHash('c1'),
+      );
+    });
+
+    test('a card that did not move runs one lap', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final embeddings = FakeEmbeddings.at(0.8);
+      final llm = fakeLlm({'member_of': [confirmAnswer(belongs: false)]});
+
+      final outcome = await StorylineService(store, llm,
+              judge: sweepJudge(store, llm), embeddings: embeddings)
+          .assignConversation('email', 'c1');
+
+      expect(outcome, AssignOutcome.rejected);
+      expect(embeddings.texts, isEmpty);
+      expect(llm.callsFor('member_of'), 1);
+    });
+
+    test('the laps are bounded', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final embeddings = FakeEmbeddings.at(0.8);
+      var n = 0;
+      // Every judgement moves the card again.
+      Future<Map<String, dynamic>> moving(LlmCall _) async {
+        await summarise('Revision ${spellDigits('${++n}')}.');
+        return confirmAnswer(belongs: false);
+      }
+
+      final llm = fakeLlm({
+        'member_of': [moving, moving, moving, moving],
+      });
+
+      await StorylineService(store, llm,
+              judge: sweepJudge(store, llm), embeddings: embeddings)
+          .assignConversation('email', 'c1');
+
+      expect(llm.callsFor('member_of'), 1 + StorylineTuning.assignRecheckLaps);
+    });
+
+    test('a refused embedding closes as unembedded', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await summarise('Sarah asked about the homepage copy.');
+      final llm = fakeLlm(const {});
+
+      expect(
+        await StorylineService(store, llm,
+                judge: sweepJudge(store, llm),
+                embeddings: FakeEmbeddings.failing(EmbedOutcome.rejected))
+            .assignConversation('email', 'c1'),
+        AssignOutcome.unembedded,
+      );
+      expect(llm.schemas, isEmpty);
+    });
+  });
+
+  group('vectorFor', () {
+    Future<Map<String, Object?>> rowOf(String key) async =>
+        (await store.getConversationRow('email', key))!;
+
+    Future<String> currentCard(String key) async =>
+        clusteringCardFor(store, 'email', key, await rowOf(key));
+
+    test('a vector stored over the same card is returned, no embed call',
+        () async {
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final embeddings = FakeEmbeddings.at(1);
+      final service = StorylineService(store, fakeLlm(const {}),
+          embeddings: embeddings);
+
+      final vector = await service.vectorFor('email', 'c1', await rowOf('c1'));
+
+      expect(vector, isNotNull);
+      expect(cosine(vector!, vectorAt(0.8)), closeTo(1, 1e-9));
+      expect(embeddings.texts, isEmpty);
+    });
+
+    test('a changed card is embedded once and written with its hash and tag',
+        () async {
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      // What a reply does to the shipped card: the newest kept inbound
+      // message's summary is the card's last segment.
+      await db.customStatement(
+        'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+        ['The venue moved the date.', 'kept-c1'],
+      );
+      final embeddings = FakeEmbeddings.at(1);
+      final service = StorylineService(store, fakeLlm(const {}),
+          embeddings: embeddings);
+
+      final vector = await service.vectorFor('email', 'c1', await rowOf('c1'));
+
+      final card = await currentCard('c1');
+      expect(embeddings.texts, [card]);
+      expect(cosine(vector!, vectorAt(1)), closeTo(1, 1e-9));
+      final ai = (await store.getConversationAi('email', 'c1'))!;
+      expect(ai['embedded_hash'], cardHash(card));
+      expect(ai['embed_model'], EmbeddingsClient.modelTag);
+      expect(
+        cosine(decodeEmbedding(ai['embedding']! as Uint8List), vectorAt(1)),
+        closeTo(1, 1e-9),
+      );
+
+      // And the second ask is free: the card has not moved since.
+      await service.vectorFor('email', 'c1', await rowOf('c1'));
+      expect(embeddings.texts, hasLength(1));
+    });
+
+    test('a thread with nothing kept is null and costs no call', () async {
+      await seed(store, 'c1', vector: vectorAt(0.8), keptInbound: false);
+      final embeddings = FakeEmbeddings.at(1);
+      final service = StorylineService(store, fakeLlm(const {}),
+          embeddings: embeddings);
+
+      expect(
+          await service.vectorFor('email', 'c1', await rowOf('c1')), isNull);
+      expect(embeddings.texts, isEmpty);
+    });
+
+    test('an unavailable server throws, which parks the assign', () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'c1-m1', triageStatus: 'triaged');
+      final service = StorylineService(store, fakeLlm(const {}),
+          embeddings: FakeEmbeddings.failing(EmbedOutcome.unavailable));
+
+      await expectLater(
+        service.vectorFor('email', 'c1', await rowOf('c1')),
+        throwsA(isA<EmbedUnavailableException>()),
+      );
+      expect(await store.getConversationAi('email', 'c1'), isNull);
+    });
+
+    test('no embedding client throws the same park', () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'c1-m1', triageStatus: 'triaged');
+      final service = StorylineService(store, fakeLlm(const {}));
+
+      await expectLater(
+        service.vectorFor('email', 'c1', await rowOf('c1')),
+        throwsA(isA<EmbedUnavailableException>()),
+      );
+    });
+
+    test('a rejected answer is null and leaves the stored row alone',
+        () async {
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await db.customStatement(
+        'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+        ['The venue moved the date.', 'kept-c1'],
+      );
+      final before = (await store.getConversationAi('email', 'c1'))!;
+      final service = StorylineService(store, fakeLlm(const {}),
+          embeddings: FakeEmbeddings.failing(EmbedOutcome.rejected));
+
+      expect(
+          await service.vectorFor('email', 'c1', await rowOf('c1')), isNull);
+
+      final after = (await store.getConversationAi('email', 'c1'))!;
+      expect(after['embedded_hash'], before['embedded_hash']);
+      expect(after['embedding'], before['embedding']);
+    });
+
+    test('the text card is the thread text the decision model reads',
+        () async {
+      await seed(store, 'c1', participants: ['Sarah']);
+      await seedMessage(store, 'c1', 'c1-m1',
+          triageStatus: 'triaged', body: 'The fence posts arrive Tuesday.');
+
+      final card = await clusteringCardFor(
+        store,
+        'email',
+        'c1',
+        await rowOf('c1'),
+        variant: ClusteringCardVariant.text,
+      );
+
+      expect(card, (await storylineThreadTextFor(store, 'email', 'c1')).text);
+      expect(card, contains('The fence posts arrive Tuesday.'));
+    });
+
+    test('the excerpt card is the row recipe over the newest message',
+        () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'c1-m1',
+          triageStatus: 'triaged', body: 'The fence posts arrive Tuesday.');
+
+      final card = await clusteringCardFor(
+        store,
+        'email',
+        'c1',
+        await rowOf('c1'),
+        variant: ClusteringCardVariant.excerpt,
+      );
+
+      expect(card, 'Subject for c one |  |  | The fence posts arrive Tuesday.');
+    });
+
+    test("a bench's card is the one built, hashed and embedded", () async {
+      // SWEEP_CARD: a seeding that embedded another variant must read as
+      // current, not be re-embedded under the shipped card.
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'c1-m1',
+          triageStatus: 'triaged', body: 'The fence posts arrive Tuesday.');
+      final embeddings = FakeEmbeddings.at(1);
+      final service = StorylineService(store, fakeLlm(const {}),
+          embeddings: embeddings,
+          clusteringCard: ClusteringCardVariant.excerpt);
+
+      await service.vectorFor('email', 'c1', await rowOf('c1'));
+      await service.vectorFor('email', 'c1', await rowOf('c1'));
+
+      expect(embeddings.texts,
+          ['Subject for c one |  |  | The fence posts arrive Tuesday.']);
+    });
+
+    test('the charter card follows the thread card', () {
+      expect(
+        charterCardFor('Fence repair', 'The new garden fence.',
+            variant: ClusteringCardVariant.text),
+        renderStorylineCharter(
+            title: 'Fence repair', charter: 'The new garden fence.'),
+      );
+      expect(
+        charterCardFor('Fence repair', 'The new garden fence.',
+            variant: ClusteringCardVariant.topics),
+        'Fence repair |  |  | The new garden fence.',
+      );
+      expect(
+        charterCardFor('Fence repair', 'The new garden fence.',
+            variant: ClusteringCardVariant.excerpt),
+        'Fence repair |  |  | The new garden fence.',
+      );
     });
   });
 }

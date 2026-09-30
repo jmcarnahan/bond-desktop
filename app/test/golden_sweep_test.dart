@@ -1077,6 +1077,13 @@ void main() {
       expect(ClusteringCardVariant.thread.wireName, 'thread');
     });
 
+    test('SWEEP_CARD=text and =excerpt name the two pre-extraction cards', () {
+      expect(parseSweepCard('text'), ClusteringCardVariant.text);
+      expect(ClusteringCardVariant.text.wireName, 'text');
+      expect(parseSweepCard('excerpt'), ClusteringCardVariant.excerpt);
+      expect(ClusteringCardVariant.excerpt.wireName, 'excerpt');
+    });
+
     test('SWEEP_POSSIBLE_ROOM is 0 or 1 or fails loudly', () {
       expect(parseSweepPossibleRoom('1'), isTrue);
       expect(parseSweepPossibleRoom(' 0 '), isFalse);

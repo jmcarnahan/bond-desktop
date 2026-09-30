@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart' show AccountInfo;
 import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
+import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
@@ -72,6 +73,20 @@ Map<String, dynamic> recapAnswer() => {
       'decisions': <String>['The launch moved a week'],
     };
 
+/// A storyline lane that counts its pumps and drains nothing, so the fast
+/// lane's per-assign wake can be told from its end-of-drain wake.
+class _CountingLane extends AiWorker {
+  int pumps = 0;
+
+  _CountingLane(super.store) : super(handlers: const []);
+
+  @override
+  Future<void> pump({List<({String source, String id})> first = const []}) {
+    pumps++;
+    return Future.value();
+  }
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -123,9 +138,10 @@ void main() {
       'participants_json': '[{"name":"Sarah Chen"}]',
     });
     if (vector == null) return;
-    // The message the vector implies. An embedding is written by extraction,
-    // which does not run until triage has spoken, so a conversation with a
-    // vector and nothing kept behind it is a shape the app cannot produce —
+    // The message the vector implies. An embedding is written by the assign
+    // pass, which extraction queues only for a kept message, so a
+    // conversation with a vector and nothing kept behind it is a shape the
+    // app cannot produce —
     // and one the assign pass now closes as `AssignOutcome.gated` before it
     // asks any client anything, which is not what these tests are about.
     await store.upsertMessage({
@@ -140,11 +156,15 @@ void main() {
       'body_text': 'body of kept-$key',
       'triage_status': 'triaged',
     });
+    // Hashed over the card the assign pass would build now, so the vector
+    // reads as current and no embedding client is asked for it.
+    final row = await store.getConversationRow('email', key);
+    final card = await clusteringCardFor(store, 'email', key, row!);
     await store.upsertConversationAi(
       'email',
       key,
       embedding: encodeEmbedding(vector),
-      embeddedHash: 'h-$key',
+      embeddedHash: cardHash(card),
       embedModel: EmbeddingsClient.modelTag,
     );
   }
@@ -578,6 +598,76 @@ void main() {
       await pumpEventQueue();
 
       expect(await store.workCounts('storyline_sweep'), {'pending': 1});
+    });
+
+    test('the fast lane wires the text width and the per-assign wake',
+        () async {
+      // The real `aiWorkerProvider`, so deleting either closure from the
+      // provider fails here rather than only in the handler tests, which pass
+      // the closures by hand. The storyline lane counts its pumps; the draft
+      // lane is idle; the message-text client holds each call a moment so
+      // the calls in flight can be counted.
+      final storyline = _CountingLane(store);
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(storyline.dispose);
+      addTearDown(idleDraft.dispose);
+      final text = ScriptedLlm()
+        ..scriptFor('message_text', [
+          (LlmCall _) async {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            return {
+              'summary': 'Sarah is asking whether the launch date holds.',
+              'action_items': <String>[],
+              'deadline': '',
+              'topics': ['launch date'],
+              'project': 'Website redesign',
+            };
+          },
+        ]);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          storylineWorkerProvider.overrideWithValue(storyline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+          stageLlmClientProvider('message_text').overrideWithValue(text),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+      container.read(processingProvider.notifier).set(true);
+      // This Mac's text width follows its slots past three.
+      await container.read(appPrefsProvider.notifier).setProseParallel(6);
+
+      for (var i = 0; i < 6; i++) {
+        final key = 'conv-${spellDigits('$i')}';
+        await store.upsertConversation({
+          'conversation_key': key,
+          'subject': 'Launch date',
+          'state': 'waiting',
+          'last_message_at': '2026-08-28T10:00:00Z',
+        });
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'm$i',
+          'conversation_key': key,
+          'direction': 'inbound',
+          'subject': 'Launch date',
+          'from_name': 'Sarah',
+          'from_address': 'sarah@example.com',
+          'received_at': '2026-08-28T10:00:00Z',
+          'body_text': 'Can we still ship on Thursday?',
+          'triage_status': 'triaged',
+        });
+        await store.enqueueWork('extract', 'email', 'm$i');
+      }
+
+      await container.read(aiWorkerProvider).pump();
+      await pumpEventQueue();
+
+      expect(text.maxInFlight, 6);
+      expect(await store.workCounts('storyline'), {'pending': 6});
+      // One pump per queued assign, plus the end-of-drain wake.
+      expect(storyline.pumps, greaterThan(1));
     });
 
     test('the fast lane leaves the sweep alone after a drain that did nothing',

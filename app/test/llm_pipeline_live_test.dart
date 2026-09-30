@@ -80,9 +80,9 @@ import 'fixtures/test_db.dart';
 /// Three honest limits, stated here because they bound every number below:
 ///
 /// 1. The seed writes messages and NO conversation rows (`seedCorpus`, the
-///    drain bench's shape). `ExtractHandler._refreshCard` and `_fileBucket`
-///    both return early without one, so the message text leg measures the model
-///    call rather than the card, the bucket filing or the thread embedding.
+///    drain bench's shape). `_fileBucket` returns early without one (and
+///    extraction builds no thread card any more), so the message text leg
+///    measures the model call rather than the bucket filing.
 /// 2. `_embedMessage` still dials the embeddings client once per message. It
 ///    is pointed at a never-dialled port, so each is a refused connection —
 ///    milliseconds, but they are in the wall clock.

@@ -1186,14 +1186,14 @@ void main() {
               '(EMBED_URL ${EmbeddingsClient.defaultBaseUrl}, make embed)');
         }
         if (report.embedFailures > 0) {
-          // The row would MIX card variants. A thread the seeding failed to
-          // embed is embedded later by `_reembed`, which builds its card under
-          // the app's own flag rather than under SWEEP_CARD — so one thread of
-          // the pool would sit in the other variant's geometry and the A/B
-          // would be comparing two mailboxes.
+          // The row would be uneven. A thread the seeding failed to embed is
+          // embedded later by `vectorFor` inside the assign pass, from an
+          // embedding server that already failed it once — so the pool the
+          // sweep reads would be missing threads the other variant's row had,
+          // and the A/B would be comparing two mailboxes.
           fail('${report.embedFailures} threads did not embed — fix the '
-              'embedding server and rerun rather than scoring a pool that '
-              'mixes two SWEEP_CARD variants');
+              'embedding server and rerun rather than scoring an uneven '
+              'pool');
         }
 
         if (stage == SweepStage.vector) {
@@ -1253,6 +1253,10 @@ void main() {
               charterCheck: charterCheck,
               // SWEEP_POSSIBLE_ROOM, defaulting to what the app ships.
               possibleHoldsRoom: possibleHoldsRoom,
+              // SWEEP_CARD: the card `vectorFor` rebuilds and hash-checks, so
+              // the assign pass reads the seeding's vectors instead of
+              // re-embedding them under the shipped card.
+              clusteringCard: variant,
               clusterObserver: !observe
                   ? null
                   : (threads, outcome) => judged.add((
@@ -1388,8 +1392,8 @@ void main() {
         final shortlist = [
           for (final thread in report.threads)
             // `embedded` is the belt to the guard above's braces: a thread
-            // with no vector would be embedded by `_reembed` inside the assign
-            // pass, under the app's flag rather than under SWEEP_CARD.
+            // with no vector would be embedded by `vectorFor` inside the
+            // assign pass, after the sweep had already read the pool.
             if (thread.keptInbound &&
                 thread.embedded &&
                 !filed.containsKey(

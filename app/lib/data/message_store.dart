@@ -2499,9 +2499,11 @@ RETURNING conversation_key
   /// re-files a row by that watermark, and a summary written without it would
   /// never become searchable. The settle machine's freshness check (the
   /// attention row newer than the message, `NotificationCoordinator
-  /// ._isComplete`) is met the way it was when triage stamped the row: the
-  /// text handler refreshes the thread's card AFTER this write, and a changed
-  /// card re-stamps `conversation_ai`.
+  /// ._isComplete`) is met when the assign pass the text handler queues on a
+  /// changed card writes the thread's vector (and so re-stamps
+  /// `conversation_ai`), and otherwise by the attention recompute
+  /// after the drains (`ConversationsNotifier._afterPump`) and on every list
+  /// load.
   Future<void> writeMessageText(
     String source,
     String sourceMessageId, {
@@ -7568,7 +7570,11 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   }
 
   /// The pieces of the embedding card that live on the message side: the
-  /// newest inbound message's triage summary and its stored extraction.
+  /// newest inbound message's triage summary, its stored extraction, and its
+  /// own `body_text` and `body_preview` (what the bench-only excerpt card
+  /// reads, `newestMessageExcerpt`), and its `source_message_id` and
+  /// `triage_status`, so the extraction's assign hold can ask whether the
+  /// newest message's text is still coming.
   /// One query, LEFT JOIN, so a thread whose extraction has not run yet
   /// still answers with its summary. Ties break on `source_message_id
   /// DESC`, the same way [newestInboundMessage] breaks them.
@@ -7586,7 +7592,8 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   ) async {
     final result = await db
         .customSelect(
-          'SELECT m.summary, ai.extraction_json '
+          'SELECT m.summary, ai.extraction_json, m.body_text, m.body_preview, '
+          'm.source_message_id, m.triage_status '
           'FROM messages m '
           'LEFT JOIN message_ai ai '
           '  ON ai.source = m.source '
@@ -7606,9 +7613,11 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   /// [threadCardData] for [ClusteringCardVariant.thread], and
   /// [newestInboundCardData] for every other card.
   ///
-  /// The ONE routing point, so the extraction's card refresh, the sweep's
-  /// re-embed and the golden seeding cannot pick different data for the same
-  /// card. Defaults to [shippedClusteringCard], which is what the app's own
+  /// The ONE routing point, so the assign pass, the extraction's hash check
+  /// and the golden seeding cannot pick different data for the same card.
+  /// The [ClusteringCardVariant.text] card never asks it: that card is the
+  /// thread text, which `clusteringCardFor` renders over the store itself.
+  /// Defaults to [shippedClusteringCard], which is what the app's own
   /// callers pass by passing nothing.
   Future<Map<String, Object?>?> clusteringCardData(
     String source,
@@ -7634,7 +7643,8 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   ) async {
     final result = await db
         .customSelect(
-          'SELECT m.summary, ai.extraction_json '
+          'SELECT m.summary, ai.extraction_json, m.body_text, m.body_preview, '
+          'm.source_message_id, m.triage_status '
           'FROM messages m '
           'LEFT JOIN message_ai ai '
           '  ON ai.source = m.source '
@@ -7657,6 +7667,10 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
     return {
       'summary': newest['summary'],
       'extraction_json': newest['extraction_json'],
+      'body_text': newest['body_text'],
+      'body_preview': newest['body_preview'],
+      'source_message_id': newest['source_message_id'],
+      'triage_status': newest['triage_status'],
       'thread_extractions': [
         for (final row in result) row.data['extraction_json'],
       ],
@@ -9933,12 +9947,14 @@ LIMIT ?
           variables: _args(sources),
         )
         .get();
+    final byKind = <String, int>{};
     for (final row in work) {
-      fold(
-        PipelinePulse.kindStages[row.data['task_kind'] as String? ?? ''],
-        row.data['status'] as String?,
-        (row.data['n'] as num?)?.toInt() ?? 0,
-      );
+      final kind = row.data['task_kind'] as String? ?? '';
+      final n = (row.data['n'] as num?)?.toInt() ?? 0;
+      fold(PipelinePulse.kindStages[kind], row.data['status'] as String?, n);
+      if (PipelinePulse.kindStages.containsKey(kind) && n > 0) {
+        byKind[kind] = (byKind[kind] ?? 0) + n;
+      }
     }
 
     final triage = await db
@@ -9992,6 +10008,7 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
       recentSettled: at('settled'),
       recentDropped: at('dropped'),
       recentNeedsYou: at('needs_you'),
+      outstandingByKind: byKind,
     );
   }
 

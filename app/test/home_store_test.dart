@@ -2052,6 +2052,14 @@ void main() {
       expect(pulse.running, {'draft': 1, 'triage': 1});
       expect(pulse.countFor('extract'), 2);
       expect(pulse.countFor('embed'), 0);
+      // Per kind before the fold, pending and processing together: the sweep
+      // row is a `storyline` STAGE but not the `storyline` (assign) kind the
+      // sweep's settle gate reads, and a chore is not counted at all.
+      expect(pulse.outstandingByKind,
+          {'extract': 2, 'draft': 1, 'storyline_sweep': 1});
+      expect(pulse.kindCount('storyline'), 0);
+      expect(pulse.kindCount('storyline_sweep'), 1);
+      expect(pulse.kindCount('mark_read'), 0);
       expect(pulse.waiting, 3);
       expect(pulse.working, 2);
       expect(pulse.busy, isTrue);

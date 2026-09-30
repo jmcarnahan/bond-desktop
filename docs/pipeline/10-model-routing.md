@@ -123,11 +123,19 @@ Each role's spec resolves in the same order, per call:
   compiled box serves both under one origin: `/prose` is its vLLM 27B and
   `/decide` its llama.cpp decision slot (`tools/inference.sh --decide-gguf`,
   `docs/inference-endpoint.md`).
-- **The width.** The compiled box's prose slot is vLLM with several sequences,
-  so a URL that follows the build is four wide; a stored address is one at a
-  time, because a one-slot llama-server queues the rest past the generative
-  client's ninety-second ceiling. The managed generative width is
-  `prose_parallel` (1–8, default 1).
+- **The width.** Two numbers on `LlmTargetSpec`: `parallel` (drafts) and
+  `textParallel` (message text — extraction and the attachment digests; 1–8,
+  default 3). A URL that follows the build is four wide for drafts and EIGHT
+  for message text. The compiled box's PROSE-ONLY profile runs vLLM at
+  `--max-num-seqs 16` (`tools/inference.sh`), which leaves the rest to the
+  storyline lane; with a bulk slot (`--bulk-model`) the prose slot has 8
+  sequences and vLLM queues the extra requests, their wait counting against
+  the client's 120 s timeout. The digests share extraction's eight: they
+  drain after it on the same lane, one kind at a time. A stored address is
+  one at a time for drafts, because a one-slot llama-server queues the rest past the
+  generative client's ninety-second ceiling, and three for message text, the
+  width it always had. The managed generative width is `prose_parallel`
+  (1–8, default 1), and message text takes it but never fewer than three.
 - **The managed generative model.** `generative_managed_model` is `''` (by
   hardware tier: the 27B on the full tier, the 4B on the inbox tier),
   `bond-prose` or `bond-bulk`. The 27B on the inbox tier is refused by
@@ -812,8 +820,11 @@ composer's **Draft reply** is disabled with `Processing is off`.
 **Order across lanes is enqueue-and-pump.** A fast handler writes the
 `storyline*` or `draft` row and wakes the owning lane: `AiWorker.onDrained`
 after every drain (fast wakes the other two; storyline wakes draft), and
-`ExtractHandler.onDraftQueued` per row. The fast lane re-arms the storyline
-sweep through `MessageStore.requeueSweep()` only after a drain that did work.
+`ExtractHandler.onDraftQueued` and `onStorylineQueued` per row — the second
+pumps the storyline lane as each thread's assign is queued, so assigns run
+while the extraction backlog is still walking rather than after it. The fast
+lane re-arms the storyline sweep through `MessageStore.requeueSweep()` only
+after a drain that did work.
 `AiWorkers.pumpAll()` is fast, then the other two together.
 
 **How wide the draft lane runs is a property of the draft TARGET.**
@@ -822,7 +833,10 @@ sweep through `MessageStore.requeueSweep()` only after a drain that did work.
 server following the build, 1 on a stored address or cloud drafts. A second
 closure, `streams`, lets a target that cannot stream (Converse) make the plain
 call. Recaps and refreshes stay at one because each writes the storyline it is
-about.
+about. The fast lane's message text runs at the target's `textParallel`
+the same way (`ExtractHandler(textParallel:)` and
+`AttachmentDigestHandler(textParallel:)`, each a closure over
+`specForStage('message_text')` read on every claim).
 
 **Two writers ride the storyline gate**: `GateRepairService.afterGate`'s three
 storyline writes (evict, clear the conversation embedding, delete the pending

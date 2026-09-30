@@ -1404,8 +1404,10 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// directly and six read this provider; the fast lane is what every one of
 /// them means by "the worker".
 ///
-/// Its own load on the generative server is one kind at a time at K=3 —
-/// needs-you, then extraction — and the gate it shares with the triage drain
+/// Its own load on the generative server is one kind at a time — needs-you,
+/// then extraction at the target's text width (`LlmTargetSpec.textParallel`),
+/// then the attachment digests at the same width — and the gate it shares
+/// with the triage drain
 /// orders the two (triage itself calls only the decision model since the
 /// decision-model round; see [fastDrainGateProvider]). The storyline and
 /// draft lanes are on gates of their own and dial the same generative model,
@@ -1434,11 +1436,12 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
             needsYouThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
       ),
-      // The message-text stage next (kind `extract`), and it drains completely
-      // before either storyline handler starts. That order is the point: it is
-      // what writes the embeddings both storyline passes compare, so running
-      // them alongside it would have them clustering a mailbox half of which
-      // has no vector yet.
+      // The message-text stage next (kind `extract`). The thread's clustering
+      // card is built from what it writes, so it is what decides, by the
+      // card's hash, whether a thread's storyline assign is owed; it queues
+      // the assign and wakes the storyline lane per thread, and the assign
+      // pass embeds the card (`StorylineService.vectorFor`). The sweep still
+      // waits for this backlog (`StorylineTuning.sweepExtractFloor`).
       ExtractHandler(
         ref.watch(messageStoreProvider),
         // The message-text stage: the one generative call per kept message.
@@ -1462,6 +1465,16 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
             unawaited(ref.read(draftWorkerProvider).pump());
           } catch (_) {}
         },
+        // The storyline lane, woken as each thread's assign is queued, on
+        // `onDraftQueued`'s reasoning and shape: a `read` of a DIFFERENT
+        // lane's provider inside the closure, guarded. Without it the lane
+        // was woken only by this drain's end, so every assign waited for the
+        // whole extraction backlog.
+        onStorylineQueued: () {
+          try {
+            unawaited(ref.read(storylineWorkerProvider).pump());
+          } catch (_) {}
+        },
         // When a reply is written ahead of being asked for — the user's
         // setting, read at the moment each message finishes rather than
         // captured here. `ref.read` inside the closure, never `watch`, in
@@ -1469,14 +1482,19 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // reason: a watch would rebuild this provider, and the worker holding
         // it mid-drain, the moment somebody moved the control.
         draftPolicy: () => ref.read(appPrefsProvider).draftPolicy,
+        // How many message-text calls are in flight: the target's text width,
+        // read on every claim for [draftPolicy]'s reason.
+        textParallel: () =>
+            ref.read(appPrefsProvider).specForStage('message_text')
+                ?.textParallel ??
+            3,
       ),
-      // After extraction and before the storylines. After, because the summary
-      // it embeds is the text stage's and the drain order keeps the
-      // generative server's slots for extraction while there is extraction
-      // left to do. Before, because it talks to no model at all: a park here
-      // is a park on the embedding server, and it parks only its own kind,
-      // so a missing `make embed` must never be allowed to sit in front of
-      // the storyline queue.
+      // After extraction. The summary it embeds is the text stage's, and the
+      // drain order keeps the generative server's slots for extraction while
+      // there is extraction left to do. It talks to no chat model: a park
+      // here is a park on the embedding server, and it parks only its own
+      // kind. The search vector only; search vectors never fed the storyline
+      // pool.
       EmbedHandler(
         ref.watch(messageStoreProvider),
         ref.watch(embeddingsClientProvider),
@@ -1484,11 +1502,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       ),
       // Reading the documents, then understanding them — in that order,
       // because the digest below has nothing to read until the words are
-      // stored. Both sit here, after the message embeddings and ahead of the
-      // storylines, so a recap written later in this same drain can see a
-      // digest that landed at the top of it. Neither is in the notification
-      // settle set: an attachment must never hold up a verdict about the
-      // message it came with.
+      // stored. Both sit here, after the message text and the message
+      // embeddings: the drain reaches a kind only when every kind above it
+      // claims nothing, so attachments run after message text. Neither is in
+      // the notification settle set: an attachment must never hold up a
+      // verdict about the message it came with.
       //
       // The text handler talks to no chat model, so a park here is a park on
       // the embedding server and it parks only its own kind.
@@ -1505,6 +1523,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        // The same text width as extraction, read the same way.
+        textParallel: () =>
+            ref.read(appPrefsProvider).specForStage('message_text')
+                ?.textParallel ??
+            3,
       ),
       // The owner's own directories, read here and nowhere else in the drain.
       // It talks to no chat model — the embedding server is its only server —
@@ -1582,10 +1605,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
     wakes: [storylineWorkerProvider, draftWorkerProvider],
     // The sweep stands down over an unsettled mailbox, so something has to
     // tell it the mailbox settled, and a fast lane that has just gone quiet
-    // IS that signal: extraction, embedding and the needs-you judgement all
-    // drain here. Gated on the count because `onDrained` fires after an empty
-    // drain too — a Restore or a Regenerate enqueues a row directly, and an
-    // ungated requeue would run a whole sweep after every idle pump.
+    // IS that signal: extraction, which fills the pool, and the needs-you
+    // judgement both drain here. Gated on the count because `onDrained` fires
+    // after an empty drain too — a Restore or a Regenerate enqueues a row
+    // directly, and an ungated requeue would run a whole sweep after every
+    // idle pump.
     // `requeueWork` never touches a `processing` sweep, and the requeue both
     // syncs make stays the durable trigger under this one.
     //
@@ -1615,7 +1639,10 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
 /// them, recap after the sweep.
 ///
 /// Off the fast lane entirely, which is the point: a twelve-to-twenty-three
-/// second recap used to sit in front of the next message's triage.
+/// second recap used to sit in front of the next message's triage. Woken by
+/// the extract handler as each assign is queued (`onStorylineQueued`) as
+/// well as by the fast lane's end, so an assign runs while the rest of the
+/// extraction backlog is still walking.
 final Provider<AiWorker> storylineWorkerProvider = Provider<AiWorker>((ref) {
   final storylines = ref.watch(storylineServiceProvider);
   return _lane(

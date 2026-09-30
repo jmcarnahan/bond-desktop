@@ -170,7 +170,13 @@ enforce the ones that are commands.
   round every lane's chat calls go to the ONE generative model (drafts may go
   to Cloud drafts), so the lanes are an ORDER cut, not a server cut: a new
   handler goes on the lane whose ordering it needs, and order ACROSS lanes is
-  enqueue-and-pump, not list position. Triage makes no chat call but still
+  enqueue-and-pump, not list position. Extraction decides by the clustering
+  card's hash whether a thread's assign is owed, queues it and pumps the
+  storyline lane per row (`onStorylineQueued`, `onDraftQueued`'s shape), so
+  an assign never waits for the whole extraction backlog; it never embeds
+  the card (`vectorFor` does, in the assign pass). The fast lane's message
+  text is `LlmTargetSpec.textParallel` wide (8 on the build's box, else at
+  least 3). Triage makes no chat call but still
   shares `fastDrainGateProvider` for the yield ticket, so a triage pump can wait
   behind a message-text call already in flight. A handler that must wake the drain it runs INSIDE is handed
   the worker through a `late final` local in the lane's body, never
@@ -208,14 +214,27 @@ enforce the ones that are commands.
   because the sidebar's own switch calls it, and `_waitForPullsToSettle` with
   its `_quietTimeout`, because it reads the `_mailPulling`/`_teamsPulling`
   flags the inbox's syncs write.
-- The clustering card is ONE recipe (`clusteringCardForConversationRow` in
-  `clustering_card.dart`, whose `ClusteringCardVariant` holds the seven cards
-  and `shippedClusteringCard` names the one that ships, `topics`; `thread` and
-  `topicsUntitled` are bench-only variants from the decision-model round,
-  measured 58/98 against the shipped card's 59/98) behind
-  `EmbeddingsClient.modelTag`; a tag bump orphans every stored
-  conversation vector by construction, so it ships with a one-shot re-embed
-  in `sync_service.dart` (Round A's pref idiom).
+- The clustering card is ONE recipe behind ONE entry: `clusteringCardFor(store,
+  source, key, row, {variant})` in `storyline_cards.dart`, which every place
+  that embeds a THREAD goes through (the assign pass's `_keptVectorFor`, the
+  only writer of a conversation vector, whose test face is `vectorFor`, and
+  the golden seed). `text` is the thread
+  text the decision model reads (`storylineThreadTextFor`) and cannot be built
+  by `buildClusteringCard` (it throws); every other variant is
+  `clusteringCardForConversationRow` in `clustering_card.dart`, whose
+  `ClusteringCardVariant` holds the nine cards and `shippedClusteringCard`
+  names the one that ships, `topics`; `thread` and `topicsUntitled` are
+  bench-only variants from the decision-model round (58/98 against the
+  shipped card's 59/98), and `text` and `excerpt`, the cards buildable before
+  extraction, read 45/98 and 47/98 against `topics`' 60/98 on 2026-09-30 and
+  do not ship (nor does the namer on the message excerpt, 55/98). The
+  assign pass hash-checks the card, so a bench under another `SWEEP_CARD`
+  passes `StorylineService(clusteringCard:)` or every thread re-embeds under
+  the shipped card; extraction queues the assign only once the thread's
+  newest kept message has its text, and the pass re-checks the card when it
+  ends (`assignRecheckLaps`). Behind `EmbeddingsClient.modelTag`; a tag
+  bump orphans every stored conversation vector by construction, so it ships
+  with a one-shot re-embed in `sync_service.dart` (Round A's pref idiom).
 - `_accepts` in `storyline_service.dart` is the one membership rule at all
   five confirm sites (assign, recruit, sweep member, probe, audit): the
   decision model's `member_of` p against `StorylinePolicy`
@@ -295,9 +314,12 @@ enforce the ones that are commands.
   went red with "Can't re-open a database after closing it"; a test that builds
   a worker `addTearDown(worker.dispose)`.
 - The sweep is re-armed by the fast lane only after a drain that processed
-  something (`AiWorker.lastDrainCount`), and it defers above three floors read
-  from ONE `pipelinePulse`; the sync-time `requeueSweep()` is the durable
-  trigger.
+  something (`AiWorker.lastDrainCount`), and it defers above three floors
+  read from ONE `pipelinePulse`: `sweepExtractFloor` (10), `sweepTriageFloor`
+  (20) and `sweepAssignFloor` (10, the `storyline` KIND via
+  `PipelinePulse.kindCount`, not the stage, which also counts the asking
+  sweep row); no `embed_message` floor, since search vectors never fed the
+  pool. The sync-time `requeueSweep()` is the durable trigger.
 - A `StorylineTuning` number moves only with a `make golden-sweep` row on each
   side, and a diagnostic flip of one is a single shell command that puts the
   constant back before it exits.

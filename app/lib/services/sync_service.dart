@@ -784,7 +784,7 @@ class SyncService implements MailSync {
       // way, and BEFORE the sweep requeue so the sweep reads what this queued.
       //
       // The `storyline` kind is the vehicle rather than a re-extraction: the
-      // assign pass reaches `_reembed` before any membership check, so a
+      // assign pass embeds the thread before any membership check, so a
       // thread already inside a storyline gets its new vector too, which is
       // what the member centroids need. The one thing that pass returns on
       // first is a thread with no kept inbound message, and such threads are

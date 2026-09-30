@@ -716,12 +716,19 @@ class PipelinePulse {
   final int recentDropped;
   final int recentNeedsYou;
 
+  /// `work_items.task_kind` → items waiting plus being worked, for the kinds
+  /// [kindStages] names, BEFORE they collapse onto a stage. The storyline
+  /// sweep's settle gate reads the assign kind alone ([kindCount]), where
+  /// the `storyline` stage also counts the sweep row asking.
+  final Map<String, int> outstandingByKind;
+
   const PipelinePulse({
     this.queued = const {},
     this.running = const {},
     this.recentSettled = 0,
     this.recentDropped = 0,
     this.recentNeedsYou = 0,
+    this.outstandingByKind = const {},
   });
 
   /// Pipeline order — the order any narration walks. Triage first because it
@@ -773,4 +780,8 @@ class PipelinePulse {
   /// unconditionally.
   int countFor(String stage) =>
       (queued[stage] ?? 0) + (running[stage] ?? 0);
+
+  /// Pending plus processing rows of one `task_kind`, zero for a kind nothing
+  /// is queued under ([outstandingByKind]).
+  int kindCount(String kind) => outstandingByKind[kind] ?? 0;
 }

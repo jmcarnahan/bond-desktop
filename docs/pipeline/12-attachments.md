@@ -565,7 +565,7 @@ from `wipeAll`) is the eventual cleanup.
 
 ## The digest
 
-`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, generative model)
+`AttachmentDigestHandler` (kind `attachment_digest`, generative model)
 runs `AttachmentDigestTask` over one document and writes
 `AttachmentDigest` — five keys, always all five:
 
@@ -576,6 +576,24 @@ runs `AttachmentDigestTask` over one document and writes
 | `summary` | one sentence saying what it says |
 | `facts` | up to 6 things a person would quote back, copied exactly |
 | `asks` | up to 3 things it requires of the reader; empty is the common case |
+
+**How wide, and when.** Its width is the generative target's message-text
+width, `LlmTargetSpec.textParallel` — extraction's own eight on Your server
+following the build (they drain after it on the same lane, so they share it), 3
+on a stored address, this Mac's `prose_parallel` but never under 3), read on
+every claim through the `textParallel` closure the provider passes; a handler
+built without one (tests, benches) runs one at a time as before. Its items are
+independent — one document in, that document's own digest row out — so running
+several at once reorders nothing. Attachments run AFTER the message text: the
+fast lane drains kind by kind in list order (needs-you, `extract`,
+`embed_message`, `attachment_text`, `attachment_digest`, context…), and it
+reaches a kind only when every kind above it claims nothing, so the lane
+reaches digests only when no text is claimable. That is not "no text owed":
+an `extract` row whose message is still untriaged is not claimable
+(`claimPendingWork`'s guard), and text rows that arrive while digests drain
+wait for the pass to come back to the top (priority refs excepted). The
+status line's counters are queue depths, not work in flight, which is why a
+digest backlog can show beside a text backlog.
 
 The system prompt says "document" and "message" and **names no channel and no
 connector** — `prompt_parity_test` holds it to the strict form. The user message puts the date anchor outside every fence, the

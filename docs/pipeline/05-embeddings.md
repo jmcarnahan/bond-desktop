@@ -4,10 +4,17 @@
 are never mixed:
 
 1. **Clustering corpus** — one vector per *conversation card*, used by the
-   storyline sweep to find threads about the same thing. Written by
-   `ExtractHandler._refreshCard` into `conversation_ai.embedding`, and healed
-   by `StorylineService._reembed` for a thread whose vector is missing when
-   the sweep or the assign pass reaches it.
+   storyline sweep to find threads about the same thing. Written by ONE
+   method, `StorylineService._keptVectorFor` (test face: `vectorFor`), inside
+   the storyline assign pass that extraction queues when the thread's card
+   hash changed (extraction builds the same card to decide that, and never
+   embeds it): it builds the card through `clusteringCardFor`
+   (`storyline_cards.dart`), hashes it, returns the
+   stored vector when `embedded_hash` and `embed_model` both match, and
+   otherwise embeds and writes `conversation_ai` (vector, hash, tag). Until
+   2026-09-30 extraction wrote it (`_refreshCard`) and the assign pass healed
+   a missing one (`_reembed`); both are gone, so one method writes the
+   vector and its hash.
 2. **Document corpus** — one vector per *message*, used by semantic search
    (sqlite-vec, PR #10). Written on the fast path by
    `ExtractHandler._embedMessage` and healed by the `embed_message` work queue
@@ -15,25 +22,28 @@ are never mixed:
    fast path missed.
 
 **The card's inputs since the text stage (decision-model round, Phase 6).**
-Unchanged in shape: `newestInboundCardData` still reads `messages.summary`
-and `extraction_json.topics`, and both are now written by ONE call — the
-message-text stage (`ExtractHandler` running `MessageTextTask`, see
-[04-extraction.md](04-extraction.md)), which writes the summary onto the row
-and `{topics, project, intent, importance}` into the blob BEFORE it refreshes
-the card, and re-reads the row so the message card embeds the summary it just
-wrote. A message whose text has not landed carries NO summary and no topics — where
-before this round triage had already written the summary, so only the topics
-waited on extraction; the `embed_message`
-queue (enqueued at sync, not held behind triage) may embed such a message
+`newestInboundCardData` reads `messages.summary`, `extraction_json.topics`,
+and (since 2026-09-30) the message's own `body_text` and `body_preview` for
+the bench-only `excerpt` card. The summary and topics are written by ONE
+call — the message-text stage (`ExtractHandler` running `MessageTextTask`,
+see [04-extraction.md](04-extraction.md)), which writes them BEFORE it checks
+the card's hash and queues the assign, and re-reads the row so the MESSAGE
+card embeds the summary it just wrote. A message whose text has not landed
+carries NO summary and no topics — where before this round triage had
+already written the summary, so only the topics waited on extraction; the
+`embed_message` queue (enqueued at sync, not held behind triage) may embed
+such a message
 first, and the text stage's own `_embedMessage` re-embeds it when the card's
 hash changes. `project` is stored but is not on the card.
 
-**The clustering card has a module and seven variants.** `clustering_card.dart`
-is the one recipe for the text a CONVERSATION is embedded from, and both
-writers go through it over the same stored facts:
-`clusteringCardForConversationRow(conversationRow, newestInboundCardData(...))`
-at the extraction and at the heal alike. One recipe over one data source is
-what makes `embedded_hash` mean something. While the extraction built its card
+**The clustering card has a module and nine variants.** `clustering_card.dart`
+is the one recipe for the text a CONVERSATION is embedded from, reached
+through ONE entry, `clusteringCardFor(store, source, key, row, {variant})` in
+`storyline_cards.dart`: the `text` variant is the thread text
+(`storylineThreadTextFor`), every other one is
+`clusteringCardForConversationRow(row, clusteringCardData(...))`. The assign
+pass and the golden seed both go through it. One recipe over one data source
+is what makes `embedded_hash` mean something. While the extraction built its card
 from the result in hand and the heal built its own from the newest kept
 inbound, extracting the fifth message of a thread wrote a hash over a card
 nothing else would ever produce, and the next heal re-embedded a thread that
@@ -42,11 +52,11 @@ had not changed. The module is its own file since Round E Phase 1, on
 recipe in `storyline_service.dart`, each importing the other for its half, and
 neither could be read without the other.
 
-**The seven variants.** Every card is `buildConversationCard`'s four segments,
-`subject | participants | topics | summary`, joined by ` | `. A variant keeps
-some of them and leaves the rest EMPTY rather than removing them: the card is
-four segments by contract, and a shorter one would make `cardHash` disagree
-with itself about nothing.
+**The nine variants.** Every card but `text` is `buildConversationCard`'s four
+segments, `subject | participants | topics | summary`, joined by ` | `. A
+variant keeps some of them and leaves the rest EMPTY rather than removing
+them: the card is four segments by contract, and a shorter one would make
+`cardHash` disagree with itself about nothing.
 
 | variant | segments kept |
 |---|---|
@@ -57,9 +67,14 @@ with itself about nothing.
 | `summary` | topics, summary |
 | `thread` | subject (empty on an untitled Teams chat), project + topics merged across the thread's newest five kept inbound messages, the newest kept inbound summary — bench only |
 | `topics_untitled` | `topics`, with the subject empty on an untitled Teams chat — bench only |
+| `text` | not four segments: the thread text the decision model's storyline questions read (`renderStorylineThread` via `storylineThreadTextFor`: subject, participants, the newest three shown messages at the renderer's caps). `buildClusteringCard` throws for it — measured, does NOT ship: `make golden-vector` recall-70 0.43 at 36% cross, cross-5 0.52; `make golden-sweep` 45/98 (23 items filed into non-efforts) |
+| `excerpt` | subject, and in the summary slot the newest kept inbound message's own words (`newestMessageExcerpt`: `body_text` else `body_preview`, `stripDecisionMarkers`, whitespace collapsed, 300 code points) — measured, does NOT ship: recall-70 0.42 at 20% cross, cross-5 0.49; golden-sweep 47/98 (5 correct positives, 24 filed into non-efforts) |
 
-The last two are the decision-model round's Phase 8 candidates, built behind
-`SWEEP_CARD` and not shipped. An untitled Teams chat is one whose subject is
+`thread` and `topics_untitled` are the decision-model round's Phase 8
+candidates, and `text` and `excerpt` the 2026-09-30 cards buildable before
+extraction (against the `topics` card's golden-vector 0.43 at 15% cross,
+cross-5 0.48, and golden-sweep 60/98 with 3 forbidden); all four are built
+behind `SWEEP_CARD` and not shipped. An untitled Teams chat is one whose subject is
 the participant names the sync wrote on first sight (`isTeamsNamesSubject` in
 `chat_roster.dart`); display keeps the names. `thread` reads
 `MessageStore.threadCardData`, and `MessageStore.clusteringCardData` is the one
@@ -146,9 +161,9 @@ in every slice forever. It runs before the sweep is requeued, so the
 sweep reads the pool it refilled; it has no source filter, so one one-shot on
 the mail sync covers chat threads too; and its pref is written only by a pass
 that came back short, so the slices continue until the old tag is gone.
-`ExtractHandler._refreshCard`'s skip is hash AND tag, matching the message
-corpus in `EmbedHandler`: without the tag half, a re-extracted thread whose
-card had not changed would keep an orphaned vector forever.
+`StorylineService._keptVectorFor`'s skip is hash AND tag, matching the message
+corpus in `EmbedHandler`: without the tag half, a thread whose card had not
+changed would keep an orphaned vector forever.
 
 **The document corpus moved too, and nothing measured it.** A model swap is
 not a card change: there is one embedding server, so the search corpora had to

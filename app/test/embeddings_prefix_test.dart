@@ -143,8 +143,8 @@ void main() {
     });
 
     test('naming the clustering prefix changes not one byte', () async {
-      // The invariant the whole default exists for: `_refreshCard` and
-      // `StorylineService` pass no prefix, and they must keep producing the
+      // The invariant the whole default exists for: `StorylineService`'s
+      // `vectorFor` passes no prefix, and it must keep producing the
       // request that every conversation vector in the database came from.
       final byDefault = BodyRecorder();
       final explicit = BodyRecorder();

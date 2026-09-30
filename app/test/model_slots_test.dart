@@ -224,10 +224,14 @@ void main() {
       model: 'qwen3.8',
       hasBearer: true,
       parallel: 4,
+      textParallel: 8,
       streams: false,
     );
 
     expect(LlmTargetSpec.tryParse(spec.toJson()), spec);
+    expect(LlmTargetSpec.tryParse(spec.toJson())!.textParallel, 8);
+    expect(spec.copyWith(textParallel: 5).textParallel, 5);
+    expect(spec.copyWith(textParallel: 5), isNot(spec));
     // The presence flag and NEVER the token — the JSON lands in a database
     // table that anything with the file can read.
     expect(spec.toJson()['bearer'], isTrue);
@@ -248,10 +252,12 @@ void main() {
       'model': 'm',
       'wire': 'a wire nobody ships',
       'parallel': 99,
+      'text_parallel': 99,
       'streams': 'yes please',
     })!;
     expect(defaulted.wire, LlmWire.openAi);
     expect(defaulted.parallel, 8);
+    expect(defaulted.textParallel, 8);
     expect(defaulted.streams, isTrue);
     expect(defaulted.hasBearer, isFalse);
 
@@ -264,6 +270,24 @@ void main() {
         'parallel': 0,
       })!.parallel,
       1,
+    );
+    final textClamped = LlmTargetSpec.tryParse({
+      'id': 'x',
+      'name': 'n',
+      'url': 'http://example.com/v1',
+      'model': 'm',
+      'text_parallel': 0,
+    })!;
+    expect(textClamped.textParallel, 1);
+    // A row an older build wrote has no text width: it reads today's three.
+    expect(
+      LlmTargetSpec.tryParse({
+        'id': 'x',
+        'name': 'n',
+        'url': 'http://example.com/v1',
+        'model': 'm',
+      })!.textParallel,
+      3,
     );
   });
 

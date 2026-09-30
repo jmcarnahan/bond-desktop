@@ -642,11 +642,15 @@ void main() {
         'body_text': 'Body for $key',
         'triage_status': 'triaged',
       });
+      // Hashed over the card the assign pass would build now, so the vector
+      // reads as current and the pass embeds nothing.
+      final row = await store.getConversationRow('email', key);
+      final card = await clusteringCardFor(store, 'email', key, row!);
       await store.upsertConversationAi(
         'email',
         key,
         embedding: encodeEmbedding(vector),
-        embeddedHash: 'h-$key',
+        embeddedHash: cardHash(card),
         embedModel: EmbeddingsClient.modelTag,
       );
     }

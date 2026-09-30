@@ -355,4 +355,28 @@ void main() {
       expect(digest.data['digest_json'] as String, contains('Sign page four'));
     });
   });
+
+  group('width', () {
+    test('one at a time when nothing says, as before', () {
+      expect(
+        AttachmentDigestHandler(store, ScriptedLlm(), FakeEmbedServer().client)
+            .concurrency,
+        1,
+      );
+    });
+
+    test("the target's text width, read on every claim", () {
+      var width = 8;
+      final handler = AttachmentDigestHandler(
+        store,
+        ScriptedLlm(),
+        FakeEmbedServer().client,
+        textParallel: () => width,
+      );
+
+      expect(handler.concurrency, 8);
+      width = 3;
+      expect(handler.concurrency, 3);
+    });
+  });
 }
