@@ -153,6 +153,7 @@ void main() {
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
       keepingDecisionClient(),
+      noCommandHeads(),
       // Predates Home: this file asserts on a pane the rail's old landing
       // section opened.
       initialSectionProvider.overrideWithValue(section),

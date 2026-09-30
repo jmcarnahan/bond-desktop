@@ -40,9 +40,11 @@ import '../services/calendar/brief_planner.dart';
 import '../services/calendar/calendar_sync.dart';
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/command/command_heads.dart';
 import '../services/calendar/command/command_lexicon.dart';
 import '../services/calendar/command/command_planner.dart';
 import '../services/calendar/command/command_router.dart';
+import '../services/calendar/command/decision_command_classifier.dart';
 import '../services/calendar/meeting_brief_handler.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
@@ -51,6 +53,7 @@ import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
 import '../services/cloud_drafts.dart';
 import '../services/decision/decision_client.dart';
+import '../services/decision/decision_heads.dart' show DecisionHeads;
 import '../services/decision/decision_heads_file.dart';
 import '../services/draft_handler.dart';
 import '../services/draft_stream.dart';
@@ -1023,13 +1026,64 @@ final commandPlannerProvider = Provider<CommandPlanner>((ref) {
   );
 });
 
+/// The calendar command head (`assets/calendar/command_heads.json`), read
+/// once; null when no head ships or the file was refused
+/// (`loadCommandHeadsAsset`).
+final commandHeadsProvider =
+    FutureProvider<CommandHeads?>((ref) => loadCommandHeadsAsset());
+
+/// The command head as a classifier, over the SAME decision client as
+/// triage: its identity probe, its target resolved per call, its heads file
+/// (whose width the raw vector is checked against). Also the Day bar's live
+/// refine ([DecisionCommandClassifier.classifyPreview]).
+///
+/// Ready means what the decision client would find at the top of a call:
+/// the heads file loads ([DecisionHeadsFile.current]) and the decision
+/// target carries no `unavailable` sentence (the managed router serves the
+/// model). Anything else is no request at all, so no `command_head` row.
+/// The installed heads are the same file, for the model name the command
+/// head must have been fitted on.
+final decisionCommandClassifierProvider =
+    Provider<DecisionCommandClassifier>((ref) {
+  DecisionHeads? installed() {
+    try {
+      return ref.read(decisionHeadsProvider).current();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return DecisionCommandClassifier(
+    client: () => ref.read(decisionClientProvider),
+    heads: () => ref.read(commandHeadsProvider.future),
+    decisionReady: () {
+      try {
+        final target =
+            ref.read(appPrefsProvider.notifier).targetForStage('decision');
+        return target.unavailable == null && installed() != null;
+      } catch (_) {
+        return false;
+      }
+    },
+    installedHeads: installed,
+  );
+});
+
 /// The Day command bar's router. Typed as the class so a screen test can
 /// override it with one built over fakes.
 ///
 /// The intent client is resolved at Enter, never held: a Settings change to
 /// the generative role reaches the next command without rebuilding this.
+///
+/// The decision model's command head is asked FIRST, the lexicon second: the
+/// head answers only above its bar, and a head that is absent, refused,
+/// unsure or whose server is down answers nothing, so the lexicon reads the
+/// command as it did before Phase 9.
 final commandRouterProvider = Provider<CommandRouter>((ref) => CommandRouter(
-      classifiers: const [LexiconClassifier()],
+      classifiers: [
+        ref.watch(decisionCommandClassifierProvider),
+        const LexiconClassifier(),
+      ],
       planner: ref.watch(commandPlannerProvider),
       intentClient: () => ref.read(stageLlmClientProvider('calendar_intent')),
       people: ref.watch(peopleBackendProvider),

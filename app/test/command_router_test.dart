@@ -72,6 +72,21 @@ class _People extends Fake implements PeopleBackend {
   }
 }
 
+/// A command head as the router sees one: a scripted guess, a null, or a
+/// throw.
+class _Head implements CommandClassifier {
+  _Head(this.answer);
+
+  final CommandGuess? Function() answer;
+  final List<String> asked = [];
+
+  @override
+  Future<CommandGuess?> classify(String text) async {
+    asked.add(text);
+    return answer();
+  }
+}
+
 void main() {
   late CalendarZone la;
   late DateTime now;
@@ -483,6 +498,88 @@ void main() {
     final move = (second.plan as CalendarProposal).write as MoveEvent;
     expect(move.eventId, 'b');
     expect(move.startUtc, at(fri, 16));
+  });
+
+  group('the command head in front of the lexicon', () {
+    CommandRouter headed(_Head head) => CommandRouter(
+          classifiers: [head, const LexiconClassifier()],
+          planner: CommandPlanner(
+            calendar: calendar,
+            backend: _Backend(),
+            writer: writer,
+            mailbox: () async => null,
+          ),
+          intentClient: () => llm,
+          people: directory,
+          activityLog: activity,
+        );
+
+    Future<CommandOutcome> headedSubmit(CommandRouter r, String text,
+            {List<CalendarEvent> events = const []}) =>
+        r.submit(text,
+            now: now, zone: la, today: today, people: known, events: events);
+
+    test('a head above its bar wins over the lexicon, on the head path',
+        () async {
+      final head = _Head(() =>
+          const CommandGuess(CommandAction.move, 0.9, CommandPath.head));
+      final three = mine('three', today, 15, 'Design sync');
+      // The lexicon reads nothing here ("put … on" is not one of its rules).
+      expect(classifyByLexicon('put my 3pm on Thursday').action,
+          CommandAction.unknown);
+      final out = await headedSubmit(headed(head), 'put my 3pm on Thursday',
+          events: [three]);
+      expect(head.asked, ['put my 3pm on Thursday']);
+      expect(out.path, CommandPath.head);
+      expect(out.parsed.action, CommandAction.move);
+      expect(llm.calls, isEmpty, reason: 'a head at 0.9 needs no model');
+      final rows = [
+        for (final r in await store.recentActivity(limit: 10))
+          if (r['kind'] == 'calendar_command') r,
+      ];
+      final detail = jsonDecode(rows.single['detail_json'] as String)
+          as Map<String, dynamic>;
+      expect(detail['path'], 'head');
+      expect(detail['action'], 'move');
+    });
+
+    test('a head under its bar (unknown) falls through to the lexicon',
+        () async {
+      final head = _Head(() =>
+          const CommandGuess(CommandAction.unknown, 0.41, CommandPath.head));
+      final three = mine('three', today, 15, 'Design sync');
+      final out = await headedSubmit(headed(head), 'move my 3pm to Thursday',
+          events: [three]);
+      expect(head.asked, hasLength(1));
+      expect(out.path, CommandPath.lexicon);
+      expect(out.parsed.action, CommandAction.move);
+    });
+
+    test('a head that is not there (null) or throws falls through', () async {
+      final three = mine('three', today, 15, 'Design sync');
+      for (final head in [
+        _Head(() => null),
+        _Head(() => throw StateError('the decision server went away')),
+      ]) {
+        final out = await headedSubmit(
+            headed(head), 'move my 3pm to Thursday',
+            events: [three]);
+        expect(out.path, CommandPath.lexicon);
+        expect(out.parsed.action, CommandAction.move);
+      }
+    });
+
+    test("the preview takes the head's guess when the caller has one", () {
+      final p = router.preview('put my 3pm on Thursday',
+          now: now,
+          zone: la,
+          people: known,
+          events: const [],
+          guess:
+              const CommandGuess(CommandAction.move, 0.9, CommandPath.head));
+      expect(p.action, CommandAction.move);
+      expect(p.guess.path, CommandPath.head);
+    });
   });
 
   test('every Enter writes one activity row, in enum words only', () async {

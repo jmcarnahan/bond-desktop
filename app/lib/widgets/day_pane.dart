@@ -66,7 +66,14 @@ class DayPane extends StatelessWidget {
     this.briefHeadlines = const {},
     this.commandBar,
     this.planCard,
+    this.schedulingAsks = const [],
+    this.onFindTime,
   });
+
+  /// The key of a Scheduling asks row's Find a time button.
+  static Key schedulingAskKeyFor(String key) =>
+      ValueKey('day-scheduling-ask-$key');
+  static const Key schedulingAsksKey = ValueKey('day-scheduling-asks');
 
   /// The key of a meeting row's brief teaser.
   static Key briefTeaserKeyFor(String eventId) =>
@@ -149,6 +156,16 @@ class DayPane extends StatelessWidget {
   /// What the bar's last Enter produced (`CommandPlanCard`), drawn directly
   /// under the bar and above the list or the grid, where the eye already is.
   final Widget? planCard;
+
+  /// The threads asking for a time (the decision model's scheduling read,
+  /// see `scheduling_ask.dart`), drawn as a "Scheduling asks · N" group
+  /// after today's agenda. Today only: the host passes none for another
+  /// day, and the pane checks too, because an ask is about now.
+  final List<Conversation> schedulingAsks;
+
+  /// Opens Find a time for one of [schedulingAsks]. Null draws the rows
+  /// without the button.
+  final void Function(String source, String conversationKey)? onFindTime;
 
   /// [onOpenEvent] bound to [e], or null when there is nothing to open with.
   VoidCallback? _openEvent(CalendarEvent e) {
@@ -343,20 +360,23 @@ class DayPane extends StatelessWidget {
           zone: zone,
         );
         final hasRows = items.any((i) => i is! NowMarker);
+        final asks = _schedulingAsks();
         if (!hasRows) {
-          return Align(
-            alignment: Alignment.topLeft,
-            child: Text(
-              availability == CalendarAvailability.unknown
-                  ? readingText
-                  : emptyText,
-              style: _muted,
-            ),
+          final empty = Text(
+            availability == CalendarAvailability.unknown
+                ? readingText
+                : emptyText,
+            style: _muted,
           );
+          if (asks == null) {
+            return Align(alignment: Alignment.topLeft, child: empty);
+          }
+          return ListView(children: [empty, asks]);
         }
         return ListView(
           children: [
             for (final item in items) _itemRow(item, t),
+            ?asks,
           ],
         );
       },
@@ -559,6 +579,76 @@ class DayPane extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// "Scheduling asks · N": today's threads asking for a time, each with
+  /// who asked and a Find a time button. Null when there are none, or the
+  /// day is not today.
+  Widget? _schedulingAsks() {
+    if (day != today || schedulingAsks.isEmpty) return null;
+    final find = onFindTime;
+    return Padding(
+      key: schedulingAsksKey,
+      padding: const EdgeInsets.only(top: BondSpacing.s16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Scheduling asks · ${schedulingAsks.length}',
+            style: BondType.caption.copyWith(
+              color: BondColors.inkSecondary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          for (final c in schedulingAsks)
+            _row(
+              when: _when('Asked'),
+              onTap: () => onOpenConversation(c.source, c.id),
+              body: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _subject(c.subject ?? ''),
+                          style: BondType.body
+                              .copyWith(fontWeight: FontWeight.w600),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (_askedBy(c).isNotEmpty)
+                          Text(_askedBy(c), style: _muted, maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                      ],
+                    ),
+                  ),
+                  if (find != null)
+                    TextButton(
+                      key: schedulingAskKeyFor('${c.source}|${c.id}'),
+                      onPressed: () => find(c.source, c.id),
+                      child: const Text('Find a time'),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Who asked: the newest inbound sender's name from the thread's
+  /// participants, else their address.
+  static String _askedBy(Conversation c) {
+    final from = (c.latestInboundFrom ?? '').trim();
+    if (from.isEmpty) return '';
+    for (final p in c.participants) {
+      if ((p.email ?? '').toLowerCase() == from.toLowerCase() &&
+          (p.name ?? '').trim().isNotEmpty) {
+        return p.name!.trim();
+      }
+    }
+    return from;
   }
 
   Widget _nowRow() {

@@ -92,6 +92,8 @@ void main() {
     Map<String, String> briefHeadlines = const {},
     Widget? commandBar,
     Widget? planCard,
+    List<Conversation> schedulingAsks = const [],
+    void Function(String, String)? onFindTime,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -122,6 +124,8 @@ void main() {
           briefHeadlines: briefHeadlines,
           commandBar: commandBar,
           planCard: planCard,
+          schedulingAsks: schedulingAsks,
+          onFindTime: onFindTime,
         ),
       ),
     ));
@@ -402,6 +406,61 @@ void main() {
       final next = tester.widget<IconButton>(
           find.widgetWithIcon(IconButton, Icons.chevron_right));
       expect(next.onPressed, isNull);
+    });
+  });
+
+  group('scheduling asks', () {
+    const ask = Conversation(
+      id: 'c-ask',
+      subject: 'Time for the Fabrikam review?',
+      state: ConversationState.needsReply,
+      participants: [
+        Participant(name: 'Dana Lee', email: 'dana@fabrikam.example'),
+      ],
+      latestInboundFrom: 'dana@fabrikam.example',
+    );
+
+    testWidgets('today: a counted group with who asked and Find a time',
+        (tester) async {
+      final found = <String>[];
+      final opened = <String>[];
+      await pumpPane(
+        tester,
+        events: [timed('m1', 'Contoso standup', DateTime.utc(2026, 9, 29, 20))],
+        schedulingAsks: const [ask],
+        onFindTime: (source, key) => found.add('$source|$key'),
+        onOpenConversation: (source, key) => opened.add('$source|$key'),
+      );
+      expect(find.text('Scheduling asks · 1'), findsOneWidget);
+      expect(find.text('Time for the Fabrikam review?'), findsOneWidget);
+      expect(find.text('Dana Lee'), findsOneWidget);
+
+      await tester.tap(find.byKey(DayPane.schedulingAskKeyFor('email|c-ask')));
+      await tester.pump();
+      expect(found, ['email|c-ask']);
+      expect(opened, isEmpty, reason: 'the button is not the row');
+
+      await tester.tap(find.text('Time for the Fabrikam review?'));
+      await tester.pump();
+      expect(opened, ['email|c-ask']);
+    });
+
+    testWidgets('an empty day still shows the group', (tester) async {
+      await pumpPane(tester, schedulingAsks: const [ask],
+          onFindTime: (_, _) {});
+      expect(find.text(DayPane.emptyText), findsOneWidget);
+      expect(find.text('Scheduling asks · 1'), findsOneWidget);
+    });
+
+    testWidgets('another day, or none: no group', (tester) async {
+      await pumpPane(tester,
+          day: today.addDays(1),
+          schedulingAsks: const [ask],
+          onFindTime: (_, _) {});
+      expect(find.byKey(DayPane.schedulingAsksKey), findsNothing);
+
+      await pumpPane(tester, onFindTime: (_, _) {});
+      expect(find.byKey(DayPane.schedulingAsksKey), findsNothing);
     });
   });
 

@@ -134,6 +134,11 @@ flutter:
   # (docs/distribution.md, "Bumping a model").
   assets:
     - assets/models/manifest.json
+    # The calendar command head (`command_heads.json`), registered as a
+    # DIRECTORY: the file exists only once the owner has fitted it
+    # (`make calendar-heads`), and a build fails on a registered FILE that is
+    # absent. The README keeps the directory from being empty.
+    - assets/calendar/
 
   # Family names must stay exactly these three — BondType references them
   # by string (lib/theme/bond_typography.dart).

@@ -272,6 +272,35 @@ class DecisionClient {
     });
   }
 
+  /// The encoder's raw pooled vector for each of [texts], in order, with no
+  /// heads applied — the calendar command head's input
+  /// (`services/calendar/command/command_heads.dart`), which is a second
+  /// head fitted on the same encoder and so must read exactly what the nine
+  /// read: the same identity probe, `embd_normalize: -1`, the same width and
+  /// norm refusals, and a long text on the token path.
+  ///
+  /// One [LlmCallRecord] labelled `command_head` for the call, unless
+  /// [report] is false: the Day bar's live preview asks on keystrokes, and a
+  /// tally with no unit of work of its own would be folded into whatever
+  /// activity row is written next. Throws what [decideStates] throws.
+  Future<List<List<double>>> embedRaw(
+    List<String> texts, {
+    bool report = true,
+  }) async {
+    if (texts.isEmpty) return const [];
+    final sw = Stopwatch()..start();
+    final destination = target;
+    return _instrumented(destination, sw, label: 'command_head', report: report,
+        (facts) async {
+      final heads = _heads();
+      await _verifyServer(destination, facts);
+      return [
+        for (final text in texts)
+          (await _vectorFor(text, destination, heads, facts)).$1,
+      ];
+    });
+  }
+
   /// For a Connect that must not write a server of the wrong kind: whether
   /// the server at [url], asked for [model], is the decision model. The same
   /// identity probe [decide] makes before its first request, and a pass here
@@ -641,15 +670,23 @@ class DecisionClient {
   /// Runs [body] and tells the observer about it exactly once, however many
   /// requests it made. The outcomes are `LlmClient._post`'s: an unauthorized
   /// key is `unavailable`, because it is a subclass and parks the same way.
+  /// [label] names the record (`decision`, or `command_head` for
+  /// [embedRaw]); [report] false tells nobody, and changes nothing else.
   Future<T> _instrumented<T>(
     LlmTarget destination,
     Stopwatch sw,
-    Future<T> Function(_CallFacts facts) body,
-  ) async {
+    Future<T> Function(_CallFacts facts) body, {
+    String label = 'decision',
+    bool report = true,
+  }) async {
     final facts = _CallFacts();
+    void tell(String outcome, String? error) {
+      if (report) _report(destination, sw, facts, outcome, error, label);
+    }
+
     try {
       final result = await body(facts);
-      _report(destination, sw, facts, 'ok', null);
+      tell('ok', null);
       return result;
     } on LlmUnavailableException catch (e) {
       // A server that went away, refused the key or answered wrongly may not
@@ -660,16 +697,16 @@ class DecisionClient {
           e is DecisionUnauthorizedException) {
         _verified.remove('${destination.baseUrl}|${destination.model}');
       }
-      _report(destination, sw, facts, 'unavailable', e.message);
+      tell('unavailable', e.message);
       rethrow;
     } on LlmFormatException catch (e) {
-      _report(destination, sw, facts, 'format', e.message);
+      tell('format', e.message);
       rethrow;
     } on LlmException catch (e) {
-      _report(destination, sw, facts, 'error', e.message);
+      tell('error', e.message);
       rethrow;
     } catch (e) {
-      _report(destination, sw, facts, 'error', '$e');
+      tell('error', '$e');
       rethrow;
     }
   }
@@ -680,6 +717,7 @@ class DecisionClient {
     _CallFacts facts,
     String outcome,
     String? error,
+    String label,
   ) {
     final observer = _onCall;
     if (observer == null) return;
@@ -687,7 +725,7 @@ class DecisionClient {
     // decision into a failure.
     try {
       observer(LlmCallRecord(
-        label: 'decision',
+        label: label,
         durationMs: sw.elapsedMilliseconds,
         outcome: outcome,
         model: destination.model,

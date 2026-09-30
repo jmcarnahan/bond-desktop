@@ -80,6 +80,7 @@ class ActivityLogPanel extends StatefulWidget {
     'sync_calendar': 'Calendar sync',
     'calendar_write': 'Calendar',
     'calendar_command': 'Calendar command',
+    'find_time': 'Find a time',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -527,6 +528,20 @@ class ActivityLogPanel extends StatefulWidget {
             if (detail[key] case final String word when word.isNotEmpty) word,
         ];
         return '$label — ${parts.join(' · ')}';
+      // Find a time on a scheduling thread: one row per search (how many
+      // slots, and whether everyone's calendars or only the owner's were
+      // read) and one per action taken on them — counts and enum words, never
+      // a person, a subject or a time.
+      case 'find_time':
+        final action = detail['action'];
+        if (action == 'put_in_reply') return '$label — put in reply';
+        if (action == 'send_invite') return '$label — invite sent';
+        if (action == 'add_to_calendar') return '$label — added to calendar';
+        final slots = detail['slots'];
+        final n = slots is num ? slots.toInt() : 0;
+        final from = detail['source'];
+        final where = from is String && from.isNotEmpty ? ' ($from)' : '';
+        return '$label — $n ${n == 1 ? 'slot' : 'slots'}$where';
       // The switch at the top of the rail. Its STATUS is the whole row — `on`
       // or `off`, neither of which any of the status cases above claims — so
       // the sentence is written here rather than left to the bare label.

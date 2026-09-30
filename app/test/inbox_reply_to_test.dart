@@ -203,6 +203,7 @@ void main() {
       overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         initialSectionProvider.overrideWithValue(RailSection.people),
         initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),

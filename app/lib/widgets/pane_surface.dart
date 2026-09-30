@@ -30,6 +30,9 @@ class PaneSurface extends StatelessWidget {
   /// nothing; the title takes the space.
   final Widget? trailing;
 
+  /// The back button's key, for a pane whose tests press it by key.
+  final Key? backKey;
+
   final Widget child;
 
   const PaneSurface({
@@ -38,6 +41,7 @@ class PaneSurface extends StatelessWidget {
     required this.onBack,
     this.onHome,
     this.trailing,
+    this.backKey,
     required this.child,
   });
 
@@ -65,6 +69,7 @@ class PaneSurface extends StatelessWidget {
             child: Row(
               children: [
                 IconButton(
+                  key: backKey,
                   onPressed: onBack,
                   icon: const Icon(Icons.arrow_back),
                   iconSize: 20,

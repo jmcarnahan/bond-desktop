@@ -178,6 +178,7 @@ void main() {
       overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         // People by default, because the thread this file opens is reached
         // through its sender's room — the route `thread_suggestions_test`
         // uses. Home for the tests about the feed's own controls.

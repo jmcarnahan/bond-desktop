@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/command/command_parser.dart';
@@ -60,6 +62,7 @@ void main() {
     bool busy = false,
     String? initialText,
     bool planStands = false,
+    Future<CommandGuess?> Function(String text)? refine,
   }) =>
       MaterialApp(
         home: Scaffold(
@@ -73,8 +76,13 @@ void main() {
             child: SizedBox(
               width: 800,
               child: DayCommandBar(
-                preview: (text) => parseCommand(text,
-                    now: now, zone: la, people: people, events: events()),
+                preview: (text, {guess}) => parseCommand(text,
+                    now: now,
+                    zone: la,
+                    people: people,
+                    events: events(),
+                    guess: guess),
+                refine: refine,
                 submit: (text) async => submitted.add(text),
                 zone: la,
                 clock: () => now,
@@ -259,6 +267,89 @@ void main() {
     await tester.pumpWidget(bar(initialText: "what's on tomorrow"));
     await tester.pump();
     expect(submitted, hasLength(2));
+  });
+
+  group("the head's refine", () {
+    // The lexicon has no rule for "put … on", so it names no action here.
+    const unread = 'put the standup on friday 3pm';
+
+    testWidgets('an answer for the words in the field re-reads the preview '
+        'under its guess', (tester) async {
+      final asked = <String>[];
+      await tester.pumpWidget(bar(refine: (text) async {
+        asked.add(text);
+        return const CommandGuess(CommandAction.move, 0.93, CommandPath.head);
+      }));
+      await tester.enterText(field(), unread);
+      await tester.pump(DayCommandBar.debounce);
+      expect(find.byKey(DayCommandBar.chipKeyFor('action')), findsNothing,
+          reason: "the lexicon's chips come first, and it read no action");
+      expect(asked, isEmpty, reason: 'the head waits a further 200 ms');
+      await tester.pump(DayCommandBar.refineDebounce);
+      await tester.pump();
+      expect(asked, [unread]);
+      expect(chip(tester, 'action'), 'Move');
+    });
+
+    testWidgets('an unknown or a throw leaves the lexicon\'s chips',
+        (tester) async {
+      var throwNext = false;
+      await tester.pumpWidget(bar(refine: (text) async {
+        if (throwNext) throw StateError('head down');
+        return const CommandGuess(
+            CommandAction.unknown, 0.4, CommandPath.head);
+      }));
+      await tester.enterText(field(), 'move my 3pm to Thursday');
+      await tester.pump(DayCommandBar.debounce);
+      await tester.pump(DayCommandBar.refineDebounce);
+      await tester.pump();
+      expect(chip(tester, 'action'), 'Move');
+      throwNext = true;
+      await tester.enterText(field(), unread);
+      await tester.pump(DayCommandBar.debounce);
+      await tester.pump(DayCommandBar.refineDebounce);
+      await tester.pump();
+      expect(find.byKey(DayCommandBar.chipKeyFor('action')), findsNothing);
+    });
+
+    testWidgets('an answer for older words is dropped; the bar asks for '
+        'each settled text and leaves the one-out gate to the head',
+        (tester) async {
+      final pending = <String, Completer<CommandGuess?>>{};
+      final asked = <String>[];
+      await tester.pumpWidget(bar(refine: (text) {
+        asked.add(text);
+        return (pending[text] = Completer<CommandGuess?>()).future;
+      }));
+
+      await tester.enterText(field(), unread);
+      await tester.pump(DayCommandBar.debounce);
+      await tester.pump(DayCommandBar.refineDebounce);
+      expect(asked, [unread]);
+
+      // The words move on while the head is out. The bar asks again: how
+      // many requests reach the server is the classifier's gate
+      // (`DecisionCommandClassifier.classifyPreview`), not a second one here.
+      const newer = 'put the retro on monday 10am';
+      await tester.enterText(field(), newer);
+      await tester.pump(DayCommandBar.debounce);
+      await tester.pump(DayCommandBar.refineDebounce);
+      expect(asked, [unread, newer]);
+
+      pending[unread]!.complete(
+          const CommandGuess(CommandAction.cancel, 0.95, CommandPath.head));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(DayCommandBar.chipKeyFor('action')), findsNothing,
+          reason: 'the answer was for words no longer in the field');
+
+      pending[newer]!.complete(
+          const CommandGuess(CommandAction.move, 0.91, CommandPath.head));
+      // One pump lands the answer, the next draws it.
+      await tester.pump();
+      await tester.pump();
+      expect(chip(tester, 'action'), 'Move');
+    });
   });
 
   group('chip labels', () {

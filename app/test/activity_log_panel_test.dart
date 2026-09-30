@@ -806,6 +806,24 @@ void main() {
           'Calendar command');
     });
 
+    test('find a time says how many slots and whose calendars, then what '
+        'was done with them, in counts and enum words', () {
+      String row(Map<String, Object?> detail) =>
+          ActivityLogPanel.describe(_event(kind: 'find_time', detail: detail));
+      expect(
+          row({'source': 'graph', 'slots': 3, 'people': 2,
+              'window': 'this_week'}),
+          'Find a time — 3 slots (graph)');
+      expect(row({'source': 'local', 'slots': 1, 'people': 0,
+              'window': 'next_week'}),
+          'Find a time — 1 slot (local)');
+      expect(row({'action': 'put_in_reply'}), 'Find a time — put in reply');
+      expect(row({'action': 'send_invite'}), 'Find a time — invite sent');
+      expect(row({'action': 'add_to_calendar'}),
+          'Find a time — added to calendar');
+      expect(ActivityLogPanel.kindLabel('find_time'), 'Find a time');
+    });
+
     test('a calendar write says what it did and how many it emailed', () {
       String write(String action,
               {String status = 'ok',

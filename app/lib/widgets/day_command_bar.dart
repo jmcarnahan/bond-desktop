@@ -25,10 +25,19 @@ import 'chips.dart';
 ///
 /// **The live preview.** A synchronous parse, debounced 150 ms, read back as
 /// chips: what it will do, when (absolute, on the display zone's clock, so
-/// "tomorrow" says which tomorrow), who, which meeting, how long. No model
-/// and no network run per keystroke; the chips are what the rules already
+/// "tomorrow" says which tomorrow), who, which meeting, how long. No
+/// generative model runs per keystroke; the chips are what the rules already
 /// understood, so a missing chip is the person's cue to say it plainer
 /// before pressing Enter rather than after.
+///
+/// **The head's refine.** When the host hands a [DayCommandBar.refine] (the
+/// decision model's command head), the lexicon's chips still show at once;
+/// a further [DayCommandBar.refineDebounce] after them the bar asks the head
+/// (which keeps at most one request out, the newest text winning), and when an
+/// answer comes back for the text STILL in the field and names an action,
+/// the preview is parsed again under that guess. A late answer for older
+/// words, a null, an `unknown` or a throw leaves the lexicon's chips as they
+/// are.
 ///
 /// **A move's two times.** For a move the when chip is where the meeting
 /// GOES (the words after the split, a shift like "1 h later" included),
@@ -51,6 +60,7 @@ class DayCommandBar extends StatefulWidget {
     required this.clock,
     this.initialText,
     this.onCleared,
+    this.refine,
     this.busy = false,
     this.planStands = false,
   });
@@ -69,9 +79,16 @@ class DayCommandBar extends StatefulWidget {
   /// How long the text must sit still before the preview reads it.
   static const Duration debounce = Duration(milliseconds: 150);
 
+  /// How long after the lexicon's preview the head is asked.
+  static const Duration refineDebounce = Duration(milliseconds: 200);
+
   /// The synchronous parse; the host binds now, the zone, the people and the
-  /// meetings.
-  final ParsedCommand Function(String text) preview;
+  /// meetings. [guess] is the head's answer when [refine] gave one.
+  final ParsedCommand Function(String text, {CommandGuess? guess}) preview;
+
+  /// The decision model's command head, asked after the preview; null when
+  /// the host has none. Null or `unknown` back means "no better answer".
+  final Future<CommandGuess?> Function(String text)? refine;
 
   /// Enter. The host runs the router and owns the plan it returns.
   final Future<void> Function(String text) submit;
@@ -106,6 +123,7 @@ class _DayCommandBarState extends State<DayCommandBar> {
   final TextEditingController _text = TextEditingController();
   final FocusNode _focus = FocusNode(debugLabel: 'day-command');
   Timer? _debounce;
+  Timer? _refineTimer;
   ParsedCommand? _parsed;
 
   /// The text last submitted, while the host may be drawing a plan for it.
@@ -127,6 +145,7 @@ class _DayCommandBarState extends State<DayCommandBar> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _refineTimer?.cancel();
     _text.dispose();
     _focus.dispose();
     super.dispose();
@@ -154,6 +173,7 @@ class _DayCommandBarState extends State<DayCommandBar> {
 
   void _onChanged(String text) {
     _debounce?.cancel();
+    _refineTimer?.cancel();
     final submitted = _submitted;
     if (submitted != null && text != submitted) {
       // The words moved on: the plan they made no longer describes them.
@@ -168,13 +188,43 @@ class _DayCommandBarState extends State<DayCommandBar> {
       // The text may have moved on inside the wait; read what is there now.
       if (!mounted || _text.text != text) return;
       setState(() => _parsed = widget.preview(text));
+      if (widget.refine != null) {
+        _refineTimer =
+            Timer(DayCommandBar.refineDebounce, () => _refine(text));
+      }
     });
+  }
+
+  /// Asks the head about [text]. How many requests go out is the head's
+  /// own business — `DecisionCommandClassifier.classifyPreview` keeps one out
+  /// and sends only the newest text — so the bar asks on every settled
+  /// preview and keeps only an answer for the words still in the field.
+  Future<void> _refine(String text) async {
+    final refine = widget.refine;
+    if (!mounted || refine == null || _text.text != text) return;
+    CommandGuess? guess;
+    try {
+      guess = await refine(text);
+    } catch (e) {
+      // The head is a refinement: a failure keeps the lexicon's chips.
+      debugPrint('day command: the refine failed: ${e.runtimeType}');
+    }
+    if (!mounted) return;
+    // Only for the words still in the field: an answer for older text is
+    // dropped rather than drawn under newer words.
+    if (guess != null &&
+        guess.action != CommandAction.unknown &&
+        _text.text == text) {
+      final refined = guess;
+      setState(() => _parsed = widget.preview(text, guess: refined));
+    }
   }
 
   void _onSubmitted(String text) {
     // Read when the key lands, not when this frame was built.
     if (widget.busy || text.trim().isEmpty) return;
     _debounce?.cancel();
+    _refineTimer?.cancel();
     _submitted = text;
     setState(() => _parsed = widget.preview(text));
     unawaited(widget.submit(text));
@@ -182,6 +232,7 @@ class _DayCommandBarState extends State<DayCommandBar> {
 
   void _clear() {
     _debounce?.cancel();
+    _refineTimer?.cancel();
     _submitted = null;
     _text.clear();
     setState(() => _parsed = null);

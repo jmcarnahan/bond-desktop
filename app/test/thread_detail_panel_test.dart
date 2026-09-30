@@ -105,6 +105,7 @@ void main() {
     VoidCallback? onOpenReply,
     VoidCallback? onReopen,
     VoidCallback? onCompose,
+    VoidCallback? onFindTime,
     Widget? Function(Message message)? suggestionFor,
     Widget? Function(Message message)? meetingCardFor,
     void Function(AttachmentRef attachment)? onOpenAttachment,
@@ -147,6 +148,7 @@ void main() {
           onReopen: onReopen,
           onOpenReply: onOpenReply,
           onCompose: onCompose,
+          onFindTime: onFindTime,
           suggestionFor: suggestionFor,
           meetingCardFor: meetingCardFor,
           onOpenAttachment: onOpenAttachment,
@@ -193,6 +195,23 @@ void main() {
     await tester.tap(find.byKey(const Key('thread-compose')));
     await tester.pump();
 
+    expect(asked, 1);
+  });
+
+  testWidgets('Find a time appears only when the host offers it, worded',
+      (tester) async {
+    final messages = [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')];
+
+    await pump(tester, messages: messages);
+    expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+
+    var asked = 0;
+    await pump(tester, messages: messages, onFindTime: () => asked++);
+    expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
+    expect(find.text('Find a time'), findsOneWidget);
+
+    await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
+    await tester.pump();
     expect(asked, 1);
   });
 

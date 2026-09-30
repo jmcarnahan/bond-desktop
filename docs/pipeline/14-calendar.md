@@ -244,6 +244,10 @@ an event (changed)`; a failed accept, maybe or decline all read `couldn't
 answer a meeting`, since it gave none of them. The same rule: no subject, no
 address, no event id.
 
+Kind `find_time`, labelled **Find a time**: a search's slot count and whose
+calendars answered, and what was done with the slots — see
+[Find a time](#find-a-time).
+
 ## The two prefs and a wipe
 
 `calendar_run` and `calendar_mailbox` are declared beside the bootstrap floors
@@ -837,7 +841,7 @@ FINITE, KNOWN sets, so reading one is mostly lookup, not generation:
 
 | Slot | Known set, determined ahead of time | Resolver | Model? |
 |---|---|---|---|
-| **action**: `create`, `move`, `cancel`, `rsvp_yes`, `rsvp_no`, `rsvp_maybe`, `find_time`, `ask_free`, `ask_agenda`, `ask_person` | closed enum | the lexicon (`command_lexicon.dart`); Phase 9 puts the decision model's command head in front | only on Enter, below the bar |
+| **action**: `create`, `move`, `cancel`, `rsvp_yes`, `rsvp_no`, `rsvp_maybe`, `find_time`, `ask_free`, `ask_agenda`, `ask_person` | closed enum | the decision model's command head (`command_heads.dart`) when one ships and is sure, else the lexicon (`command_lexicon.dart`) | only on Enter, below the bar |
 | **when** | the time grammar | `resolveWhen` (`when_resolver.dart`), pure Dart | never |
 | **duration** | "30 min", "an hour", "90m" | the resolver's duration grammar | never |
 | **people** | the People directory: names and addresses from mail | `matchPeople` (`people_matcher.dart`), exact hits; ambiguous → a choice; unknown → `search_people` on Enter | never |
@@ -938,8 +942,10 @@ Questions are `Answer`s: a yes or no for a named time ("No — on Fri Oct 16 at
 2:00 PM you have Budget review."), the openings in a window, the day's
 meetings, next and last met.
 
-**The router** (`CommandRouter.submit`, Enter) asks the classifiers in order,
-parses, and calls the generative model (`calendar_intent`,
+**The router** (`CommandRouter.submit`, Enter) asks the classifiers in order
+— the command head, then the lexicon; the first answer that names an action
+wins, so a head that is absent, refused, down or under its bar (`unknown`)
+falls through to the lexicon — parses, and calls the generative model (`calendar_intent`,
 `CalendarIntentTask`) ONCE, and only when the best classifier is under the
 bar (0.8) or a required slot is unresolved with leftover words. The model
 names the action when the rules could not and COPIES phrases — when, people,
@@ -953,7 +959,8 @@ words as a subject then, they only failed to read them). A move's `when` is
 never merged: the planner reads a move's target from the typed words after
 the split, so a merged `when` would be drawn and never used. The outcome's
 `path` is `generative` only when the model's answer changed the action or
-filled a slot; an answer that added nothing leaves `lexicon`. When the model
+filled a slot; an answer that added nothing leaves the classifier's path,
+`head` or `lexicon`. When the model
 is not running the local parse stands, and a request the rules cannot finish
 says "The model isn't running; try a plainer phrasing…".
 
@@ -980,6 +987,101 @@ path: lexicon|head|generative, outcome: proposal|slots|answer|choice|cannot}`.
 Enum words only: never the text, a name or a subject. The activity panel
 reads it as "Calendar command — Move · lexicon · proposal".
 
+### The command head
+
+The decision model's second consumer (Phase 9; `10-model-routing.md`): a
+linear head on the SAME encoder triage uses, fitted on the encoder's raw
+pooled vector of the typed command, naming its action. It lives in
+`command_heads.dart` (`CommandHeads`), kept apart from the nine message heads
+(`DecisionHeads`, pinned), and asks the server through
+`DecisionClient.embedRaw` — the triage call's wire exactly: the `/tokenize`
+identity probe, `embd_normalize: -1`, the width and norm≈1 refusals, the token
+path for a long text, and one call record labelled `command_head`.
+
+- **The file.** `app/assets/calendar/command_heads.json`: `{format:
+  bond-command-heads/1, encoder_qhash, encoder_model, input: raw-text/1,
+  fields: {action: {options, weight, bias, temperature}}, fitted: {n_train,
+  n_heldout, heldout_acc, lexicon_heldout_acc, n_heldout_hard,
+  heldout_hard_acc, …}}`. The options are the ten actions in `CommandAction`
+  order without `unknown`. A file whose format, input or options differ,
+  whose weights are ragged, whose temperature is not positive, whose
+  `encoder_model` is missing or empty, or whose `encoder_qhash` is not
+  `DecisionHeads.expectedQhash` (`6eba387492208260`) is REFUSED at load.
+  `pubspec.yaml` registers the DIRECTORY `assets/calendar/`, so a build with
+  no fitted file still builds; the loader (`loadCommandHeadsAsset`,
+  `commandHeadsProvider`) reads a missing or refused file as null.
+- **Tied to the model, not only the question set.** A head reads only the
+  vector space of the encoder it was fitted on. `encoder_qhash` is the
+  QUESTION SET's hash, which two trainings on the same questions share, so
+  the fit also copies the installed `decide-heads.json`'s own `model` name
+  into `encoder_model`, and `DecisionCommandClassifier` compares it with the
+  installed heads (`decisionHeadsProvider`) at every call: another model
+  installed since the fit is no head (one debug line), never a wrong
+  answer.
+- **The bar.** `apply` is `softmax((W·x + b) / T)`; the argmax is the guess
+  when its probability is at least **0.80**, and below that the head answers
+  `unknown`, which the router passes over. The head answers only above its
+  bar.
+- **Refuse → lexicon.** `DecisionCommandClassifier` returns null for no file,
+  a refused file, a vector of another width, a model other than the head's
+  `encoder_model`, a caller's 800 ms wait running out, and every
+  decision-server exception; it never throws and never parks. It catches the
+  expected kinds by name (`LlmException` and the decision subclasses,
+  `CommandHeadsRefused`, `TimeoutException`); anything else is a bug, printed
+  with its stack in debug, and is still null. With no head the bar reads
+  exactly as it did before Phase 9.
+- **Nothing asked that could not be answered.** When the decision role is
+  not ready — its heads file is not on this Mac, or its target carries an
+  `unavailable` sentence (the managed router not serving `bond-decide`) — or
+  the installed heads name another model, the classifier returns null BEFORE
+  `embedRaw`, so no `command_head` call record and no activity row speaks of
+  a model nobody could have asked.
+- **The live preview refine.** The lexicon's chips still show 150 ms after
+  the text stops; a further 200 ms later the bar asks the head
+  (`classifyPreview`, no call record), and when an answer that names an
+  action comes back for the words still in the field, the preview is parsed
+  again under that guess. A late answer for older words is dropped. The ONE
+  gate on requests is the classifier's: the slot is held by the UNTIMED
+  request, so a caller that stopped waiting at 800 ms does not free it while
+  the server still works; a newer text starts no request of its own, waits
+  for the one out to settle, and is then sent once if it is still the newest
+  (every text overtaken meanwhile gets null). The bar keeps only the
+  "words unchanged" check.
+- **The three fixture files** (`app/test/fixtures/calendar_commands/`, all
+  fictional, `calendar_commands_fixture_test.dart` pins them):
+  `train.jsonl` (40 per action — the fit's only input), `heldout.jsonl` (10
+  per action — the number the adoption bar reads) and `heldout_hard.jsonl` (5
+  per action: indirect phrasings and typos — reported beside the held-out
+  number and deciding nothing). No held-out or hard line may be a train line
+  with its slots swapped: after masking roster names, addresses, weekdays,
+  months, times, numbers and relative days, none equals a train line.
+- **Fitting is owner-run.** `make calendar-heads` (needs `make decide`, or
+  `DECIDE_URL`, live; never beside `make model` / `make fast` on one Mac)
+  reads the installed `$(DECIDE_DIR)/$(DECIDE_HEADS)` for `qhash` and
+  `model`, embeds the three fixture files, fits `tools/calendar_heads/fit.py`
+  (numpy: L2 softmax regression, the L2 weight by 5-fold CV, the temperature
+  on a fold the weights did not see), prints the head's held-out and hard-set
+  accuracy and writes the head under the git-ignored
+  `tmp/calendar_heads/command_heads.json` (`CALHEADS_OUT`) — never the asset.
+  It then runs `test/calendar_command_heldout_test.dart`, handed that file
+  (`--dart-define=CALHEADS_JSON=…`), which prints the LEXICON's held-out and
+  hard-set accuracy, both hard-set numbers side by side, and the ADOPTION
+  LINE: `adoption: go`, `adoption: no-go (head 0.xx < 0.90)` or `adoption:
+  no-go (head 0.xx < lexicon 0.yy + 0.05)`. Every number and the verdict are
+  printed; nothing asserts a threshold.
+- **The adoption bar** (plan §1.1): the head ships only if its held-out
+  accuracy is ≥ 0.90 AND ≥ the lexicon's + 0.05; the hard set's numbers are
+  read beside it and decide nothing. On `adoption: go` the owner runs `make
+  calendar-heads-adopt`, which copies `CALHEADS_OUT` to
+  `app/assets/calendar/command_heads.json`; otherwise nothing ships and the
+  lexicon reads commands alone. All four numbers go in the
+  `docs/model-bakeoff.md` ledger — measured: head **pending owner run**,
+  lexicon **pending owner run** (serverless, the heldout test reads the
+  lexicon at 0.710 held-out and 0.140 hard on the fixture set; it read 0.830
+  held-out before fifteen held-out and hard lines that were train templates
+  with other slots were rephrased, which is the leakage the mask check now
+  refuses).
+
 ### The bar
 
 `DayCommandBar` (`widgets/day_command_bar.dart`) sits under the Day stop's
@@ -996,8 +1098,9 @@ two weeks) into `CommandRouter.preview` and `submit`, through
   "Thu Oct 15 morning", a range, or the resolver's reason), the people
   (matched names, "Dana? (2)" for a shared first name, "Sam?" for a name
   nobody in the mail has — the last two tinted for attention), the meeting
-  (its subject, or "2 matches"), the duration ("45 min"). No model, no
-  network, per keystroke. For a MOVE the when chip is where the meeting
+  (its subject, or "2 matches"), the duration ("45 min"). No generative
+  model per keystroke; when a command head ships, it refines the action
+  chip 200 ms later (The command head, above). For a MOVE the when chip is where the meeting
   goes — read from the target words after the split, a shift as "1 h later"
   / "30 min earlier" (with no duration chip) — tinted for attention while it
   cannot be read yet ("to when?", a bare hour); the time the meeting is at
@@ -1042,6 +1145,120 @@ list stays fixed at eleven. Enter on it clears Find, selects the Day stop
 and hands the text to the bar, which writes it in and submits it a frame
 later.
 
-## Later phases
+## Find a time
 
-- The decision model's command head (Phase 9).
+**What happens.** A thread asking the owner for a time gets a way to answer
+it with real free slots, on the thread and on today's agenda. No chat model
+is involved: the signal is the decision model's, already stored, and the
+slots are the calendar's.
+
+**The signal** (`app/lib/services/calendar/scheduling_ask.dart`). A thread is
+a *scheduling ask* when all three hold:
+
+- its state is `needs_reply`;
+- the owner has not written since its NEWEST inbound message
+  (`received_at DESC, source_message_id DESC`, the store's own "newest"):
+  the thread's `last_outbound_at` is absent or not after that message;
+- that message's stored decision (`message_decisions.answers_json`) has
+  `intent` = `scheduling` with the scheduling option's own probability (else
+  the choice's confidence) ≥ `DecisionPolicy.booleanYes` (0.50).
+
+A message the decision model never read (triaged before it, or gated first),
+or whose stored answers are unreadable, is not an ask. The rule has ONE
+spelling, a single SQL query —
+`MessageStore.schedulingAskConversations(limit: 200, threshold:)`: the
+threads joined to their newest inbound message joined to its decision, read
+with `json_extract` under `json_valid` inside a CASE so a bad row is no ask
+rather than a failed read, newest first, capped at 200. `schedulingAskKeys`
+turns it into the `'$source|$id'` keys, the one path the app and the tests
+share, and `schedulingAsksProvider` (`day_providers.dart`) holds that set,
+re-read when the conversation list reloads (which is what follows a triage
+pass writing new decisions, a reply going out, or a state change). No clock.
+
+**The thread header.** `ThreadActionBar` draws **Find a time** (a worded
+button beside Mark done, icon `schedule_outlined`; its word goes with Mark
+done's at narrow widths) when the host passes `onFindTime`, which the inbox
+does only when the thread's key is in the set — on the main thread AND on a
+thread open beside (a Needs You row opens beside). The pane always takes the
+main column: from the thread beside, the press selects that thread (closing
+the side panel, the thread now in the main pane) and opens the pane over it.
+
+**The pane** (`FindTimePane`, `app/lib/widgets/find_time_pane.dart`, a
+`PaneSurface` with Back and Inbox — never a dialog). It is an overlay on the
+thread (`_findTimeFor` in the inbox, a rung of `_main()` under the storyline
+picker): Back and Put in reply return to the thread, and every selection
+clears it (`_clearOverlays`, and wherever `_section` is assigned). Top to
+bottom:
+
+- **Before the zone resolves** the pane is "Reading your calendar…" with
+  Back and Inbox (`FindTimePane.waiting`), never a blank column; no search
+  runs without the display zone's clock.
+- **With** — the thread's other participants with an address, lowercased
+  (the owner and repeats left out), each removable with ✕. Removing the last leaves "Just
+  you — your own free times.", a search of the owner's own calendar.
+- **How long** — 30 / 45 / 60 min pills (30 to start).
+- **When** — This week / Next week pills. **This week** is now until Friday
+  18:00 local; on a weekend, or once less than the chosen length is left
+  before Friday 18:00, the week is over and it means the coming Monday 08:00
+  to Friday 18:00. **Next week** is the Monday
+  after that one, 08:00 to Friday 18:00. Built from dates with
+  `CalendarZone.localDateTime`, never a Duration across midnight
+  (`findTimeWindowUtc`).
+- **The search** runs as the pane opens and again 200 ms after the last
+  change of people, length or week, one in flight at a time, the newest
+  winning; "Looking…" while it runs.
+- **Up to three slots**, each "Tue Oct 20 · 10:00–10:30 AM", with the overlap
+  line when the owner's own mirror has a hard overlap there, and a caption
+  saying whose calendars answered ("when everyone is free" / "from your
+  calendar").
+
+**The search** (`searchFindTime`, `app/lib/services/calendar/find_time.dart`;
+never throws):
+
+- People on it → `find_meeting_times` with those addresses, the window, the
+  length and at most three candidates (source `graph`).
+- Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
+  the mailbox's working hours (source `local`; `find_meeting_times` refuses an
+  empty list — gotcha 28).
+- `unsupported_account` (a personal account has no free/busy for others) →
+  the same local search, with the note "Showing your own free times — your
+  account can't look up others' calendars."
+- Any other failure → no slots and its sentence as the note (a refusal's first
+  sentence, the scope sentence, "Couldn't reach the calendar to find a time.").
+- Overlaps for every slot from the mirror (`findOverlaps`).
+
+Nothing found says "No time when everyone is free this week. Try next week."
+(or "No free time …" for a search of only the owner); a failed search shows
+only its sentence, never a false all-clear.
+
+**The two actions.**
+
+- **Put these in the reply** writes ONE line naming every slot shown, with
+  the zone's abbreviation — "Would any of these work? · Tue 20 Oct 10:00–10:30
+  AM PDT · Tue 20 Oct 2:00–2:30 PM PDT" (`findTimeReplyLine`) — so the other
+  person picks. It goes AFTER whatever the box already holds (a blank line
+  between), through the box's explicit stage (`_stage`, the path a tapped
+  suggestion takes, which rebuilds the field with those words) and
+  `DraftNotifier.markEdited` (recorded as the owner's words when a draft row
+  exists); the pane closes and the cursor is in the thread's reply box.
+- **Send invite** on one slot is a `CreateEvent` — subject "Re: <thread
+  subject>" (or "Meeting"), the chip addresses as attendees, online when
+  anyone is invited — through `CalendarWriteFlow`, so an invite that emails
+  people waits on the inline confirm strip naming them ("This emails: …"),
+  and one with nobody on it (**Add to calendar**) goes straight on with its
+  Undo (the Writes policy). A sent invite toasts and returns to the thread.
+
+**Today's agenda.** `DayPane` draws **Scheduling asks · N** after today's
+rows (also on an empty day, under "Nothing on your calendar."): each thread's
+subject, who asked (the newest inbound sender's name from the participants,
+else the address), and a **Find a time** button that selects the thread and
+opens the pane over it; the row itself opens the thread. Today only, and
+agenda view only; `buildDayItems` is unchanged — the group is the pane's.
+
+**Activity.** Kind `find_time`, labelled **Find a time**: one row per search,
+`detail: {source: graph|local, slots, people, window: this_week|next_week}` —
+"Find a time — 3 slots (graph)" — and one per action, `{action: put_in_reply |
+send_invite | add_to_calendar}` — "Find a time — put in reply", "Find a time —
+invite sent", "Find a time — added to calendar" (a slot with nobody on it; the
+invite's own `calendar_write` row is the writer's, as for every write).
+Counts and enum words only.

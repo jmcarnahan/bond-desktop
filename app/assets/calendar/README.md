@@ -1,0 +1,2 @@
+`command_heads.json` is the decision model's calendar command head: a linear layer over the encoder's raw vector that names a Day-bar command's action, tied to the decision model it was fitted on (`encoder_model`) and that model's question hash (`encoder_qhash`).
+`make calendar-heads` (the owner-run fit, `tools/calendar_heads/fit.py`) writes it under the git-ignored `tmp/calendar_heads/` and prints the adoption line; `make calendar-heads-adopt` copies it here. While it is absent the bar reads commands with the lexicon alone.

@@ -9,7 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
-import '../models/calendar_models.dart' show CalendarDate, CalendarEvent;
+import '../models/calendar_models.dart' show CalendarDate, CalendarEvent, MailboxSettings;
 import '../models/context_models.dart' show ContextScopeKind;
 import '../models/draft_provenance.dart';
 import '../models/label_models.dart';
@@ -62,6 +62,8 @@ import '../services/calendar/command/command_types.dart'
     show CommandGuess, CommandPath, KnownPerson, ParsedCommand;
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
+import '../services/calendar/find_time.dart' show searchFindTime;
+import '../services/calendar/scheduling_ask.dart' show schedulingAskKey;
 import '../services/calendar/overlaps.dart'
     show FreeSlot, Overlaps, overlapsForEvent;
 import '../services/calendar/when_resolver.dart' show WhenResolution;
@@ -104,6 +106,7 @@ import '../widgets/event_actions.dart';
 import '../widgets/event_panel.dart';
 import '../widgets/files_pane.dart';
 import '../widgets/find_field.dart';
+import '../widgets/find_time_pane.dart';
 import '../widgets/find_filter.dart';
 import '../widgets/bond_avatar.dart' show BondAvatar;
 import '../widgets/home_pane.dart';
@@ -649,6 +652,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
+
+  /// The thread Find a time is open for — a pane over that thread, the same
+  /// overlay contract as the two above: Back and Put in reply return to the
+  /// thread underneath, and every selection clears it.
+  ({String source, String key})? _findTimeFor;
 
   /// Whether the New storyline pane is up — a storyline declared from a title
   /// and a charter with no thread in it yet. Same overlay contract as the two
@@ -1454,6 +1462,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _focusSideOnMount = null;
     _addingToStorylineId = null;
     _pickingStorylineForThread = null;
+    _findTimeFor = null;
     _declaringStoryline = false;
     _railOpen = false;
     _replyTo = null;
@@ -3359,6 +3368,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _find = text;
       _section = sectionForLabelFind(_section);
+      _findTimeFor = null;
       _selectedDay = null;
       _showingInvites = false;
       if (_section != RailSection.day) _forgetCommand();
@@ -4852,6 +4862,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final picking = _pickingStorylineForThread;
     if (picking != null) return _pickStorylinePane(picking);
 
+    // Over the thread it was opened for; a thread that went from under it
+    // falls through to whatever is next, and the next selection clears it.
+    final findFor = _findTimeFor;
+    if (findFor != null) {
+      final thread = _conversationFor(findFor.source, findFor.key);
+      if (thread != null) return _findTimePane(thread);
+    }
+
     final side = _side;
     // The full viewer stands wherever the file was opened from — a thread, a
     // storyline's shelf, a room, the Files stop, a person's files — as long as
@@ -4969,6 +4987,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // mirror is hidden (SDK mode, a missing scope) there is none to ask.
       commandBar: shows ? _commandBar(zone, today) : null,
       planCard: shows ? _commandCard(zone, today) : null,
+      // Today's threads asking for a time. Only today: an ask is about now,
+      // and another day's agenda is about that day.
+      schedulingAsks: day == today
+          ? _schedulingAsksIn(conversations)
+          : const <Conversation>[],
+      onFindTime: _openFindTime,
       briefHeadlines: shows
           ? ref.watch(briefHeadlinesProvider(day)).valueOrNull ??
               const <String, String>{}
@@ -5317,13 +5341,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final events = _commandEvents(today);
     return DayCommandBar(
       key: const ValueKey('day-command-bar'),
-      preview: (text) => ref.read(commandRouterProvider).preview(
+      preview: (text, {guess}) => ref.read(commandRouterProvider).preview(
             text,
             now: DateTime.now(),
             zone: zone,
             people: people,
             events: events,
+            guess: guess,
           ),
+      // The decision model's command head, after the lexicon's chips: one
+      // request out, the newest text winning, nothing drawn without a head.
+      refine: (text) =>
+          ref.read(decisionCommandClassifierProvider).classifyPreview(text),
       submit: (text) => _submitCommand(text, zone: zone),
       zone: zone,
       clock: DateTime.now,
@@ -5596,6 +5625,152 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         },
       ),
     );
+  }
+
+  /// The threads among [conversations] that [schedulingAsksProvider] says are
+  /// asking for a time, in the list's order.
+  List<Conversation> _schedulingAsksIn(List<Conversation> conversations) {
+    final keys = ref.watch(schedulingAsksProvider).valueOrNull;
+    if (keys == null || keys.isEmpty) return const [];
+    return [
+      for (final c in conversations)
+        if (keys.contains(schedulingAskKey(c.source, c.id))) c,
+    ];
+  }
+
+  /// Opens Find a time over the thread: selected first when it is not the
+  /// main pane's already (a Day row, or the thread beside — whose panel the
+  /// selection closes, the thread now standing in the main column), so Back
+  /// and Put in reply land on it.
+  void _openFindTime(String source, String key) {
+    if (_selectedId != key || _selectedSource != source) {
+      _select(key, source: source);
+    }
+    setState(() => _findTimeFor = (source: source, key: key));
+  }
+
+  /// Find a time for [thread]: its other people, the search, and the two
+  /// ways out of a slot — the reply box, or an invite through the write flow.
+  Widget _findTimePane(Conversation thread) {
+    void back() => setState(() => _findTimeFor = null);
+    final zone = ref.watch(calendarZoneProvider).valueOrNull;
+    // Never a blank column: until the zone resolves the pane has no clock to
+    // draw slots on, so it says what it is waiting for and keeps its way
+    // out. Not a UTC stand-in — a search run on the wrong clock would stand
+    // until the next change of people, length or week.
+    if (zone == null) {
+      return Padding(
+        padding: const EdgeInsets.all(BondSpacing.s24),
+        child: FindTimePane.waiting(
+          onBack: back,
+          onHome: () => _selectSection(RailSection.home),
+        ),
+      );
+    }
+    final owner = _ownerRecord.address?.trim().toLowerCase();
+    final seen = <String>{};
+    final people = <FindTimePerson>[
+      for (final p in thread.participants)
+        if ((p.email ?? '').trim().isNotEmpty &&
+            p.email!.trim().toLowerCase() != owner &&
+            // A Teams roster entry is no address; a repeat is one person.
+            p.email!.contains('@') &&
+            seen.add(p.email!.trim().toLowerCase()))
+          // Lowercased, as the de-duplication above reads it: the search,
+          // the invite's attendees and the pills all key on the address.
+          (name: p.name ?? '', address: p.email!.trim().toLowerCase()),
+    ];
+    final target = (source: thread.source, conversationKey: thread.id);
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: FindTimePane(
+        key: ValueKey('find-time-${thread.source}|${thread.id}'),
+        subject: thread.subject,
+        participants: people,
+        zone: zone,
+        today: zone.dateOf(DateTime.now().toUtc()),
+        search: ({
+          required addresses,
+          required durationMinutes,
+          required window,
+        }) =>
+            _findTimeSearch(
+          addresses: addresses,
+          durationMinutes: durationMinutes,
+          window: window,
+          zone: zone,
+        ),
+        onPutInReply: (text) => _putInReply(target, text),
+        writer: ref.read(calendarWritesProvider),
+        onDone: (message, undo, invited) {
+          _calendarWriteDone(message, undo);
+          // `add_to_calendar` when nobody was on it: the event went on the
+          // owner's calendar and no invite went anywhere.
+          unawaited(ref.read(activityLogProvider).record('find_time',
+              detail: {
+                'action': invited ? 'send_invite' : 'add_to_calendar',
+              }));
+          if (mounted) back();
+        },
+        onBack: back,
+        onHome: () => _selectSection(RailSection.home),
+      ),
+    );
+  }
+
+  /// One Find a time search, and its activity row: how many slots, whose
+  /// calendars, how many people, which week — counts and enum words only.
+  Future<FindTimeResult> _findTimeSearch({
+    required List<String> addresses,
+    required int durationMinutes,
+    required FindTimeWindow window,
+    required CalendarZone zone,
+  }) async {
+    MailboxSettings? hours;
+    try {
+      hours = await ref.read(mailboxSettingsProvider.future);
+    } on Object {
+      hours = null;
+    }
+    final result = await searchFindTime(
+      backend: ref.read(calendarBackendProvider),
+      calendar: ref.read(calendarStoreProvider),
+      hours: hours,
+      addresses: addresses,
+      durationMinutes: durationMinutes,
+      window: window,
+      now: DateTime.now(),
+      zone: zone,
+    );
+    unawaited(ref.read(activityLogProvider).record('find_time', detail: {
+      'source': result.source,
+      'slots': result.slots.length,
+      'people': addresses.length,
+      'window': window.wire,
+    }));
+    return result;
+  }
+
+  /// Put in reply: [text] goes after whatever the box already holds (a blank
+  /// line between), through the box's explicit stage — the path a tapped
+  /// suggestion takes — and is recorded on the draft as the owner's words.
+  /// Back on the thread, the cursor is in the box.
+  void _putInReply(DraftTarget target, String text) {
+    final draft = ref.read(draftProvider(target));
+    final edited = (draft.draft?['status'] as String?) == 'edited';
+    final current =
+        (_stagedBodyFor(target, draft) ?? (edited ? draft.body : null) ?? '')
+            .trimRight();
+    final body = current.isEmpty ? text : '$current\n\n$text';
+    setState(() => _findTimeFor = null);
+    _stage(target, body: body);
+    unawaited(ref.read(draftProvider(target).notifier).markEdited(body));
+    unawaited(ref
+        .read(activityLogProvider)
+        .record('find_time', detail: const {'action': 'put_in_reply'}));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _mainComposerFocus.requestFocus();
+    });
   }
 
   /// Which storyline [thread] joins, or the one it starts.
@@ -6358,6 +6533,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // else has no business opening: the ✕ and the ⤢ are the two ways out of
       // the side panel.
       onCompose: inSidePanel ? null : () => unawaited(_composeFrom(selected)),
+      // Only on a thread asking for a time. From the thread BESIDE too — a
+      // Needs You row opens beside — where it moves the thread into the main
+      // column and opens the pane there ([_openFindTime]), as Find a time
+      // always takes the main pane.
+      onFindTime: (ref.watch(schedulingAsksProvider).valueOrNull ?? const {})
+              .contains(schedulingAskKey(selected.source, selected.id))
+          ? () => _openFindTime(selected.source, selected.id)
+          : null,
       // Opening a file always lands on the split, never on the full pane the
       // user may have left open for the last one. From the MAIN thread it is a
       // selection like any other and replaces whatever was beside; from the

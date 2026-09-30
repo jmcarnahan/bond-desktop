@@ -117,10 +117,10 @@ class CommandGuess {
       'CommandGuess(${action.wire}, $confidence, ${path.name})';
 }
 
-/// Something that can name the action of a command. The lexicon is the first
-/// implementation; Phase 9 puts the decision model's command head in front of
-/// it. A classifier that cannot answer (a head that is not loaded) returns
-/// null and the router asks the next one.
+/// Something that can name the action of a command: the decision model's
+/// command head (`DecisionCommandClassifier`), then the lexicon. A classifier
+/// that cannot answer (a head that is not loaded) returns null, and one that
+/// is unsure returns `unknown`; either way the router asks the next one.
 abstract interface class CommandClassifier {
   Future<CommandGuess?> classify(String text);
 }

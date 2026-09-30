@@ -230,6 +230,10 @@ class ThreadDetailPanel extends StatefulWidget {
   /// button, for a host with no compose to open.
   final VoidCallback? onCompose;
 
+  /// Opens Find a time for this thread. The host decides whether the thread
+  /// is asking for one (its scheduling read); null draws no button.
+  final VoidCallback? onFindTime;
+
   /// What opening one of the thread's files does. Null leaves every chip and
   /// picture in the transcript a statement — the panel has nowhere of its own
   /// to show a file, and never invents one.
@@ -367,6 +371,7 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onWhy,
     this.onPeople,
     this.onCompose,
+    this.onFindTime,
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
@@ -1343,6 +1348,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       onContext: widget.onContext,
       contextLinked: widget.contextLinked,
       onCompose: widget.onCompose,
+      onFindTime: widget.onFindTime,
       labels: c.labels,
       onAddLabel: open == null ? null : () => open(LabelPickerMode.label),
       onRemoveLabel: widget.onRemoveLabel,

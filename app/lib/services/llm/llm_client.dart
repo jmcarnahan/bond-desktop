@@ -201,8 +201,9 @@ class LlmFormatException extends LlmException {
 /// who is listening.
 class LlmCallRecord {
   /// Which task asked — a [completeJson] caller's `schemaName`, `'complete'`
-  /// for free text, or `'decision'` for the decision model's embedding call
-  /// (`DecisionClient`). The task names in the app today: `message_text`,
+  /// for free text, `'decision'` for the decision model's embedding call
+  /// (`DecisionClient`), or `'command_head'` for its raw-vector call
+  /// (`DecisionClient.embedRaw`, the Day bar's command head). The task names in the app today: `message_text`,
   /// `needs_you`, `attachment_digest`, `context_file_digest`,
   /// `context_brief`, `context_select`, `draft_reply`
   /// (Improve a draft reuses it), `storyline_membership`, `storyline_name`,

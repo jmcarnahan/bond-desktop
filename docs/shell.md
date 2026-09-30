@@ -195,7 +195,7 @@ screen — what it reads, what each lever writes — is in
 
 `_main()`'s ladder is the priority order, top rung first: compose → Settings →
 activity log → add-thread picker → declare-storyline pane → pick-storyline
-picker → full file viewer → thread → storyline → **room** → **Drafts & sent** →
+picker → **Find a time** → full file viewer → thread → storyline → **room** → **Drafts & sent** →
 Inbox → **Day** → AI → section overview. A pane outranks what it was opened
 from because it is the newer thing the user asked for. Drafts & sent sits
 directly above the Inbox because its row lives in the Inbox stack. Day sits
@@ -213,6 +213,20 @@ alone, and only the setters that move `_section` clear it.
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
+| a row in today's **Scheduling asks · N** | that thread, in main (`_select`) |
+| its **Find a time** button | that thread in main, with `FindTimePane` over it (`_openFindTime`) |
+
+**Find a time** (`FindTimePane`, `docs/pipeline/14-calendar.md` "Find a
+time") is an overlay on the MAIN thread, the pick-storyline picker's
+contract: the thread's action bar draws the worded **Find a time** button
+beside Mark done only on a `needs_reply` thread whose newest inbound mail the
+decision model read as scheduling — on the main thread and on a thread
+beside, where the press moves that thread into the main column (closing the
+side panel) and opens the pane over it, since the pane always takes the main
+pane. Until the display zone resolves it reads "Reading your calendar…" with
+Back, never a blank column. Its Back, a sent invite and **Put these
+in the reply** all return to the thread — the last with the slots written
+into its reply box and the cursor there — and any selection clears it.
 
 ---
 

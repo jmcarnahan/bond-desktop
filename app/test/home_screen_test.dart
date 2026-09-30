@@ -152,6 +152,7 @@ void main() {
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
       keepingDecisionClient(),
+      noCommandHeads(),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       // Unstarted, so it owns no sweep timer — this file's container is

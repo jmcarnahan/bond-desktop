@@ -2631,6 +2631,68 @@ WHERE COALESCE(cta_text, '') <> ''
     );
   }
 
+  /// The threads asking for a time (`services/calendar/scheduling_ask.dart`,
+  /// docs/pipeline/14-calendar.md "Find a time"), newest first, at most
+  /// [limit] — in ONE query, so the Day stop and the thread header cost a
+  /// read, not a read per thread.
+  ///
+  /// A thread is one when it `needs_reply`, its NEWEST inbound message (by
+  /// `received_at DESC, source_message_id DESC`, [latestInboundMeta]'s
+  /// order) has a `message_decisions` row whose intent head chose
+  /// `scheduling` with that option's probability — else the choice's own
+  /// confidence, for a row without per-option probabilities — at least
+  /// [threshold], and the owner has not written since that message
+  /// (`last_outbound_at` absent or not after it). This is the rule's one
+  /// spelling; the caller supplies only the policy's number.
+  ///
+  /// `answers_json` is read under `json_valid` inside a CASE, which SQLite
+  /// evaluates lazily, so an unreadable row is simply not an ask rather than
+  /// a malformed-JSON error failing the whole read.
+  Future<List<({String source, String conversationKey})>>
+      schedulingAskConversations({
+    int limit = 200,
+    required double threshold,
+  }) async {
+    final rows = await db.customSelect(
+      'SELECT c.source AS source, c.conversation_key AS conversation_key '
+      'FROM conversations c '
+      'JOIN ('
+      '  SELECT m.source AS source, m.conversation_key AS conversation_key, '
+      '    m.source_message_id AS source_message_id, '
+      '    m.received_at AS received_at, '
+      '    ROW_NUMBER() OVER ('
+      '      PARTITION BY m.source, m.conversation_key '
+      '      ORDER BY m.received_at DESC, m.source_message_id DESC'
+      '    ) AS rn '
+      '  FROM messages m '
+      "  WHERE m.direction = 'inbound'"
+      ') n ON n.source = c.source '
+      '  AND n.conversation_key = c.conversation_key AND n.rn = 1 '
+      'JOIN message_decisions d ON d.source = n.source '
+      '  AND d.source_message_id = n.source_message_id '
+      "WHERE c.state = 'needs_reply' "
+      "  AND (c.last_outbound_at IS NULL OR c.last_outbound_at <= "
+      "       COALESCE(n.received_at, '')) "
+      '  AND CASE WHEN json_valid(d.answers_json) THEN '
+      "    json_extract(d.answers_json, '\$.intent.choice') = 'scheduling' "
+      '    AND COALESCE('
+      "      json_extract(d.answers_json, '\$.intent.probabilities.scheduling'), "
+      "      json_extract(d.answers_json, '\$.intent.confidence'), 0) >= ? "
+      '  ELSE 0 END '
+      "ORDER BY COALESCE(c.last_message_at, c.last_inbound_at, '') DESC, "
+      '  c.conversation_key DESC '
+      'LIMIT ?',
+      variables: _args([threshold, limit]),
+    ).get();
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          conversationKey: row.data['conversation_key'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// Records what the needs-you pass decided about one message.
   ///
   /// Targeted like [writeTriage], and for the same reason: this stage owns

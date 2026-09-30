@@ -83,6 +83,29 @@ the decision pass, the needs-you band when the decision is unsure, and one
 records (`LlmCallRecord.label`) is its schema: `decision`, `message_text`,
 `needs_you`, …
 
+**The decision model's second consumer: the Day bar's command head (Phase
+9).** The calendar command bar asks the SAME decision client
+(`decisionClientProvider`, so the same target, key, identity probe and heads
+file) for the raw pooled vector of a typed command
+(`DecisionClient.embedRaw`, call records labelled `command_head`) and applies
+a second, separately fitted linear head in Dart (`CommandHeads`,
+`app/assets/calendar/command_heads.json`, tied to the question set's
+`expectedQhash` AND to the installed model by name, `encoder_model` against
+the installed heads' `model`). Unlike triage it never parks: no head file, a
+refused one, a head fitted on another model, a decision role that is not
+installed or not served (then no request is made at all), or a decision
+server that is down means the lexicon reads the command alone
+([14-calendar.md](14-calendar.md#the-command-head)). There is no stage row
+and no routing of its own; it follows the decision role wherever that runs.
+
+**Its third: scheduling asks (Phase 9).** Find a time makes NO model call: it
+reads the `intent` answer triage already stored in `message_decisions` for a
+thread's newest inbound message, and a `needs_reply` thread whose answer is
+`scheduling` at p ≥ `DecisionPolicy.booleanYes` gets the thread header's
+**Find a time** and a row in today's "Scheduling asks · N"
+([14-calendar.md](14-calendar.md#find-a-time)). A message the decision model
+never read is simply not an ask.
+
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
 model is text a person reads, and one server for all of it is one prompt cache,
@@ -255,7 +278,9 @@ and `baseUrl`, and the activity log folds the model into the row as
 `detail_json` as `first_token_ms` only when there was one (only the draft
 streams). A constrained call whose content is not the JSON object it asked for
 is recorded as `format`, never `ok`. The decision client reports ONE record per
-decision or batch, labelled `decision`, however many HTTP requests it took.
+decision or batch, labelled `decision`, however many HTTP requests it took;
+`embedRaw` reports one labelled `command_head` on Enter and none for the live
+preview's keystrokes, which are no unit of work.
 
 **Two wires, one client.** `LlmClient` speaks the OpenAI wire and Bedrock's
 Converse (`LlmWire.bedrockConverse`). On Converse a JSON answer is a forced

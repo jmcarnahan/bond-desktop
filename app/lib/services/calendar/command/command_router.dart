@@ -86,8 +86,10 @@ class CommandRouter {
     this.confidenceBar = 0.8,
   }) : _activity = activityLog ?? ActivityLog.disabled();
 
-  /// Asked in order; the first non-null answer wins. The lexicon today;
-  /// Phase 9 puts the decision model's command head in front of it.
+  /// Asked in order; the first answer that names an action wins. The
+  /// decision model's command head first, then the lexicon
+  /// (`commandRouterProvider`). A null or an `unknown` is no answer, so a
+  /// head under its bar falls through: the head answers only above its bar.
   final List<CommandClassifier> classifiers;
   final CommandPlanner planner;
 
@@ -252,7 +254,7 @@ class CommandRouter {
     for (final c in classifiers) {
       try {
         final g = await c.classify(text);
-        if (g != null) return g;
+        if (g != null && g.action != CommandAction.unknown) return g;
       } on Object catch (e) {
         // A classifier that throws (a head whose server went away) is one
         // that did not answer.

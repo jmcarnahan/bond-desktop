@@ -6,8 +6,10 @@ import '../models/calendar_models.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
 import '../services/calendar/overlaps.dart';
+import '../services/calendar/scheduling_ask.dart';
 import '../services/decision/stored_decision.dart';
 import 'app_providers.dart';
+import 'conversations_provider.dart';
 
 /// The Day stop's reads.
 ///
@@ -186,3 +188,24 @@ Future<List<CalendarEvent>> _between(
       fromDate: from,
       toDateExclusive: toExclusive,
     );
+
+/// The `'$source|$id'` keys of the threads asking for a time
+/// ([schedulingAskKeys]): the thread header's Find a time and the Day stop's
+/// "Scheduling asks" group read the same set.
+///
+/// Re-read whenever the list reloads — which is what follows a triage pass
+/// writing new decisions, a reply going out, or a thread changing state. A
+/// calendar revision changes none of that, so it is not watched. One query
+/// ([MessageStore.schedulingAskConversations]). No clock: the rule is about
+/// the thread's state and its newest message, not the time.
+final schedulingAsksProvider =
+    FutureProvider.autoDispose<Set<String>>((ref) async {
+  final state = ref.watch(conversationsProvider);
+  if (state is! ConversationsLoaded) return const {};
+  try {
+    return await schedulingAskKeys(ref.watch(messageStoreProvider));
+  } on Object catch (err) {
+    debugPrint('scheduling asks could not be read: $err');
+    return const {};
+  }
+});

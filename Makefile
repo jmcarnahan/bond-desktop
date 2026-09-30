@@ -184,6 +184,7 @@ RESET  := \033[0m
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
         golden-gate golden-decision decision-agreement _decide-health \
+        calendar-heads calendar-heads-adopt \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -232,6 +233,8 @@ help:
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-decision → the golden set through the decision model on :$(DECIDE_PORT) (after make decide); two run files, the app's gate and the row of record's\n"
 	@printf "  make decision-agreement DECISION_DB=<copy of the app db> → the decision model against the stored 4B labels, counts only (DECISION_LIMIT=…)\n"
+	@printf "  make calendar-heads → fit the Day bar's command head on the decision model (after make decide) into $(CALHEADS_OUT); head and lexicon held-out accuracy, and the adoption line\n"
+	@printf "  make calendar-heads-adopt → ship the fitted head: copy $(CALHEADS_OUT) into the app's asset (after reading the adoption line)\n"
 	@printf "  make golden-baseline → what the shipping app scores on the golden set (needs golden/)\n"
 	@printf "  make golden-score R=<run.json> → score a golden run file (BREAKDOWN= per-bucket tables, JSON= the tallies)\n"
 	@printf "  make golden-judge-pack R=<run.json> → packets for the Claude Code rubric judge (NAME=, GOLDEN_BATCH=)\n"
@@ -912,6 +915,19 @@ DECISION_URL = $(if $(strip $(DECIDE_URL)),$(DECIDE_URL),http://127.0.0.1:$(DECI
 DECISION_DB ?=
 # How many of that copy's newest triaged inbound messages the report reads.
 DECISION_LIMIT ?= 500
+# The fictional labelled commands `make calendar-heads` fits the command head
+# on and holds out.
+CALHEADS_TRAIN ?= app/test/fixtures/calendar_commands/train.jsonl
+CALHEADS_HELDOUT ?= app/test/fixtures/calendar_commands/heldout.jsonl
+# A harder held-out set — indirect phrasings and typos that share no template
+# with train — reported beside the held-out number and never used to choose
+# anything; empty skips it.
+CALHEADS_HELDOUT_HARD ?= app/test/fixtures/calendar_commands/heldout_hard.jsonl
+# Where the fit writes the head: under the git-ignored tmp/, NEVER the app's
+# asset. A head ships only when the owner, having read the adoption line the
+# Dart leg prints (plan §1.1: >= 0.90 AND >= the lexicon + 0.05), runs
+# `make calendar-heads-adopt`.
+CALHEADS_OUT ?= tmp/calendar_heads/command_heads.json
 # Which clustering card `make golden-sweep` embeds: topics (what the app ships
 # since 2026-09-18, the card with its people segment left empty) or
 # participants (what it shipped before). The variable that bench was built to
@@ -1491,6 +1507,36 @@ decision-agreement: _decide-health
 	  --dart-define=DECISION_LIMIT='$(DECISION_LIMIT)' \
 	  --dart-define=GOLDEN_OWNER_NAME='$(GOLDEN_OWNER_NAME)' \
 	  --dart-define=GOLDEN_OWNER_ADDRESS='$(GOLDEN_OWNER_ADDRESS)'
+
+# The Day bar's command head: embed the fictional labelled commands on the
+# decision server exactly as the app's DecisionClient.embedRaw does, fit a
+# linear head with a temperature (tools/calendar_heads/fit.py, numpy only),
+# print its held-out accuracy and write $(CALHEADS_OUT), tied to the installed
+# decision model by the qhash and model name in $(DECIDE_DIR)/$(DECIDE_HEADS);
+# then the lexicon's held-out accuracy from the Dart side, which is the number
+# the head is judged against, and the adoption line. Needs `make decide` (or
+# DECIDE_URL) live, and is owner-run: never beside `make model` / `make fast`
+# on one Mac. Counts, accuracies and enum words only. DECIDE_BEARER in the
+# environment is sent as the key, if set. Nothing ships from here: see
+# calendar-heads-adopt.
+calendar-heads: _decide-health
+	@python3 tools/calendar_heads/fit.py --decide-url '$(DECISION_URL)' \
+	  --model '$(if $(strip $(DECIDE_MODEL)),$(DECIDE_MODEL),bond-decide)' \
+	  --decide-heads '$(DECIDE_DIR)/$(DECIDE_HEADS)' \
+	  --train '$(CALHEADS_TRAIN)' --heldout '$(CALHEADS_HELDOUT)' \
+	  $(if $(strip $(CALHEADS_HELDOUT_HARD)),--heldout-hard '$(CALHEADS_HELDOUT_HARD)',) \
+	  --out '$(CALHEADS_OUT)'
+	@cd $(APP_DIR) && $(FLUTTER) test test/calendar_command_heldout_test.dart --plain-name 'calendar command heldout' \
+	  --dart-define=CALHEADS_JSON='$(abspath $(CALHEADS_OUT))'
+
+# Ships the fitted head. The owner promotes a head only after reading the
+# adoption line `make calendar-heads` printed, so the copy into the app's
+# asset is its own step and never a side effect of a fit; with no fitted head
+# there is nothing to copy, and it says so.
+calendar-heads-adopt:
+	@test -f '$(CALHEADS_OUT)' || { printf "$(RED)✗$(RESET) no fitted head at $(CALHEADS_OUT) — run make calendar-heads first\n"; exit 1; }
+	@cp '$(CALHEADS_OUT)' '$(APP_DIR)/assets/calendar/command_heads.json'
+	@printf "$(GREEN)✓$(RESET) adopted $(CALHEADS_OUT) → $(APP_DIR)/assets/calendar/command_heads.json\n"
 
 # The rubric fields — label, summary, action items, the two evidence sentences
 # and a drafted reply — need a READER, and the middle step here is deliberately

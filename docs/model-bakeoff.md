@@ -1967,6 +1967,25 @@ reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreeme
 17 are the 4B's `normal` read as `low` and 4 its `normal` read as `high`. The learned gate would add 2 drops to the rules' 55 keeps. Needs-you:
 41 yes, 11 no and 3 in the band, the only 3 of 55 that still cost a generative call.
 
+**The calendar command head** (Phase 9 of the calendar round; `make calendar-heads`, owner-run
+against `make decide`). A second linear head on the same encoder, fitted by
+`tools/calendar_heads/fit.py` on the raw pooled vector of a typed Day-bar command, over the
+fictional labelled set in `app/test/fixtures/calendar_commands/` (400 train, 100 held out and 50
+hard, 40, 10 and 5 per action, no `unknown`; no held-out or hard line is a train line with its
+slots swapped). The fit writes under the git-ignored `tmp/calendar_heads/` and prints the head's
+held-out and hard-set accuracy; the Dart leg (`test/calendar_command_heldout_test.dart`) prints
+the lexicon's on the same sets and the adoption line. Adoption bar (the calendar plan §1.1): the
+head ships only at ≥ 0.90 AND ≥ the lexicon + 0.05 on the HELD-OUT set — the hard set is read
+beside it and decides nothing; on `adoption: go` the owner runs `make calendar-heads-adopt`,
+otherwise nothing ships and the lexicon reads commands alone. Read the head's number against the
+lexicon's from the same day and tree, never against 1.0. `encoder_model` is the installed
+`decide-heads.json`'s own `model` name, which the fit copies into the head and the app checks
+against the installed heads at every call; the qhash names only the question set.
+
+| date | encoder_model (qhash) | head held-out acc (n) | lexicon held-out acc (n) | head hard acc (n) | lexicon hard acc (n) | above the 0.80 bar | l2 / T | adopted | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-30 | pending owner run (qhash `6eba387492208260`; GGUF `bond-decide-mbl-v2swap-f16.gguf`) | pending owner run | pending owner run | pending owner run | pending owner run | pending owner run | pending | pending | serverless, the lexicon reads 0.710 (n=100) held-out and 0.140 (n=50) hard on this set; it read 0.830 held-out before fifteen template-sharing held-out and hard lines were rephrased |
+
 ### Recommendations (decision-model round, 2026-09-28)
 
 What the round ships, and the rows that justify each. All numbers are keep-only
