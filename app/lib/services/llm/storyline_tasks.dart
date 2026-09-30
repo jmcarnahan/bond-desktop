@@ -5,10 +5,11 @@ import 'prompt_guard.dart';
 
 /// The three language-model jobs storylines need, all of them WRITING:
 /// naming a group once it exists, re-describing it once its membership has
-/// moved, and saying where it stands as messages arrive. Every judgement is
-/// the decision model's (`storyline_judge.dart`): which threads go together
-/// (`same_effort`), whether one more thread belongs (`member_of`) and whether
-/// a charter names one specific thing (`charter_specific`).
+/// moved, and saying where it stands as messages arrive. Which threads go
+/// together is the cosine grouping's proposal, and every judgement is the
+/// decision model's (`storyline_judge.dart`): whether one more thread belongs
+/// (`member_of`) and whether a charter names one specific thing
+/// (`charter_specific`).
 ///
 /// All three follow `message_text_task.dart` exactly — const system prompt, a
 /// FLAT schema (scalars and arrays of scalars) with no ref or defs in it to
@@ -124,9 +125,9 @@ class NameInput {
   const NameInput(this.memberCards);
 }
 
-/// What the namer wrote: text only. Whether the group is one storyline was
-/// decided before it was asked (`same_effort`), and whether what it wrote is
-/// specific enough is decided after (the charter check).
+/// What the namer wrote: text only. The group was proposed before it was
+/// asked (the cosine grouping), and whether what it wrote is specific enough
+/// is decided after (the charter check).
 @immutable
 class NameResult {
   final String evidence;

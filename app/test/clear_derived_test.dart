@@ -248,7 +248,7 @@ void main() {
     });
   }
 
-  /// A row in every one of the eighteen derived tables and all seven synced
+  /// A row in every one of the seventeen derived tables and all seven synced
   /// ones, so "emptied" and "kept" are both assertions about rows that were
   /// actually there. The awkward five go in as raw INSERTs: their writers take
   /// a reconcile pass or a notification sweep, and what this test is about is
@@ -397,12 +397,6 @@ void main() {
       variables: args([fresh()]),
     );
 
-    // One cached `same_effort` answer: the sweep asks it again after a clear.
-    await store.writePairDecisions(
-      const [(a: 'hash-a', b: 'hash-b', p: 0.8)],
-      decidedBy: '$decisionQhash|heads:test@0',
-    );
-
     // The owner's own vocabulary and one thread filed under it. Kept, like a
     // sender rule: the words are theirs, not the model's. `messages.label` is
     // the model's verdict and lives in a derived table.
@@ -459,7 +453,7 @@ void main() {
       expect(classified.toSet(), equals(declared));
       // Pairwise disjoint, which the set comparison above cannot see.
       expect(classified.length, classified.toSet().length);
-      expect(MessageStore.derivedTables, hasLength(18));
+      expect(MessageStore.derivedTables, hasLength(17));
       expect(MessageStore.syncedTables, hasLength(7));
       expect(MessageStore.keptTables, hasLength(6));
     });

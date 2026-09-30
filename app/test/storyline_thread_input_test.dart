@@ -4,7 +4,6 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/decision/storyline_state.dart';
 import 'package:bond_inbox/services/decision/storyline_thread_input.dart';
-import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -121,8 +120,7 @@ void main() {
     expect(thread.previewRows, 0);
   });
 
-  test('the text is exactly renderStorylineThread over the rows, and the '
-      'hash is its sha256', () async {
+  test('the text is exactly renderStorylineThread over the rows', () async {
     await message('m1', body: 'Venues attached.', at: '2026-09-01T09:00:00Z');
 
     final thread = await storylineThreadTextFor(store, 'email', 'c1');
@@ -137,13 +135,6 @@ void main() {
         ],
       ),
     );
-    expect(thread.cardHash, hasLength(16));
-    expect(
-      thread.cardHash,
-      sha256.convert(utf8.encode(thread.text)).toString().substring(0, 16),
-    );
-    expect((await storylineThreadTextFor(store, 'email', 'c1')).cardHash,
-        thread.cardHash);
   });
 
   test('Teams: the stored topic is the subject, the stored roster the people',

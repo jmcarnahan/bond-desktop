@@ -8,16 +8,14 @@ import 'decision/storyline_state.dart';
 import 'decision/storyline_thread_input.dart';
 
 /// The numbers every storyline judgement is read against: the decision
-/// model's `member_of`, `same_effort` and `charter_specific` p(yes), and the
-/// cosine retrieval in front of them.
+/// model's `member_of` and `charter_specific` p(yes), and the cosine
+/// retrieval in front of them.
 ///
 /// The membership thresholds and the charter threshold are FITTED on the
-/// golden set against the ModernBERT v3 student (2026-09-30); [linkTau] and
-/// [pairBudgetPerPass] are PROVISIONAL, because they are read only by the
-/// decision grouping, which is a bench arm. Every one moves only with a
-/// `make golden-storyline`, `golden-declared` or `golden-sweep` row on each
-/// side, like every `DecisionPolicy` and `StorylineTuning` number. One file,
-/// so a threshold is never spelled twice.
+/// golden set against the ModernBERT v3 student (2026-09-30). Every one moves
+/// only with a `make golden-storyline`, `golden-declared` or `golden-sweep`
+/// row on each side, like every `DecisionPolicy` and `StorylineTuning`
+/// number. One file, so a threshold is never spelled twice.
 abstract final class StorylinePolicy {
   /// A thread joins a storyline the owner KEPT at p(member_of = yes) ≥ this.
   ///
@@ -51,41 +49,6 @@ abstract final class StorylinePolicy {
   /// this-many by centroid cosine and the top this-many by nearest-member
   /// cosine, merged.
   static const int assignTopK = 3;
-
-  /// How many nearest pool threads, by clustering-vector cosine, each pool
-  /// thread proposes as `same_effort` candidates in a sweep pass. The vector
-  /// only proposes the pair; the decision model judges it.
-  static const int pairNeighbours = 10;
-
-  /// The cosine a neighbour must reach to be proposed as a pair at all. As
-  /// loose as [assignRetrievalFloor], for the same reason: retrieval, never
-  /// a verdict.
-  static const double pairRetrievalFloor = 0.30;
-
-  /// How many NEW pairs one sweep pass may send to the decision model. The
-  /// answers are cached (`pair_decisions`), so a pool larger than this
-  /// converges over a few passes, newest threads' pairs first; a pair left
-  /// unscored reads as p = 0 in the pass that skipped it.
-  ///
-  /// PROVISIONAL, read only by the decision bench arm. The golden pool of 71
-  /// threads proposes about 570 candidate pairs, so a first pass over it
-  /// defers (2026-09-30: 400 scored, 166 deferred, 5 clusters deferred), and
-  /// the golden sweep bench keeps running passes while clusters are deferred.
-  static const int pairBudgetPerPass = 400;
-
-  /// Two clusters merge while the mean `same_effort` p between them is at
-  /// least this (average linkage), and a member whose mean p to the rest of
-  /// its cluster falls under it is an outlier and returns to the pool.
-  ///
-  /// PROVISIONAL and not shipped: read only by the decision bench arm. The
-  /// scale is the v3 student's, whose `same_effort` p over the golden pool
-  /// is compressed near zero (AUC 0.888; 5% false links at 50% recall sits at
-  /// p 0.01, 13% at 70% recall at p 0.002), so a neutral 0.5 links nothing.
-  /// Golden sweep rows on 2026-09-30 (id score / correct positives /
-  /// forbidden hits / formed): 0.0018 → 57/98, 13, 5, 6; 0.004 → 55/98, 13,
-  /// 4, 8 and 0.008 → 51/98, 18, 7, 10 (both at a 2,000-pair budget, not the
-  /// shipped 400); 0.0135 → 50/98, 0, 0 on one budget-bound pass. 0.008 is the row with the most correct positives.
-  static const double linkTau = 0.008;
 
   /// A named cluster's title and charter pass the charter check at
   /// p(charter_specific = yes) ≥ this; under it the cluster is filed
@@ -154,13 +117,6 @@ class StorylineJudge {
 
   /// When each thread's last body fetch failed, as `'<source>\n<key>'`.
   final Map<String, DateTime> _fetchFailedAt = {};
-
-  /// The fetches that already succeeded since [beginPass], as the thread and
-  /// the preview ids asked for. A message whose fetched body is empty still
-  /// renders its preview, so without this every judgement of its thread in a
-  /// pass would fetch it again; a NEW preview row is a different set of ids
-  /// and is fetched.
-  final Set<String> _fetched = {};
 
   /// Throws the park a question would throw when the decision model plainly
   /// cannot answer, asking it nothing ([DecisionClient.ensureReady]). The
@@ -240,25 +196,11 @@ class StorylineJudge {
     return sameEffortOfTexts(rendered);
   }
 
-  /// [sameEffort] over thread texts the caller already built — the sweep's
-  /// pair scoring, which builds each pool thread's text once per pass and
-  /// needs its hash for the pair cache before it asks anything.
+  /// [sameEffort] over thread texts the caller already built — the golden
+  /// pairs bench (`make golden-pairs`), which builds each pool thread's text
+  /// once for every pair it is in.
   Future<List<double>> sameEffortOfTexts(List<(String, String)> pairs) =>
       _decision.askPairs(pairs);
-
-  /// Forgets which threads' body fetches already landed, so a pass that
-  /// starts now may fetch each of them once more; inside the pass a thread is
-  /// fetched at most once. The sweep calls it at the top of a pass. The
-  /// FAILURE memo is not touched: a mail server that was down a minute ago is
-  /// not asked again until [fetchRetryAfter] has passed, whichever pass asks.
-  void beginPass() => _fetched.clear();
-
-  /// Who answers `same_effort` now, as the sweep's pair cache keys it:
-  /// `'<qhash>|<model identity>'` ([DecisionClient.modelIdentity]). Another
-  /// question set, another backend or a re-installed model is another key,
-  /// and its pairs are asked again.
-  Future<String> decidedBy() async =>
-      '$decisionQhash|${await _decision.modelIdentity()}';
 
   /// One thread's text, with the bodies of its preview rows fetched first.
   ///
@@ -279,12 +221,9 @@ class StorylineJudge {
     if (failedAt != null && _now().difference(failedAt) < fetchRetryAfter) {
       return first;
     }
-    final asked = '$id\n${first.previewIds.join('\n')}';
-    if (_fetched.contains(asked)) return first;
     try {
       await ensure(source, key, first.previewIds);
       _fetchFailedAt.remove(id);
-      _fetched.add(asked);
     } catch (e) {
       _fetchFailedAt[id] = _now();
       debugPrint('storyline judge: fetching bodies for $source failed: $e');

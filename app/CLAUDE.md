@@ -231,49 +231,27 @@ enforce the ones that are commands.
   yes must clear 0.74 for a suggested storyline. Storyline tests script `member_of`
   through `scriptedJudge(store, llm)` (`fake_decision_client.dart`): a
   `{'p': …}` step under the `member_of` schema name, one call per thread.
-- The sweep groups by COSINE: `StorylineTuning.groupingMode =
-  GroupingMode.cosine` ships (with the model charter check and `member_of`
-  confirms), and it is the one reader of `clusterLinkThreshold`,
-  `clusterCoherenceFloor` and the split ladder. `GroupingMode.decision` is the
-  BENCH ARM (`SWEEP_GROUPING=decision`; the Makefile and
-  `GoldenDefines.sweepGroupingRaw` both default to cosine): it did not beat
-  cosine on the v3 golden sweep (57/98 at best against 60/98), because
-  `same_effort`'s p on the golden pool is compressed near zero, so its
-  `linkTau` (0.008) and `pairBudgetPerPass` (400) stay PROVISIONAL. A test
-  about it passes `groupingMode: GroupingMode.decision` and writes any p that
-  a MEAN is compared on through `onLinkScale` (`fake_decision_client.dart`,
-  the 0.5-centred scale moved onto `linkTau`'s); a plain no is 0.0, never
-  0.05, which clears a 0.008 bar. Under it cosine only proposes candidate pairs
-  (each pool thread's top `StorylinePolicy.pairNeighbours` at
-  `pairRetrievalFloor`, plus every pair sharing a series key), the decision
-  model's `same_effort` judges them, and `clusterByAverageLinkage` forms the
-  clusters at `linkTau` — an optimistic round over the answered pairs, then
-  each cluster COMPLETED (its unasked internal pairs asked) and judged again
-  on the full matrix, or deferred when the budget cannot complete it — and
-  drops outliers before naming. The golden sweep's keep-all loop runs on
-  while a quiet pass deferred clusters (`sweepLoopContinues`, up to
-  `sweepDeferredPassCap` 8), because the golden pool's ~570 candidate pairs
-  overrun one pass's budget. The answers are cached in `pair_decisions` (v23, DERIVED) under both
-  thread texts' `cardHash` and, in the `qhash` column, `decidedBy` =
-  `'<qhash>|<model identity>'`
-  (`DecisionClient.modelIdentity`, so a swapped or re-installed model re-asks;
-  a test's fake answers `fake-model`), pruned at each decision pass by AGE
-  only (30 days; reads filter on `decidedBy`, so both backends' caches
-  survive a role switch), at most `pairBudgetPerPass` new pairs a
-  pass, written per batch only after the batch returns. The namer
-  (`NameStorylineTask`) only WRITES — no `coherent`/`outliers` — and
+- The sweep groups by COSINE (`StorylineGrouper.candidates`, the one reader
+  of `clusterLinkThreshold`, `clusterCoherenceFloor` and the split ladder):
+  cosine PROPOSES the clusters and the decision model JUDGES them — the namer
+  (`NameStorylineTask`) only WRITES (no `coherent`/`outliers`),
   `StorylineTuning.charterCheck` (`CharterCheck.model`: `charter_specific` at
   `charterSpecificTau`; `CharterCheck.lint`: the regex, `SWEEP_CHARTER=lint`)
-  files a refused cluster `possible`. `maxQuestionsPerPass` counts NAMING calls
-  only. `GroupThreadsTask`, the `storyline_group` stage and the `model`/`pool`
-  modes are gone. `ensureReady` runs before the first pair, and
-  `StorylineJudge.beginPass()` at the sweep's top makes each thread's body
-  fetch at most once a pass (it forgets successes only; the five-minute
-  failure memo survives passes). Storyline service tests answer `same_effort`
-  (under the decision arm) through `sweepJudge` (`storyline_service_test.dart`: from the seeded vectors
-  at the file's own `sweepJudgeLinkCosine`, unless the test scripts it) or
-  `sameEffortAmong`/`sameEffortBy` (`fake_decision_client.dart`), and
-  `charter_specific` with `{'p': …}` like `member_of`.
+  files a refused cluster `possible`, and each member is confirmed on
+  `member_of`. `maxQuestionsPerPass` counts NAMING calls only, and
+  `ensureReady` runs before the first naming call. A pair grouping on
+  `same_effort` (cosine proposed pairs, average linkage over the judged pairs,
+  a `pair_decisions` cache) was measured on the v3 golden sweep (57/98 at
+  best against cosine's 60/98, because `same_effort`'s p on the golden pool
+  is compressed near zero) and REMOVED on 2026-09-30, with its v23 table:
+  unused code does not stay as a dark arm. The `same_effort` head stays in
+  the contract (`StorylineQuestion.sameEffort`, `DecisionClient.askPairs`,
+  `StorylineJudge.sameEffortOfTexts`), and `make golden-pairs` is how a
+  future `same_effort` model is measured before a grouping on it is built
+  again. `GroupThreadsTask`, the `storyline_group` stage and the
+  `model`/`pool` modes are gone too. Storyline service tests answer
+  `charter_specific` through `sweepJudge` (`storyline_service_test.dart`: a
+  yes unless the test scripts it) with `{'p': …}` like `member_of`.
 - The storyline service is four files now and one public face: the user
   actions in `storyline_edits.dart` (`StorylineEdits`), the clustering in
   `storyline_grouper.dart` (`StorylineGrouper`), the shared card statics in
@@ -717,7 +695,7 @@ enforce the ones that are commands.
   stuck at "triaging" or as RenderFlex overflows, not as a clear failure.
   `FakeDecisionClient`'s storyline `ask` answers `defaultYes` for any state no
   `yes(question, contains, p)` script matches, and `defaultYes` is 0.0, so an
-  unscripted `member_of` or `same_effort` files and links NOTHING: a storyline
+  unscripted `member_of` files NOTHING: a storyline
   test that expects a filing scripts its yes (or builds
   `FakeDecisionClient.storyline(defaultYes: …)`).
 - Generated drift schema files (`drift_schemas/bond/drift_schema_vN.json`,

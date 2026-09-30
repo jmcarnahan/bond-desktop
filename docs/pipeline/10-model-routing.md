@@ -33,8 +33,8 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 
 There is no storyline-membership or storyline-grouping stage: whether a thread
 belongs to a storyline is the decision model's `member_of`, which threads the
-sweep groups is the cosine clustering (the decision model's `same_effort` only
-under the golden sweep's bench arm), and whether a charter names one specific
+sweep groups is the cosine clustering (a pair grouping on the decision model's
+`same_effort` was measured and removed), and whether a charter names one specific
 effort is its `charter_specific`, all asked through `StorylineJudge` on the
 decision client (the calls are labelled `decision:<question id>`). A decision
 failure parks the storyline lane as it parks triage (see

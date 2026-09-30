@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -12,8 +11,6 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
-import 'package:bond_inbox/services/decision/storyline_thread_input.dart'
-    show storylineThreadTextFor;
 // `show`: the charter centroid goes through the ONE clustering-card recipe,
 // and this file pins its bytes against that same call rather than against a
 // literal that would agree only until the shipped variant moved.
@@ -38,7 +35,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_decision_client.dart'
-    show ScriptedDecisionClient, onLinkScale, pairTextsOf, scriptedJudge;
+    show ScriptedDecisionClient, scriptedJudge;
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
@@ -190,79 +187,17 @@ class UnindexedStore extends MessageStore {
 /// to read.
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
-/// [scriptedJudge] with the sweep's two other questions answered wherever the
-/// test did not script them itself: `same_effort` from the clustering
-/// vectors the test seeded ([cosineSameEffort]) and `charter_specific` a yes.
-///
-/// Most tests here were written against the cosine clustering and are about
-/// something past it — the probe, the room, the series pre-pass, the possible
-/// rows, the fragments — and the cosine clustering is again what ships, so
-/// they build their service with the default mode and no pair is asked.
-/// Answering each pair from the vectors those tests already laid out keeps
-/// their groups what they were written as under the decision bench arm too;
-/// a test about that grouping passes `GroupingMode.decision` and scripts
-/// `same_effort` by thread, on [onLinkScale] where a mean is compared.
+/// [scriptedJudge] with the sweep's charter question answered wherever the
+/// test did not script it itself: `charter_specific` a yes. Most tests here
+/// are about something past the charter check — the probe, the room, the
+/// series pre-pass, the possible rows, the fragments — and a yes keeps each
+/// cluster on to its confirms.
 StorylineJudge sweepJudge(MessageStore store, ScriptedLlm llm) {
-  if (!llm.isScripted('same_effort')) {
-    llm.answer('same_effort', cosineSameEffort(store));
-  }
   if (!llm.isScripted('charter_specific')) {
     llm.answer('charter_specific', const {'p': 0.9});
   }
   return scriptedJudge(store, llm);
 }
-
-/// The cosine at which [cosineSameEffort] calls two seeded threads one
-/// effort. This file's own number — the value the tests' geometry was laid
-/// out against (the cosine baseline's link threshold when they were
-/// written) — so moving `StorylineTuning.clusterLinkThreshold` cannot quietly
-/// regroup every sweep test here.
-const double sweepJudgeLinkCosine = 0.48;
-
-/// A `same_effort` step that answers a pair from the two threads' stored
-/// clustering vectors: 0.9 when their cosine reaches
-/// [sweepJudgeLinkCosine], 0.0 otherwise. Each thread is found by its rendered
-/// text, read back from [store] (re-read whenever a text is new).
-FutureOr<Map<String, dynamic>> Function(LlmCall) cosineSameEffort(
-  MessageStore store,
-) {
-  final vectorOf = <String, List<double>>{};
-  Future<List<double>?> lookup(String text) async {
-    if (vectorOf[text] case final vector?) return vector;
-    for (final row in await store.conversationsWithEmbeddings(
-      embedModel: EmbeddingsClient.modelTag,
-      sources: const ['email', 'teams'],
-    )) {
-      final blob = row['embedding'];
-      if (blob is! Uint8List) continue;
-      final thread = await storylineThreadTextFor(
-        store,
-        row['source'] as String,
-        row['conversation_key'] as String,
-      );
-      vectorOf[thread.text] = decodeEmbedding(blob);
-    }
-    return vectorOf[text];
-  }
-
-  return (call) async {
-    final (a, b) = pairTextsOf(call.user);
-    final va = await lookup(a);
-    final vb = await lookup(b);
-    final linked = va != null &&
-        vb != null &&
-        cosine(va, vb) >= sweepJudgeLinkCosine;
-    return {'p': linked ? 0.9 : 0.0};
-  };
-}
-
-/// The task names of [llm]'s calls past the grouping: every call but the
-/// sweep's `same_effort` pairs. What a test that says "no model was asked
-/// about this cluster" means now that the pairs are judged first.
-List<String> pastPairs(ScriptedLlm llm) => [
-      for (final schema in llm.schemas)
-        if (schema != 'same_effort') schema,
-    ];
 
 /// One `member_of` answer, as the scripted judge reads it: `{'p': …}`.
 ///
@@ -1886,7 +1821,7 @@ void main() {
 
       // Not one call: the pair never reached the namer, so there is nothing
       // to tombstone either — it is back in the pool for a third thread.
-      expect(pastPairs(llm), isEmpty);
+      expect(llm.calls, isEmpty);
       expect(await store.loadStorylines(), isEmpty);
 
       await seed(store, 'c3',
@@ -1941,7 +1876,7 @@ void main() {
 
       await StorylineService(store, llm, judge: sweepJudge(store, llm)).sweep();
 
-      expect(pastPairs(llm), isEmpty);
+      expect(llm.calls, isEmpty);
       expect(await store.loadStorylines(), isEmpty);
       // No tombstone either: nothing was asked, so there is no answer to
       // remember and no hash to recognise.
@@ -2348,7 +2283,7 @@ void main() {
       // c1's only partner is finished. The three threads left are well over
       // the sweep's floor, so the pass runs — and c1, c3 and c4 sit too far
       // apart to link, so no cluster forms and no model is dialled.
-      expect(pastPairs(llm), isEmpty);
+      expect(llm.calls, isEmpty);
       expect(await store.loadStorylines(), isEmpty);
     });
 
@@ -2372,7 +2307,7 @@ void main() {
       // sweep's floor, so the pass runs. What keeps it silent is that c1 was
       // c2's only partner: c2, c3 and c4 link to nothing at
       // `clusterLinkThreshold`, so no cluster forms and no model is dialled.
-      expect(pastPairs(llm), isEmpty);
+      expect(llm.calls, isEmpty);
       expect(await store.loadStorylines(), hasLength(1));
     });
 
@@ -2649,16 +2584,14 @@ void main() {
         llm,
         judge: sweepJudge(store, llm),
         possibleHoldsRoom: false,
-        groupingMode: GroupingMode.decision,
       );
 
       await service.sweep();
 
       // Three, the per-pass cap: the room never ran out, the cap did. It
-      // counts naming calls alone — every pair of all five clusters was
-      // judged, and the charter checks ran, without spending any of it.
+      // counts naming calls alone — the charter checks ran without spending
+      // any of it.
       expect(StorylineTuning.maxQuestionsPerPass, 3);
-      expect(llm.callsFor('same_effort'), 30);
       expect(llm.callsFor('charter_specific'), 3);
       expect(
         await store.loadStorylines(statuses: const ['possible']),
@@ -3084,7 +3017,7 @@ void main() {
 
       // The sweep rebuilds exactly that trio, and stops on a hash nothing in
       // the app writes any more — before a single call past the pairs.
-      expect(pastPairs(llm), isEmpty);
+      expect(llm.calls, isEmpty);
       expect(await store.loadStorylines(), isEmpty);
     });
   });
@@ -3099,7 +3032,6 @@ void main() {
     Future<Map<String, Object?>> sweepAndRecord(
       ScriptedLlm llm, {
       CharterCheck charterCheck = CharterCheck.model,
-      GroupingMode groupingMode = StorylineTuning.groupingMode,
     }) async {
       final log = ActivityLog(store);
       addTearDown(log.dispose);
@@ -3109,7 +3041,6 @@ void main() {
         judge: sweepJudge(store, llm),
         activityLog: log,
         charterCheck: charterCheck,
-        groupingMode: groupingMode,
       ).sweep();
       await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
       final rows = await store.recentActivity();
@@ -3303,16 +3234,6 @@ void main() {
           subject: 'Roof replacement permit',
           vector: vectorAt(0.9),
           lastMessageAt: '2026-08-29T02:00:00Z');
-    }
-
-    /// [seedTrio] plus a fourth thread in the same cluster, so a test can drop
-    /// one outlier and still have three threads left to propose.
-    Future<void> seedQuad(MessageStore into) async {
-      await seedTrio(into);
-      await seed(into, 'q4',
-          subject: 'Roof replacement gutters',
-          vector: vectorAt(0.85),
-          lastMessageAt: '2026-08-29T01:00:00Z');
     }
 
     test('a charter the decision model reads as unspecific files the cluster '
@@ -3598,97 +3519,6 @@ void main() {
         (await store.loadStorylines(statuses: const ['suggested'])).single.id,
         possible.id,
       );
-    });
-
-    test('an outlier is dropped and the rest are confirmed', () async {
-      // q1–q3 are one effort with q4; q5 is sure only of q4, which seats it
-      // beside them at a mean of 0.525 across the two clusters while its own
-      // mean to the rest is 0.325. The grouping drops it before the namer.
-      await seedQuad(store);
-      await seed(store, 'q5',
-          subject: 'Roof replacement invoice',
-          vector: vectorAt(0.8),
-          lastMessageAt: '2026-08-29T00:30:00Z');
-      final p = <String, double>{
-        'q1 q2': onLinkScale(0.9),
-        'q1 q3': onLinkScale(0.9),
-        'q2 q3': onLinkScale(0.9),
-        'q4 q5': onLinkScale(1.0),
-        'q1 q4': onLinkScale(0.95),
-        'q2 q4': onLinkScale(0.95),
-        'q3 q4': onLinkScale(0.95),
-        'q1 q5': onLinkScale(0.1),
-        'q2 q5': onLinkScale(0.1),
-        'q3 q5': onLinkScale(0.1),
-      };
-      String keyOf(String text) =>
-          RegExp(r'kept-(q\d)').firstMatch(text)!.group(1)!;
-      final llm = fakeLlm({
-        'storyline_name': [nameAnswer()],
-        'same_effort': [
-          (LlmCall call) {
-            final (a, b) = pairTextsOf(call.user);
-            final pair = [keyOf(a), keyOf(b)]..sort();
-            return {'p': p[pair.join(' ')] ?? 0.0};
-          },
-        ],
-        'member_of': [confirmAnswer()],
-      });
-
-      final detail =
-          await sweepAndRecord(llm, groupingMode: GroupingMode.decision);
-
-      final storyline =
-          (await store.loadStorylines(statuses: const ['suggested'])).single;
-      final members = (await store.membersOf(storyline.id))
-          .map((m) => m.conversationKey)
-          .toSet();
-      expect(members, {'q1', 'q2', 'q3', 'q4'});
-      // Four confirms, not five: the outlier was never named with the others
-      // and never put to the confirm stage at all.
-      expect(llm.callsFor('member_of'), 4);
-      expect(
-        namingCards(llm).where((card) => card.contains('invoice')),
-        isEmpty,
-      );
-      expect(detail['outliers'], 1);
-      // Nothing was written for it and nothing blocks it, so it is back in the
-      // pool for a group it does belong to.
-      expect(await store.storylineIdsFor('email', 'q5'), isEmpty);
-      expect(await store.assignedOrBlockedKeys('email'), isNot(contains('q5')));
-    });
-
-    test('a trio the decision model does not see as one effort is never named',
-        () async {
-      // Near by cosine, so every pair is asked; no by the model, so no
-      // cluster forms. Nothing is named, filed or remembered but the pair
-      // answers, which the next pass reads instead of asking again.
-      await seedTrio(store);
-      final llm = fakeLlm({
-        'storyline_name': [nameAnswer()],
-        'same_effort': [
-          {'p': 0.0},
-        ],
-        'member_of': [confirmAnswer()],
-      });
-
-      final detail =
-          await sweepAndRecord(llm, groupingMode: GroupingMode.decision);
-
-      expect(llm.callsFor('same_effort'), 6);
-      expect(llm.callsFor('storyline_name'), 0);
-      expect(await store.loadStorylines(), isEmpty);
-      expect(detail['pairs_scored'], 3);
-      expect(detail['proposed'], 0);
-
-      await StorylineService(
-        store,
-        llm,
-        judge: sweepJudge(store, llm),
-        groupingMode: GroupingMode.decision,
-      ).sweep();
-
-      expect(llm.callsFor('same_effort'), 6);
     });
 
     test('a cluster the model could not name is filed as possible by the lint',
@@ -7882,7 +7712,6 @@ void main() {
     Future<Map<String, Object?>> sweepAndRecord(
       ScriptedLlm llm, {
       MessageStore? into,
-      GroupingMode groupingMode = StorylineTuning.groupingMode,
     }) async {
       final target = into ?? store;
       final log = ActivityLog(target);
@@ -7892,7 +7721,6 @@ void main() {
         llm,
         judge: sweepJudge(target, llm),
         activityLog: log,
-        groupingMode: groupingMode,
       ).sweep();
       await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
       final rows = await target.recentActivity();
@@ -8182,7 +8010,6 @@ void main() {
       Future<List<SeenCluster>> sweepAndObserve(
         ScriptedLlm llm, {
         CharterCheck charterCheck = CharterCheck.model,
-        GroupingMode groupingMode = StorylineTuning.groupingMode,
       }) async {
         final log = ActivityLog(store);
         addTearDown(log.dispose);
@@ -8193,7 +8020,6 @@ void main() {
           judge: sweepJudge(store, llm),
           activityLog: log,
           charterCheck: charterCheck,
-          groupingMode: groupingMode,
           clusterObserver: (threads, outcome) =>
               seen.add((threads: threads, outcome: outcome)),
         ).sweep();
@@ -8244,56 +8070,6 @@ void main() {
         expect(seen.single.outcome, 'charter_model');
         expect(keysOf(seen.single), ['a', 'b', 'c']);
         expect(llm.callsFor('member_of'), 0);
-      });
-
-      test('an outlier is not in the report: it went back to the pool',
-          () async {
-        // a–c are one effort with d; e is sure only of d, which seats it
-        // beside them and leaves its own mean to the rest under the bar.
-        await seedTrio(store);
-        await seed(store, 'd',
-            subject: 'Delta cutover',
-            vector: vectorAt(0.94),
-            lastMessageAt: '2026-08-26T10:00:00Z');
-        await seed(store, 'e',
-            subject: 'Epsilon invoice',
-            vector: vectorAt(0.92),
-            lastMessageAt: '2026-08-25T10:00:00Z');
-        final p = <String, double>{
-          'a b': onLinkScale(0.9),
-          'a c': onLinkScale(0.9),
-          'b c': onLinkScale(0.9),
-          'd e': onLinkScale(1.0),
-          'a d': onLinkScale(0.95),
-          'b d': onLinkScale(0.95),
-          'c d': onLinkScale(0.95),
-          'a e': onLinkScale(0.1),
-          'b e': onLinkScale(0.1),
-          'c e': onLinkScale(0.1),
-        };
-        String keyOf(String text) =>
-            RegExp(r'kept-([a-e])\b').firstMatch(text)!.group(1)!;
-        final llm = fakeLlm({
-          'storyline_name': [alphaName()],
-          'same_effort': [
-            (LlmCall call) {
-              final (a, b) = pairTextsOf(call.user);
-              final pair = [keyOf(a), keyOf(b)]..sort();
-              return {'p': p[pair.join(' ')] ?? 0.0};
-            },
-          ],
-          'member_of': [confirmAnswer()],
-        });
-
-        final seen =
-            await sweepAndObserve(llm, groupingMode: GroupingMode.decision);
-
-        // The report is the cluster the grouping PROPOSED: its outlier is
-        // already back in the pool, and never named or confirmed.
-        expect(seen, hasLength(1));
-        expect(seen.single.outcome, 'formed');
-        expect(keysOf(seen.single), ['a', 'b', 'c', 'd']);
-        expect(llm.callsFor('member_of'), 4);
       });
 
       test('a hash that already answers is reported as answered and asks '
@@ -8717,12 +8493,9 @@ void main() {
             lastMessageAt: '2026-08-26T10:00:00Z');
         final llm = fakeLlm(const {});
 
-        final detail =
-            await sweepAndRecord(llm, groupingMode: GroupingMode.decision);
+        final detail = await sweepAndRecord(llm);
 
-        // One pair judged — the two representatives — and nothing past it.
-        expect(llm.callsFor('same_effort'), 2);
-        expect(pastPairs(llm), isEmpty);
+        expect(llm.calls, isEmpty);
         expect(await store.loadStorylines(), isEmpty);
         // The folding still happened and the row still says so, even though
         // nothing it folded went on to ship.

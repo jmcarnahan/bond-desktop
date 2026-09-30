@@ -59,9 +59,9 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    threads by the cosine clustering over their clustering vectors (gate:
    three threads that cluster, or a recurring series of three, form a
    proposal, and two confirmed members are still a storyline). A pair
-   grouping on the decision model's `same_effort` (cosine proposes pairs, the
-   model judges them, average linkage forms the clusters) is built and kept
-   as a bench arm; it does not yet beat cosine on the golden sweep. The namer then
+   grouping on the decision model's `same_effort` was measured against it on
+   2026-09-30, did not beat it, and was removed; `make golden-pairs` is how a
+   future `same_effort` model is measured. The namer then
    only WRITES the title, summary and charter; the decision model's
    `charter_specific` checks the charter, and each member is confirmed
    individually on `member_of`. Series are found by subject before any
@@ -907,8 +907,8 @@ for a fortnight; `make golden-sweep SWEEP_POSSIBLE_ROOM=0|1` measured the two
 rules identical on `storyline.id` (59/98) and forbidden hits (1). What bounds a
 pass now is `maxQuestionsPerPass`, three NAMING calls, proposals and filings
 together, room or no room, and a cluster past it is rebuilt and asked on a
-later pass. The decision model's questions are not counted: a pair, a charter
-check or a confirm is tens of milliseconds where a naming call is seconds of
+later pass. The decision model's questions are not counted: a charter check
+or a confirm is tens of milliseconds where a naming call is seconds of
 the generative model. A filed
 set writes its hash, so the IDENTICAL set is never asked again; a re-cluster
 that is a different set but has at least half its threads in one live automatic
@@ -999,8 +999,7 @@ two issues of one series share a shape and not a subject matter. A seeded
 group takes at most `maxClusterSize` of its members, the newest twelve, and
 the rest stay in the pool for a later pass. A seed is a question and not a
 verdict. It goes through the same naming call, the same charter check and the
-same per-member confirms as any cluster; its pairs are not judged, because the
-subject already said what `same_effort` would be asked. The counts land on the activity row as
+same per-member confirms as any cluster. The counts land on the activity row as
 `series` and `series_excluded`. The three columns this reads,
 `message_count`, `inbound_count` and `newest_kept_from`, are the ones
 `conversationsWithEmbeddings` gained for it; the last is a correlated subquery
@@ -1135,8 +1134,8 @@ otherwise consume the same slot on every future sweep and starve the genuinely
 new clusters ranked behind it.
 
 A cluster the grouping never formed — pairs under the link bar, or a group
-left under `proposeMinClusterSize` once its outliers went back to the pool —
-is filed nowhere at all, because nothing was asked about it as a group.
+under `proposeMinClusterSize` — is filed nowhere at all, because nothing was
+asked about it as a group.
 
 **Keeping one is not a bare status flip.** Its members stayed in the pool while
 it waited, so between the filing and the press a later sweep, a recruit or the
@@ -1150,134 +1149,27 @@ longer exists and a tombstone keeps its hashes on file. A `suggested` row skips
 all of this: its members left the pool the moment it was proposed. This is what
 holds ONE THREAD, ONE LIVE STORYLINE at the one press that could break it.
 
-### The decision grouping (the bench arm)
+### The pair grouping that was measured and removed
 
-**What ships is the cosine grouping** (`StorylineTuning.groupingMode =
-GroupingMode.cosine`, *The cosine grouping* below) with the model charter check
-and a `member_of` confirm for every member. The decision grouping is built,
-tested and measured, and stays a bench arm (`make golden-sweep
-SWEEP_GROUPING=decision`): on the ModernBERT v3 student it does not yet beat
-cosine on the golden sweep. `same_effort` over the golden pool has AUC 0.888
-but its p is compressed near zero (5% false links at 50% recall sits at p
-0.01, 13% at 70% recall at p 0.002), and its best row scored 57/98 with 13
-correct positives and 5 forbidden hits against cosine's 60/98, 16 and 3
-(2026-09-30; every row is in `docs/model-bakeoff.md`). It ships once a
-`same_effort` student reaches at most 5% false links at 70% recall.
-
-Under it, the cosine only PROPOSES which pairs to ask about; the decision
-model's `same_effort` says which of them are one effort; average linkage over
-those answers forms the groups. All of it is
-`StorylineGrouper._decisionCandidates` (`storyline_grouper.dart`) and
-`clusterByAverageLinkage` (`storyline_clustering.dart`).
-
-**Candidate pairs**, unordered and de-duplicated, over the pool as the series
-pre-pass and the fragment fold left it:
-
-- each thread's nearest `StorylinePolicy.pairNeighbours` (10) pool threads by
-  clustering-vector cosine, at `pairRetrievalFloor` (0.30) or above — a loose
-  floor, because it only decides what the model is asked;
-- every pair of pool threads sharing a series key (`seriesKeyFor`), the first
-  `maxClusterSize` of each key in pool order. Two issues of one series share a
-  shape and not a subject matter, so the vector can miss them; a fragment key
-  folds less than a series key, so every fragment pair left in the pool (one
-  outside the fold window) is among these too.
-
-**The pair cache.** Each pool thread's text (`storylineThreadTextFor`, the
-body fetch first, *Membership on the decision model* below) is built ONCE per
-pass, and its 16-hex `cardHash` keys the cache: `pair_decisions` (schema v23,
-DERIVED — Clear AI results empties it) holds one row per unordered pair of
-texts, `a_hash < b_hash`, under what decided it: the `qhash` column holds
-`'<qhash>|<model identity>'` (`StorylineJudge.decidedBy`, `decidedBy` in Dart;
-the column kept its generated name), with `p` the mean of
-p(yes) over both orders (`askPairs`). The identity is
-`DecisionClient.modelIdentity()`: the heads file's model name and the first 12
-hex of its sha256 for the encoder-heads kind, the listed name for Kev on Your
-server — so a swapped backend or a re-installed model asks its pairs again.
-Only a pair missing from the cache is asked. A thread whose text changes — a
-new message, a fetched body — has a new hash, so its pairs are asked again.
-Two threads that render identically share a hash and have no row to live in:
-such a pair is asked every pass, which is rare enough to cost nothing. Each
-decision pass first PRUNES the table by AGE only: rows older than 30 days,
-which mostly key texts nothing renders any more. Rows another backend or
-question set decided are kept, since every read filters on its own
-`decidedBy`, so switching the decision role to Your server and back finds
-both caches warm.
-
-The cache saves questions, not reads: every pass still builds the text of
-every pool thread in a candidate pair (a few store reads each, and a body
-fetch where a preview still shows) to learn its hash, even when every pair is
-cached.
-
-**The budget.** At most `StorylinePolicy.pairBudgetPerPass` (400) new pairs a
-pass are sent: the candidates first, the newest threads' pairs first (the pool
-arrives newest first, so the pair with the smaller first index involves the
-newer thread), and the completions below out of what is left. A candidate
-over the budget reads as p = 0 in the pass that skipped it and is asked on the
-next; the cache is what makes a large mailbox converge over a few passes. The
-golden pool of 71 threads proposes about 570 candidate pairs, so its first
-pass defers (400 scored, 166 deferred, 5 clusters deferred), and the golden
-sweep bench keeps running passes while a pass defers clusters, up to eight. The model is asked in batches of 50 pairs (100 states), and each
-batch's answers are written only once it returns: a batch that throws parks
-the lane with nothing of its own written, and the batches before it stay
-cached, so the re-run asks only what is left.
-
-**Linkage, twice.** Average linkage (`averageLinkage`): every thread starts
-alone, and the two clusters whose mean p across their cross pairs is highest
-merge, while that mean is at least `StorylinePolicy.linkTau` (0.008, on the v3
-student's compressed scale) and the
-result holds at most `maxClusterSize` (12) threads. A tie goes to the pair of
-clusters with the smallest pool indexes, so the store's order breaks it and
-the same mailbox groups the same way twice — which the cluster hashes rest
-on. Average linkage is what keeps one strong pair from welding two groups
-together: a single likely pair across two sure trios is one pair in nine.
-
-The candidates are not every pair, so the first round is OPTIMISTIC: the mean
-is over the cross pairs that have an answer, and an unasked pair is left out
-rather than read as a no (two clusters with no answered pair between them
-never merge). Otherwise an effort whose threads are not all each other's
-nearest neighbours — the longer the effort, the likelier — would be split by
-questions nobody asked. Each cluster of at least `proposeMinClusterSize` the
-first round forms is then COMPLETED: every pair inside it with no answer (at
-most 66 for twelve threads) is asked, cached as usual, and linkage and the
-outlier cut run again over that cluster alone on the full matrix, an unasked
-pair now reading p = 0 (`clusterByAverageLinkage`). Only what survives is
-proposed, so no group is named on part of its evidence. A cluster whose
-missing pairs do not fit the budget left is not proposed this pass: its pairs
-count in `pairs_deferred` and the cluster in `clusters_deferred`, and a later
-pass, its candidates cached, completes it.
-
-**Outliers.** In a cluster of at least `proposeMinClusterSize`, a member whose
-mean p to the rest is under `linkTau` is an OUTLIER: average linkage can seat
-one, because it compares whole clusters, not members. Outliers are dropped
-before naming and go back to the pool, with nothing written for them and
-nothing blocking them. What is still at least `proposeMinClusterSize` is a
-candidate, largest first, ties by the smallest member — the order the cosine
-grouping answers in, which is what the sweep spends its budget on. The row's
-`outliers` counts the members set aside from the clusters the pass went on to
-NAME, so a cluster rebuilt pass after pass is not counted each time. (Ranking
-`possible` rows by a cluster's mean pairwise p, as the plan sketched, is
-deferred: nothing reads it yet.)
+The branch that brought the decision model to the sweep also built a second
+grouping: cosine only PROPOSED candidate pairs, the decision model's
+`same_effort` judged each one (cached per thread text in a derived
+`pair_decisions` table), and average linkage over the judged pairs formed the
+clusters. On the ModernBERT v3 student it did not beat cosine on the golden
+sweep: `same_effort` over the golden pool has AUC 0.888, but its p is
+compressed near zero (5% false links at 50% recall sits at p 0.01, 13% at 70%
+recall at p 0.002), and its best row scored 57/98 with 13 correct positives
+and 5 forbidden hits against cosine's 60/98, 16 and 3 (2026-09-30; every row
+is in `docs/model-bakeoff.md`). It was removed on 2026-09-30, table and all,
+rather than kept dark. What stays is the `same_effort` question itself
+(*Storyline questions*, below) and `make golden-pairs`, which reads it on the
+golden pool pairs: a `same_effort` model is measured there first, and a
+grouping on it comes back only with a golden sweep row that beats cosine's.
 
 **Park before anything is asked.** The sweep calls
-`StorylineJudge.ensureReady()` before the first pair is judged whenever the
-pool has two threads to judge or a series is seeded, so a decision model that
-cannot answer parks the pass having asked nothing, fetched no body and written
-nothing — no pair row and no naming call. The cosine grouping checks the same
-way before its first naming call.
-
-**The row.** The sweep's activity row carries `pairs_scored`, `pairs_cached`,
-`pairs_deferred`, `clusters_deferred` and `namer_calls` in both modes, zeroes
-for the pairs under the cosine grouping. `pairs_cached` is a scan key to the log (`ActivityLog._scanKeys`), so
-a pass that only re-read its cache and proposed nothing stays quiet.
-
-**PROVISIONAL.** `linkTau` and `pairBudgetPerPass`, with `pairNeighbours` and
-`pairRetrievalFloor`, are read only by this bench arm and are not shipped.
-`linkTau` sits at 0.008 because a neutral 0.5 links nothing on the v3 scale;
-the rows taken on 2026-09-30 (id score / correct positives / forbidden hits)
-were 0.0018 → 57/98, 13, 5; 0.004 → 55/98, 13, 4; 0.008 → 51/98, 18, 7 (the 0.004 and 0.008 rows at a 2,000-pair budget, not the shipped 400; the
-most correct positives); 0.0135 → 50/98, 0, 0 on one budget-bound pass. They
-move with a `make golden-sweep SWEEP_GROUPING=decision` row on each side, the
-`StorylineTuning` rule; the bench's commands are in `docs/model-bakeoff.md`.
+`StorylineJudge.ensureReady()` before its first naming call whenever it has a
+cluster to ask about, so a decision model that cannot answer parks the pass
+having asked nothing and written nothing.
 
 ### The charter check
 
@@ -1301,17 +1193,14 @@ cluster as `possible`, either arm.
 
 ### The cosine grouping
 
-`GroupingMode.cosine` is what ships (`SWEEP_GROUPING=cosine`, the bench's
-default): it grouped the sweep before the decision grouping was built, was a
-bench baseline while that one shipped on the branch, and shipped again when the
-v3 rows came in behind it. It is the one reader of `clusterLinkThreshold`,
-`clusterCoherenceFloor`, `clusterSplitStep` and `clusterSplitCeiling`.
+The sweep's one grouping (`StorylineGrouper.candidates`), and the one reader
+of `clusterLinkThreshold`, `clusterCoherenceFloor`, `clusterSplitStep` and
+`clusterSplitCeiling`.
 
 Clustering is two halves. **Measuring** the pairs is the half an index can do
 faster, and it does — `ConversationVectorIndex` (see `05-embeddings.md`),
 diff-backfilled at sweep start, one KNN probe per candidate, `1 - distance`
-converted back to a cosine; the decision grouping reads its nearest neighbours
-off the same table. **Forming** the clusters out of those numbers is
+converted back to a cosine. **Forming** the clusters out of those numbers is
 `clusterBySimilarity` in `storyline_clustering.dart`, which has no store, no
 model and no clock in it, and both halves meet at one table of similarities.
 
@@ -1385,13 +1274,9 @@ of 98 on the scorer, reached with 106 member confirms against 291. Purity fell
 from 71% to 51% over fourteen groups rather than seven, and coverage is still
 8%, which is what the series pre-pass and the fragment handling are for.
 The tally reads its own numbers off the sweep's activity rows: `lint`,
-`charter_model`, `series`, `series_excluded`, `outliers`, `fragments`,
-`folded`, `pairs_scored`, `pairs_cached`, `pairs_deferred`,
-`clusters_deferred` and `namer_calls`
-are summed over every `storyline_sweep` row the run recorded, so the printed
-row and the log tell one story rather than two. (A pass that only re-read its
-cached pairs is quiet and writes no row, so `pairs_cached` counts the passes
-that did something else too.) The bench's `tombstoned` figure counts
+`charter_model`, `series`, `series_excluded`, `fragments`, `folded` and
+`namer_calls` are summed over every `storyline_sweep` row the run recorded, so
+the printed row and the log tell one story rather than two. The bench's `tombstoned` figure counts
 `created_by = 'auto'` rows at `dismissed` or `possible`, which is the same
 population it always counted: the clusters no model would vouch for. The run fails outright if any of those
 rows carries a `deferred` key: the bench store has no queue behind it, so the
@@ -1536,13 +1421,13 @@ same-effort ones, so at any cosine that keeps most of the real pairs the links
 a cluster forms on are mostly wrong ones, whatever the vector. Round D
 measured it from the other end: at the shipped threshold a link was a
 same-effort pair about 5% of the time, and the clusters the namer declined
-were 39% gold-pure. That is why the decision grouping was built on
-`same_effort`, a pair question the decision model is trained on (*The decision
-grouping*, above); the as-is evaluation put Kev v2 at an 8.0% false-link rate
-at 70% recall on the golden pairs, against cosine's 15%. The ModernBERT v3
-student reads 13% there, and its sweep rows do not beat cosine's, so the
-cosine grouping ships and every member it proposes is confirmed by `member_of`,
-which is what catches the wrong links.
+were 39% gold-pure. That is why a pair grouping was built on `same_effort`, a
+pair question the decision model is trained on (*The pair grouping that was
+measured and removed*, above); the as-is evaluation put Kev v2 at an 8.0%
+false-link rate at 70% recall on the golden pairs, against cosine's 15%. The
+ModernBERT v3 student reads 13% there, and its sweep rows did not beat
+cosine's, so the cosine grouping ships and every member it proposes is
+confirmed by `member_of`, which is what catches the wrong links.
 
 Two earlier attempts had a GENERATIVE model do the grouping, and both were
 deleted in the decision-questions round with their task (`GroupThreadsTask`,
@@ -1551,12 +1436,11 @@ the 27B which threads inside each were one effort, and `pool` mode showed it
 the whole pool in consecutive 48-card slices. Neither ever named a group on
 this pool (the rows below).
 
-**The mode is chosen by a define, never by a `sed`.** `make golden-sweep
-SWEEP_GROUPING=cosine|decision` and `SWEEP_CHARTER=model|lint` set them for one
-run; each define is refused loudly on anything else, and the run prints what
-it took on its stage line and records `grouping` and `charter` in the result
-JSON. The defaults follow the app, so a run nobody passed a mode to measures
-what ships.
+**The charter check is chosen by a define, never by a `sed`.** `make
+golden-sweep SWEEP_CHARTER=model|lint` sets it for one run; the define is
+refused loudly on anything else, and the run prints what it took on its stage
+line and records `charter` in the result JSON. The default follows the app, so
+a run nobody passed a check to measures what ships.
 
 **The naming budget is 1024 tokens.** `NameStorylineTask.maxTokens` is a task
 constant, on the recap task's precedent: a task that names no budget lands on
@@ -1727,23 +1611,20 @@ In the activity row the probe reports itself as `joined`, kept separate from
 `confirmed` and `rejected` — those two count the cluster's own members being
 judged, and a finished thread that was offered and turned away was never one.
 
-The sweep's row carries seventeen numeric keys: `proposed`, `confirmed`,
+The sweep's row carries twelve numeric keys: `proposed`, `confirmed`,
 `rejected` and `joined`, and beside them `series` and `series_excluded` from
 the subject pre-pass, `lint` and `charter_model` for the clusters each arm of
 the charter check refused — which is to say the clusters filed as `possible`
 for that reason, since a refusal is filed rather than thrown away —
-`outliers` for the members the grouping set aside from the clusters it
-named, `clusters_deferred` for the clusters the pair budget could not
-complete,
 `fragments` and `folded` for the rows the fragment fold joined and the rows it
-folded at all, `overlaps_possible`, and the grouping's `pairs_scored`,
-`pairs_cached`, `pairs_deferred` and `namer_calls`. Every one is a number and never a null or a
+folded at all, `overlaps_possible`, and `namer_calls`. Every one is a number
+and never a null or a
 string, because the log's quiet-kind check reads them as numerics and a
 non-numeric would make every all-zero sweep loud again; the one string this
 row ever carries is `deferred`, and it is a string so that a deferred pass is
 never hidden as quiet. The row is written when the pass reached a cluster,
-excluded a series, folded a row, or asked or deferred a pair: each of those
-is something the pass did.
+excluded a series, folded a row or skipped an overlap: each of those is
+something the pass did.
 
 ## Cross-source identity
 
@@ -1770,8 +1651,9 @@ recipe; a dismissal made under the old one holds forever.
 The decision model answers three storyline questions. Membership asks
 `member_of` at all five confirm sites (*Membership on the decision model*,
 below); the sweep asks `charter_specific` to check what the namer wrote
-(*The charter check*, above), and `same_effort` only under the decision
-grouping, a bench arm (*The decision grouping*, above).
+(*The charter check*, above). Nothing in the app asks `same_effort` since the
+pair grouping was removed; `make golden-pairs` reads it (*The pair grouping
+that was measured and removed*, above).
 
 - `same_effort` asks whether two threads are about the same specific project,
   event or topic. It is asked of `renderStorylinePair(a, b)` in both orders,
@@ -1794,8 +1676,7 @@ each inbound sender and each outbound To recipient, at most eight. For Teams,
 they are the stored `conversations` row's topic (else the names subject) and
 roster. The messages are the owner's outbound and the kept inbound. Each is
 written as `You` or the sender's name (else the address), then its body with
-the markers stripped (else the attachment stand-in). It also returns a 16-hex
-`cardHash` of the text.
+the markers stripped (else the attachment stand-in).
 
 The text is close to what training saw, not equal to it. A message whose body
 was never fetched (an outbound one, or one still pending its detail fetch)
@@ -1838,13 +1719,8 @@ the fetch failed partway, since the bodies that landed are real. A failure is
 logged, the thread is judged on what is stored, and the judge does not ask
 again for that thread for five minutes (`StorylineJudge.fetchRetryAfter`), so a
 mail server that is down costs one failed round trip per thread, not one per
-candidate — and that memo outlives a sweep pass. A fetch that succeeded is
-not asked again for the same preview rows either, so a message whose fetched
-body is empty is fetched once, not once per question. The sweep calls
-`StorylineJudge.beginPass()` at its top, which forgets the successes (never
-the failures), so inside a pass each thread is fetched at most once — its
-pairs, its member confirm and the probe all read it. Teams has no fetch
-to ask for.
+candidate — and that memo outlives a sweep pass. Teams has no fetch to ask
+for.
 
 **One batch per storyline.** `memberOf(storyline, threads)` asks every thread
 in one request batch: recruit, the audit, the sweep's members and the probe
@@ -1884,9 +1760,7 @@ golden set against the ModernBERT v3 student (2026-09-30):
 - `charterSpecificTau` 0.50: *The charter check*, above.
 
 `assignRetrievalFloor` 0.30 and `assignTopK` 3 are retrieval widths, set from
-the as-is evaluation. PROVISIONAL, and read only by the decision bench arm:
-`pairNeighbours` 10, `pairRetrievalFloor` 0.30, `pairBudgetPerPass` 400 and
-`linkTau` 0.008. Every one moves with a `make golden-storyline`, `make
+the as-is evaluation. Every one moves with a `make golden-storyline`, `make
 golden-declared` or `make golden-sweep` row on each side — the
 `StorylineTuning` rule.
 
@@ -1922,7 +1796,7 @@ gate's eviction):
 ## The model calls
 
 No membership call and no grouping call: see *Membership on the decision
-model* and *The decision grouping*, above. Every storyline task left WRITES.
+model* and *The cosine grouping*, above. Every storyline task left WRITES.
 
 **NameStorylineTask** — `app/lib/services/llm/storyline_tasks.dart`, schema
 `storyline_name`, **prose / 27B slot**, **temperature 0**. Four fields in
@@ -1930,7 +1804,7 @@ schema order, which is the order a grammar emits them in: `evidence`, `title`,
 `summary`, `charter`. The evidence sentence comes first, so the title follows
 from it rather than being written first and defended afterwards. It only
 writes: whether the threads are one storyline was decided before it was asked
-(the cosine grouping, or `same_effort` under the bench arm), and whether what it wrote is specific enough is decided after
+(the cosine grouping), and whether what it wrote is specific enough is decided after
 (*The charter check*). Until the decision-questions round it also answered
 `coherent` and `outliers`, its own out and its own outlier list; both were
 removed from the schema, the validator and the prompt. `title` is ≤6 words in the owner's own

@@ -1141,7 +1141,6 @@ void main() {
       }
       final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
       final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
-      final groupingMode = parseSweepGrouping(GoldenDefines.sweepGroupingRaw);
       final charterCheck = parseSweepCharter(GoldenDefines.sweepCharterRaw);
       final possibleHoldsRoom =
           parseSweepPossibleRoom(GoldenDefines.sweepPossibleRoomRaw);
@@ -1173,7 +1172,7 @@ void main() {
         );
         // ignore: avoid_print
         print(
-          'stage ${stage.name}, grouping ${groupingMode.name}, '
+          'stage ${stage.name}, '
           'charter ${charterCheck.name}, '
           'card ${variant.wireName}, room $roomRule, '
           'prefix length ${report.prefixLength}, dims ${report.dims}, '
@@ -1225,8 +1224,8 @@ void main() {
         }
 
         // The app's own log, because the sweep's per-pass counts — the series
-        // it seeded and excluded, the clusters it refused, the outliers it
-        // dropped, the pairs it judged — are written there and nowhere else. The run records a row
+        // it seeded and excluded, the clusters it refused, the naming calls it
+        // made — are written there and nowhere else. The run records a row
         // after each pass and sums them afterwards, rather than the bench
         // keeping a second set of counters that could disagree with the
         // app's.
@@ -1250,9 +1249,7 @@ void main() {
               judge: StorylineJudge(decision: decider, store: store),
               embeddings: EmbeddingsClient(),
               activityLog: log,
-              // SWEEP_GROUPING and SWEEP_CHARTER, defaulting to what the app
-              // ships.
-              groupingMode: groupingMode,
+              // SWEEP_CHARTER, defaulting to what the app ships.
               charterCheck: charterCheck,
               // SWEEP_POSSIBLE_ROOM, defaulting to what the app ships.
               possibleHoldsRoom: possibleHoldsRoom,
@@ -1270,8 +1267,7 @@ void main() {
         // The room cap is a `static const` of three, so the loop KEEPS what it
         // is offered rather than widening it. A pass that leaves the storyline
         // count where it found it has nothing left to propose and ends the
-        // loop, unless its grouping deferred clusters for want of pair budget
-        // (`sweepLoopContinues`); the cap of twenty is a guard, not a budget.
+        // loop; the cap of twenty is a guard, not a budget.
         const maxPasses = 20;
         final callsPerPass = <int>[];
         final wallPerPassMs = <int>[];
@@ -1345,7 +1341,6 @@ void main() {
         final sweeps = stage == SweepStage.declared ? 0 : maxPasses;
         for (var pass = 1; pass <= sweeps; pass++) {
           final before = await _storylineCount(store);
-          final deferredBefore = await _clustersDeferredLogged(store);
           final callsBefore =
               _callsMade(confirmCollector) + _callsMade(nameCollector);
           final passStartedAt = DateTime.now();
@@ -1384,17 +1379,7 @@ void main() {
               in await store.loadStorylines(statuses: const ['possible'])) {
             await service.dismissSuggestion(storyline.id);
           }
-          // A pass that wrote nothing ends the loop, unless its grouping
-          // deferred clusters the pair budget could not complete: the cache
-          // it filled is what lets the next pass finish them.
-          if (!sweepLoopContinues(
-            pass: pass,
-            grew: after != before,
-            clustersDeferred:
-                await _clustersDeferredLogged(store) - deferredBefore,
-          )) {
-            break;
-          }
+          if (after == before) break;
         }
 
         // Arrival order, which is the order the app files threads in: the
@@ -1612,20 +1597,11 @@ void main() {
         // suppressed as quiet simply contributes nothing.
         var sweptLint = 0;
         var sweptCharterModel = 0;
-        var sweptOutliers = 0;
         var sweptSeries = 0;
         var sweptSeriesExcluded = 0;
         var sweptFragments = 0;
         var sweptFolded = 0;
-        // The pair counts the decision grouping writes, zero under
-        // `SWEEP_GROUPING=cosine` — which is the point of reading them in both
-        // modes rather than only in the one that moves them — and the naming
-        // calls, which both modes make.
-        var sweptPairsScored = 0;
-        var sweptPairsCached = 0;
-        var sweptPairsDeferred = 0;
         var sweptNamerCalls = 0;
-        var sweptClustersDeferred = 0;
         for (final row in await store.recentActivity(limit: 1000)) {
           if (row['kind'] != 'storyline_sweep') continue;
           final detail = ActivityEvent.fromRow(row).detail;
@@ -1641,16 +1617,11 @@ void main() {
           }
           sweptLint += at('lint');
           sweptCharterModel += at('charter_model');
-          sweptOutliers += at('outliers');
           sweptSeries += at('series');
           sweptSeriesExcluded += at('series_excluded');
           sweptFragments += at('fragments');
           sweptFolded += at('folded');
-          sweptPairsScored += at('pairs_scored');
-          sweptPairsCached += at('pairs_cached');
-          sweptPairsDeferred += at('pairs_deferred');
           sweptNamerCalls += at('namer_calls');
-          sweptClustersDeferred += at('clusters_deferred');
         }
 
         final tally = SweepTally(
@@ -1660,14 +1631,9 @@ void main() {
           charterModelRejected: sweptCharterModel,
           seriesSeeded: sweptSeries,
           seriesExcluded: sweptSeriesExcluded,
-          outliersDropped: sweptOutliers,
           fragmentsJoined: sweptFragments,
           fragmentsFolded: sweptFolded,
-          pairsScored: sweptPairsScored,
-          pairsCached: sweptPairsCached,
-          pairsDeferred: sweptPairsDeferred,
           namerCalls: sweptNamerCalls,
-          clustersDeferred: sweptClustersDeferred,
           purityByStoryline: {
             for (final entry in membership.threadsByStoryline.entries)
               entry.key: purityOf(entry.value, goldByThread),
@@ -1740,7 +1706,6 @@ void main() {
             'cards_from': GoldenDefines.runPath,
             // On both stages, so the two are one row read two ways.
             'stage': stage.name,
-            'grouping': groupingMode.name,
             'charter': charterCheck.name,
             // Zero on every stage but `declared`.
             'declared': slugById.length,
@@ -2344,20 +2309,6 @@ Future<T> _decoded<T>(String path, Future<T> Function() load) =>
 Future<int> _storylineCount(MessageStore store) async => (await store
     .loadStorylines(
         statuses: const ['suggested', 'possible', 'active', 'dismissed'])).length;
-
-/// Clusters the sweep's grouping deferred, summed over every
-/// `storyline_sweep` row written so far. Monotonic, so a pass's own count is
-/// the difference across it, and a pass the log suppressed as quiet adds
-/// nothing rather than re-reading the pass before it.
-Future<int> _clustersDeferredLogged(MessageStore store) async {
-  var sum = 0;
-  for (final row in await store.recentActivity(limit: 1000)) {
-    if (row['kind'] != 'storyline_sweep') continue;
-    final value = ActivityEvent.fromRow(row).detail['clusters_deferred'];
-    sum += (value as num?)?.toInt() ?? 0;
-  }
-  return sum;
-}
 
 /// Calls this collector saw, failures included — what a per-pass count and a
 /// calls-per-minute figure are both divided by. A failed call spent the wall

@@ -253,33 +253,6 @@ class SweepMembership {
   }
 }
 
-/// The pass through which a pass that DEFERRED clusters keeps the golden
-/// sweep's keep-all loop going when it wrote nothing.
-///
-/// Under `SWEEP_GROUPING=decision` the golden pool of 71 threads proposes
-/// about 570 candidate pairs against a `pairBudgetPerPass` of 400, so the
-/// first pass can form clusters it cannot complete, defer every one of them
-/// and write nothing. Ending there took the 2026-09-30 `linkTau` 0.0135 row
-/// on one budget-bound pass. The cache fills each pass, so a few more
-/// converge; eight bounds a grouping that never would.
-const int sweepDeferredPassCap = 8;
-
-/// Whether the golden sweep's keep-all loop runs another pass after [pass]
-/// (1-based).
-///
-/// A pass that wrote a storyline row ([grew]) always earns another, the rule
-/// the loop has always had. A pass that wrote nothing earns one only while
-/// its grouping deferred clusters for want of pair budget
-/// ([clustersDeferred], this pass's count) and [pass] is under
-/// [sweepDeferredPassCap]. Under `SWEEP_GROUPING=cosine` nothing is ever
-/// deferred, so the loop is the one it was.
-bool sweepLoopContinues({
-  required int pass,
-  required bool grew,
-  required int clustersDeferred,
-}) =>
-    grew || (clustersDeferred > 0 && pass < sweepDeferredPassCap);
-
 /// Reads the memberships back out of the store after a sweep.
 ///
 /// `suggested` AND `active`, which is the set `assignConversation` itself
@@ -424,9 +397,8 @@ Map<String, int> charterLintCounts(List<LintCandidate> storylines) {
 /// One report from the service's `clusterObserver` seam: a cluster the sweep
 /// asked about, and the one word for what became of it.
 ///
-/// [threads] are [threadKeyOf] keys, the cluster as the grouping proposed it —
-/// after its outliers went back to the pool and without the fragment siblings
-/// that ride its members. The words are the seam's five: `formed`, `lint`,
+/// [threads] are [threadKeyOf] keys, the cluster as the grouping proposed it,
+/// without the fragment siblings that ride its members. The words are the seam's five: `formed`, `lint`,
 /// `charter_model`, `thin`, `answered`.
 typedef JudgedCluster = ({List<String> threads, String outcome});
 
@@ -1277,11 +1249,6 @@ class SweepTally {
   /// Threads the pre-pass took out of the pool as notification-shaped.
   final int seriesExcluded;
 
-  /// Members the decision grouping dropped from a formed cluster because their
-  /// mean `same_effort` p to the rest was under the link bar, back to the
-  /// pool before naming. Zero under the cosine grouping.
-  final int outliersDropped;
-
   /// Pool rows that were fragments of a member's own thread and joined on its
   /// verdict, never clustered, named or confirmed in their own right.
   final int fragmentsJoined;
@@ -1341,29 +1308,8 @@ class SweepTally {
   /// Model calls per task label — `storyline_name`, `decision:member_of`.
   final Map<String, int> callsByKind;
 
-  /// `same_effort` pairs the sweep sent to the decision model, summed off its
-  /// own activity rows.
-  ///
-  /// Zero under `SWEEP_GROUPING=cosine`: the sweep writes all four of these
-  /// keys in either mode so that a row from the two modes is the same row
-  /// with different numbers in it. They default to 0 here for the same reason
-  /// a missing key reads 0 — a ledger row taken before these existed is a
-  /// cosine row, and that is what a cosine row says.
-  final int pairsScored;
-
-  /// Candidate pairs answered from the `pair_decisions` cache with no
-  /// question asked.
-  final int pairsCached;
-
-  /// Candidate pairs over a pass's budget, read as p = 0 in that pass.
-  final int pairsDeferred;
-
   /// Naming calls the sweep made — what `maxQuestionsPerPass` caps.
   final int namerCalls;
-
-  /// Clusters formed but not proposed in a pass because its pair budget
-  /// could not complete them.
-  final int clustersDeferred;
 
   /// Model calls made in each sweep pass, in pass order.
   final List<int> callsPerPass;
@@ -1437,7 +1383,6 @@ class SweepTally {
     this.charterModelRejected = 0,
     required this.seriesSeeded,
     required this.seriesExcluded,
-    required this.outliersDropped,
     required this.fragmentsJoined,
     required this.fragmentsFolded,
     required this.purityByStoryline,
@@ -1452,11 +1397,7 @@ class SweepTally {
     required this.unmapped,
     required this.filedNowhere,
     required this.callsByKind,
-    this.pairsScored = 0,
-    this.pairsCached = 0,
-    this.pairsDeferred = 0,
     this.namerCalls = 0,
-    this.clustersDeferred = 0,
     required this.callsPerPass,
     required this.wallPerPassMs,
     required this.cosineBins,
@@ -1516,7 +1457,6 @@ class SweepTally {
         'charter_model_rejected': charterModelRejected,
         'series': seriesSeeded,
         'series_excluded': seriesExcluded,
-        'outliers': outliersDropped,
         'fragments': fragmentsJoined,
         'folded': fragmentsFolded,
         'purity': {
@@ -1541,11 +1481,7 @@ class SweepTally {
         'unmapped': unmapped,
         'filed_nowhere': filedNowhere,
         'calls_by_kind': callsByKind,
-        'pairs_scored': pairsScored,
-        'pairs_cached': pairsCached,
-        'pairs_deferred': pairsDeferred,
         'namer_calls': namerCalls,
-        'clusters_deferred': clustersDeferred,
         'calls_per_pass': callsPerPass,
         'wall_per_pass_ms': wallPerPassMs,
         'cosine_bins': {
@@ -1618,7 +1554,7 @@ class SweepTally {
         '  storylines  formed $formed  tombstoned $tombstoned'
         '  lint-rejected $lintRejected  charter-rejected $charterModelRejected\n'
         '  series  seeded $seriesSeeded  excluded $seriesExcluded'
-        '  outliers dropped $outliersDropped  fragments $fragmentsJoined'
+        '  fragments $fragmentsJoined'
         '  folded $fragmentsFolded\n'
         '  formable: $formablePositives of $formableItems correct'
         '   ceiling $ceiling of $items\n'
@@ -1631,9 +1567,7 @@ class SweepTally {
         '  filed nowhere $filedNowhere  forbidden hits $forbiddenHits '
         'over ${forbiddenByAnti.length} buckets\n'
         '  calls  $calls   per pass ${callsPerPass.join(', ')}'
-        '   pairs scored $pairsScored  cached $pairsCached'
-        '  deferred $pairsDeferred  namer calls $namerCalls'
-        '  clusters deferred $clustersDeferred\n'
+        '   namer calls $namerCalls\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines (0.50..0.65)  $bins\n'
         '  in-cluster cosines (0.35..0.50)  $binsQwen\n'

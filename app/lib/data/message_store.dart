@@ -3549,7 +3549,6 @@ RETURNING *
     'context_text',
     'context_chunks',
     'message_decisions',
-    'pair_decisions',
   ];
 
   /// Every table a CONNECTOR or the user's own directory scan wrote.
@@ -3690,7 +3689,7 @@ RETURNING *
   ///
   /// Four things happen, and the order is the method:
   ///
-  /// 1. One transaction: the eighteen [derivedTables] are emptied, the verdict
+  /// 1. One transaction: the seventeen [derivedTables] are emptied, the verdict
   ///    columns on `messages` and `conversations` are reset, the derived
   ///    columns on `context_dirs` and `context_files` are nulled, and the
   ///    one-shot markers that describe rows this just deleted are dropped.
@@ -5157,80 +5156,6 @@ SELECT conversation_key FROM (
             .get())
           row.data,
       ];
-
-  // ── pair decisions ───────────────────────────────────────────────────
-
-  /// The stored `same_effort` answers among [hashes] under [decidedBy]: every
-  /// cached pair whose two thread-text hashes are BOTH in [hashes], keyed
-  /// `(a, b)` with `a < b` — the order [writePairDecisions] stores them in.
-  ///
-  /// [decidedBy] is `'<qhash>|<model identity>'` (`StorylineJudge.decidedBy`),
-  /// stored in the table's `qhash` column, which holds the key of what
-  /// decided the pair: a row another model or another question set answered
-  /// is not read, since its answers are not this model's.
-  Future<Map<(String, String), double>> pairDecisionsFor(
-    Iterable<String> hashes,
-    String decidedBy,
-  ) async {
-    final wanted = hashes.toSet().toList()..sort();
-    if (wanted.length < 2) return const {};
-    final marks = List.filled(wanted.length, '?').join(', ');
-    final rows = await db.customSelect(
-      'SELECT a_hash, b_hash, p FROM pair_decisions '
-      'WHERE qhash = ? AND a_hash IN ($marks) AND b_hash IN ($marks)',
-      variables: _args([decidedBy, ...wanted, ...wanted]),
-    ).get();
-    return {
-      for (final row in rows)
-        (row.data['a_hash'] as String, row.data['b_hash'] as String):
-            (row.data['p'] as num).toDouble(),
-    };
-  }
-
-  /// Stores `same_effort` answers under [decidedBy], one row per unordered
-  /// pair, the two hashes put in ascending order here so a caller can hand
-  /// them either way round. A pair already stored is replaced: the newer
-  /// answer is the one the current model gave. One transaction, so a batch
-  /// lands whole.
-  Future<void> writePairDecisions(
-    List<({String a, String b, double p})> pairs, {
-    required String decidedBy,
-  }) async {
-    if (pairs.isEmpty) return;
-    final now = _nowIso();
-    await db.transaction(() async {
-      for (final pair in pairs) {
-        if (pair.a == pair.b) continue;
-        final swap = pair.a.compareTo(pair.b) > 0;
-        await db.customUpdate(
-          'INSERT OR REPLACE INTO pair_decisions '
-          '(a_hash, b_hash, qhash, p, decided_at) VALUES (?, ?, ?, ?, ?)',
-          variables: _args([
-            swap ? pair.b : pair.a,
-            swap ? pair.a : pair.b,
-            decidedBy,
-            pair.p,
-            now,
-          ]),
-        );
-      }
-    });
-  }
-
-  /// Deletes the cached pairs decided before [olderThanIso] (a store stamp,
-  /// [isoStamp]'s shape). A thread whose text moved leaves its old pairs
-  /// behind under hashes nothing renders any more, so the age bound is what
-  /// keeps the table the size of the live pool. Returns how many rows went.
-  ///
-  /// By AGE only, never by who decided: every read already filters on its
-  /// own `decidedBy`, so another backend's rows are simply not read, and
-  /// they survive a role switch — flipping the decision role from this Mac
-  /// to Your server and back finds both caches warm.
-  Future<int> prunePairDecisions({required String olderThanIso}) =>
-      db.customUpdate(
-        'DELETE FROM pair_decisions WHERE decided_at < ?',
-        variables: _args([olderThanIso]),
-      );
 
   // ── activity ─────────────────────────────────────────────────────────
 

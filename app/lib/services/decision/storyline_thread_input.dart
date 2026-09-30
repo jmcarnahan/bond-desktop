@@ -44,8 +44,8 @@
 ///   address where corpus.py had the name.
 /// - **Not yet triaged.** An inbound row triage has not reached is
 ///   `pending`, which `keptMessageSql` counts as kept, so it is shown at once
-///   and drops out if the gate later skips it; the text and `cardHash` change
-///   when it does. corpus.py labelled every message before rendering.
+///   and drops out if the gate later skips it; the text changes when it
+///   does. corpus.py labelled every message before rendering.
 /// - **Teams.** The subject and the roster are the stored `conversations`
 ///   row, which ingest writes by corpus.py's rules at first sight. A chat
 ///   renamed later carries its NEW topic here, where corpus.py took the
@@ -63,7 +63,6 @@ library;
 
 import 'dart:convert';
 
-import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../../data/message_store.dart';
@@ -74,16 +73,12 @@ import 'decision_input.dart' show DecisionAttachment, stripDecisionMarkers;
 import 'decision_state.dart' show decisionAttachmentStandIn;
 import 'storyline_state.dart';
 
-/// A thread's rendered text and the hash that names it.
+/// A thread's rendered text and the preview rows it still carries.
 @immutable
 class StorylineThreadText {
   /// `renderStorylineThread`'s output: what a pair, a membership question or
   /// the Why panel reads.
   final String text;
-
-  /// The first 16 hex of the text's sha256: a pair cache keys on two of
-  /// these, so an answer is reused exactly while both texts are unchanged.
-  final String cardHash;
 
   /// The `source_message_id`s of the messages the text renders (the newest
   /// three shown) that were rendered from `body_preview` because `body_text`
@@ -95,7 +90,6 @@ class StorylineThreadText {
 
   const StorylineThreadText({
     required this.text,
-    required this.cardHash,
     this.previewIds = const [],
   });
 
@@ -105,7 +99,6 @@ class StorylineThreadText {
   }) =>
       StorylineThreadText(
         text: text,
-        cardHash: sha256.convert(utf8.encode(text)).toString().substring(0, 16),
         previewIds: previewIds,
       );
 

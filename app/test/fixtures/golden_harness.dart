@@ -10,11 +10,9 @@ import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-// `show`: what this file wants from the storyline service is the grouping
-// mode and the charter check a define can pick, so a harness default cannot
-// drift from them.
-import 'package:bond_inbox/services/storyline_service.dart'
-    show CharterCheck, GroupingMode;
+// `show`: what this file wants from the storyline service is the charter
+// check a define can pick, so a harness default cannot drift from it.
+import 'package:bond_inbox/services/storyline_service.dart' show CharterCheck;
 
 import 'bench_stats.dart';
 import 'golden_prices.dart';
@@ -95,22 +93,16 @@ class GoldenDefines {
   static const String sweepStageRaw =
       String.fromEnvironment('SWEEP_STAGE', defaultValue: 'full');
 
-  /// Which pass decides what goes together on a sweep replay: `cosine` (what
-  /// ships) or `decision` (the bench arm, `same_effort` over cosine's
-  /// proposals). Parsed by [parseSweepGrouping], which refuses anything else.
-  ///
-  /// A define rather than a `sed` of `StorylineTuning.groupingMode`, for the
-  /// reason every other knob here is one: a row has to name the mode it was
-  /// taken under, and a constant edited for one run and forgotten is how two
-  /// rows from different trees end up in one table. The default follows the
-  /// app, so a run nobody passed a mode to measures the mode that ships.
-  static const String sweepGroupingRaw =
-      String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'cosine');
-
   /// Which check a named cluster's charter faces on a sweep replay: `model`
   /// (the decision model's `charter_specific`, what ships) or `lint` (the
-  /// regex lint). Parsed by [parseSweepCharter]; handed to the service as
-  /// `charterCheck`, for [sweepGroupingRaw]'s reason.
+  /// regex lint). Parsed by [parseSweepCharter], which refuses anything else;
+  /// handed to the service as `charterCheck`.
+  ///
+  /// A define rather than a `sed` of `StorylineTuning.charterCheck`, for the
+  /// reason every other knob here is one: a row has to name the check it was
+  /// taken under, and a constant edited for one run and forgotten is how two
+  /// rows from different trees end up in one table. The default follows the
+  /// app, so a run nobody passed a check to measures the check that ships.
   static const String sweepCharterRaw =
       String.fromEnvironment('SWEEP_CHARTER', defaultValue: 'model');
 
@@ -118,7 +110,7 @@ class GoldenDefines {
   /// (what the app ships — suggested rows only) or `1` (the old rule, both
   /// count). Parsed by [parseSweepPossibleRoom], which refuses anything else;
   /// handed to the service as `possibleHoldsRoom`. A define and not a `sed` of
-  /// `StorylineTuning.possibleHoldsRoom`, for [sweepGroupingRaw]'s reason.
+  /// `StorylineTuning.possibleHoldsRoom`, for [sweepCharterRaw]'s reason.
   static const String sweepPossibleRoomRaw =
       String.fromEnvironment('SWEEP_POSSIBLE_ROOM', defaultValue: '0');
 
@@ -334,24 +326,11 @@ SweepStage parseSweepStage(String raw) => switch (raw.trim().toLowerCase()) {
         ),
     };
 
-/// The grouping mode `SWEEP_GROUPING` names, or a thrown [ArgumentError].
+/// The charter check `SWEEP_CHARTER` names, or a thrown [ArgumentError].
 ///
-/// Loud rather than defaulted, for [parseSweepStage]'s reason: the two modes
+/// Loud rather than defaulted, for [parseSweepStage]'s reason: the two checks
 /// are two different experiments, and a typo that quietly ran the shipped one
 /// would record a row against a question nobody asked.
-GroupingMode parseSweepGrouping(String raw) =>
-    switch (raw.trim().toLowerCase()) {
-      'decision' => GroupingMode.decision,
-      'cosine' => GroupingMode.cosine,
-      _ => throw ArgumentError.value(
-          raw,
-          'SWEEP_GROUPING',
-          'must be one of decision, cosine',
-        ),
-    };
-
-/// The charter check `SWEEP_CHARTER` names, or a thrown [ArgumentError], for
-/// [parseSweepGrouping]'s reason.
 CharterCheck parseSweepCharter(String raw) =>
     switch (raw.trim().toLowerCase()) {
       'model' => CharterCheck.model,

@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart'
-    show CharterCheck, GroupingMode, StorylinePolicy, StorylineTuning;
+    show CharterCheck, StorylinePolicy, StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/golden_harness.dart';
@@ -1047,22 +1047,6 @@ void main() {
       }
     });
 
-    test('SWEEP_GROUPING names a mode or fails loudly', () {
-      // Two modes and two experiments: a typo that quietly ran the shipped
-      // one would record a row against a question nobody asked. `model` and
-      // `pool` were retired with the grouping task.
-      expect(parseSweepGrouping('cosine'), GroupingMode.cosine);
-      expect(parseSweepGrouping(' DECISION '), GroupingMode.decision);
-      for (final raw in ['', 'cosign', 'model', 'pool', 'grouping']) {
-        expect(() => parseSweepGrouping(raw), throwsArgumentError, reason: raw);
-      }
-      // The default follows the app.
-      expect(
-        parseSweepGrouping(GoldenDefines.sweepGroupingRaw),
-        StorylineTuning.groupingMode,
-      );
-    });
-
     test('SWEEP_CHARTER names a check or fails loudly', () {
       expect(parseSweepCharter('lint'), CharterCheck.lint);
       expect(parseSweepCharter(' MODEL '), CharterCheck.model);
@@ -1122,51 +1106,6 @@ void main() {
     });
   });
 
-  group('the keep-all loop', () {
-    test('a pass that wrote a storyline always earns another', () {
-      for (final pass in [1, sweepDeferredPassCap, 19]) {
-        expect(
-          sweepLoopContinues(pass: pass, grew: true, clustersDeferred: 0),
-          isTrue,
-          reason: '$pass',
-        );
-      }
-    });
-
-    test('a quiet pass with nothing deferred ends it', () {
-      expect(
-        sweepLoopContinues(pass: 1, grew: false, clustersDeferred: 0),
-        isFalse,
-      );
-    });
-
-    test('a quiet pass that deferred clusters runs on, up to the cap', () {
-      // The 2026-09-30 linkTau 0.0135 row: the first pass deferred five
-      // clusters, wrote nothing, and the loop used to end right there.
-      expect(
-        sweepLoopContinues(pass: 1, grew: false, clustersDeferred: 5),
-        isTrue,
-      );
-      expect(
-        sweepLoopContinues(
-          pass: sweepDeferredPassCap - 1,
-          grew: false,
-          clustersDeferred: 1,
-        ),
-        isTrue,
-      );
-      expect(
-        sweepLoopContinues(
-          pass: sweepDeferredPassCap,
-          grew: false,
-          clustersDeferred: 1,
-        ),
-        isFalse,
-      );
-      expect(sweepDeferredPassCap, 8);
-    });
-  });
-
   group('the tally', () {
     SweepTally tally({
       Map<String, double?> purity = const {'sl-1': 1.0, 'sl-2': 0.5},
@@ -1181,7 +1120,6 @@ void main() {
           charterModelRejected: 6,
           seriesSeeded: 1,
           seriesExcluded: 8,
-          outliersDropped: 3,
           fragmentsJoined: 4,
           fragmentsFolded: 6,
           purityByStoryline: purity,
@@ -1196,11 +1134,7 @@ void main() {
           unmapped: 4,
           filedNowhere: 11,
           callsByKind: const {'storyline_name': 2, 'decision:member_of': 9},
-          pairsScored: 40,
-          pairsCached: 11,
-          pairsDeferred: 1,
           namerCalls: 2,
-          clustersDeferred: 1,
           callsPerPass: const [7, 4],
           wallPerPassMs: const [1200, 900],
           cosineBins: const [0, 1, 2, 3, 4],
@@ -1311,14 +1245,9 @@ void main() {
       expect(json['charter_model_rejected'], 6);
       expect(json['series'], 1);
       expect(json['series_excluded'], 8);
-      expect(json['outliers'], 3);
       expect(json['fragments'], 4);
       expect(json['folded'], 6);
-      expect(json['pairs_scored'], 40);
-      expect(json['pairs_cached'], 11);
-      expect(json['pairs_deferred'], 1);
       expect(json['namer_calls'], 2);
-      expect(json['clusters_deferred'], 1);
     });
 
     test('the formable line says how far the row sits from the ceiling', () {
@@ -1336,72 +1265,8 @@ void main() {
       expect(json['items'], 14);
     });
 
-    test('the pair and namer counts print on the calls line', () {
-      expect(
-        tally().table(),
-        contains('pairs scored 40  cached 11  deferred 1  namer calls 2'
-            '  clusters deferred 1'),
-      );
-    });
-
-    test('a cosine row carries the four pair keys as zeroes', () {
-      // The baseline judges no pair, and a row that simply left the keys out
-      // would read as a pass that judged nothing rather than as one that
-      // never judged — which is the whole comparison.
-      final json = SweepTally(
-        formed: 0,
-        tombstoned: 0,
-        lintRejected: 0,
-        seriesSeeded: 0,
-        seriesExcluded: 0,
-        outliersDropped: 0,
-        fragmentsJoined: 0,
-        fragmentsFolded: 0,
-        purityByStoryline: const {},
-        coverageBySlug: const {},
-        largestShare: 0,
-        correctPositives: 0,
-        formableItems: 0,
-        formablePositives: 0,
-        ceiling: 0,
-        items: 0,
-        forbiddenByAnti: const {},
-        unmapped: 0,
-        filedNowhere: 0,
-        callsByKind: const {},
-        callsPerPass: const [],
-        wallPerPassMs: const [],
-        cosineBins: const [0, 0, 0, 0, 0],
-        cosineBinsQwen: const [0, 0, 0, 0, 0],
-        lintCounts: const {},
-        clusterPurity: const {},
-        sameEffortBins: const [0, 0, 0, 0, 0],
-        crossEffortBins: const [0, 0, 0, 0, 0],
-        withNoneBins: const [0, 0, 0, 0, 0],
-        sameEffortBinsQwen: const [0, 0, 0, 0, 0],
-        crossEffortBinsQwen: const [0, 0, 0, 0, 0],
-        withNoneBinsQwen: const [0, 0, 0, 0, 0],
-        sameSubjectBins: const [0, 0, 0, 0],
-        crossSubjectBins: const [0, 0, 0, 0],
-        withNoneSubjectBins: const [0, 0, 0, 0],
-        samePeopleBins: const [0, 0, 0],
-        crossPeopleBins: const [0, 0, 0],
-        withNonePeopleBins: const [0, 0, 0],
-        separation: (
-          points: 0,
-          recall70Cosine: 0,
-          recall70CrossPct: 0,
-          cross5Cosine: 0,
-          cross5CrossPct: 0,
-          cross5SameRecallPct: 0,
-        ),
-      ).toJson();
-
-      expect(json['pairs_scored'], 0);
-      expect(json['pairs_cached'], 0);
-      expect(json['pairs_deferred'], 0);
-      expect(json['namer_calls'], 0);
-      expect(json['clusters_deferred'], 0);
+    test('the namer count prints on the calls line', () {
+      expect(tally().table(), contains('per pass 7, 4   namer calls 2'));
     });
 
     test('the JSON carries clusters by outcome and the pair bins by name', () {
@@ -1412,7 +1277,6 @@ void main() {
         charterModelRejected: 1,
         seriesSeeded: 0,
         seriesExcluded: 0,
-        outliersDropped: 0,
         fragmentsJoined: 0,
         fragmentsFolded: 0,
         purityByStoryline: const {},
@@ -1583,7 +1447,6 @@ void main() {
       // Counts, which is all the sweep-side line ever carries.
       expect(printed, contains('lint-rejected 5  charter-rejected 6'));
       expect(printed, contains('series  seeded 1  excluded 8'));
-      expect(printed, contains('outliers dropped 3'));
       expect(printed, contains('fragments 4'));
       expect(printed, contains('folded 6'));
       // A run that judged nothing still prints all five columns and says so.

@@ -365,8 +365,7 @@ class DecisionClient {
   /// here, so the file names the model), `systemone:<listed name>` for Your
   /// server's Kev wrapper.
   /// Cheap: the heads are cached per file modification and a server's kind
-  /// per address. The sweep keys its pair cache on this beside the qhash, so
-  /// a swapped or re-installed model asks its pairs again. Throws what
+  /// per address. The golden pairs bench prints its backend word. Throws what
   /// [ensureReady] throws.
   Future<String> modelIdentity() async {
     final destination = target;

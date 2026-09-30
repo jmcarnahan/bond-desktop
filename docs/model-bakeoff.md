@@ -34,7 +34,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
-| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep's grouping, the naming pass, the charter check, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`same_effort`, `charter_specific`, `member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector; `SWEEP_GROUPING` and `SWEEP_CHARTER` pick the grouping and the charter check. See "The golden set". |
+| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep's grouping, the naming pass, the charter check, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`same_effort`, `charter_specific`, `member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector; `SWEEP_CHARTER` picks the charter check. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
@@ -83,12 +83,6 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   the durable half with the summary dropped; and `summary`, what the thread is
   about with no subject line. Defaults to `topics`, which is to say to the app.
   Anything else fails loudly rather than defaulting.
-- `SWEEP_GROUPING` — which pass groups the pool on `make golden-sweep`:
-  `decision` (what ships since the decision-questions round: cosine proposes
-  pairs, the decision model's `same_effort` judges them) or `cosine` (the
-  cosine clustering alone, the baseline). `model` and `pool`, the two
-  generative grouping modes, were deleted with their task and are refused.
-  Defaults to `decision`, which is to say to the app.
 - `SWEEP_CHARTER` — which check a named cluster's charter faces: `model` (the
   decision model's `charter_specific`, what ships) or `lint` (the regex
   charter lint). Defaults to `model`. Anything else fails loudly.
@@ -2025,15 +2019,16 @@ The sweep (`make golden-sweep`; id score / correct positives / forbidden hits / 
 | decision | model | linkTau 0.004, budget 2000 | 55/98 | 13 | 4 | 8 | 14 | purity 39% | no |
 | decision | model | linkTau 0.008, budget 2000 | 51/98 | 18 | 7 | 10 | 11 | purity 53% | no |
 
-Reading it: the decision grouping does not beat cosine on this set at any `linkTau` taken. Its
+Reading it: the decision grouping (cosine proposed pairs, `same_effort` judged them, average
+linkage at `linkTau` formed the clusters) does not beat cosine on this set at any `linkTau` taken. Its
 `same_effort` signal on the golden pool is real (AUC 0.888) but weak where it matters, with p
 compressed near zero, so a tau low enough to link real pairs links wrong ones too. What ships is
 the cosine grouping with the model charter check (`CharterCheck.model`: 59 and 60 against the
 lint's 54) and `acceptSuggested` 0.74. `acceptActive` stays 0.50 (storyline 89/98; declared 84 at
-both 0.50 and 0.60, four more correct positives at 0.50 for no more forbidden). `linkTau` sits at
-0.008 as a provisional bench value (the most correct positives), and the golden sweep now keeps
-passing while a quiet pass defers clusters, up to eight passes; the budget-bound 0.0135 row was taken before that change and has not been
-re-measured.
+both 0.50 and 0.60, four more correct positives at 0.50 for no more forbidden). The decision
+grouping was REMOVED on 2026-09-30 because it did not beat cosine: the grouping, its pair cache
+(`pair_decisions`), `linkTau` and the pair budget are gone from the app, and the seven rows above
+stay as the record of what was measured. The budget-bound 0.0135 row was never re-measured.
 
 Run files, all under `tmp/bench/`: `golden-decision-golden-decision-20260930-145158.json`
 (with `golden-run-decision-argmax-…` and `golden-run-decision-policy-20260930-145158.json`);
@@ -2047,18 +2042,16 @@ clean `git archive` copy with the embed, decision and prose servers up:
 
 ```
 make golden-sweep GOLDEN_RUN=<run>                                        # what ships: cosine grouping, model charter check
-make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=decision                # the bench arm: same_effort grouping, same charter check
 make golden-sweep GOLDEN_RUN=<run> SWEEP_CHARTER=lint                     # the charter baseline, same grouping
 make golden-pairs GOLDEN_RUN=<run>                                        # same_effort alone over golden-vector's pool pairs: AUC, p at 70% recall, false links at 50/70/90% (DECIDE_URL=…/v1/systemone benches Kev v3 through the app's wire)
 ```
 
-The shipped configuration is `SWEEP_GROUPING=cosine SWEEP_CHARTER=model` with
-`StorylinePolicy.acceptSuggested` 0.74 and `acceptActive` 0.50. What would change the decision: a
-`same_effort` student with false links at or under 5% at 70% recall on `make golden-pairs`, then a
-`SWEEP_GROUPING=decision` row above 60/98 with no more than 3 forbidden hits, taken on the same day
-and tree as a cosine row. `linkTau` and `pairBudgetPerPass` stay PROVISIONAL until then; the golden
-pool of 71 threads proposes about 570 candidate pairs, so a first pass at 400 defers. A move of any
-`StorylinePolicy` number takes a row on each side.
+The shipped configuration is the cosine grouping with `SWEEP_CHARTER=model`,
+`StorylinePolicy.acceptSuggested` 0.74 and `acceptActive` 0.50. What would bring a pair grouping
+back: a `same_effort` student with false links at or under 5% at 70% recall on `make golden-pairs`,
+and then a grouping built on it scoring above 60/98 on `make golden-sweep` with no more than 3
+forbidden hits, taken on the same day and tree as a cosine row. A move of any `StorylinePolicy`
+number takes a row on each side.
 
 ### Recommendations (decision-model round, 2026-09-28)
 

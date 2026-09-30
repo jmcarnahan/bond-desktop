@@ -218,8 +218,7 @@ class DecisionHeads {
 
   /// The first 12 hex of the file's sha256, or empty for heads built in
   /// memory. Two installs that share a [model] name but differ in any weight
-  /// differ here, which is what the sweep's pair cache keys on
-  /// (`DecisionClient.modelIdentity`).
+  /// differ here (`DecisionClient.modelIdentity`).
   final String fingerprint;
 
   /// The vector width every head reads: the file's weight rows', which is
