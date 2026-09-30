@@ -19,6 +19,11 @@ List<double> _softmax(List<double> logits) {
 Matcher _refusal(String words) => isA<LlmFormatException>()
     .having((e) => e.message, 'message', contains(words));
 
+/// A wrong-width vector: the server's fault, so it parks.
+Matcher _widthPark(String words) => isA<DecisionMisconfiguredException>()
+    .having((e) => e.message, 'message', contains(words))
+    .having((e) => parkReasonFor(e), 'park word', 'decision_misconfigured');
+
 void main() {
   group('apply', () {
     test('softmax of (W·v + b) / T, per field, against hand arithmetic', () {
@@ -93,10 +98,10 @@ void main() {
       expect(answers.p('gate', 'keep'), 0.0);
     });
 
-    test('a vector of the wrong width is refused', () {
+    test('a vector of the wrong width parks as misconfigured', () {
       expect(
         () => syntheticHeads().apply(List.filled(768, 1.0)),
-        throwsA(_refusal('768')),
+        throwsA(_widthPark('768')),
       );
     });
 
@@ -146,11 +151,11 @@ void main() {
       }
     });
 
-    test('a vector of the wrong width is refused', () {
+    test('a vector of the wrong width parks as misconfigured', () {
       expect(
         () => syntheticHeads()
             .pYes(StorylineQuestion.memberOf, List.filled(768, 1.0)),
-        throwsA(_refusal('768')),
+        throwsA(_widthPark('768')),
       );
     });
   });

@@ -1012,7 +1012,8 @@ class TriageQueue {
   /// question set and reason per app run ([_redecideParksLogged]), so a model
   /// that stays parked for a week does not write a row on every sync.
   ///
-  /// A 4xx this one request earned SETTLES the message for this question set
+  /// A per-message fault ([LlmFormatException]: a 4xx this one request
+  /// earned) SETTLES the message for this question set
   /// ([MessageStore.settleFailedDecision]): it keeps its old numbers, reads
   /// as undecided, and leaves the stale list, so the same bad message is
   /// never asked again by this one-shot. A run that did not park is
@@ -1050,7 +1051,11 @@ class TriageQueue {
           );
         }
         return (redecided: redecided, complete: false);
-      } on LlmException {
+      } on LlmFormatException {
+        // The one per-message fault the client throws (a 4xx this request
+        // earned, a systemone answer to this state that did not validate).
+        // Everything that would fail every message alike is an
+        // [LlmUnavailableException] and parked above.
         await _store.settleFailedDecision(
           ref.source,
           ref.id,

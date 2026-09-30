@@ -132,7 +132,8 @@ FAST_SLOTS   ?= 4
 
 # The fourth server: the decision model, the fine-tuned ModernBERT-large
 # classifier from jev-prototype served as a mean-pooled embedding model — the
-# app applies its nine heads itself (tmp/PLAN-decision-model.md, D1). Its own
+# app applies its heads itself, the nine message fields and the three
+# storyline questions (tmp/PLAN-decision-model.md, D1). Its own
 # port because 8090 is OMLX_PORT, and its own process because the embed server
 # pools `last` and one llama-server serves one pooling mode per model.
 DECIDE_PORT  ?= 8083

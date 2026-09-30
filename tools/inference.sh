@@ -27,13 +27,15 @@
 # GPU (--mem / --bulk-mem); the shares are chosen so the pair fits one L40S.
 # `decide` (--decide-gguf PATH, :8002) is the app's Decision model: the
 # fine-tuned ModernBERT classifier as a GGUF, served as mean-pooled embeddings
-# by a llama.cpp container (llama-decide); the app applies the nine heads
-# itself, so the heads file stays on the Mac and is never uploaded. PATH has
+# by a llama.cpp container (llama-decide); the app applies the heads (the
+# nine message fields and the three storyline questions) itself, so the heads file stays on the Mac and is never uploaded. PATH has
 # no default; the usual value is the file `make decide-install` put in
 # "$HOME/Library/Application Support/com.bondinbox.app/models/local_bond-decide/
 # bond-decide-mbl-v2swap-f16.gguf". It is copied up from this machine and its
-# sha256 checked on the box before the slot starts. It is served as
-# bond-decide-mbl-v2swap (--decide-served), the name the app expects from a box. The slot is off unless --decide-gguf
+# sha256 checked on the box before the slot starts. It is served under the
+# file's name less its -<quant>.gguf (bond-decide-mbl-v3-f16.gguf serves as
+# bond-decide-mbl-v3), which the app's heads pairing reads against the heads
+# file's model; --decide-served overrides it. The slot is off unless --decide-gguf
 # is given; `restart` keeps it from the box like the other models.
 # --decide-image pins another llama.cpp CUDA image. The app's Your server
 # decision address for such a box is https://HOST/decide/v1/embeddings.
@@ -117,11 +119,13 @@ IMAGE=vllm/vllm-openai:v0.29.0
 # The decide slot, off unless --decide-gguf is given (or kept from the box on
 # `restart`). DECIDE_GGUF is the local file to upload; DECIDE_FILE its name on
 # the box, under /opt/bond/decide/. The served name is the one the app asks a
-# box for (boxDecideModel in app/lib/services/llm/model_slots.dart).
+# box for (boxDecideModel in app/lib/services/llm/model_slots.dart); empty
+# means the file's own name less its -<quant>.gguf (served_from_file), so a
+# v3 file serves as bond-decide-mbl-v3 with no flag. --decide-served sets it.
 DECIDE_GGUF=
 DECIDE_FILE=
 DECIDE_SET=
-DECIDE_SERVED=bond-decide-mbl-v2swap
+DECIDE_SERVED=
 DECIDE_SERVED_SET=
 # The llama.cpp build pinned like the vLLM image: b10896 is the bundled
 # sidecar build that matched PyTorch in the round's parity check
@@ -766,6 +770,13 @@ EOF
 # The one check on a decide file name, for --decide-gguf and for the
 # decide-file tag read back off the instance: it reaches a remote shell, a
 # docker mount and a tag, so it is a plain .gguf name and nothing else.
+# The served name a decide file gets by default: its name less .gguf and the
+# last -<quant> segment (bond-decide-mbl-v3-f16.gguf -> bond-decide-mbl-v3).
+served_from_file() {  # served_from_file FILE
+  local b=${1%.gguf}
+  echo "${b%-*}"
+}
+
 check_decide_file() {  # check_decide_file NAME WHERE-IT-CAME-FROM
   case "$1" in
     *.json) die "$2: takes the .gguf; the heads file ($1) stays on the Mac" ;;
@@ -922,7 +933,7 @@ cmd_restart() {
     DECIDE_FILE=$IDECIDEFILE; decide_keep=1
     if [ -z "$DECIDE_SERVED_SET" ]; then
       case "$IDECIDE" in *[!A-Za-z0-9._-]*) die "the decide-model tag on $INSTANCE_ID ($IDECIDE) is not a plain name; give --decide-served NAME" ;; esac
-      DECIDE_SERVED=$IDECIDE
+      DECIDE_SERVED=${IDECIDE:-$(served_from_file "$IDECIDEFILE")}
     fi
   fi
   # --decide-served renames a slot. With no --decide-gguf and no slot on the
@@ -1140,6 +1151,7 @@ cmd_test() {
     if [ "$TEST_DECIDE" = 1 ]; then
       # --decide: URL is the slot's base (…/decide), not its /v1/embeddings.
       [ -n "$MODEL_SET" ] || m=$DECIDE_SERVED
+      [ -n "$m" ] || die "test --url --decide needs the served name: give --model NAME or --decide-served NAME"
       run_decide_test "${URL%/}" "$m" "$BEARER"
     else
       run_test "${URL%/}" "$m" "$BEARER"
@@ -1359,7 +1371,10 @@ case "$DECIDE_GGUF" in
   none) DECIDE_GGUF= DECIDE_FILE= ;;
   *) DECIDE_FILE=$(basename "$DECIDE_GGUF"); check_decide_file "$DECIDE_FILE" --decide-gguf ;;
 esac
-case "$DECIDE_SERVED" in ''|*[!A-Za-z0-9._-]*) die "--decide-served takes letters, digits, dot, dash and underscore only" ;; esac
+# No --decide-served: a file given here names its own slot.
+[ -z "$DECIDE_SERVED_SET" ] && [ -n "$DECIDE_FILE" ] && DECIDE_SERVED=$(served_from_file "$DECIDE_FILE")
+[ -n "$DECIDE_SERVED_SET" ] && [ -z "$DECIDE_SERVED" ] && die "--decide-served takes a name"
+case "$DECIDE_SERVED" in *[!A-Za-z0-9._-]*) die "--decide-served takes letters, digits, dot, dash and underscore only" ;; esac
 case "$CMD" in
   up) cmd_up ;; restart) cmd_restart ;; status) cmd_status ;; test) cmd_test ;; tunnel) cmd_tunnel ;;
   extend) cmd_extend ;; down) cmd_down ;; persist) cmd_persist ;; -h|--help|help) usage ;;

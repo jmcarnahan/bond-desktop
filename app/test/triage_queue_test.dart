@@ -21,6 +21,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/decision_heads_fixture.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -2853,6 +2854,34 @@ void main() {
       expect(second.redecided, 1);
       expect(second.complete, isTrue);
       expect([for (final c in decision.calls) c.bodyText], ['Body of later']);
+    });
+
+    test('a wrong-width vector parks the run and settles nothing', () async {
+      await seedDecided('a', hours: 1);
+      await seedDecided('b', hours: 2);
+      // Another model behind the address: every message comes back 768 wide,
+      // which the heads refuse as the server's fault.
+      final wrongWidth = FakeDecisionClient((_) => fakeDecision(
+          syntheticHeads().apply(List<double>.filled(768, 1.0))));
+
+      final outcome =
+          await TriageQueue(store, decisionClient: wrongWidth).redecideStale();
+
+      expect(outcome.complete, isFalse);
+      expect(wrongWidth.calls, hasLength(1));
+      final marked = await db
+          .customSelect("SELECT COUNT(*) AS n FROM message_decisions "
+              "WHERE answers_json LIKE '%redecide_failed%'")
+          .getSingle();
+      expect(marked.data['n'], 0);
+      expect(
+        await store.staleDecisionRefs(
+          qhash: decisionQhash,
+          sinceIso: hoursAgo(24 * TriageQueue.redecideDays),
+          limit: 10,
+        ),
+        hasLength(2),
+      );
     });
 
     group('the chip', () {

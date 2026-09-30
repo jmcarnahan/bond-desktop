@@ -18,6 +18,7 @@ import 'package:flutter/foundation.dart' show immutable;
 
 import '../llm/llm_client.dart'
     show
+        DecisionMisconfiguredException,
         DecisionOlderModelException,
         LlmFormatException,
         decisionOlderModelText;
@@ -445,9 +446,12 @@ class DecisionHeads {
     return _softmaxOf(_logits(head, vector))[head.options.indexOf('yes')];
   }
 
+  /// A vector of another width is the SERVER's (another model behind the
+  /// address), never one message's, so it parks rather than failing the
+  /// message: every message would come back the same width.
   void _checkWidth(List<double> vector) {
     if (vector.length != hidden) {
-      throw LlmFormatException(
+      throw DecisionMisconfiguredException(
         'The decision model returned a vector of ${vector.length} numbers, '
         'not $hidden.',
       );

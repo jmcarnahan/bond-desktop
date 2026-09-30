@@ -46,8 +46,12 @@ the v3 decision model is installed. The rail says "The installed decision
 model is an older version that this app no longer reads · N waiting ·
 install the current decision model to resume sorting new mail", and
 Settings, Models says the same sentence under the Decision model with a
-quieter `For developers: make decide-install` line beneath it. The v3 install updates `DECIDE_SRC`, the manifest entry
-and the sha256 pins.
+quieter `For developers: make decide-install` line beneath it. The v3 install
+updates `DECIDE_SRC`, the manifest entry, the sha256 pins, and the box's
+served name: `boxDecideModel` in `app/lib/services/llm/model_slots.dart`,
+which `tools/inference.sh` matches by default (`DECIDE_SERVED` is the GGUF's
+name less its `-<quant>.gguf`, so a v3 file serves as `bond-decide-mbl-v3`;
+`--decide-served` overrides it).
 
 **Decision model on your server.** Settings, Models can point the Decision
 model at **Your server** instead, and what the URL serves decides what this Mac
