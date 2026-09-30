@@ -6,7 +6,7 @@ rather than a stored map:
 
 | Role | What it does | Where it can run |
 |------|--------------|------------------|
-| **Decision** | The fine-tuned ModernBERT classifier: one embedding call per message, nine heads applied in Dart | this Mac (Managed) or Your server |
+| **Decision** | Every choice-shaped answer, twelve questions: the nine message fields (one call per message) and the three storyline questions. The fine-tuned ModernBERT classifier (one embedding call, heads applied in Dart from this Mac's heads file) on this Mac or at a llama-server URL; a Kev 4B server (`/v1/systemone`) answers the questions itself and needs no files here | this Mac (Managed) or Your server |
 | **Generative** | Every piece of text: summaries, digests, briefs, storyline names and recaps, drafts | this Mac (Managed: the 27B or the 4B) or Your server |
 | **Embeddings** | Clustering and search vectors | this Mac, always; not a choice |
 
@@ -359,9 +359,28 @@ name the wrapper listed; `truncated` is always false.
   the form instead of connecting; the form also takes the decision model's
   own name from a router's `/v1/models` (`bond-decide`, the box's served
   name, this build's, or the stored one) before the first id.
+- **The heads pairing.** After the probe, once per target and heads model,
+  the name of the GGUF the server serves must CONTAIN the heads file's
+  `model` (`bond-decide-mbl-v3` in `bond-decide-mbl-v3-f16.gguf`); the probe
+  cannot see this, since every ModernBERT tokenizes alike. For the managed
+  router the file is the manifest's decide entry (the provider's
+  `servedFile` hook: the router lists only preset ids); for Your server it
+  is read off the `/v1/models` listing the kind check already fetched; for a
+  hand-started server it is one `GET <base>/v1/models`. llama-server lists
+  its model path under `model`/`id`/`name` unless an alias replaced it, and
+  only a name ending `.gguf` counts (reduced to its last path segment). A
+  listing that names none, or no listing, SKIPS the check and is kept like a
+  pass; a mismatch is `DecisionModelMismatchException` (a
+  `DecisionMisconfiguredException`, park `decision_misconfigured`): "The
+  decision model file (<file>) does not match its heads file (<model>).
+  Install them together." It is forgotten with the probe's pass.
 - **The request.** `POST <url> {"model", "input", "embd_normalize": -1}` with
   `Authorization: Bearer` when the target has a key. `input` is a string for
-  one state, an array for a batch, or a flat int array for a token path.
+  one state, an array for a batch, or a flat int array for a token path. A
+  404 or 405 here is the server, not the message (`… does not offer
+  /v1/embeddings, which the decision model needs`): it parks
+  `decision_misconfigured` and drops the probe's and the kind's cache, as
+  `/tokenize` and `/v1/systemone` do.
 - **Raw vectors.** llama-server L2-normalises by default, and the heads were
   trained on the RAW pooled vector (a linear layer with a bias is not
   scale-invariant), so every request sends `embd_normalize: -1`. A vector
@@ -400,8 +419,12 @@ name the wrapper listed; `truncated` is always false.
   answers. A file this build refuses (not
   JSON, another schema, question set or renderer set) throws
   `DecisionMisconfiguredException`. A schema-1 file (the first decision
-  model) gets its own sentence, `DecisionHeads.olderModelText`, which says the
-  installed model is the older version and to run `make decide-install`. That
+  model) throws its subclass `DecisionOlderModelException`, which parks
+  under its own `decision_older_model` with `DecisionHeads.olderModelText`
+  (`decisionOlderModelText` in `llm_client.dart`): "The installed decision
+  model is an older version that this app no longer reads. Install the
+  current decision model to resume sorting new mail." Plain words and no
+  command, because the owner reading it may not be a developer. That
   failure IS cached on the file's
   mtime, so a bad file is parsed once rather than once per claim. Settings'
   **Check** does not drop the cache: rebuilding it would rebuild the decision
@@ -412,7 +435,8 @@ What goes wrong, and what the owner sees:
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` answers 404 or 405; the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
 | Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
 | Any other 4xx (a systemone 413/422 included) | `LlmFormatException` | none: counted against the item | none |
@@ -422,7 +446,8 @@ message would error the backlog and let each row flow on to its text with no
 decision. The one per-message fault is a 4xx the server gives this request.
 The activity log's words for the reasons are in `activity_log_panel.dart`
 (`decision model unreachable`, `decision model not installed`, `decision
-server misconfigured`, `the decision server refused the access key`), and the
+model is an older version`, `decision server misconfigured`, `the decision
+server refused the access key`), and the
 Models page
 carries the same park as one status line (`docs/settings.md`). The
 unreachable sentences name `make decide`, the hand-server fix; the URL in any
@@ -642,7 +667,8 @@ The decision model is not downloaded this round: `make decide-install` copies
 the GGUF and the heads file from the training export, sha256-pinned, into
 `local_bond-decide/`. Distributing it is an open packaging question. It still
 copies the v2 export, whose schema-1 heads file this build refuses
-(`olderModelText`) until the v3 decision model is installed; the v3 install
+(`olderModelText`, park `decision_older_model`) until the v3 decision model
+is installed; the v3 install
 updates the export and its pins ([03-triage.md](03-triage.md)).
 
 ### First run
@@ -687,7 +713,10 @@ ledger.
   `LlmClient` for a managed generative target carrying
   `LlmTarget.unavailable`) is `not_installed`; the decision client's own
   `DecisionNotInstalledException` is `decision_not_installed`, because its fix
-  is a command rather than a download; `DecisionMisconfiguredException` is
+  is a command rather than a download; `DecisionOlderModelException` (the
+  heads schema-1 refusal) is `decision_older_model`, ahead of its parent,
+  because its fix is an install rather than an address;
+  `DecisionMisconfiguredException` is
   `decision_misconfigured`, because waiting fixes neither of its causes (the
   address or the heads file), so its sentence claims no retry;
   `DecisionUnauthorizedException` is
@@ -719,6 +748,7 @@ ledger.
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
   | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
   | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+  | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
   | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
   | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |

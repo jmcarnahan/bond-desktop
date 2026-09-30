@@ -284,6 +284,28 @@ void main() {
       }
     });
 
+    test('the older decision model says so in plain words, with no command '
+        'and no retry', () {
+      for (final onBox in [true, false]) {
+        final line = railProgressLine(
+          on: true,
+          remaining: 3,
+          reason: 'decision_older_model',
+          waiting: 3,
+          onBox: onBox,
+        );
+        expect(
+          line,
+          'The installed decision model is an older version that this app no '
+          'longer reads · 3 waiting · install the current decision model to '
+          'resume sorting new mail',
+          reason: 'onBox: $onBox',
+        );
+        expect(line, isNot(contains('make')));
+        expect(line, isNot(contains('retrying')));
+      }
+    });
+
     test('a refused decision key names the decision server, whatever the '
         'generative placement', () {
       for (final onBox in [true, false]) {
@@ -342,6 +364,7 @@ void main() {
         'decision_unavailable',
         'not_installed',
         'decision_not_installed',
+        'decision_older_model',
         'decision_misconfigured',
         'decision_unauthorized',
       ]) {
@@ -383,6 +406,7 @@ void main() {
         'decision_unavailable',
         'not_installed',
         'decision_not_installed',
+        'decision_older_model',
         'decision_misconfigured',
         'decision_unauthorized',
         'session',

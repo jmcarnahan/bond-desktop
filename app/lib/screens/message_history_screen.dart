@@ -10,7 +10,8 @@ import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/home_result.dart';
 import '../widgets/inline_alert.dart';
-import '../widgets/needs_you_reason.dart' show needsYouPercentWords;
+import '../widgets/needs_you_reason.dart'
+    show needsYouFromEarlierModel, needsYouPercentWords;
 import '../widgets/pane_surface.dart';
 import '../widgets/source_glyph.dart';
 import '../widgets/stage_bar.dart';
@@ -443,7 +444,13 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     final why = history.needsYouReason?.trim() ?? '';
     // NULL has never been decided at all, which is not 0%.
     final p = history.needsYouP;
-    final verdict = needsYouPercentWords(p) ?? 'not decided';
+    // An earlier model's carried verdict is not drawn as 100% or 0%: no model
+    // said that number (`needsYouFromEarlierModel`).
+    final verdict = p != null &&
+            needsYouFromEarlierModel(p, decidedNow: history.decidedNow)
+        ? '— (earlier model)'
+        : needsYouPercentWords(p, decidedNow: history.decidedNow) ??
+            'not decided';
     // The reason is templated whatever the probability, so it rides only on a
     // message over the owner's slider, where it is an answer
     // (`home_result.dart` keeps the same rule).

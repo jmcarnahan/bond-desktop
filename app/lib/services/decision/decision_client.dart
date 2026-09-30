@@ -134,6 +134,19 @@ String noTokenizeText(String origin) =>
     'The server at $origin does not offer /tokenize, which the decision '
     'model needs. Check its address in Settings, Models.';
 
+/// A server with no `/v1/embeddings` at [origin]: an encoder-heads decision
+/// server answers every question there, so nothing it answers can be used.
+String noEmbeddingsText(String origin) =>
+    'The server at $origin does not offer /v1/embeddings, which the decision '
+    'model needs. Check its address in Settings, Models.';
+
+/// The served GGUF ([file], its name only) is not the model [model] the
+/// heads file on this Mac was trained with: heads applied to another
+/// encoder's vectors answer confidently and wrongly.
+String modelMismatchText(String file, String model) =>
+    'The decision model file ($file) does not match its heads file '
+    '($model). Install them together.';
+
 /// A systemone server at [origin] trained on another question set: its
 /// answers would be to other questions, so none is used.
 String systemOneQhashText(String origin, Object? qhash) =>
@@ -195,6 +208,16 @@ class DecisionClient {
   /// answering or refuses the key.
   final Map<String, _ServerKind> _kinds = {};
 
+  /// The heads' model each target's served file was checked against, by
+  /// [_keyOf], on [_verified]'s rule: only a pass (or a listing that named no
+  /// file) is kept, and it is forgotten with the identity probe's pass.
+  final Map<String, String> _paired = {};
+
+  /// The GGUF a MANAGED target serves, by name, or null for any other target
+  /// (then the server's own `/v1/models` is read). The managed router lists
+  /// only its preset ids, so the manifest is what names its file.
+  final String? Function(LlmTarget target)? _servedFile;
+
   final LlmTarget Function() _resolveTarget;
   final DecisionHeads Function() _heads;
   final http.Client _http;
@@ -222,6 +245,7 @@ class DecisionClient {
     this.timeout = const Duration(seconds: 15),
     this._toLocal,
     this._isYourServer,
+    this._servedFile,
   }) : _http = client ?? http.Client();
 
   /// Where the next request goes, resolved ONCE per call so its URL, model
@@ -329,6 +353,7 @@ class DecisionClient {
           e is DecisionUnauthorizedException) {
         _verified.remove(_keyOf(destination));
         _kinds.remove(_keyOf(destination));
+        _paired.remove(_keyOf(destination));
       }
       rethrow;
     }
@@ -388,6 +413,7 @@ class DecisionClient {
     _CallFacts facts,
   ) async {
     await _verifyServer(destination, facts);
+    await _checkPairing(destination, heads, facts);
     final vectors = List<List<double>?>.filled(states.length, null);
     final truncated = List<bool>.filled(states.length, false);
 
@@ -547,7 +573,11 @@ class DecisionClient {
         listing == null ? null : _systemOneEntry(listing, destination);
     final _ServerKind kind;
     if (entry == null) {
-      kind = const _ServerKind(DecisionServerKind.encoderHeads, '');
+      kind = _ServerKind(
+        DecisionServerKind.encoderHeads,
+        '',
+        listedFile: listing == null ? null : _listedGguf(listing, destination),
+      );
     } else {
       final origin = _origin(url);
       if (entry['qhash'] != decisionQhash) {
@@ -725,6 +755,100 @@ class DecisionClient {
     _verified.add(key);
   }
 
+  /// The heads↔GGUF pairing, once per target and heads model: the name of
+  /// the file the server serves must CONTAIN the heads' `model`
+  /// (`bond-decide-mbl-v3` in `bond-decide-mbl-v3-f16.gguf`). The identity
+  /// probe cannot see this — every ModernBERT tokenizes alike — and heads
+  /// applied to another fine-tune's vectors answer confidently and wrongly,
+  /// so a mismatch is a [DecisionModelMismatchException] and parks.
+  ///
+  /// The file comes from [_servedFile] for a managed target (the manifest),
+  /// from the listing [_resolveKind] already read for Your server, and from
+  /// one `GET <base>/v1/models` for a hand-started server. A listing that
+  /// names no `.gguf` and no `bond-decide-…` served name (none at all, or
+  /// only a bare alias) is skipped rather than refused, and the skip is kept
+  /// like a pass.
+  Future<void> _checkPairing(
+    LlmTarget destination,
+    DecisionHeads heads,
+    _CallFacts facts,
+  ) async {
+    final key = _keyOf(destination);
+    if (_paired[key] == heads.model) return;
+    String? file = _servedFile?.call(destination);
+    if (file == null) {
+      if (facts.yourServer) {
+        file = _kinds[key]?.listedFile;
+      } else {
+        try {
+          final listing = await _requestJson(
+            systemOneUrlFor(destination.baseUrl, 'models'),
+            destination,
+            null,
+            facts,
+            listingRequest: true,
+          );
+          file = _listedGguf(listing, destination);
+        } on _NoListing {
+          file = null;
+        }
+      }
+    }
+    if (file != null &&
+        heads.model.isNotEmpty &&
+        !file.contains(heads.model)) {
+      throw DecisionModelMismatchException(
+          modelMismatchText(file, heads.model));
+    }
+    _paired[key] = heads.model;
+  }
+
+  /// The GGUF file name [listing] names for [destination], or null. The entry
+  /// named [destination]'s model is read first, else a list's lone entry; its
+  /// `model`, `id` and `name` are llama-server's (the path it was started
+  /// with, unless an alias replaced it), and only one ending `.gguf` or a
+  /// served name starting `bond-decide-` counts, reduced to its last path
+  /// segment so no folder reaches a sentence.
+  static String? _listedGguf(
+    Map<String, Object?> listing,
+    LlmTarget destination,
+  ) {
+    final entries = [
+      for (final list in [listing['data'], listing['models']])
+        if (list is List)
+          for (final entry in list)
+            if (entry is Map) entry,
+    ];
+    final named = [
+      for (final entry in entries)
+        if (entry['id'] == destination.model ||
+            entry['name'] == destination.model)
+          entry,
+    ];
+    // llama-server lists its one model twice, once in each list, so a lone
+    // entry is judged per list.
+    final candidates = named.isNotEmpty
+        ? named
+        : [
+            for (final list in [listing['data'], listing['models']])
+              if (list is List && list.length == 1 && list.single is Map)
+                list.single as Map<Object?, Object?>,
+          ];
+    for (final entry in candidates) {
+      for (final field in ['model', 'id', 'name']) {
+        final value = entry[field];
+        if (value is! String) continue;
+        final base = value.split(RegExp(r'[/\\]')).last;
+        if (base.toLowerCase().endsWith('.gguf')) return base;
+        // A served name the box gives the model (`bond-decide-mbl-v3`),
+        // which names it as well as a file would. A bare `bond-decide`
+        // names no model and is skipped.
+        if (base.startsWith('bond-decide-')) return base;
+      }
+    }
+    return null;
+  }
+
   /// [state]'s vector, and whether ids had to be cut to get one.
   Future<(List<double>, bool)> _vectorFor(
     String state,
@@ -803,6 +927,7 @@ class DecisionClient {
         },
         facts,
         tooLargeIsSignal: true,
+        embeddingsRequest: true,
       );
     } on _TooLarge {
       if (textRequest) return null;
@@ -878,6 +1003,7 @@ class DecisionClient {
     _CallFacts facts, {
     bool tooLargeIsSignal = false,
     bool tokenizeRequest = false,
+    bool embeddingsRequest = false,
   }) =>
       _requestJson(
         url,
@@ -886,6 +1012,7 @@ class DecisionClient {
         facts,
         tooLargeIsSignal: tooLargeIsSignal,
         tokenizeRequest: tokenizeRequest,
+        embeddingsRequest: embeddingsRequest,
       );
 
   /// [_postJson], or a GET when [body] is null. A [listingRequest] (the
@@ -894,7 +1021,8 @@ class DecisionClient {
   /// throws [_NoListing]: a server with no listing is not a systemone server,
   /// and the encoder-heads identity probe decides what it is. A
   /// [systemOneRequest] answered 404 or 405 is a server with no systemone
-  /// endpoint, which parks as misconfigured.
+  /// endpoint, and an [embeddingsRequest] (the encoder's `/v1/embeddings`)
+  /// one with no embeddings endpoint: both park as misconfigured.
   Future<Map<String, Object?>> _requestJson(
     Uri url,
     LlmTarget destination,
@@ -904,6 +1032,7 @@ class DecisionClient {
     bool tokenizeRequest = false,
     bool listingRequest = false,
     bool systemOneRequest = false,
+    bool embeddingsRequest = false,
   }) async {
     // A managed decision model the router is not serving (not installed):
     // refused before any request, so the pass parks on its own reason.
@@ -966,6 +1095,12 @@ class DecisionClient {
       if (tokenizeRequest &&
           (response.statusCode == 404 || response.statusCode == 405)) {
         throw DecisionMisconfiguredException(noTokenizeText(_origin(url)));
+      }
+      // The same for the embeddings route: an address re-pointed at a
+      // server with no `/v1/embeddings` fails every message alike.
+      if (embeddingsRequest &&
+          (response.statusCode == 404 || response.statusCode == 405)) {
+        throw DecisionMisconfiguredException(noEmbeddingsText(_origin(url)));
       }
       final status = response.statusCode;
       if (listingRequest &&
@@ -1155,6 +1290,7 @@ class DecisionClient {
           e is DecisionUnauthorizedException) {
         _verified.remove(_keyOf(destination));
         _kinds.remove(_keyOf(destination));
+        _paired.remove(_keyOf(destination));
       }
       _report(destination, sw, facts, label, 'unavailable', e.message);
       rethrow;
@@ -1215,7 +1351,11 @@ class _ServerKind {
   final DecisionServerKind kind;
   final String model;
 
-  const _ServerKind(this.kind, this.model);
+  /// For an encoder-heads server, the GGUF its listing named, or null when
+  /// it named none: what the heads pairing reads without asking again.
+  final String? listedFile;
+
+  const _ServerKind(this.kind, this.model, {this.listedFile});
 }
 
 /// What answers one call's questions: the message fields over message
@@ -1246,6 +1386,7 @@ class _EncoderHeadsBackend implements _DecisionBackend {
   Future<DecisionResult> one(String state, Stopwatch sw) async {
     final heads = _client._heads();
     await _client._verifyServer(_destination, _facts);
+    await _client._checkPairing(_destination, heads, _facts);
     final (vector, truncated) =
         await _client._vectorFor(state, _destination, heads, _facts);
     return DecisionResult(

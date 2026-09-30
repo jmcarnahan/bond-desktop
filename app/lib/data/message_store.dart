@@ -1047,6 +1047,13 @@ WHERE source = ? AND conversation_key = ?
           // tile compare the same number against the same slider. See
           // [threadNeedsYouPSql].
           '  ${threadNeedsYouPSql('c')} AS needs_you_p, '
+          // Whether that probability was decided under the question set this
+          // build reads, off the same `nr` row it came from: a v21 carried
+          // verdict (1.0 or 0.0) is never drawn as a percentage. See
+          // [decidedNowSql].
+          '  CASE WHEN nr.source_message_id IS NULL THEN NULL '
+          "       WHEN ${decidedNowSql('nr')} THEN 1 ELSE 0 END "
+          '    AS needs_you_decided_now, '
           '  nk.from_address AS latest_inbound_from '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
@@ -2633,6 +2640,9 @@ WHERE COALESCE(cta_text, '') <> ''
       final decoded = jsonDecode(row['answers_json'] as String? ?? '{}');
       if (decoded is Map) {
         final json = decoded.cast<String, Object?>();
+        // Settled by a failed re-decide ([settleFailedDecision]): no decision
+        // under this question set, whatever an older model left beside it.
+        if (json[decisionRedecideFailedKey] == true) return null;
         answers = DecisionAnswers.fromJson({
           for (final e in json.entries)
             if (e.key != decisionOwnerKnownKey) e.key: e.value,
@@ -2663,8 +2673,9 @@ WHERE COALESCE(cta_text, '') <> ''
   ///
   /// Kept means DECIDED: `triaged`. A pending row is triage's own, and a
   /// skipped one is gated, which the re-decide never revisits. A row already
-  /// decided under [qhash] drops out, so a re-decide that parked halfway
-  /// resumes where it stopped.
+  /// decided under [qhash], or settled under it as failed
+  /// ([settleFailedDecision]), drops out, so a re-decide that parked halfway
+  /// resumes where it stopped and never asks a bad message twice.
   Future<List<({String source, String id})>> staleDecisionRefs({
     required String qhash,
     required String sinceIso,
@@ -2688,11 +2699,48 @@ WHERE COALESCE(cta_text, '') <> ''
     ];
   }
 
+  /// Settles a message the install-time re-decide could not decide under
+  /// [qhash] — a 4xx that one request earned, which asking again would only
+  /// earn again — so [staleDecisionRefs] stops returning it and the one-shot
+  /// can close.
+  ///
+  /// No schema of its own: the decision row takes [qhash] and a
+  /// `redecide_failed` mark in `answers_json` ([decisionRedecideFailedKey]),
+  /// and [decisionFor] reads a marked row as no decision. The older model's
+  /// answers and columns stay beside the mark, as the raw SQL readers found
+  /// them, and the message keeps its old numbers on `messages`. A message
+  /// with no decision row gets a marked row of its own. The next real
+  /// decision ([writeDecision]) replaces the blob and so clears the mark.
+  Future<void> settleFailedDecision(
+    String source,
+    String sourceMessageId, {
+    required String qhash,
+  }) async {
+    await db.customUpdate(
+      'INSERT INTO message_decisions (source, source_message_id, model, '
+      'qhash, answers_json, decided_at) VALUES (?, ?, ?, ?, ?, ?) '
+      'ON CONFLICT(source, source_message_id) DO UPDATE SET '
+      'qhash = excluded.qhash, '
+      'answers_json = json_set(CASE WHEN json_valid(answers_json) '
+      "THEN answers_json ELSE '{}' END, "
+      "'\$.$decisionRedecideFailedKey', json('true'))",
+      variables: _args([
+        source,
+        sourceMessageId,
+        '',
+        qhash,
+        jsonEncode({decisionRedecideFailedKey: true}),
+        _nowIso(),
+      ]),
+    );
+  }
+
   /// The four triage fields the decision pass decides — urgency, category,
   /// needs_action and reply_expected — and nothing else: not
-  /// `triage_status`, not the gate verdict, not the text. The re-decide's
-  /// writer, narrow for [writeTriage]'s reason; a message the owner restored
-  /// is written like any other, since the re-decide never gates.
+  /// `triage_status`, not the gate verdict, not the text. `applyDecision`'s
+  /// writer for a message already past triage (the re-decide, the needs-you
+  /// pass), narrow for [writeTriage]'s reason; a message the owner restored
+  /// is written like any other, since neither ever gates.
   Future<void> writeDecidedTriage(
     String source,
     String sourceMessageId,
@@ -5169,19 +5217,19 @@ SELECT conversation_key FROM (
     });
   }
 
-  /// Deletes the cached pairs no pass will read again: every row answered
-  /// by a model or question set other than [keep], and every row decided
-  /// before [olderThanIso] (a store stamp, [isoStamp]'s shape). A thread
-  /// whose text moved leaves its old pairs behind under hashes nothing
-  /// renders any more, so the age bound is what keeps the table the size of
-  /// the live pool. Returns how many rows went.
-  Future<int> prunePairDecisions({
-    required String keep,
-    required String olderThanIso,
-  }) =>
+  /// Deletes the cached pairs decided before [olderThanIso] (a store stamp,
+  /// [isoStamp]'s shape). A thread whose text moved leaves its old pairs
+  /// behind under hashes nothing renders any more, so the age bound is what
+  /// keeps the table the size of the live pool. Returns how many rows went.
+  ///
+  /// By AGE only, never by who decided: every read already filters on its
+  /// own `decidedBy`, so another backend's rows are simply not read, and
+  /// they survive a role switch — flipping the decision role from this Mac
+  /// to Your server and back finds both caches warm.
+  Future<int> prunePairDecisions({required String olderThanIso}) =>
       db.customUpdate(
-        'DELETE FROM pair_decisions WHERE qhash <> ? OR decided_at < ?',
-        variables: _args([keep, olderThanIso]),
+        'DELETE FROM pair_decisions WHERE decided_at < ?',
+        variables: _args([olderThanIso]),
       );
 
   // ── activity ─────────────────────────────────────────────────────────
@@ -8171,6 +8219,7 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   $_hasFileExists AS has_file,
   m.needs_you_p, m.needs_you_reason, m.gate_reason, m.triage_status,
   c.cta_text, c.state AS thread_state,
+  c.last_outbound_at AS thread_last_outbound_at,
   s.title AS storyline_title,
   ai.bucket, ai.bucket_reason, ai.attention_score,
   (SELECT sm.evidence FROM storyline_members sm
@@ -9028,6 +9077,23 @@ WHERE p.received_at >= ? AND p.source IN ($places)
 COALESCE(ai.bucket, '') <> 'later'
 AND c.state <> 'done'
 AND ${needsYouAtSql(threadNeedsYouPSql('c'), '?')}""";
+
+  /// Whether the message behind alias [m] has a decision under the question
+  /// set this build reads, as a SQL condition with no placeholders — the
+  /// question [decisionFor] answers when it returns non-null: a
+  /// `message_decisions` row under [decisionQhash] that is not a failed
+  /// re-decide's marker. The marker test is `instr` rather than `json_extract`
+  /// because a malformed `answers_json` must not fail a whole list read.
+  ///
+  /// The surfaces read it beside `needs_you_p` for one reason: v21 carried
+  /// the old verdicts across as 1.0 and 0.0, and a number no model said is
+  /// never drawn as a percentage (`needsYouFromEarlierModel`).
+  static String decidedNowSql(String m) => '''
+EXISTS (SELECT 1 FROM message_decisions dq
+         WHERE dq.source = $m.source
+           AND dq.source_message_id = $m.source_message_id
+           AND dq.qhash = '$decisionQhash'
+           AND instr(dq.answers_json, '"$decisionRedecideFailedKey"') = 0)''';
 
   /// The needs-you probability of the thread behind the `conversations` alias
   /// [c], as a SQL expression with no placeholders: the HIGHEST `needs_you_p`
@@ -9910,9 +9976,17 @@ LIMIT ?
   /// pipeline last WROTE, rather than when the message arrived. An empty
   /// [sources] is "no connector at all", which is the empty pulse rather than
   /// every connector.
+  ///
+  /// The needs-you count is LIVE at [threshold], the rule
+  /// `HomeFeedRow.needsYouLive` reads for the label on each row: the
+  /// message's own probability over the slider (`needsYouAtSql`), its thread
+  /// not `done`, not `later`, and not answered since. The settle snapshot
+  /// (`message_progress.needs_you`) would leave "3 need you" standing after a
+  /// slider move that relabelled the rows under it.
   Future<PipelinePulse> pipelinePulse({
     required String sinceIso,
     List<String> sources = const ['email', 'teams'],
+    double threshold = NeedsYouTuning.defaultThreshold,
   }) async {
     if (sources.isEmpty) return const PipelinePulse();
     final places = _placeholders(sources.length);
@@ -9965,12 +10039,24 @@ LIMIT ?
 SELECT
   COALESCE(SUM(CASE WHEN p.outcome = 'done' THEN 1 ELSE 0 END), 0) AS settled,
   COALESCE(SUM(p.dropped), 0) AS dropped,
-  COALESCE(SUM(CASE WHEN p.needs_you = 1 AND p.dropped = 0 THEN 1 ELSE 0 END),
-           0) AS needs_you
+  COALESCE(SUM(CASE WHEN p.dropped = 0
+                      AND ${needsYouAtSql('m.needs_you_p', '?')}
+                      AND COALESCE(c.state, '') <> 'done'
+                      AND COALESCE(ai.bucket, '') <> 'later'
+                      AND COALESCE(c.last_outbound_at, '') < p.received_at
+                    THEN 1 ELSE 0 END), 0) AS needs_you
 FROM message_progress p
+LEFT JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+LEFT JOIN conversations c
+  ON c.source = p.source AND c.conversation_key = p.conversation_key
+LEFT JOIN conversation_ai ai
+  ON ai.source = p.source AND ai.conversation_key = p.conversation_key
 WHERE p.updated_at >= ? AND p.source IN ($places)
 ''',
-          variables: _args([sinceIso, ...sources]),
+          // Every join is on its table's primary key, so none can turn one
+          // progress row into two and move the other two counts.
+          variables: _args([threshold, sinceIso, ...sources]),
         )
         .getSingle();
     int at(String column) => (row.data[column] as num?)?.toInt() ?? 0;

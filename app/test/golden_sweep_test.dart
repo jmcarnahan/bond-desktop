@@ -1041,7 +1041,8 @@ void main() {
       expect(parseSweepStage('vector'), SweepStage.vector);
       expect(parseSweepStage(' FULL '), SweepStage.full);
       expect(parseSweepStage('declared'), SweepStage.declared);
-      for (final raw in ['', 'vectors', 'seed', 'all', 'declare']) {
+      expect(parseSweepStage(' Pairs'), SweepStage.pairs);
+      for (final raw in ['', 'vectors', 'seed', 'all', 'declare', 'pair']) {
         expect(() => parseSweepStage(raw), throwsArgumentError, reason: raw);
       }
     });
@@ -1586,6 +1587,66 @@ void main() {
       }
       expect(withClusters, isNot(contains('alpha-effort')));
       expect(withClusters, isNot(contains('beta-effort')));
+    });
+  });
+
+  group('the pairs stage', () {
+    test('poolPairsOf is the split pairCosinesOf reads, in sorted order', () {
+      const gold = {'a': 'x', 'b': 'x', 'c': 'y', 'd': noneId};
+      final pairs = poolPairsOf(keys: ['d', 'c', 'b', 'a'], goldByThread: gold);
+      expect(pairs.sameEffort, [('a', 'b')]);
+      expect(pairs.crossEffort, [('a', 'c'), ('b', 'c')]);
+      expect(pairs.withNone, [('a', 'd'), ('b', 'd'), ('c', 'd')]);
+
+      final cosines = pairCosinesOf(vectors: {
+        'a': [1.0, 0.0],
+        'b': [1.0, 0.0],
+        'c': [0.0, 1.0],
+        'd': [1.0, 1.0],
+      }, goldByThread: gold);
+      expect(cosines.sameEffort, hasLength(pairs.sameEffort.length));
+      expect(cosines.crossEffort, hasLength(pairs.crossEffort.length));
+      expect(cosines.withNone, hasLength(pairs.withNone.length));
+    });
+
+    test('valueAtRecall is the highest value that keeps the share', () {
+      final values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+      expect(valueAtRecall(values, 70), 0.4);
+      expect(valueAtRecall(values, 50), 0.6);
+      expect(valueAtRecall(values, 90), 0.2);
+      expect(valueAtRecall(const [], 70), 0);
+      // The walk separationOf has always made at seventy.
+      expect(
+        separationOf(sameEffort: values, crossEffort: const [0.05])
+            .recall70Cosine,
+        valueAtRecall(values, 70),
+      );
+    });
+
+    test('aucOf counts wins, ties at half', () {
+      expect(aucOf(sameEffort: const [0.9, 0.8], crossEffort: const [0.1]), 1);
+      expect(aucOf(sameEffort: const [0.1], crossEffort: const [0.9]), 0);
+      expect(aucOf(sameEffort: const [0.5], crossEffort: const [0.5]), 0.5);
+      expect(aucOf(sameEffort: const [], crossEffort: const [0.5]), 0.5);
+    });
+
+    test('pairReadingOf reads the false links at each recall', () {
+      final reading = pairReadingOf(
+        sameEffort: const [0.9, 0.8, 0.7, 0.6],
+        crossEffort: const [0.85, 0.5, 0.4, 0.3],
+      );
+      expect(reading.same, 4);
+      expect(reading.cross, 4);
+      expect(reading.points.map((p) => p.recallPct), [50, 70, 90]);
+      // 50%: p 0.8 keeps two of four same pairs and links one of four cross.
+      expect(reading.points[0].at, 0.8);
+      expect(reading.points[0].falseLinkPct, 25);
+      // 90%: every same pair, so down to 0.6, still one cross pair.
+      expect(reading.points[2].at, 0.6);
+      expect(reading.points[2].falseLinkPct, 25);
+      expect(reading.auc, closeTo(13 / 16, 1e-9));
+      expect(pairReadingLine(reading),
+          startsWith('pairs: same 4 · cross 4 · AUC 0.81'));
     });
   });
 }

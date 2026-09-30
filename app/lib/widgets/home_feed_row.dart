@@ -401,7 +401,12 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   /// table the reader is on the hook for would look like every other row.
   /// A summary gets no dot: it is not a verdict about anything.
   Widget _ask(HomeFeedRow row, HomeResult result) {
-    final ask = askLine(row, result, threadNeedsYou: widget.threadNeedsYou);
+    final ask = askLine(
+      row,
+      result,
+      threadNeedsYou: widget.threadNeedsYou,
+      threshold: widget.needsYouThreshold,
+    );
     final style = BondType.small.copyWith(
       color: ask.ask ? BondColors.ink : BondColors.inkSecondary,
       fontWeight: ask.ask ? FontWeight.w600 : null,

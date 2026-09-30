@@ -41,10 +41,21 @@ ships it as a model bundle from a registry (JFrog Artifactory; the design is
 
 **On this branch the installed model is refused.** `DECIDE_SRC` still points
 at the v2 export (`bond-decide-mbl-v2swap`), whose schema-1 heads file this
-build refuses with "the installed decision model is the older version", so
-triage parks exactly as if nothing were installed, until the v3 decision
-model is installed. The v3 install updates `DECIDE_SRC`, the manifest entry
+build refuses, so triage parks exactly as if nothing were installed, until
+the v3 decision model is installed. The rail says "The installed decision
+model is an older version that this app no longer reads · N waiting ·
+install the current decision model to resume sorting new mail", and
+Settings, Models says the same sentence under the Decision model with a
+quieter `For developers: make decide-install` line beneath it. The v3 install updates `DECIDE_SRC`, the manifest entry
 and the sha256 pins.
+
+**Decision model on your server.** Settings, Models can point the Decision
+model at **Your server** instead, and what the URL serves decides what this Mac
+needs. A URL to ModernBERT on llama-server (`…/v1/embeddings`) returns vectors
+and the app applies the heads here, so this Mac still needs the heads file from
+`make decide-install`. A URL to a Kev 4B wrapper (`…/v1/systemone`) answers the
+questions on the server, and this Mac needs no decision files at all. The app
+detects which one it is when it checks the address and names it under the form.
 
 You need:
 

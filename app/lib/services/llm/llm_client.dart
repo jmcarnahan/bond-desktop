@@ -162,6 +162,33 @@ class DecisionMisconfiguredException extends DecisionUnavailableException {
   const DecisionMisconfiguredException(super.message);
 }
 
+/// The served decision model file is not the model the heads file on this
+/// Mac was trained with: the GGUF's name does not contain the heads'
+/// `model`. A misconfiguration like the rest — every message would be read
+/// through the wrong heads — so it parks under `decision_misconfigured`, and
+/// its own type only so a test and a reader can tell the cause.
+class DecisionModelMismatchException extends DecisionMisconfiguredException {
+  const DecisionModelMismatchException(super.message);
+}
+
+/// What the older decision model's heads file says, wherever it is shown:
+/// the rail, the Settings status, `DecisionHeads.olderModelText`. Plain words
+/// and no command, because the owner reading it may not be a developer.
+const String decisionOlderModelText =
+    'The installed decision model is an older version that this app no '
+    'longer reads. Install the current decision model to resume sorting new '
+    'mail.';
+
+/// The installed heads file is the OLDER decision model's (heads schema 1),
+/// which this build no longer reads. A misconfiguration like any refused
+/// heads file, but with its own park reason, `decision_older_model`, because
+/// the fix is an install, not an address: the rail and Settings say so in
+/// [decisionOlderModelText]. Here rather than beside the heads parser so
+/// [parkReasonFor] can name it.
+class DecisionOlderModelException extends DecisionMisconfiguredException {
+  const DecisionOlderModelException() : super(decisionOlderModelText);
+}
+
 /// The DECISION server refused the access key (HTTP 401 or 403), or the key
 /// cannot be sent at all. Its own reason, `decision_unauthorized`, so the
 /// rail names the decision server instead of wording it by the generative
@@ -183,6 +210,7 @@ String parkReasonFor(Object e) => switch (e) {
       ModelNotInstalledException() => 'not_installed',
       // Waiting fixes nothing here — the address or the heads file does —
       // so it is not worded as a server that is still coming up.
+      DecisionOlderModelException() => 'decision_older_model',
       DecisionMisconfiguredException() => 'decision_misconfigured',
       DecisionUnavailableException() => 'decision_unavailable',
       EmbedUnavailableException() => 'embed_unavailable',

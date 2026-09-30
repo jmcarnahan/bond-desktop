@@ -83,12 +83,13 @@ class GoldenDefines {
       String.fromEnvironment('SWEEP_CARD', defaultValue: 'topics');
 
   /// How much of the sweep replay runs: `vector` stops after the seeding and
-  /// reads the clustering vector alone, `full` is the whole filing path, and
+  /// reads the clustering vector alone, `full` is the whole filing path,
   /// `declared` skips the clustering entirely and recruits into storylines
-  /// declared from the registry. Parsed by [parseSweepStage], which refuses
-  /// anything else.
+  /// declared from the registry, and `pairs` asks the decision model's
+  /// `same_effort` over the pool pairs. Parsed by [parseSweepStage], which
+  /// refuses anything else.
   ///
-  /// One test body and one seeding serve all three, which is what keeps the
+  /// One test body and one seeding serve all four, which is what keeps the
   /// readings of one mailbox from drifting apart. `full` is the default
   /// because it is what `make golden-sweep` has always run.
   static const String sweepStageRaw =
@@ -307,6 +308,12 @@ enum SweepStage {
   /// and no naming call: what the recruit can do from a charter a person
   /// wrote, which is the ceiling the sweep is measured against.
   declared,
+
+  /// Seed the mailbox, then ask the decision model's `same_effort` over the
+  /// same same-effort and cross-effort pool pairs the vector stage reads by
+  /// cosine, and stop. The decision model is the only model dialled: the
+  /// pair question's own separation, read against the cosine's.
+  pairs,
 }
 
 /// The stage `SWEEP_STAGE` names, or a thrown [ArgumentError].
@@ -319,10 +326,11 @@ SweepStage parseSweepStage(String raw) => switch (raw.trim().toLowerCase()) {
       'vector' => SweepStage.vector,
       'full' => SweepStage.full,
       'declared' => SweepStage.declared,
+      'pairs' => SweepStage.pairs,
       _ => throw ArgumentError.value(
           raw,
           'SWEEP_STAGE',
-          'must be one of vector, full, declared',
+          'must be one of vector, full, declared, pairs',
         ),
     };
 

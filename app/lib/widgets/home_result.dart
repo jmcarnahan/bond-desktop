@@ -335,7 +335,9 @@ HomeResult resultLine(
     );
   }
 
-  if (row.needsYou) {
+  // Live against the slider, not the settle-time snapshot: see
+  // [HomeFeedRow.needsYouLive].
+  if (row.needsYouLive(threshold)) {
     return HomeResult(
       HomeResultKind.needsYou,
       'Needs you',
@@ -419,8 +421,9 @@ HomeAsk askLine(
   HomeFeedRow row,
   HomeResult result, {
   bool threadNeedsYou = false,
+  double threshold = NeedsYouTuning.defaultThreshold,
 }) {
-  if (threadNeedsYou || (row.needsYou && !row.dropped)) {
+  if (threadNeedsYou || (row.needsYouLive(threshold) && !row.dropped)) {
     final cta = row.ctaText?.trim() ?? '';
     if (cta.isNotEmpty) return (text: cta, ask: true);
     final reason = row.needsYouReason?.trim() ?? '';

@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../services/decision/needs_you_predicate.dart' show needsYouAt;
 import 'attachment_models.dart';
 import 'context_models.dart';
 
@@ -77,7 +78,9 @@ String homeMetricsWindowLabel(Duration window) => window.inHours < 48
 /// [needsYou], [urgency] and [storylineId] are SNAPSHOTS, frozen when the app
 /// settled the message. That is what makes scrolling back through history
 /// honest: a thread that has since gone quiet still shows the verdict the user
-/// was actually given at the time.
+/// was actually given at the time. The row's "Needs you" LABEL is not one of
+/// them: it is [needsYouLive], read against the slider on every build, so a
+/// slider move relabels Home with no pipeline run.
 ///
 /// The reason fields are the opposite and are meant to be: [needsYouReason],
 /// [gateReason], [bucketReason], [storylineEvidence] and the rest are the
@@ -159,6 +162,12 @@ class HomeFeedRow {
   /// and this is what is true now, which is what the tile counting threads has
   /// to agree with.
   final String? threadState;
+
+  /// When the owner last wrote on the thread (`conversations.last_outbound_at`).
+  /// A message received at or before it has been answered, and
+  /// [needsYouLive] reads it for exactly that. Null when the owner never wrote
+  /// on the thread, or on a read that did not select it.
+  final String? threadLastOutboundAt;
 
   /// Whether the message carries a file somebody could open.
   ///
@@ -244,6 +253,7 @@ class HomeFeedRow {
     this.summary,
     this.ctaText,
     this.threadState,
+    this.threadLastOutboundAt,
     this.hasFile = false,
     this.updatedAt = '',
     this.needsYouP,
@@ -281,6 +291,7 @@ class HomeFeedRow {
         summary: row['summary'] as String?,
         ctaText: row['cta_text'] as String?,
         threadState: row['thread_state'] as String?,
+        threadLastOutboundAt: row['thread_last_outbound_at'] as String?,
         hasFile: (row['has_file'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
         // Null stays null: an undecided message is not a low one.
@@ -295,6 +306,23 @@ class HomeFeedRow {
         storylineAddedBy: row['storyline_added_by'] as String?,
         workOpen: (row['work_open'] as num?)?.toInt() == 1,
       );
+
+  /// Whether this message needs the owner NOW, at [threshold]: its own
+  /// probability at or above the slider (`needsYouAt`), its thread not `done`,
+  /// not filed `later`, and not answered since it arrived — the rail's rule
+  /// (`MessageStore.threadNeedsYouPSql`) for one message.
+  ///
+  /// Home's "Needs you" label reads this and not [needsYou], the settle-time
+  /// snapshot: the snapshot is taken once, and a slider move or a re-decide
+  /// that left the label behind would put "Needs you" beside a Why panel
+  /// saying "below your line". `MessageStore.pipelinePulse` counts the same
+  /// rule in SQL.
+  bool needsYouLive(double threshold) {
+    if (!needsYouAt(needsYouP, threshold)) return false;
+    if (threadState == 'done' || bucket == 'later') return false;
+    final outbound = threadLastOutboundAt ?? '';
+    return outbound.isEmpty || outbound.compareTo(receivedAt) < 0;
+  }
 
   /// The pair the feed is keyed and cursored by. A message id is only unique
   /// within its connector, so neither half stands alone.
@@ -342,6 +370,7 @@ class HomeFeedRow {
         summary: summary,
         ctaText: ctaText,
         threadState: threadState,
+        threadLastOutboundAt: threadLastOutboundAt,
         hasFile: hasFile,
         updatedAt: updatedAt,
         needsYouP: needsYouP,
@@ -680,7 +709,9 @@ class PipelinePulse {
 
   /// Settled, dropped and judged-needs-you inside [homePulseWindow] — measured
   /// on `message_progress.updated_at`, which is when the pipeline last wrote
-  /// about the row rather than when the message arrived.
+  /// about the row rather than when the message arrived. [recentNeedsYou] is
+  /// those rows that need the owner NOW at the slider
+  /// ([HomeFeedRow.needsYouLive]), not the settle-time snapshot.
   final int recentSettled;
   final int recentDropped;
   final int recentNeedsYou;

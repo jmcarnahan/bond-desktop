@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart'
     show needsYouYesReason;
@@ -15,6 +16,7 @@ import 'package:bond_inbox/services/llm/llm_client.dart'
 import 'package:bond_inbox/services/needs_you_handler.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
+import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -332,6 +334,127 @@ void main() {
       expect((await answerOf('email', 'm1'))['p'], closeTo(0.7, 1e-9));
       final stored = await store.decisionFor('email', 'm1');
       expect(stored!.needsYouP, closeTo(0.7, 1e-9));
+    });
+
+    test('a re-decide writes the whole state, exactly as the install-time '
+        're-decide writes it', () async {
+      // Two identical triaged messages in two threads, each with its text,
+      // an extraction and a thread whose CTA the old decision folded.
+      final moved = fakeAnswers(
+        urgency: 'high',
+        category: 'personal',
+        needsAction: 0.8,
+        replyExpected: 0.7,
+        needsYou: 0.66,
+        intent: 'request',
+        importance: 'high',
+      );
+      for (final id in ['m1', 'm2']) {
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': id,
+          'conversation_key': 'conv-$id',
+          'direction': 'inbound',
+          'from_name': 'Dana',
+          'from_address': 'dana@northwind.example.com',
+          'to_json': '["lo@x.com"]',
+          'received_at': '2026-08-29T10:00:00Z',
+          'body_text': 'Alex, can you sign off on the wayfinding sheet?',
+          'addressed_me': 1,
+          'triage_status': 'triaged',
+        });
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'conv-$id',
+          'subject': 'Wayfinding',
+          'state': 'needs_reply',
+          'last_message_at': '2026-08-29T10:00:00Z',
+          'last_inbound_at': '2026-08-29T10:00:00Z',
+        });
+        await store.updateConversationTriage(
+          'email',
+          'conv-$id',
+          ctaUrgency: 'low',
+          category: 'work',
+          keepCtaText: true,
+        );
+        await store.writeTriage(
+          'email',
+          id,
+          status: 'triaged',
+          result: const TriageResult(
+            urgency: 'low',
+            category: 'work',
+            needsAction: false,
+            replyExpected: false,
+          ),
+        );
+        await store.writeMessageText(
+          'email',
+          id,
+          summary: 'Dana asks for a sign-off.',
+          actionItems: const ['Sign off'],
+          deadline: '',
+        );
+        await store.writeExtraction(
+          'email',
+          id,
+          jsonEncode({
+            'topics': ['wayfinding'],
+            'project': 'Signage',
+            'intent': 'fyi',
+            'importance': 'low',
+          }),
+        );
+      }
+
+      // m1 through this handler (no decision stored), m2 through the
+      // install-time re-decide.
+      await runOne(handler(decision: FakeDecisionClient.fixed(moved)));
+      await TriageQueue(store, decisionClient: FakeDecisionClient.fixed(moved))
+          .redecide([(source: 'email', id: 'm2')]);
+
+      Future<Map<String, Object?>> stateOf(String id) async {
+        final row = (await store.getMessageRow('email', id))!;
+        final conversation =
+            (await store.getConversationRow('email', 'conv-$id'))!;
+        final extraction =
+            jsonDecode((await store.getExtraction('email', id))!) as Map;
+        return {
+          for (final k in [
+            'urgency',
+            'category',
+            'needs_action',
+            'reply_expected',
+            'needs_you_p',
+            'needs_you_reason',
+            'triage_status',
+          ])
+            k: row[k],
+          'intent': extraction['intent'],
+          'importance': extraction['importance'],
+          'topics': extraction['topics'],
+          'cta_urgency': conversation['cta_urgency'],
+          'thread_category': conversation['category'],
+        };
+      }
+
+      final viaHandler = await stateOf('m1');
+      expect(viaHandler, {
+        'urgency': 'high',
+        'category': 'personal',
+        'needs_action': 1,
+        'reply_expected': 1,
+        'needs_you_p': closeTo(0.66, 1e-9),
+        'needs_you_reason': 'Asks you to do something.',
+        'triage_status': 'triaged',
+        'intent': 'request',
+        'importance': 'high',
+        'topics': ['wayfinding'],
+        'cta_urgency': 'high',
+        'thread_category': 'personal',
+      });
+      expect(viaHandler, await stateOf('m2'));
     });
 
     test('the input carries the thread before the message, as triage builds it',

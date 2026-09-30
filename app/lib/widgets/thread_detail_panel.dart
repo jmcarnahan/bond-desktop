@@ -1071,6 +1071,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
               reason: widget.conversation.needsYouReason,
               at: widget.conversation.needsYouReasonAt,
               p: widget.conversation.needsYouP,
+              decidedNow: widget.conversation.needsYouDecidedNow,
               onTap: _toReasonMessage,
             ),
           Expanded(

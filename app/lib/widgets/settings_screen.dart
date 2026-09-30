@@ -101,6 +101,10 @@ class SettingsScreen extends StatefulWidget {
   /// within [NeedsYouTuning.minThreshold]..[NeedsYouTuning.maxThreshold].
   final double threshold;
 
+  /// Whether an older build stored custom Needs You rules text. It is never
+  /// read now; the section says so in one quiet line.
+  final bool oldNeedsYouRules;
+
   final String aboutMe;
 
   /// Fired when the user lets go of the slider, not on every pixel of the
@@ -510,6 +514,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     this.scope = SettingsScope.all,
     required this.threshold,
+    this.oldNeedsYouRules = false,
     required this.aboutMe,
     required this.onThresholdChanged,
     required this.onAboutMeChanged,
@@ -648,6 +653,10 @@ class SettingsScreen extends StatefulWidget {
       ValueKey('settings-forget-resync-confirm');
   static const Key forgetResyncKeepKey =
       ValueKey('settings-forget-resync-keep');
+
+  /// The quiet line saying an older build's Needs You rules are unused.
+  static const Key oldNeedsYouRulesKey =
+      ValueKey('settings-old-needs-you-rules');
 
   /// The line under the Needs You slider that states its number.
   static const Key needsYouThresholdLineKey =
@@ -2257,6 +2266,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'message shows its own percentage.',
           style: BondType.caption,
         ),
+        if (widget.oldNeedsYouRules)
+          Text(
+            'Your earlier Needs You rules are no longer used; the slider is '
+            'the one control.',
+            key: SettingsScreen.oldNeedsYouRulesKey,
+            style: BondType.caption,
+          ),
         // Last in the section because it is about leaving the pile rather than
         // about what lands in it, and it is the one control here that acts on
         // threads already judged.

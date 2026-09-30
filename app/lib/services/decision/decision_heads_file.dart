@@ -16,6 +16,7 @@ import '../llm/llm_client.dart'
     show
         DecisionMisconfiguredException,
         DecisionNotInstalledException,
+        DecisionOlderModelException,
         LlmFormatException;
 import 'decision_heads.dart';
 
@@ -32,9 +33,9 @@ class DecisionHeadsFile {
       'The decision model is not installed. Run: make decide-install';
 
   /// What a file this build cannot use says, before the parser's own
-  /// reason. It parks under `decision_misconfigured`, as does the older
-  /// model's file, which throws `DecisionOlderModelException` with
-  /// `DecisionHeads.olderModelText` alone.
+  /// reason. It parks under `decision_misconfigured`. The older model's file
+  /// throws [DecisionOlderModelException] with `DecisionHeads.olderModelText`
+  /// alone instead, and parks under its own `decision_older_model`.
   static const String mismatchText =
       "The decision model's heads file does not match this build. Run: make "
       'decide-install';

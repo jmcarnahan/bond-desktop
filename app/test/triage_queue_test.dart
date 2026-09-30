@@ -15,6 +15,8 @@ import 'package:bond_inbox/services/decision/decision_questions.dart'
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/owner_lookup.dart' show OwnerIdentity;
+import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -2749,37 +2751,180 @@ void main() {
       expect(conversation['category'], 'personal');
     });
 
-    test('a run that mostly failed is owed again, a few bad messages are not',
-        () async {
+    FakeDecisionClient failing(Set<String> bad, DecisionAnswers answers) =>
+        FakeDecisionClient((input) {
+          if (bad.any((id) => input.bodyText == 'Body of $id')) {
+            throw const LlmFormatException('rejected');
+          }
+          return fakeDecision(answers);
+        });
+
+    test('a permanently bad message is settled, and the run closes on its '
+        'first pass', () async {
       for (final (i, id) in ['a', 'b', 'c'].indexed) {
         await seedDecided(id, hours: i + 1);
       }
-      FakeDecisionClient failing(Set<String> bad) => FakeDecisionClient((input) {
-            if (bad.any((id) => input.bodyText == 'Body of $id')) {
-              throw const LlmFormatException('rejected');
-            }
-            return fakeDecision(moved());
-          });
 
-      // Two of three refused: more skipped than re-decided.
-      final mostly = await TriageQueue(store, decisionClient: failing({'a', 'b'}))
-          .redecideStale();
-      expect(mostly.redecided, 1);
-      expect(mostly.complete, isFalse);
+      // Two of three refused for good: a 4xx that one request earned.
+      final first = await TriageQueue(
+        store,
+        decisionClient: failing({'a', 'b'}, moved()),
+      ).redecideStale();
+      expect(first.redecided, 1);
+      expect(first.complete, isTrue,
+          reason: 'a run that did not park is complete');
 
-      // The next run finds the two still stale; one of them is bad for good.
-      final few =
-          await TriageQueue(store, decisionClient: failing({'a'})).redecideStale();
-      expect(few.redecided, 1);
-      expect(few.complete, isFalse,
-          reason: 'one skipped against one re-decided is not a majority');
+      // Settled for this question set: off the stale list, read as no
+      // decision, and still carrying the old model's numbers.
+      expect(
+        await store.staleDecisionRefs(
+          qhash: decisionQhash,
+          sinceIso: hoursAgo(24 * TriageQueue.redecideDays),
+          limit: 10,
+        ),
+        isEmpty,
+      );
+      expect(await store.decisionFor('email', 'a'), isNull);
+      expect((await messageRow('a'))['needs_you_p'], closeTo(0.1, 1e-9));
+      expect((await messageRow('a'))['urgency'], 'normal');
 
-      await seedDecided('d', hours: 4);
-      await seedDecided('e', hours: 5);
-      final closed =
-          await TriageQueue(store, decisionClient: failing({'a'})).redecideStale();
-      expect(closed.redecided, 2);
-      expect(closed.complete, isTrue);
+      // Nothing new goes stale after an install — new mail is decided under
+      // this build's question set — so a second run asks nobody.
+      final again = FakeDecisionClient.fixed(moved());
+      final second =
+          await TriageQueue(store, decisionClient: again).redecideStale();
+      expect(second.redecided, 0);
+      expect(second.complete, isTrue);
+      expect(again.calls, isEmpty);
+
+      // A real decision later (a re-triage) clears the mark.
+      await store.writeDecision(
+        'email',
+        'a',
+        fakeDecision(moved()),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+      expect((await store.decisionFor('email', 'a'))!.needsYouP,
+          closeTo(0.66, 1e-9));
+    });
+
+    test('a message with no decision row at all is settled too', () async {
+      await seedMessage(id: 'bare', receivedAt: hoursAgo(1),
+          triageStatus: 'triaged');
+
+      final outcome = await TriageQueue(
+        store,
+        decisionClient: failing({'bare'}, moved()),
+      ).redecideStale();
+
+      expect(outcome.complete, isTrue);
+      expect(await store.decisionFor('email', 'bare'), isNull);
+      expect(
+        await store.staleDecisionRefs(
+          qhash: decisionQhash,
+          sinceIso: hoursAgo(24 * TriageQueue.redecideDays),
+          limit: 10,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('a park keeps it open, and the message settled before the park is '
+        'not asked again', () async {
+      await seedDecided('bad', hours: 1);
+      await seedDecided('later', hours: 2);
+      final parking = FakeDecisionClient((input) {
+        if (input.bodyText == 'Body of bad') {
+          throw const LlmFormatException('rejected');
+        }
+        throw const DecisionUnavailableException('The decision server is '
+            'down.');
+      });
+
+      final first =
+          await TriageQueue(store, decisionClient: parking).redecideStale();
+      expect(first.redecided, 0);
+      expect(first.complete, isFalse);
+
+      final decision = FakeDecisionClient.fixed(moved());
+      final second =
+          await TriageQueue(store, decisionClient: decision).redecideStale();
+      expect(second.redecided, 1);
+      expect(second.complete, isTrue);
+      expect([for (final c in decision.calls) c.bodyText], ['Body of later']);
+    });
+
+    group('the chip', () {
+      late ProgressBus bus;
+      late PipelineProgress progress;
+
+      setUp(() {
+        bus = ProgressBus();
+        progress = PipelineProgress(store, bus: bus);
+      });
+
+      tearDown(() => bus.dispose());
+
+      Future<Object?> flagOf(String id) async => (await db
+              .customSelect(
+                'SELECT needs_you FROM message_progress '
+                'WHERE source = ? AND source_message_id = ?',
+                variables: [Variable('email'), Variable(id)],
+              )
+              .getSingle())
+          .data['needs_you'];
+
+      /// A settled message whose chip reads [needsYou], its old p at [p].
+      Future<void> seedSettled({required double p, required bool needsYou})
+          async {
+        final at = hoursAgo(1);
+        await seedDecided('m1');
+        await seedConversation(lastInboundAt: at);
+        await store.writeNeedsYouP('email', 'm1', p: p, reason: 'Old reason.');
+        await progress.noteSettled(
+          'email',
+          'm1',
+          needsYou: needsYou,
+          reason: needsYou ? 'worthy' : 'not_worthy',
+          dropped: false,
+        );
+      }
+
+      for (final (label, from, to, flagBefore, flagAfter) in [
+        ('up', 0.1, 0.66, 0, 1),
+        ('down', 0.66, 0.1, 1, 0),
+      ]) {
+        test('a re-decided p that crosses the slider moves the chip $label',
+            () async {
+          await seedSettled(p: from, needsYou: flagBefore == 1);
+          expect(await flagOf('m1'), flagBefore);
+
+          await TriageQueue(
+            store,
+            decisionClient:
+                FakeDecisionClient.fixed(fakeAnswers(needsYou: to)),
+            progress: progress,
+            needsYouThreshold: () async => 0.30,
+          ).redecideStale();
+
+          expect(await flagOf('m1'), flagAfter);
+        });
+      }
+
+      test('a p that moves without crossing the slider leaves the chip',
+          () async {
+        await seedSettled(p: 0.1, needsYou: false);
+
+        await TriageQueue(
+          store,
+          decisionClient: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.2)),
+          progress: progress,
+          needsYouThreshold: () async => 0.30,
+        ).redecideStale();
+
+        expect(await flagOf('m1'), 0);
+      });
     });
 
     test('a decision model that stays parked is logged once per app run',

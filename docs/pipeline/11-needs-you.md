@@ -114,8 +114,10 @@ Per message it:
 3. when the decision was made **ownerless** and the owner is now known, or
    there is no decision at all (triaged before the decision model),
    **re-decides** the message with the decision model, on the input the triage
-   pass builds (`decisionInputFor`), stores the decision and writes its
-   probability. With no decision and the owner still unknown the message is
+   pass builds (`decisionInputFor`), and writes the whole state that decision
+   determines through the triage claim's own writer (`applyDecision`): the
+   decision row, the four triage fields, the probability, the extraction's
+   intent and importance, and the thread's CTA fold. With no decision and the owner still unknown the message is
    decided ownerless anyway and written, because an undecided row is a message
    nobody sees; the ownerless requeue above brings it back once the owner is
    known.
@@ -135,8 +137,10 @@ answers. `messages.needs_you_verdict` is INERT since v21: v21 mapped it into
 stored copy with the rest of one person's text.
 
 **The chip follows the probability.** `message_progress.needs_you` is a
-snapshot taken at settle time from `notifyWorthy`. When the needs-you pass
-changes a probability ACROSS the owner's slider, it hands the message to
+snapshot taken at settle time from `notifyWorthy`. When any decision writer
+changes a probability ACROSS the owner's slider (the needs-you pass, and
+through `applyDecision` the triage claim and the install-time re-decide), the
+shared `followNeedsYouChip` hands the message to
 `PipelineProgress.refreshNeedsYou`, which re-asks `notifyWorthy` and rewrites
 the flag. A probability that moved without crossing the slider is a repeat of
 the answer and writes nothing, so a chip cleared by a reply or by a Done stays

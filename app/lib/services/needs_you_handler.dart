@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart' show debugPrint;
-
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
@@ -7,11 +5,10 @@ import 'ai_worker.dart';
 import 'decision/decision_client.dart';
 import 'decision/decision_input.dart' show decisionOwnerString;
 import 'decision/decision_policy.dart';
-import 'decision/decision_questions.dart' show decisionQhash;
-import 'decision/needs_you_predicate.dart';
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
-import 'triage_queue.dart' show decisionInputFor;
+import 'triage_queue.dart'
+    show applyDecision, decisionInputFor, followNeedsYouChip;
 
 /// Settles ONE message's needs-you probability, `messages.needs_you_p`.
 ///
@@ -26,7 +23,10 @@ import 'triage_queue.dart' show decisionInputFor;
 /// most messages this pass finds it already there and does nothing. It
 /// decides a message AGAIN, with the decision model, when the stored decision
 /// is missing or was made without an owner line (the head was trained with
-/// that line, so its number is not trusted without it). NULL on the row means
+/// that line, so its number is not trusted without it), and then it writes
+/// the whole state that decision determines through [applyDecision], the
+/// triage claim's writer: the triage fields, the extraction's intent and
+/// importance and the thread fold move with the p. NULL on the row means
 /// not decided yet, never a low probability.
 ///
 /// No language model is asked about needs-you, on any path, and there is no
@@ -45,7 +45,7 @@ import 'triage_queue.dart' show decisionInputFor;
 /// `needs_you` flag on a settled row is a snapshot taken at settle time, so a
 /// probability this pass CHANGES across the slider leaves the chip beside it
 /// showing the old answer. When, and only when, the answer at the owner's
-/// threshold moves, the tail below hands the message to
+/// threshold moves, [followNeedsYouChip] hands the message to
 /// [PipelineProgress.refreshNeedsYou], which rewrites the flag. A pass that
 /// leaves the answer where it was writes nothing, which is what keeps a chip
 /// cleared by a reply or by a Done from coming back.
@@ -99,10 +99,12 @@ class NeedsYouHandler extends WorkHandler {
   @override
   String get kind => 'needs_you';
 
-  /// Three at once. An item touches nothing shared — it reads one row and
-  /// writes that same row's columns and its own decision row — so items of
-  /// this kind are genuinely independent of each other, which is the bar [WorkHandler.concurrency]
-  /// sets for raising it.
+  /// Three at once. An item writes its own row, its own decision row and
+  /// extraction, and at most its thread's CTA fold, which only the thread's
+  /// newest inbound message moves (`foldCtaUp`'s own guard) — the same fold
+  /// three triage claims already run side by side — so items of this kind
+  /// are independent of each other, which is the bar
+  /// [WorkHandler.concurrency] sets for raising it.
   @override
   int get concurrency => 3;
 
@@ -182,7 +184,14 @@ class NeedsYouHandler extends WorkHandler {
         reason: needsYouYesReason(stored.answers),
       );
       _log.note({'source': 'decision', 'p': storedP});
-      await _followChip(source, id, previous: previous, p: storedP);
+      await followNeedsYouChip(
+        _pipeline,
+        source,
+        id,
+        previous: previous,
+        p: storedP,
+        threshold: _threshold,
+      );
       return;
     }
 
@@ -200,61 +209,24 @@ class NeedsYouHandler extends WorkHandler {
       conversationKey: row['conversation_key'] as String?,
       owner: owner,
     ));
-    await _store.writeDecision(
+    // The whole state the decision determines, through the writer the triage
+    // claim uses, so a message decided here reads exactly as one triage
+    // decided: its urgency, category, booleans, extraction intent and thread
+    // fold move with its p, and its chip follows the p across the slider.
+    await applyDecision(
+      _store,
       source,
-      id,
+      row,
       decided,
-      qhash: decisionQhash,
       ownerKnown: owner != null,
-    );
-    final p = needsYouP(decided.answers);
-    await _store.writeNeedsYouP(
-      source,
-      id,
-      p: p,
-      reason: p == null ? null : needsYouYesReason(decided.answers),
+      progress: _pipeline,
+      threshold: _threshold,
     );
     _log.note({
       'source': 'decision',
-      'p': p,
+      'p': needsYouP(decided.answers),
       'redecided': true,
       'owner_known': owner != null,
     });
-    await _followChip(source, id, previous: previous, p: p);
-  }
-
-  /// Moves the settled row's Needs You chip when — and only when — this pass
-  /// changed the answer at the owner's threshold (`needsYouAt`).
-  ///
-  /// A repeat must write nothing, or a chip the user cleared by replying would
-  /// come back every time the row was re-judged; a probability that moved
-  /// without crossing the slider is a repeat of the answer.
-  ///
-  /// Nothing here can fail the item. The recorder swallows its own errors, and
-  /// the threshold read below degrades to the default: a chip that did not
-  /// follow is a stale square on the home screen, and re-running a model call
-  /// over it would be the more expensive mistake.
-  Future<void> _followChip(
-    String source,
-    String id, {
-    required double? previous,
-    required double? p,
-  }) async {
-    final threshold = await _thresholdOrDefault();
-    if (needsYouAt(previous, threshold) == needsYouAt(p, threshold)) return;
-    await _pipeline.refreshNeedsYou(source, id, threshold: threshold);
-  }
-
-  /// The owner's slider, degraded the settle machine's way. A preference that
-  /// cannot be read is the default, never a failed item.
-  Future<double> _thresholdOrDefault() async {
-    final read = _threshold;
-    if (read == null) return NeedsYouTuning.defaultThreshold;
-    try {
-      return await read();
-    } catch (e) {
-      debugPrint('needs_you: reading the needs-you threshold failed: $e');
-      return NeedsYouTuning.defaultThreshold;
-    }
   }
 }

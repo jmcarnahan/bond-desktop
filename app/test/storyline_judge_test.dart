@@ -97,7 +97,7 @@ void main() {
       );
     });
 
-    test('a storyline with no charter is judged against its summary',
+    test('a storyline with no charter renders (none), never its summary',
         () async {
       await thread('c1');
       final judge = StorylineJudge(decision: decision, store: store);
@@ -114,8 +114,9 @@ void main() {
         [(source: 'email', key: 'c1')],
       );
 
-      expect(decision.asks.single.states.single,
-          contains('Charter: Venues are being compared.'));
+      final state = decision.asks.single.states.single;
+      expect(state, contains('Charter: (none)'));
+      expect(state, isNot(contains('Venues are being compared.')));
     });
 
     test('with neither, the renderer says (none)', () async {

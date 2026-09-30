@@ -183,7 +183,7 @@ RESET  := \033[0m
         ab drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
-        golden-gate golden-decision decision-agreement _decide-health \
+        golden-pairs golden-gate golden-decision decision-agreement _decide-health \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -228,6 +228,7 @@ help:
 	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled, SWEEP_POSSIBLE_ROOM=0|1, SWEEP_GROUPING=decision|cosine, SWEEP_CHARTER=model|lint)\n"
 	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
 	@printf "  make golden-declared GOLDEN_RUN=<run.json> → every registry storyline declared by hand and then recruited into, on the embed server and the decision model; the ceiling the sweep is read against\n"
+	@printf "  make golden-pairs GOLDEN_RUN=<run.json> → the decision model's same_effort over the pool pairs golden-vector reads by cosine: AUC, p at 70%% recall, false links at 50/70/90%%; embed server + decision model (DECIDE_URL=…/v1/systemone benches Kev)\n"
 	@printf "  make golden-gate   → the golden set through the app's gates, offline (GOLDEN_RUN=<run.json> adds the model's notification proxy)\n"
 	@printf "  make golden-decision → the golden set through the decision model on :$(DECIDE_PORT) (after make decide); two run files, the app's gate and the row of record's\n"
 	@printf "  make decision-agreement DECISION_DB=<copy of the app db> → the decision model against the stored 4B labels, counts only (DECISION_LIMIT=…)\n"
@@ -1419,6 +1420,23 @@ golden-declared: golden-check _decide-health
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) $(DECISION_DEFINES) --dart-define=SWEEP_STAGE=declared
 
+# The decision model's same_effort, read on its own — the same test body and
+# the same seeding as golden-sweep, stopped once every pool pair is asked.
+# What it measures: the SAME same-effort and cross-effort pool pairs
+# golden-vector reads by cosine, each thread's text built as the app builds it
+# and asked through the app's own judge (the mean over both orders); it prints
+# the AUC, the p at 70% recall and the cross-effort pairs linked at 50/70/90%
+# recall. Counts and metrics only, no run file and nothing to score.
+#
+# Two servers: the embedding one for the pool and the decision model. A
+# DECIDE_URL ending in /v1/systemone (or one whose listing marks a systemone
+# server) is benched as Kev 4B through the app's own wire, with no heads file;
+# anything else uses this Mac's heads, as golden-sweep does.
+golden-pairs: golden-check _decide-health
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-pairs GOLDEN_RUN=<golden-run-….json from make golden> [DECIDE_URL=…]\n"; exit 1; }
+	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) $(DECISION_DEFINES) --dart-define=SWEEP_STAGE=pairs
+
 # The gate half, and the only golden target with no server in it: the app's
 # gates are pure, so this replays them over the set offline — the item's
 # direction, its sender address and its body, through the same `gateFor` and
@@ -1445,9 +1463,11 @@ golden-gate: golden-check
 
 # The decision server's own health check, first in both decision targets: a
 # run against a server that is not up fails on its first call with a sentence
-# about sockets, and this one says what to run.
+# about sockets, and this one says what to run. A Kev wrapper's address
+# (…/v1/systemone) is checked on the listing beside it, the one GET the app
+# itself asks such a server; llama-server's is its /health.
 _decide-health:
-	@url='$(patsubst %/v1/embeddings,%/health,$(DECISION_URL))'; \
+	@url='$(patsubst %/v1/systemone,%/v1/models,$(patsubst %/v1/embeddings,%/health,$(DECISION_URL)))'; \
 	 curl -sf -m 5 "$$url" >/dev/null || { printf "$(RED)✗$(RESET) no decision server answering at $$url — run make decide (or point DECIDE_URL at one)\n"; exit 1; }
 
 # What the decision tests are told: the server, the model name and the heads

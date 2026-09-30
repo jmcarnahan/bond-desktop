@@ -7,6 +7,14 @@ import 'decision_heads.dart';
 /// can never be read as an answer.
 const String decisionOwnerKnownKey = 'owner_known';
 
+/// The key in `answers_json` that marks a message the install-time re-decide
+/// could not decide (a 4xx that one request earned). The row carries the
+/// current question hash, so the re-decide's stale list stops returning it,
+/// while `MessageStore.decisionFor` reads it as no decision at all: its
+/// answers, if any, are an older model's. `MessageStore.writeDecision`
+/// replaces the whole blob, so a later decision clears the mark.
+const String decisionRedecideFailedKey = 'redecide_failed';
+
 /// One message's stored decision, as `MessageStore.decisionFor` reads it
 /// back from `message_decisions`.
 @immutable

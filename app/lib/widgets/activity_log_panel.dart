@@ -121,6 +121,7 @@ class ActivityLogPanel extends StatefulWidget {
     'decision_unavailable': 'decision model unreachable',
     'not_installed': 'model not downloaded',
     'decision_not_installed': 'decision model not installed',
+    'decision_older_model': 'decision model is an older version',
     'decision_misconfigured': 'decision server misconfigured',
     'decision_unauthorized': 'the decision server refused the access key',
     'session': 'signed out',

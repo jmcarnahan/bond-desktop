@@ -150,14 +150,25 @@ void main() {
     expect(find.text('At 5% or more'), findsOneWidget);
   });
 
-  testWidgets('a needs-you text an older build stored brings back no editor',
-      (tester) async {
+  testWidgets('a needs-you text an older build stored brings back no editor, '
+      'only one quiet line saying so', (tester) async {
     await store.setPref(needsYouRulesKey, 'Anything about the budget.');
 
     await openNeedsYou(tester);
 
     expect(find.byType(Slider), findsOneWidget);
     expect(find.text('Anything about the budget.'), findsNothing);
+    expect(
+      find.text('Your earlier Needs You rules are no longer used; the slider '
+          'is the one control.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('with no old rules text there is no such line', (tester) async {
+    await openNeedsYou(tester);
+
+    expect(find.byKey(SettingsScreen.oldNeedsYouRulesKey), findsNothing);
     expect(find.textContaining('rules'), findsNothing);
   });
 }

@@ -209,12 +209,16 @@ void main() {
         throwsA(isA<DecisionOlderModelException>()
             .having((e) => e.message, 'message', DecisionHeads.olderModelText)
             .having((e) => parkReasonFor(e), 'park word',
-                'decision_misconfigured')),
+                'decision_older_model')),
       );
-      expect(DecisionHeads.olderModelText, contains('older version'));
-      // It names the fix without promising today's target delivers it.
-      expect(DecisionHeads.olderModelText,
-          contains('make decide-install once it points at it'));
+      expect(
+        DecisionHeads.olderModelText,
+        'The installed decision model is an older version that this app no '
+        'longer reads. Install the current decision model to resume sorting '
+        'new mail.',
+      );
+      // Plain words for an owner who may not be a developer: no command.
+      expect(DecisionHeads.olderModelText, isNot(contains('make')));
     });
 
     test('another renderer set', () {

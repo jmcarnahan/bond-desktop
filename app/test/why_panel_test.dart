@@ -135,9 +135,55 @@ void main() {
       expect(find.text('Asks you a question.'), findsNothing);
     });
 
-    testWidgets('the percentage is rounded, never truncated', (tester) async {
-      await pump(tester, message: msg(needsYouP: 0.716));
-      expect(find.text('Needs you: 72%'), findsOneWidget);
+    testWidgets('the percentage is floored, so it never contradicts the line',
+        (tester) async {
+      // Rounded, 0.296 would read "30%" beside "below your 30% line".
+      for (final (p, shown, inside) in [
+        (0.296, '29%', false),
+        (0.2999, '29%', false),
+        (0.30, '30%', true),
+        (0.3001, '30%', true),
+        (0.716, '71%', true),
+      ]) {
+        await pump(tester, message: msg(needsYouP: p), threshold: 0.30);
+        expect(find.text('Needs you: $shown'), findsOneWidget, reason: '$p');
+        expect(
+          find.text(inside
+              ? 'In Needs You: at or above your 30% line.'
+              : 'Not in Needs You: below your 30% line.'),
+          findsOneWidget,
+          reason: '$p',
+        );
+      }
+    });
+
+    testWidgets("an earlier model's carried verdict shows no percentage",
+        (tester) async {
+      // v21 carried the old verdicts across as 1.0 and 0.0. With no decision
+      // under this build's questions, no model said that number.
+      await pump(tester, message: msg(needsYouP: 1.0));
+      expect(find.text('Needs you: — (earlier model)'), findsOneWidget);
+      expect(find.text('Needs you: 100%'), findsNothing);
+      // It still counts against the slider.
+      expect(find.text('In Needs You: at or above your 30% line.'),
+          findsOneWidget);
+
+      await pump(tester, message: msg(needsYouP: 0.0));
+      expect(find.text('Needs you: — (earlier model)'), findsOneWidget);
+      expect(find.text('Not in Needs You: below your 30% line.'),
+          findsOneWidget);
+
+      // Decided under this build's questions, the same number is the model's.
+      await pump(
+        tester,
+        message: msg(needsYouP: 1.0),
+        decision: StoredDecision(
+          answers: fakeAnswers(),
+          model: 'bond-decide-fake',
+          needsYouP: 1.0,
+        ),
+      );
+      expect(find.text('Needs you: 100%'), findsOneWidget);
     });
 
     testWidgets("the reader's own slider is the cut", (tester) async {

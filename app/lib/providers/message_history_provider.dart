@@ -101,6 +101,9 @@ class MessageHistoryNotifier extends StateNotifier<AsyncValue<MessageHistory>> {
         conversationKey: conversationKey,
       );
       final bar = await threshold();
+      // Only whether one exists: an earlier model's carried verdict is not
+      // drawn as a percentage.
+      final decided = await _store.decisionFor(source, sourceMessageId);
 
       if (seq != _fetchSeq || !mounted) return;
       state = AsyncValue.data(
@@ -117,6 +120,7 @@ class MessageHistoryNotifier extends StateNotifier<AsyncValue<MessageHistory>> {
           blocks: blocks,
           activity: activity,
           threshold: bar,
+          decidedNow: decided != null,
         ),
       );
     } catch (e, stack) {

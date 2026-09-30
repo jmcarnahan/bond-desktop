@@ -11,12 +11,19 @@ says, and which model serves it.
 
 **Three models, three roles** (since the decision-model round, 2026-09):
 
-- **Decision** — a fine-tuned ModernBERT-large encoder served as a mean-pooled
-  embedding model (router id `bond-decide`), whose nine calibrated heads run
-  in Dart. It answers every classification-shaped question, one forward pass
-  per kept message, and no chat model is asked any of them.
+- **Decision** — the model that answers every choice-shaped question, and no
+  chat model is asked any of them: twelve questions, the nine message fields
+  (one pass per kept message) and three storyline questions (`same_effort`,
+  `member_of`, `charter_specific`). Two backends answer the same question set.
+  On this Mac, or at a llama-server URL, it is a fine-tuned ModernBERT-large
+  encoder served as a mean-pooled embedding model (router id `bond-decide`)
+  whose calibrated heads run in Dart from the heads file here. At a Kev 4B
+  URL (`/v1/systemone`) the server answers the questions itself and no heads
+  run here.
 - **Generative** — ONE chat model for every piece of text: the message text,
-  attachment and directory digests, every storyline call, drafts and Improve.
+  attachment and directory digests, the storylines' writing (names,
+  summaries, charters, refreshes, recaps), drafts and Improve. It judges no
+  storyline membership.
   It is never asked about needs-you. The box 27B by default when the build names one, else the
   27B or the 4B the app's own router serves.
 - **Embeddings** — always on this Mac; search, clustering and retrieval.
@@ -55,7 +62,7 @@ is always the authority when they disagree.
 \* embeddings call the embedding server, but no chat model.
 
 § one forward pass of the decision model (an embedding call whose heads run
-in Dart), no chat model; the text the retired triage call wrote is stage 7's
+in Dart, or one `systemone` call to a Kev server), no chat model; the text the retired triage call wrote is stage 7's
 since the decision-model round's Phase 6. Stage 12 makes no call at all: it
 reads the probability stage 5 stored in `message_decisions`. There is no
 `triage`, `extraction` or `reply_decision` LLM stage any more.

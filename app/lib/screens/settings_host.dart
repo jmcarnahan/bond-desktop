@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../data/message_store.dart' show MessageStore;
+import '../data/message_store.dart' show MessageStore, needsYouRulesKey;
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/context_provider.dart';
@@ -24,6 +24,14 @@ import '../services/llm/model_probe.dart';
 import '../services/llm/model_slots.dart'
     show MachineTier, ModelPlacement, boxDecideId, managedGenerativeIdFor;
 import '../widgets/settings_screen.dart';
+
+/// Whether an older build left Needs You rules text in `needs_you_rules`. The
+/// pref is inert — the slider is the one control — so Settings only says so,
+/// once, rather than leaving an owner to wonder where their rules went.
+final _oldNeedsYouRulesProvider = FutureProvider.autoDispose<bool>((ref) async {
+  final text = await ref.watch(messageStoreProvider).getPref(needsYouRulesKey);
+  return (text ?? '').trim().isNotEmpty;
+});
 
 /// The settings surface, and every mutator only settings calls.
 ///
@@ -227,6 +235,8 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       onBack: widget.onBack,
       onHome: widget.onHome,
       threshold: prefs.needsYouThreshold,
+      oldNeedsYouRules:
+          ref.watch(_oldNeedsYouRulesProvider).valueOrNull ?? false,
       aboutMe: prefs.aboutMe,
       // The prefs setters update state first and persist behind the caller's
       // back on purpose (see AppPrefsNotifier) — `unawaited` says the discard

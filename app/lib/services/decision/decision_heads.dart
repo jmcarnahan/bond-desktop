@@ -17,7 +17,10 @@ import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../llm/llm_client.dart'
-    show DecisionMisconfiguredException, LlmFormatException;
+    show
+        DecisionOlderModelException,
+        LlmFormatException,
+        decisionOlderModelText;
 import 'decision_questions.dart';
 import 'decision_state.dart' show decisionRendererVersion;
 
@@ -204,13 +207,9 @@ class DecisionHeads {
   /// What a schema-1 file says: the nine-field heads of the first decision
   /// model, which cannot answer the storyline questions. It is the one
   /// refusal the owner meets after an upgrade, so it names the cause rather
-  /// than a mismatch. It does not promise that today's `make decide-install`
-  /// fixes it: that target installs the newer model only once it points at
-  /// one.
-  static const String olderModelText =
-      'The installed decision model is the older version, which cannot '
-      'answer the storyline questions. Install the newer decision model '
-      '(make decide-install once it points at it).';
+  /// than a mismatch, in plain words with no command
+  /// ([decisionOlderModelText], `DecisionOlderModelException`'s sentence).
+  static const String olderModelText = decisionOlderModelText;
 
   /// The model's own name, from the file — what a stored decision records.
   final String model;
@@ -489,11 +488,4 @@ class DecisionHeads {
     }
     return out;
   }
-}
-
-/// The heads file is the first decision model's (schema 1), which cannot
-/// answer the storyline questions. A misconfiguration like any refused heads
-/// file, so it parks under `decision_misconfigured`, with its own sentence.
-class DecisionOlderModelException extends DecisionMisconfiguredException {
-  const DecisionOlderModelException() : super(DecisionHeads.olderModelText);
 }

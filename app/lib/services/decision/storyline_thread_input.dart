@@ -191,6 +191,16 @@ const int _maxParticipants = 8;
 /// corpus.py `mail_participants` / `add_mail_participant` over [rows] oldest
 /// first: an inbound message adds its sender, an outbound one its To
 /// recipients, named from [stored] (see the library doc).
+///
+/// An outbound row with an EMPTY `to_json` names no recipient to key on. That
+/// happens in production too — a sent message synced before `to_json` was
+/// stored, or one whose recipients Graph did not return — and it is how the
+/// golden seed writes every outbound row, since the golden set records how
+/// many addresses were on an envelope and not which. Such a row takes the
+/// thread's [stored] participants as its recipients, in stored order: by
+/// address where one is stored, else by name (case-insensitively, and never
+/// a second time for a name already present). corpus.py always had the sent
+/// message's own To, so this is the closest the stored row can come.
 List<Participant> _mailParticipants(
   List<Map<String, Object?>> rows,
   List<Participant> stored,
@@ -200,12 +210,15 @@ List<Participant> _mailParticipants(
       if ((p.email ?? '').isNotEmpty && (p.name ?? '').isNotEmpty)
         p.email!.toLowerCase(): p.name!,
   };
-  final people = <({String? name, String email})>[];
+  final people = <({String? name, String? email})>[];
+  bool named(String name) => people.any(
+        (p) => (p.name ?? '').toLowerCase() == name.toLowerCase(),
+      );
   void add(String? name, String? email) {
     if (email == null || email.isEmpty) return;
     final key = email.toLowerCase();
     for (var i = 0; i < people.length; i++) {
-      if (people[i].email.toLowerCase() != key) continue;
+      if (people[i].email?.toLowerCase() != key) continue;
       if ((people[i].name ?? '').isEmpty && (name ?? '').isNotEmpty) {
         people[i] = (name: name, email: people[i].email);
       }
@@ -215,9 +228,25 @@ List<Participant> _mailParticipants(
     people.add((name: name, email: email));
   }
 
+  void addByName(String name) {
+    if (name.isEmpty || named(name)) return;
+    if (people.length >= _maxParticipants) return;
+    people.add((name: name, email: null));
+  }
+
   for (final row in rows) {
     if (row['direction'] == 'outbound') {
-      for (final address in _addresses(row['to_json'])) {
+      final to = _addresses(row['to_json']);
+      if (to.isEmpty) {
+        for (final p in stored) {
+          if ((p.email ?? '').isNotEmpty) {
+            add(p.name, p.email);
+          } else {
+            addByName(p.name ?? '');
+          }
+        }
+      }
+      for (final address in to) {
         add(storedNames[address.toLowerCase()], address);
       }
     } else {

@@ -15,6 +15,8 @@ import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
+import 'package:bond_inbox/services/decision/storyline_thread_input.dart'
+    show storylineThreadTextFor;
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -1211,6 +1213,17 @@ void main() {
         final decider =
             await _storylineDecider(onCall: confirmCollector.record);
 
+        if (stage == SweepStage.pairs) {
+          await _readThePairs(
+            store: store,
+            set: set,
+            decider: decider,
+            collector: confirmCollector,
+            startedAt: startedAt,
+          );
+          return;
+        }
+
         // The app's own log, because the sweep's per-pass counts — the series
         // it seeded and excluded, the clusters it refused, the outliers it
         // dropped, the pairs it judged — are written there and nowhere else. The run records a row
@@ -2182,10 +2195,23 @@ String? _goldGateReason(GoldenItem item) {
 /// The decision client the storyline legs judge membership through: this
 /// Mac's heads over `DECIDE_URL`, the decision legs' own recipe, so a
 /// storyline row and a decision row read the same model.
+///
+/// Or a Kev 4B wrapper, when `DECIDE_URL` is one ([_decideUrlIsSystemOne]):
+/// the client is built as the app builds Your server's, so the questions go
+/// out on the app's own systemone wire and no heads file is needed here.
 Future<DecisionClient> _storylineDecider({
   void Function(LlmCallRecord record)? onCall,
   http.Client? client,
 }) async {
+  if (await _decideUrlIsSystemOne(client)) {
+    return DecisionClient(
+      resolveTarget: _decideTarget,
+      heads: _noHeadsForKev,
+      client: client,
+      onCall: onCall,
+      isYourServer: (_) => true,
+    );
+  }
   final headsPath = decideHeadsPath();
   if (!File(headsPath).existsSync()) {
     fail('no decision heads at $headsPath — run make decide-install, or '
@@ -2201,6 +2227,38 @@ Future<DecisionClient> _storylineDecider({
     client: client,
     onCall: onCall,
   );
+}
+
+LlmTarget _decideTarget() => const LlmTarget(
+      baseUrl: DecisionClient.defaultBaseUrl,
+      model: DecisionClient.defaultModel,
+    );
+
+/// A Kev server answers there, so its client never reads heads; a call that
+/// reached for them found an encoder-heads server after all.
+DecisionHeads _noHeadsForKev() => throw StateError(
+      'DECIDE_URL was taken for a Kev 4B server, but it answered as an '
+      'encoder — pass DECIDE_HEADS and a /v1/embeddings address instead',
+    );
+
+/// Whether `DECIDE_URL` is a Kev 4B wrapper: its path ends in
+/// `/v1/systemone`, or the server's listing marks it one (the app's own
+/// detection, `DecisionClient.detectKind`). A listing that does not answer
+/// reads as not Kev, and the heads recipe then says what is missing.
+Future<bool> _decideUrlIsSystemOne(http.Client? client) async {
+  const url = DecisionClient.defaultBaseUrl;
+  if (Uri.tryParse(url)?.path.endsWith('/v1/systemone') ?? false) return true;
+  final probe = DecisionClient(
+    resolveTarget: _decideTarget,
+    heads: _noHeadsForKev,
+    client: client,
+    isYourServer: (_) => true,
+  );
+  return await probe.detectKind(
+        url: url,
+        model: DecisionClient.defaultModel,
+      ) ==
+      DecisionServerKind.systemOne;
 }
 
 /// A collector for the decision model's calls, which the storyline legs
@@ -2242,14 +2300,15 @@ Future<GoldenSet> _loadOrFail() async {
 /// The names are the ones every existing file in `BENCH_OUT` already carries,
 /// and they are what `bench_compare` and the ledger read a row by, so none of
 /// them moved when the four tests came onto [LiveBench] in Round F. The sweep
-/// keeps two, because its two STAGES share one body and one seeding and write
-/// under a name each.
+/// keeps three, because its stages share one body and one seeding and the
+/// vector and pairs stages write under a name of their own.
 const LiveBench _triageBench = LiveBench('golden-bulk');
 const LiveBench _proseBench = LiveBench('golden-prose');
 const LiveBench _storylineBench = LiveBench('golden-storyline');
 const LiveBench _gatesBench = LiveBench('golden-gate');
 const LiveBench _sweepBench = LiveBench('golden-sweep');
 const LiveBench _vectorBench = LiveBench('golden-vector');
+const LiveBench _pairsBench = LiveBench('golden-pairs');
 const LiveBench _decisionBench = LiveBench('golden-decision');
 
 /// [load], with a decode failure rethrown as a sentence naming the FILE.
@@ -2566,6 +2625,115 @@ Future<void> _readTheVectorAlone({
     },
   );
   _vectorBench.printPaths(resultPath: resultPath);
+}
+
+/// The decision model's `same_effort`, read on its own —
+/// `make golden-pairs`, the sweep test under `SWEEP_STAGE=pairs`.
+///
+/// The pool is the vector stage's, by the same rule, and the pairs are the
+/// same same-effort and cross-effort lists [pairCosinesOf] reads by cosine
+/// ([poolPairsOf]), so this row and a `golden-vector` row are one question
+/// answered two ways. Each thread's text is the app's own
+/// (`storylineThreadTextFor`), and the pairs go through the app's own judge
+/// (`StorylineJudge.sameEffortOfTexts`, the mean over both orders). Pairs
+/// with a side gold files nowhere are not asked: they separate nothing.
+///
+/// No run file and nothing to score. It prints and records the AUC, the p at
+/// each recall and the cross-effort pairs it would link there, and the
+/// cosine stage's separation line over the same p's — counts, ratios and
+/// probabilities, never a thread.
+Future<void> _readThePairs({
+  required MessageStore store,
+  required GoldenSet set,
+  required DecisionClient decider,
+  required CallCollector collector,
+  required DateTime startedAt,
+}) async {
+  final threads = <String, ({String source, String key})>{};
+  for (final row in await store.conversationsWithEmbeddings(
+    embedModel: EmbeddingsClient.modelTag,
+    sources: const ['email', 'teams'],
+  )) {
+    final key = row['conversation_key'] as String? ?? '';
+    if (key.isEmpty) continue;
+    if ((row['state'] as String?) == 'done') continue;
+    final blob = row['embedding'];
+    if (blob is! Uint8List || decodeEmbedding(blob).isEmpty) continue;
+    final source = row['source'] as String? ?? 'email';
+    threads[threadKeyOf(source, key)] = (source: source, key: key);
+  }
+  if (threads.isEmpty) {
+    fail('the seeded pool holds no vector under ${EmbeddingsClient.modelTag} — '
+        'nothing to pair');
+  }
+
+  final pairs =
+      poolPairsOf(keys: threads.keys, goldByThread: goldSlugByThread(set));
+  final texts = <String, String>{};
+  var previewRows = 0;
+  for (final MapEntry(:key, value: thread) in threads.entries) {
+    final text =
+        await storylineThreadTextFor(store, thread.source, thread.key);
+    texts[key] = text.text;
+    previewRows += text.previewRows;
+  }
+
+  final judge = StorylineJudge(decision: decider, store: store);
+  final asked = [...pairs.sameEffort, ...pairs.crossEffort];
+  final watch = Stopwatch()..start();
+  final ps = await judge.sameEffortOfTexts([
+    for (final (a, b) in asked) (texts[a]!, texts[b]!),
+  ]);
+  watch.stop();
+  final same = ps.sublist(0, pairs.sameEffort.length);
+  final cross = ps.sublist(pairs.sameEffort.length);
+  final reading = pairReadingOf(sameEffort: same, crossEffort: cross);
+  final separation = separationOf(sameEffort: same, crossEffort: cross);
+  // `systemone` or `heads`, never the listed name or the file's sha.
+  final backend = (await decider.modelIdentity()).split(':').first;
+
+  // ignore: avoid_print
+  print(
+    'pairs:\n'
+    '  stage pairs · backend $backend · pool ${threads.length} threads · '
+    'preview rows $previewRows · with none ${pairs.withNone.length} '
+    '(not asked) · ${watch.elapsedMilliseconds} ms\n'
+    '  ${pairReadingLine(reading)}\n'
+    '  ${separationLine(separation)}\n',
+  );
+
+  final resultPath = await _pairsBench.writeResult(
+    label: 'decision $backend · same_effort',
+    startedAt: startedAt,
+    collectors: [collector],
+    extra: {
+      'cards_from': GoldenDefines.runPath.split('/').last,
+      'pairs': {
+        'backend': backend,
+        'pool_threads': threads.length,
+        'preview_rows': previewRows,
+        'same': reading.same,
+        'cross': reading.cross,
+        'with_none_not_asked': pairs.withNone.length,
+        'wall_ms': watch.elapsedMilliseconds,
+        'auc': reading.auc,
+        'at_recall': {
+          for (final point in reading.points)
+            '${point.recallPct}': {
+              'p': point.at,
+              'false_link_pct': point.falseLinkPct,
+            },
+        },
+        'separation': separationJson(separation),
+      },
+      'golden': {
+        'path': GoldenDefines.setPath.split('/').last,
+        'generated': set.generated,
+        'items': set.items.length,
+      },
+    },
+  );
+  _pairsBench.printPaths(resultPath: resultPath);
 }
 
 /// The display names on a stored `participants_json`, the way every card

@@ -741,10 +741,12 @@ WHERE needs_you_reason LIKE 'label_rule:%' ''');
               // Backfilled from the stored decision where there is one, else
               // from the old verdict (1 → 1.0, 0 → 0.0; a NULL verdict stays
               // NULL, undecided). Only NULL rows are touched, so a replay
-              // (db_adoption_test) writes nothing new. The verdict is then
-              // cleared: the column is INERT from here on, and a verdict left
-              // standing could be carried into a `needs_you_p` that a later
-              // re-decision had set back to NULL, if this step ever replayed.
+              // (db_adoption_test) never overwrites a probability; it does
+              // fill any `needs_you_p` still NULL from a decision row that
+              // has one, which is correct — that row's number IS the
+              // message's p. The verdict is then cleared: the column is
+              // INERT from here on, so a replay finds no verdict to carry
+              // into a `needs_you_p` a later re-decision set back to NULL.
               from20To21: (m, schema) async {
                 if (!await _columnExists('messages', 'needs_you_p')) {
                   await m.addColumn(

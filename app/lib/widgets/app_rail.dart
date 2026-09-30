@@ -116,13 +116,12 @@ bool isNeedsYou(
 
 /// What the user is on the hook for, loudest first — [isNeedsYou], sorted.
 ///
-/// The sort is needs-reply first, then score. Two blocks rather than one
-/// ordering because they answer different questions: the top block is work the
-/// user is holding up, the bottom is work someone else is, and a waiting thread
-/// with an urgent ask must not outrank a reply the user owes however loudly it
-/// scores. The attention score ORDERS here and nowhere gates. Ties keep input
-/// order, so the store's newest-first ordering shows through and the list does
-/// not reshuffle between reads.
+/// The sort is the attention score, which ORDERS here and nowhere gates. There
+/// is no second "waiting on somebody else" block: a thread with no kept
+/// inbound after the owner's last reply has no probability
+/// ([Conversation.needsYouP] is NULL), so it can never be here to rank. Ties
+/// keep input order, so the store's newest-first ordering shows through and
+/// the list does not reshuffle between reads.
 List<Conversation> needsYouRows(
   List<Conversation> all, {
   double threshold = NeedsYouTuning.defaultThreshold,
@@ -135,8 +134,6 @@ List<Conversation> needsYouRows(
   }
 
   rows.sort((a, b) {
-    final byBlock = _needsReplyRank(a.$2).compareTo(_needsReplyRank(b.$2));
-    if (byBlock != 0) return byBlock;
     final byScore =
         (b.$2.attentionScore ?? 0).compareTo(a.$2.attentionScore ?? 0);
     if (byScore != 0) return byScore;
@@ -146,13 +143,6 @@ List<Conversation> needsYouRows(
   });
   return [for (final (_, c) in rows) c];
 }
-
-int _needsReplyRank(Conversation c) =>
-    c.state == ConversationState.needsReply ? 0 : 1;
-
-/// Whether a Needs You row belongs to the quieter second block — waiting on
-/// somebody else, and rendered dimmed so the two halves read apart at a glance.
-bool isWaitingRow(Conversation c) => c.state != ConversationState.needsReply;
 
 /// Every live thread the user does not owe an answer: resolved ones dropped,
 /// deferred ones dropped, and everything Needs You claimed dropped.
@@ -667,7 +657,6 @@ class _AppRailState extends State<AppRail> {
         for (final c in shown)
           _item(
             c,
-            dimmed: isWaitingRow(c),
             // Bold is unread here as everywhere (D5). What makes a Needs You
             // row loud is the badge over the section, the accent dot on the
             // row and the ask in its own words — three signals that say
@@ -960,18 +949,13 @@ class _AppRailState extends State<AppRail> {
   /// One Needs You thread, titled by the ASK — see [needsYouTitleFor] — with
   /// the person after it in quieter ink.
   ///
-  /// [dimmed] drops the whole row to the muted ink used for the quieter half
-  /// of Needs You — a thread on the list because someone else is late, not
-  /// because the user is.
-  ///
   /// [processing] says the model has not finished with this thread yet, and it
-  /// overrides both of those: whatever the row would otherwise claim about
+  /// overrides the ink: whatever the row would otherwise claim about
   /// itself is a half-formed answer, so it reads quiet — muted ink and a
   /// hollow dot — until the answer is whole.
   Widget _item(
     Conversation c, {
     required bool bold,
-    bool dimmed = false,
     bool processing = false,
   }) {
     final selected = widget.selectedId == c.id &&
@@ -985,9 +969,9 @@ class _AppRailState extends State<AppRail> {
     // by the accent dot on the row, and by the ask the row is titled with.
     final color = processing
         ? BondColors.onDarkMuted
-        : (selected || (bold && !dimmed))
+        : (selected || bold)
             ? BondColors.onDarkPrimary
-            : (dimmed ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
+            : BondColors.onDarkSecondary;
 
     final title = needsYouTitleFor(c);
     final who = needsYouWhoFor(c);

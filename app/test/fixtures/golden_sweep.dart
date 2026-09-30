@@ -559,8 +559,50 @@ Map<String, ClusterPurity> clusterPurityByOutcome(
   return byOutcome;
 }
 
+/// Every pool pair, split by whether the two threads are the same gold effort:
+/// the ONE split [pairCosinesOf] reads by cosine and the pairs stage asks the
+/// decision model about, so the two readings are over the same pairs.
+///
+/// Sorted keys, `i < j`, so the populations do not depend on the order the
+/// caller built [keys] in. [withNone] is every pair at least one side of which
+/// gold files nowhere or carries no slug at all.
+({
+  List<(String, String)> sameEffort,
+  List<(String, String)> crossEffort,
+  List<(String, String)> withNone,
+}) poolPairsOf({
+  required Iterable<String> keys,
+  required Map<String, String> goldByThread,
+}) {
+  final sameEffort = <(String, String)>[];
+  final crossEffort = <(String, String)>[];
+  final withNone = <(String, String)>[];
+  final sorted = keys.toList()..sort();
+  String? slugOf(String key) {
+    final slug = goldByThread[key];
+    if (slug == null || slug.isEmpty || slug == noneId) return null;
+    return slug;
+  }
+
+  for (var i = 0; i < sorted.length; i++) {
+    for (var j = i + 1; j < sorted.length; j++) {
+      final pair = (sorted[i], sorted[j]);
+      final a = slugOf(sorted[i]);
+      final b = slugOf(sorted[j]);
+      if (a == null || b == null) {
+        withNone.add(pair);
+      } else if (a == b) {
+        sameEffort.add(pair);
+      } else {
+        crossEffort.add(pair);
+      }
+    }
+  }
+  return (sameEffort: sameEffort, crossEffort: crossEffort, withNone: withNone);
+}
+
 /// Every pool pair's cosine, split by whether the two threads are the same
-/// gold effort.
+/// gold effort ([poolPairsOf]).
 ///
 /// The separability read, and the ceiling on every threshold the clustering
 /// could be given: a floor that keeps the in-effort pairs and drops the rest
@@ -577,38 +619,107 @@ Map<String, ClusterPurity> clusterPurityByOutcome(
   required Map<String, List<double>> vectors,
   required Map<String, String> goldByThread,
 }) {
-  final sameEffort = <double>[];
-  final crossEffort = <double>[];
-  final withNone = <double>[];
-  // Sorted, so the three populations do not depend on the order the caller
-  // happened to build the map in.
-  final keys = vectors.keys.toList()..sort();
-  String? slugOf(String key) {
-    final slug = goldByThread[key];
-    if (slug == null || slug.isEmpty || slug == noneId) return null;
-    return slug;
-  }
+  final pairs = poolPairsOf(keys: vectors.keys, goldByThread: goldByThread);
+  List<double> cosines(List<(String, String)> of) => [
+        for (final (a, b) in of) cosine(vectors[a]!, vectors[b]!),
+      ];
+  return (
+    sameEffort: cosines(pairs.sameEffort),
+    crossEffort: cosines(pairs.crossEffort),
+    withNone: cosines(pairs.withNone),
+  );
+}
 
-  for (var i = 0; i < keys.length; i++) {
-    for (var j = i + 1; j < keys.length; j++) {
-      final value = cosine(vectors[keys[i]]!, vectors[keys[j]]!);
-      final a = slugOf(keys[i]);
-      final b = slugOf(keys[j]);
-      if (a == null || b == null) {
-        withNone.add(value);
-      } else if (a == b) {
-        sameEffort.add(value);
-      } else {
-        crossEffort.add(value);
+/// The highest value in [values] that still has at least [pct]% of them at or
+/// above it — a value the data contains, never an interpolated percentile, so
+/// the share read beside it is a real count. Zero for an empty list.
+///
+/// [separationOf]'s recall-70 walk, at any recall.
+double valueAtRecall(List<double> values, int pct) {
+  if (values.isEmpty) return 0;
+  final sorted = [...values]..sort();
+  var at = sorted.first;
+  var firstOfValue = 0;
+  for (var i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i] != sorted[i - 1]) firstOfValue = i;
+    final atOrAbove = sorted.length - firstOfValue;
+    if (atOrAbove * 100 >= sorted.length * pct) at = sorted[i];
+  }
+  return at;
+}
+
+/// The chance a random same-effort pair scores above a random cross-effort
+/// pair, ties counting half: the area under the ROC curve, by counting. 0.5
+/// for an empty side, which separates nothing.
+double aucOf({
+  required List<double> sameEffort,
+  required List<double> crossEffort,
+}) {
+  if (sameEffort.isEmpty || crossEffort.isEmpty) return 0.5;
+  var wins = 0.0;
+  for (final same in sameEffort) {
+    for (final cross in crossEffort) {
+      if (same > cross) {
+        wins += 1;
+      } else if (same == cross) {
+        wins += 0.5;
       }
     }
   }
+  return wins / (sameEffort.length * crossEffort.length);
+}
+
+/// The pairs stage's reading of one per-pair score (the decision model's
+/// p(same_effort)), over the same same and cross lists [separationOf] reads:
+/// the AUC, and at each of [recalls] the score that keeps that share of the
+/// same-effort pairs and the share of cross-effort pairs it would link too.
+/// Seventy is [separationOf]'s own point, so its cosine row and this one are
+/// read side by side.
+({
+  int same,
+  int cross,
+  double auc,
+  List<({int recallPct, double at, int falseLinkPct})> points,
+}) pairReadingOf({
+  required List<double> sameEffort,
+  required List<double> crossEffort,
+  List<int> recalls = const [50, 70, 90],
+}) {
+  int sharePct(List<double> values, double bar) => values.isEmpty
+      ? 0
+      : (values.where((v) => v >= bar).length * 100 / values.length).round();
   return (
-    sameEffort: sameEffort,
-    crossEffort: crossEffort,
-    withNone: withNone,
+    same: sameEffort.length,
+    cross: crossEffort.length,
+    auc: aucOf(sameEffort: sameEffort, crossEffort: crossEffort),
+    points: [
+      for (final recall in recalls)
+        (
+          recallPct: recall,
+          at: valueAtRecall(sameEffort, recall),
+          falseLinkPct: sharePct(crossEffort, valueAtRecall(sameEffort, recall)),
+        ),
+    ],
   );
 }
+
+/// [pairReadingOf]'s numbers on one line. Counts, ratios and two-decimal
+/// probabilities only.
+String pairReadingLine(
+  ({
+    int same,
+    int cross,
+    double auc,
+    List<({int recallPct, double at, int falseLinkPct})> points,
+  }) reading,
+) =>
+    'pairs: same ${reading.same} · cross ${reading.cross} · '
+    'AUC ${reading.auc.toStringAsFixed(3)} · '
+    '${[
+      for (final point in reading.points)
+        'recall ${point.recallPct}% at p ${point.at.toStringAsFixed(2)} '
+            'false-link ${point.falseLinkPct}%',
+    ].join(' · ')}';
 
 /// The commonest English function words, dropped before two subjects are
 /// compared.
@@ -850,18 +961,11 @@ List<int> sharedPeopleBins(Iterable<double> counts) {
     );
   }
 
-  // Ascending, then the LAST value whose "at or above me" share still clears
-  // seven in ten. Walking the values rather than interpolating a percentile
-  // keeps the answer a cosine the data actually contains, which is what makes
-  // the share beside it a real count rather than an estimate.
+  // The LAST value whose "at or above me" share still clears seven in ten
+  // ([valueAtRecall]): a cosine the data actually contains, which is what
+  // makes the share beside it a real count rather than an estimate.
   final sortedSame = [...sameEffort]..sort();
-  var recall70 = sortedSame.first;
-  var firstOfValue = 0;
-  for (var i = 0; i < sortedSame.length; i++) {
-    if (i > 0 && sortedSame[i] != sortedSame[i - 1]) firstOfValue = i;
-    final atOrAbove = sortedSame.length - firstOfValue;
-    if (atOrAbove * 100 >= sortedSame.length * 70) recall70 = sortedSame[i];
-  }
+  final recall70 = valueAtRecall(sameEffort, 70);
 
   // The same walk over the cross list, taking the FIRST value whose share has
   // fallen to one in twenty. A list where even the largest value is held by
@@ -872,7 +976,7 @@ List<int> sharedPeopleBins(Iterable<double> counts) {
   var cross5 = sortedSame.last;
   if (sortedCross.isNotEmpty) {
     cross5 = sortedCross.last;
-    firstOfValue = 0;
+    var firstOfValue = 0;
     for (var i = 0; i < sortedCross.length; i++) {
       if (i > 0 && sortedCross[i] != sortedCross[i - 1]) firstOfValue = i;
       final atOrAbove = sortedCross.length - firstOfValue;

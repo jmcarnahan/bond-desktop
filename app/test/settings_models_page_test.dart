@@ -681,6 +681,7 @@ void main() {
       // The managed generative model, said on this Mac's server line.
       'not_installed': SettingsModelsPage.statusKey,
       'decision_not_installed': SettingsModelsPage.decisionStatusKey,
+      'decision_older_model': SettingsModelsPage.decisionStatusKey,
       'decision_misconfigured': SettingsModelsPage.decisionStatusKey,
       'decision_unauthorized': SettingsModelsPage.decisionStatusKey,
     };
@@ -691,6 +692,7 @@ void main() {
       'unauthorized': SettingsModelsPage.serverUnauthorizedText,
       'not_installed': SettingsModelsPage.notInstalledText,
       'decision_not_installed': SettingsModelsPage.decisionNotInstalledText,
+      'decision_older_model': SettingsModelsPage.decisionOlderModelText,
       'decision_misconfigured': SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized': SettingsModelsPage.decisionUnauthorizedText,
     };
@@ -711,6 +713,30 @@ void main() {
         }
       });
     }
+
+    testWidgets('the older decision model says it plainly, with the command '
+        'on a quieter line of its own', (tester) async {
+      await open(
+        tester,
+        parked: const ParkedFact(reason: 'decision_older_model', waiting: 3),
+      );
+
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionOlderModelText);
+      expect(SettingsModelsPage.decisionOlderModelText,
+          isNot(contains('make')));
+      expect(textOf(tester, SettingsModelsPage.decisionOlderHintKey),
+          'For developers: make decide-install');
+    });
+
+    testWidgets('no other park shows the developer line', (tester) async {
+      await open(
+        tester,
+        parked: const ParkedFact(reason: 'decision_misconfigured', waiting: 3),
+      );
+
+      expect(find.byKey(SettingsModelsPage.decisionOlderHintKey), findsNothing);
+    });
 
     testWidgets('on this Mac the generative model leaves a server park to the '
         'server line', (tester) async {

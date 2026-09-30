@@ -142,9 +142,10 @@ class StorylineJudge {
   /// in ONE request batch.
   ///
   /// The state is the storyline's title and charter over the thread's text.
-  /// A storyline with no charter is judged against its summary, since that is
-  /// the nearest thing to a statement of what it holds; with neither, the
-  /// renderer says `(none)`.
+  /// A storyline with no charter renders `(none)` in the charter slot, never
+  /// its summary: the summary is display text, not the membership contract,
+  /// and `(none)` is the state training includes for an uncharted
+  /// storyline.
   Future<List<double>> memberOf(
     Storyline storyline,
     List<({String source, String key})> threads,
@@ -264,7 +265,7 @@ class StorylineJudge {
   static String _membershipState(Storyline storyline, String threadText) =>
       renderStorylineMembership(
         title: storyline.title,
-        charter: _nonBlank(storyline.charter) ?? _nonBlank(storyline.summary),
+        charter: _nonBlank(storyline.charter),
         threadText: threadText,
       );
 

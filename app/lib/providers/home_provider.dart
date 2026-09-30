@@ -1108,5 +1108,7 @@ final pipelinePulseProvider = FutureProvider.autoDispose<PipelinePulse>((ref) {
           DateTime.now().subtract(homePulseWindow),
         ),
         sources: sources,
+        threshold:
+            ref.watch(appPrefsProvider.select((p) => p.needsYouThreshold)),
       );
 });

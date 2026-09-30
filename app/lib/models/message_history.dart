@@ -191,6 +191,12 @@ class MessageHistory {
   /// else entirely from "no".
   final double? needsYouP;
 
+  /// Whether [needsYouP] was decided under the question set this build reads
+  /// (`MessageStore.decisionFor` found a row). Null when the loader did not
+  /// ask, which leaves only an exact 1.0 or 0.0 in question
+  /// (`needsYouFromEarlierModel`).
+  final bool? decidedNow;
+
   final String? needsYouReason;
   final String? urgency;
   final String? category;
@@ -235,6 +241,7 @@ class MessageHistory {
     this.gateReason,
     this.gateOverride,
     this.needsYouP,
+    this.decidedNow,
     this.needsYouReason,
     this.urgency,
     this.category,
@@ -306,6 +313,7 @@ class MessageHistory {
     required List<Map<String, Object?>> blocks,
     required List<Map<String, Object?>> activity,
     required double threshold,
+    bool? decidedNow,
   }) {
     if (message == null) {
       return MessageHistory.missing(
@@ -335,6 +343,7 @@ class MessageHistory {
       gateOverride: message['gate_override'] as String?,
       // Null is undecided, which is not a low probability.
       needsYouP: (message['needs_you_p'] as num?)?.toDouble(),
+      decidedNow: decidedNow,
       needsYouReason: message['needs_you_reason'] as String?,
       urgency: message['urgency'] as String?,
       category: message['category'] as String?,

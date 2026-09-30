@@ -1185,8 +1185,11 @@ Only a pair missing from the cache is asked. A thread whose text changes — a
 new message, a fetched body — has a new hash, so its pairs are asked again.
 Two threads that render identically share a hash and have no row to live in:
 such a pair is asked every pass, which is rare enough to cost nothing. Each
-decision pass first PRUNES the table: rows decided by another key, and
-rows older than 30 days, which mostly key texts nothing renders any more.
+decision pass first PRUNES the table by AGE only: rows older than 30 days,
+which mostly key texts nothing renders any more. Rows another backend or
+question set decided are kept, since every read filters on its own
+`decidedBy`, so switching the decision role to Your server and back finds
+both caches warm.
 
 The cache saves questions, not reads: every pass still builds the text of
 every pool thread in a candidate pair (a few store reads each, and a body
@@ -1774,8 +1777,11 @@ renders `body_preview`, which for mail is Graph's preview of the whole body,
 quoted chain included, where training had the unique body.
 `StorylineThreadText.previewRows` counts those rows among the three rendered,
 so a caller can fetch the bodies first. Outbound recipients' names come from
-the stored participants, because `to_json` keeps addresses only. A renamed
-Teams chat shows its new topic.
+the stored participants, because `to_json` keeps addresses only. An outbound
+row with an empty `to_json` (a sent message synced before it was stored, and
+every outbound row the golden seed writes) takes the stored participants as
+its recipients, in stored order, by address where one is stored and else by
+name. A renamed Teams chat shows its new topic.
 
 `DecisionClient.ask(question, states)` sends the texts
 over the same transport as a message decision (the identity probe, raw
@@ -1792,8 +1798,9 @@ model is asked whether a thread belongs anywhere: `ConfirmMembershipTask` and
 the `storyline_membership` stage were deleted in the decision-questions round.
 
 **The state.** `renderStorylineMembership(title, charter, thread)`: the
-storyline's title, its charter (else its summary, else `(none)`), and the
-thread's own text (`storylineThreadTextFor`). The owner's charter is the prompt
+storyline's title, its charter (`(none)` when it has none — never its
+summary, which is display text; training includes the `(none)` state), and
+the thread's own text (`storylineThreadTextFor`). The owner's charter is the prompt
 the model reads — the lever an owner has on what gets filed.
 
 **The body fetch.** Training read every message's own body, so a mail

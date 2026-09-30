@@ -34,7 +34,8 @@ Storyline _storyline({
 const Owner _owner = (name: 'Dana Whitfield', address: 'dana@example.com');
 
 /// [_conv]'s default needs-you probability: over the slider for a thread
-/// awaiting a reply or carrying an ask, undecided otherwise. It is what the
+/// awaiting a reply, undecided otherwise — a thread the owner answered last
+/// has no kept inbound to carry a probability. It is what the
 /// rendering tests below mean by a row "in Needs You"; the predicate tests
 /// pass `p` explicitly, `null` included.
 const double _pFromState = -1;
@@ -71,7 +72,7 @@ Conversation _conv({
     replyExpected: replyExpected,
     needsYouP: p != _pFromState
         ? p
-        : (state == ConversationState.needsReply || cta != null ? 0.9 : null),
+        : (state == ConversationState.needsReply ? 0.9 : null),
   );
 }
 
@@ -89,7 +90,7 @@ void main() {
     test('includes a thread whose probability clears the slider', () {
       final rows = needsYouRows([
         _conv(id: 'a', state: ConversationState.needsReply, p: 0.9),
-        _conv(id: 'b', state: ConversationState.waiting, p: 0.4),
+        _conv(id: 'b', state: ConversationState.needsReply, p: 0.4),
       ]);
       expect(rows.map((c) => c.id), ['a', 'b']);
     });
@@ -176,33 +177,6 @@ void main() {
       expect(rows.map((c) => c.id), ['quiet', 'unscored']);
     });
 
-    test('sorts needs-reply first, then by score', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'quiet',
-          state: ConversationState.needsReply,
-          score: 0.4,
-          p: 0.9,
-        ),
-        _conv(
-          id: 'loud-waiting',
-          state: ConversationState.waiting,
-          cta: 'ask',
-          score: 1.9,
-          p: 0.9,
-        ),
-        _conv(
-          id: 'loud',
-          state: ConversationState.needsReply,
-          score: 1.5,
-          p: 0.9,
-        ),
-      ]);
-      // A waiting thread never outranks a reply the LO owes, however loudly
-      // it scores.
-      expect(rows.map((c) => c.id), ['loud', 'quiet', 'loud-waiting']);
-    });
-
     test('ties keep input order rather than shuffling between reads', () {
       final rows = needsYouRows([
         for (final id in ['a', 'b', 'c', 'd', 'e'])
@@ -222,19 +196,6 @@ void main() {
         ),
       ]);
       expect(rows.map((c) => c.id), ['scored', 'unscored']);
-    });
-  });
-
-  group('isWaitingRow', () {
-    test('is the second block of Needs You', () {
-      expect(
-        isWaitingRow(_conv(id: 'a', state: ConversationState.needsReply)),
-        isFalse,
-      );
-      expect(
-        isWaitingRow(_conv(id: 'a', state: ConversationState.waiting)),
-        isTrue,
-      );
     });
   });
 
@@ -277,7 +238,7 @@ void main() {
       _conv(id: 'quiet-reply', state: ConversationState.needsReply, p: 0.4),
       _conv(
         id: 'cta',
-        state: ConversationState.waiting,
+        state: ConversationState.needsReply,
         cta: 'Send the homepage copy',
         p: 0.8,
       ),
@@ -465,7 +426,7 @@ void main() {
       _conv(
         id: 'c',
         who: 'Cleo',
-        state: ConversationState.waiting,
+        state: ConversationState.needsReply,
         cta: 'Send the homepage copy',
       ),
       _conv(id: 'd', who: 'Dev', state: ConversationState.done),
@@ -892,43 +853,6 @@ void main() {
         ).single.title,
         'Quiet',
       );
-    });
-
-    testWidgets('a waiting row renders dimmed below the needs-reply block',
-        (tester) async {
-      await pumpRail(tester, conversations: [
-        _conv(
-          id: 'a',
-          who: 'Owed',
-          state: ConversationState.needsReply,
-          unread: 1,
-          score: 1,
-        ),
-        _conv(
-          id: 'b',
-          who: 'Waiting',
-          state: ConversationState.waiting,
-          cta: 'Send the homepage copy',
-          unread: 1,
-          score: 1.9,
-        ),
-      ]);
-
-      // Present, titled by its ask, with the person after it — and quieter
-      // than the row above.
-      // One Text, rich: the ask in the row's own ink and the person after it
-      // in the muted one. `find.text` reads the whole span.
-      final row = find.text('Send the homepage copy · Waiting');
-      expect(row, findsOneWidget);
-      expect(
-        tester.widget<Text>(row).textSpan!.style?.color,
-        BondColors.onDarkMuted,
-      );
-
-      // 'Owed' has no ask and no subject, so its row IS the person and stays
-      // a plain Text with no suffix.
-      final loud = tester.widget<Text>(find.text('Owed'));
-      expect(loud.style?.color, BondColors.onDarkPrimary);
     });
   });
 

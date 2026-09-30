@@ -284,6 +284,45 @@ void main() {
       expect(thread.text, contains('People: Dana Whitfield, Sam Rivera\n'));
     });
 
+    test('an outbound row with no to_json takes the stored people as its '
+        'recipients, in stored order', () async {
+      // The golden seed's shape, and production's for a sent message synced
+      // before `to_json` was stored: names only on the row, no recipients on
+      // the outbound message.
+      await conversation(participants: [
+        {'name': 'Dana Whitfield'},
+        {'name': 'Kim Lee'},
+        {'name': 'Sam Rivera', 'email': 'sam@example.org'},
+      ]);
+      await message('m1', body: 'Venues attached.', at: '2026-09-01T09:00:00Z');
+      await outbound('m2', body: 'Thanks.', at: '2026-09-01T10:00:00Z');
+
+      final thread = await storylineThreadTextFor(store, 'email', 'c1');
+
+      // Dana is the sender already and is not named twice; Kim by name, Sam
+      // by the stored address.
+      expect(
+        thread.text,
+        contains('People: Dana Whitfield, Kim Lee, Sam Rivera\n'),
+      );
+    });
+
+    test('an outbound row WITH to_json never reaches for the stored people',
+        () async {
+      await conversation(participants: [
+        {'name': 'Kim Lee'},
+        {'name': 'Sam Rivera', 'email': 'sam@example.org'},
+      ]);
+      await message('m1', body: 'Venues attached.', at: '2026-09-01T09:00:00Z');
+      await outbound('m2',
+          body: 'Thanks.', at: '2026-09-01T10:00:00Z', to: ['sam@example.org']);
+
+      final thread = await storylineThreadTextFor(store, 'email', 'c1');
+
+      expect(thread.text, contains('People: Dana Whitfield, Sam Rivera\n'));
+      expect(thread.text, isNot(contains('Kim Lee')));
+    });
+
     test('ingest order is not received order: the subject and the people '
         'follow received order', () async {
       // The later message was ingested FIRST, so the stored row was named

@@ -2016,6 +2016,7 @@ void main() {
         'owed1',
         conversationKey: 'c3',
         needsYou: true,
+        threadState: 'needs_reply',
         updatedAt: '2026-09-01T09:57:00Z',
       );
       // Outside it, and still pending — so it counts as in flight and as
@@ -2061,6 +2062,46 @@ void main() {
       expect(pulse.recentSettled, 2);
       expect(pulse.recentDropped, 1);
       expect(pulse.recentNeedsYou, 1);
+    });
+
+    test('its needs-you count follows the slider, not the snapshot',
+        () async {
+      // Snapshot says owed, probability says 0.5: the count is the
+      // probability against the slider, so a slider move alone moves it.
+      await seed(
+        'owed1',
+        conversationKey: 'c3',
+        needsYou: true,
+        threadState: 'needs_reply',
+        needsYouP: 0.5,
+        updatedAt: '2026-09-01T09:57:00Z',
+      );
+      // Never snapshotted, and over the default slider: it counts.
+      await seed(
+        'late1',
+        conversationKey: 'c4',
+        threadState: 'needs_reply',
+        needsYouP: 0.4,
+        updatedAt: '2026-09-01T09:57:00Z',
+      );
+      // Over every slider, but its thread is closed.
+      await seed(
+        'closed1',
+        conversationKey: 'c5',
+        threadState: 'done',
+        needsYouP: 0.9,
+        updatedAt: '2026-09-01T09:57:00Z',
+      );
+
+      Future<int> at(double threshold) async => (await store.pipelinePulse(
+            sinceIso: '2026-09-01T09:50:00Z',
+            threshold: threshold,
+          ))
+              .recentNeedsYou;
+
+      expect(await at(0.30), 2);
+      expect(await at(0.45), 1);
+      expect(await at(0.60), 0);
     });
 
     test('a quiet pipeline reads as quiet rather than as nothing', () async {

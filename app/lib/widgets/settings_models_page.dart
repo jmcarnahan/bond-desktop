@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../providers/app_providers.dart' show ParkedFact;
 import '../services/decision/decision_client.dart' show DecisionServerKind;
+import '../services/llm/llm_client.dart' as llm show decisionOlderModelText;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart'
     show
@@ -161,6 +162,8 @@ class SettingsModelsPage extends StatefulWidget {
       ValueKey('settings-generative-managed');
   static const Key decisionStatusKey = ValueKey('settings-decision-status');
   static const Key decisionKindKey = ValueKey('settings-decision-kind');
+  static const Key decisionOlderHintKey =
+      ValueKey('settings-decision-older-hint');
   static const Key generativeStatusKey = ValueKey('settings-generative-status');
   static const Key embedStatusKey = ValueKey('settings-embed-status');
   static const Key checkDecisionKey = ValueKey('settings-role-check-decision');
@@ -226,6 +229,19 @@ class SettingsModelsPage extends StatefulWidget {
       'The decision server is not the decision model, or its heads file does '
       'not match this build. Check its address here, or run make '
       'decide-install.';
+
+  /// The installed heads file is the older decision model's, which this
+  /// build no longer reads: the same plain sentence the rail and the heads
+  /// refusal say, with no command in it.
+  static const String decisionOlderModelText = llm.decisionOlderModelText;
+
+  /// The quieter line under [decisionOlderModelText], for a developer who
+  /// installs the model by hand: the same command, and folder, that
+  /// [decisionNotInstalledIn] names.
+  static String decisionOlderModelHintIn(String? dir) => dir == null
+      ? 'For developers: make decide-install'
+      : 'For developers: make decide-install '
+          "DECIDE_DIR='${dir.replaceAll("'", "'\\''")}'";
 
   /// Under Your server's decision form, what the server is.
   static const String systemOneKindText =
@@ -404,6 +420,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       'not_installed' => SettingsModelsPage.notInstalledText,
       'decision_not_installed' =>
         SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir),
+      'decision_older_model' => SettingsModelsPage.decisionOlderModelText,
       'decision_misconfigured' => SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized' => SettingsModelsPage.decisionUnauthorizedText,
       _ => null,
@@ -492,6 +509,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     final onServer = _decisionOnServer;
     final row = _row('decision');
     final check = widget.onCheckDecision;
+    final status = _decisionStatus(row);
     return [
       _heading(SettingsModelsPage.decisionTitle),
       _placementSegments(
@@ -556,7 +574,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           Expanded(
             child: Text(
               key: SettingsModelsPage.decisionStatusKey,
-              _decisionStatus(row),
+              status,
               style: BondType.small,
             ),
           ),
@@ -570,6 +588,14 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           ],
         ],
       ),
+      if (status == SettingsModelsPage.decisionOlderModelText) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(
+          key: SettingsModelsPage.decisionOlderHintKey,
+          SettingsModelsPage.decisionOlderModelHintIn(widget.decideInstallDir),
+          style: BondType.caption,
+        ),
+      ],
     ];
   }
 
@@ -588,6 +614,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     if (_parked(const {
       'decision_unavailable',
       'decision_not_installed',
+      'decision_older_model',
       'decision_misconfigured',
       'decision_unauthorized',
     })

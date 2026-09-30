@@ -72,6 +72,9 @@ class _FakeDecide {
   /// Never answers, when true.
   bool hang = false;
 
+  /// The listing's HTTP status, when not 200.
+  int? listingStatus;
+
   /// Every `GET …/v1/models` (a kind check), in order. Not in [requests].
   final List<http.Request> listings = [];
 
@@ -130,6 +133,8 @@ class _FakeDecide {
   MockClient get client => MockClient((request) async {
         if (request.method == 'GET') {
           listings.add(request);
+          final status = listingStatus;
+          if (status != null) return http.Response('Not Found', status);
           return http.Response(jsonEncode(listing), 200);
         }
         if (isProbe(request)) {
@@ -399,10 +404,32 @@ void main() {
     });
 
     test('any other 4xx is this request', () async {
-      for (final status in [400, 404]) {
+      for (final status in [400, 422]) {
         expect(await failure(status: status), isA<LlmFormatException>(),
             reason: '$status');
       }
+    });
+
+    test('no /v1/embeddings is the server, and its passes are forgotten',
+        () async {
+      final c = client();
+      for (final status in [404, 405]) {
+        server.onEmbed = (_) => http.Response('Not Found', status);
+        try {
+          await c.decide(_input('a'));
+          fail('expected a throw');
+        } catch (e) {
+          expect(e, isA<DecisionMisconfiguredException>(), reason: '$status');
+          expect(parkReasonFor(e), 'decision_misconfigured');
+          expect((e as LlmException).message,
+              contains('does not offer /v1/embeddings'));
+        }
+      }
+      // A park, so the identity probe's pass went with it: the server that
+      // answers next is probed again, once per failed call and once more.
+      server.onEmbed = null;
+      await c.decide(_input('a'));
+      expect(server.probes, hasLength(3));
     });
 
     test('a dead socket, a dropped client and a timeout all park', () async {
@@ -665,6 +692,105 @@ void main() {
     });
   });
 
+  group('the heads pairing', () {
+    DecisionClient paired({String? Function(LlmTarget)? servedFile}) =>
+        DecisionClient(
+          resolveTarget: () => target,
+          heads: syntheticHeads,
+          client: server.client,
+          onCall: records.add,
+          toLocal: _pacific,
+          servedFile: servedFile,
+        );
+
+    Map<String, Object?> listingOf(String path) => {
+          'models': [
+            {'name': path, 'model': path},
+          ],
+          'object': 'list',
+          'data': [
+            {'id': path, 'object': 'model'},
+          ],
+        };
+
+    test("a served file whose name carries the heads' model passes, once",
+        () async {
+      server.listing = listingOf(
+          '/Users/sam/models/local_bond-decide/bond-decide-synthetic-f16.gguf');
+      final c = paired();
+
+      await c.decide(_input('a'));
+      await c.decide(_input('b'));
+
+      expect(server.listings, hasLength(1));
+      expect(server.embeds, hasLength(2));
+    });
+
+    test('a file of another model is refused, parks, and names the file only',
+        () async {
+      server.listing = listingOf(
+          '/Users/sam/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf');
+
+      final e = await paired().decide(_input('a')).then<Object>(
+          (_) => fail('expected a throw'),
+          onError: (Object e) => e);
+
+      expect(e, isA<DecisionModelMismatchException>());
+      expect(e, isA<DecisionMisconfiguredException>());
+      expect(parkReasonFor(e), 'decision_misconfigured');
+      expect(
+        (e as LlmException).message,
+        'The decision model file (bond-decide-mbl-v2swap-f16.gguf) does not '
+        'match its heads file (bond-decide-synthetic). Install them together.',
+      );
+      expect(server.embeds, isEmpty);
+    });
+
+    test("a served bond-decide- alias is paired like a file: the heads' "
+        'model passes', () async {
+      server.listing = listingOf('bond-decide-synthetic');
+      await paired().decide(_input('a'));
+      expect(server.embeds, hasLength(1));
+    });
+
+    test('a served bond-decide- alias of another model is refused', () async {
+      server.listing = listingOf('bond-decide-mbl-v3');
+      await expectLater(
+        paired().decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>().having(
+            (e) => e.message,
+            'message',
+            'The decision model file (bond-decide-mbl-v3) does not match its '
+                'heads file (bond-decide-synthetic). Install them together.')),
+      );
+      expect(server.embeds, isEmpty);
+    });
+
+    test('a listing that names no file skips the check', () async {
+      // The default listing: an alias, no path.
+      final c = paired();
+      await c.decide(_input('a'));
+      expect(server.embeds, hasLength(1));
+
+      // No listing at all.
+      server.listingStatus = 404;
+      await paired().decide(_input('a'));
+      expect(server.embeds, hasLength(2));
+    });
+
+    test("a managed target's file is the manifest's, and no listing is asked",
+        () async {
+      await expectLater(
+        paired(servedFile: (_) => 'bond-decide-mbl-v3-f16.gguf')
+            .decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>()),
+      );
+      await paired(servedFile: (_) => 'bond-decide-synthetic-f16.gguf')
+          .decide(_input('a'));
+      expect(server.listings, isEmpty);
+    });
+  });
+
   group('truncation', () {
     test('a refused text becomes tokenize, then ids — once each, no retry',
         () async {
@@ -771,6 +897,8 @@ void main() {
           resolveTarget: () => target,
           heads: syntheticHeads,
           client: MockClient((request) async {
+            // No listing: the heads pairing is skipped.
+            if (request.method == 'GET') return http.Response('', 404);
             if (_FakeDecide.isProbe(request)) {
               return http.Response(jsonEncode({'tokens': _modernBertA}), 200);
             }
@@ -805,7 +933,9 @@ void main() {
         final c = DecisionClient(
           resolveTarget: () => target,
           heads: syntheticHeads,
-          client: MockClient((request) async => _FakeDecide.isProbe(request)
+          client: MockClient((request) async => request.method == 'GET'
+              ? http.Response('', 404)
+              : _FakeDecide.isProbe(request)
               ? http.Response(jsonEncode({'tokens': _modernBertA}), 200)
               : request.url.path.endsWith('/tokenize')
                   ? http.Response('nope', status)

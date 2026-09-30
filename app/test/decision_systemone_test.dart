@@ -187,6 +187,7 @@ void main() {
   DecisionClient client({
     bool yourServer = true,
     DecisionHeads Function()? heads,
+    String? servedFile,
   }) =>
       DecisionClient(
         resolveTarget: () => target,
@@ -195,6 +196,7 @@ void main() {
         onCall: records.add,
         toLocal: _pacific,
         isYourServer: (_) => yourServer,
+        servedFile: (_) => servedFile,
       );
 
   setUp(() {
@@ -210,9 +212,13 @@ void main() {
         baseUrl: 'http://127.0.0.1:8090/v1/embeddings',
         model: 'bond-decide',
       );
-      final result =
-          await client(yourServer: false, heads: syntheticHeads)
-              .decide(_input('a'));
+      // Managed: the router's file is the manifest's, so the heads pairing
+      // reads no listing either.
+      final result = await client(
+        yourServer: false,
+        heads: syntheticHeads,
+        servedFile: 'bond-decide-synthetic-f16.gguf',
+      ).decide(_input('a'));
       expect(server.listings, isEmpty);
       expect(server.asks, isEmpty);
       expect(result.model, syntheticHeads().model);
@@ -243,6 +249,31 @@ void main() {
       expect(server.requests.map((r) => r.url.path),
           ['/decide/tokenize', '/decide/v1/embeddings']);
       expect(result.model, syntheticHeads().model);
+    });
+
+    test("Your ModernBERT's listed file is paired with the heads from the "
+        'same listing, asked once', () async {
+      target = const LlmTarget(baseUrl: _encoderUrl, model: 'bond-decide');
+      Map<String, Object?> listing(String file) => {
+            'models': [
+              {'name': 'bond-decide', 'model': '/srv/models/$file'},
+            ],
+            'data': [
+              {'id': 'bond-decide'},
+            ],
+          };
+      server.listing = listing('bond-decide-synthetic-f16.gguf');
+      await client(heads: syntheticHeads).decide(_input('a'));
+      expect(server.listings, hasLength(1));
+
+      server.listing = listing('bond-decide-mbl-v2swap-f16.gguf');
+      await expectLater(
+        client(heads: syntheticHeads).decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>().having(
+            (e) => e.message,
+            'message',
+            contains('(bond-decide-mbl-v2swap-f16.gguf)'))),
+      );
     });
 
     test('a server with no listing (404) is encoder-heads', () async {
@@ -396,11 +427,13 @@ void main() {
       expect(e, isA<DecisionMisconfiguredException>());
       expect(parkReasonFor(e!), 'decision_misconfigured');
 
-      // The route now serves ModernBERT: re-detected, not stuck on Kev.
+      // The route now serves ModernBERT: re-detected, not stuck on Kev. It
+      // lists the ModernBERT its heads were trained with, or the heads
+      // pairing would refuse it.
       server.askStatus = 200;
       server.listing = {
         'data': [
-          {'id': _kevModel},
+          {'id': 'bond-decide-synthetic'},
         ],
       };
       final result = await c.decide(_input('c'));

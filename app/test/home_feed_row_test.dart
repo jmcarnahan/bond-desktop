@@ -204,7 +204,7 @@ void main() {
           outcome: 'dropped',
           // Both of these would render on a row that was not dropped. Neither
           // may argue with the drop.
-          needsYou: true,
+          needsYouP: 0.9,
           storylineId: 's1',
           storylineTitle: 'Website redesign',
         ),
@@ -238,7 +238,7 @@ void main() {
         tester,
         _row(
           outcome: 'done',
-          needsYou: true,
+          needsYouP: 0.9,
           storylineId: 's1',
           storylineTitle: 'Website redesign',
         ),
@@ -372,7 +372,7 @@ void main() {
         (tester) async {
       final row = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         needsYouReason: 'asks you to confirm Thursday',
         ctaText: 'Confirm Thursday with Sarah',
         summary: 'Sarah proposes moving the launch',
@@ -422,7 +422,7 @@ void main() {
         outcome: 'dropped',
         dropped: true,
         dropReason: 'newsletter',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Reply to the newsletter',
         summary: 'This week in widgets',
       );
@@ -557,7 +557,7 @@ void main() {
     testWidgets('is one line: who, what, the ask, and when', (tester) async {
       final row = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Confirm Thursday with Sarah',
         storylineId: 's1',
         storylineTitle: 'Website redesign',
@@ -601,7 +601,7 @@ void main() {
 
       final asking = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Confirm Thursday with Sarah',
       );
       await _pump(tester, asking, compact: true);
@@ -622,7 +622,7 @@ void main() {
         (tester) async {
       final row = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Confirm Thursday with Sarah',
       );
       await _pump(tester, row);

@@ -9,7 +9,8 @@ import '../services/decision/decision_policy.dart'
 import '../models/extraction_models.dart';
 import '../theme/tokens.dart';
 import 'home_result.dart' show homeDropLabels;
-import 'needs_you_reason.dart' show needsYouPercentWords;
+import 'needs_you_reason.dart'
+    show needsYouFromEarlierModel, needsYouPercentWords;
 import 'time_format.dart';
 
 /// Why one message got the verdict it did, in plain words.
@@ -173,8 +174,20 @@ class WhyPanelBody extends StatelessWidget {
   /// slider is set in, so the two read as one number: `Needs you: 72%`. A
   /// dash when the decision model has not read it: an undecided message is
   /// not a low one, and the panel never shows it as 0%.
-  String _headline(Message m) =>
-      'Needs you: ${needsYouPercentWords(m.needsYouP) ?? '—'}';
+  ///
+  /// An earlier model's carried verdict (a 1.0 or 0.0 with no [decision]
+  /// under this build's questions, `needsYouFromEarlierModel`) reads
+  /// `Needs you: — (earlier model)`: it still counts against the slider, but
+  /// no model said that number.
+  String _headline(Message m) {
+    final decidedNow = decision != null;
+    if (m.needsYouP != null &&
+        needsYouFromEarlierModel(m.needsYouP, decidedNow: decidedNow)) {
+      return 'Needs you: — (earlier model)';
+    }
+    final percent = needsYouPercentWords(m.needsYouP, decidedNow: decidedNow);
+    return 'Needs you: ${percent ?? '—'}';
+  }
 
   List<String> _verdictLines(Message m) {
     final lines = <String>[];

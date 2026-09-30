@@ -63,6 +63,7 @@ MessageHistory _history({
   List<Map<String, Object?>> activity = const [],
   Map<String, Object?>? progress,
   double threshold = 0.5,
+  bool? decidedNow,
 }) =>
     MessageHistory.assemble(
       source: 'email',
@@ -97,6 +98,7 @@ MessageHistory _history({
       blocks: blocks,
       activity: activity,
       threshold: threshold,
+      decidedNow: decidedNow,
     );
 
 Future<void> _pump(
@@ -242,6 +244,31 @@ void main() {
     await _pump(
         tester, AsyncValue.data(_history(message: message(null, null))));
     expect(find.text('Needs you: not decided'), findsOneWidget);
+
+    // Floored, not rounded: 0.496 is under the slider of 0.5 and never
+    // reads "50%".
+    await _pump(
+        tester, AsyncValue.data(_history(message: message(0.496, null))));
+    expect(find.text('Needs you: 49%'), findsOneWidget);
+
+    // An earlier model's carried verdict: no decision under this build's
+    // questions, so no percentage.
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        message: message(1.0, 'Dana may want the DPA'),
+        decidedNow: false,
+      )),
+    );
+    expect(
+      find.text('Needs you: — (earlier model) — Dana may want the DPA'),
+      findsOneWidget,
+    );
+    await _pump(
+      tester,
+      AsyncValue.data(_history(message: message(1.0, null), decidedNow: true)),
+    );
+    expect(find.text('Needs you: 100%'), findsOneWidget);
   });
 
   testWidgets('a dropped message offers Restore and nothing that would run '

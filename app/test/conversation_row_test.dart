@@ -30,6 +30,7 @@ Conversation _conv({
   ConversationState? state,
   String? reason,
   double? needsYouP,
+  bool? decidedNow,
 }) {
   return Conversation(
     id: id,
@@ -42,6 +43,7 @@ Conversation _conv({
             : ConversationState.needsReply),
     needsYouReason: reason,
     needsYouP: needsYouP,
+    needsYouDecidedNow: decidedNow,
     lastMessagePreview: preview,
     lastMessageAt: lastMessageAt,
     aiPendingCount: pending,
@@ -340,7 +342,35 @@ void main() {
         onTap: () {},
       )));
 
-      expect(chipText(tester), 'Asks you to confirm Friday. · 72%');
+      // Floored, as every needs-you percentage is.
+      expect(chipText(tester), 'Asks you to confirm Friday. · 71%');
+    });
+
+    testWidgets("an earlier model's carried verdict rides with no percentage",
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'Asks you to confirm Friday.',
+          needsYouP: 1.0,
+          decidedNow: false,
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+      expect(chipText(tester), 'Asks you to confirm Friday.');
+
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'Asks you to confirm Friday.',
+          needsYouP: 1.0,
+          decidedNow: true,
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+      expect(chipText(tester), 'Asks you to confirm Friday. · 100%');
     });
 
     testWidgets('a long reason is clamped, and the percentage never is',

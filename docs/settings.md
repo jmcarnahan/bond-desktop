@@ -116,9 +116,16 @@ per 0.05 notch the stored pref can hold. Its ends read **Only the surest**
 caption says what the number is: *The decision model's confidence that a message
 needs you. Each message shows its own percentage.* The percentage is the same
 one every message shows in its Why panel and history row and every thread shows
-beside its reason, so a row at 72% is in Needs You exactly when this line says
-70% or less. There is no editable Needs You text: no language model is asked
-about needs-you, so there is no prompt to edit. The old `attention_threshold`
+beside its reason, and it is FLOORED, never rounded (0.296 shows 29%, not 30%),
+so a row showing 72% is in Needs You exactly when this line says 70% or less,
+and a row never shows 30% beside "below your 30% line". A message nothing has
+re-decided since v21 carried the old yes/no verdict across as exactly 1.0 or
+0.0; it still counts against the slider, but shows no percentage (the Why panel
+reads "— (earlier model)"). There is no editable Needs You text: no language model is asked
+about needs-you, so there is no prompt to edit. When an older build left custom
+rules text in `needs_you_rules`, the section says so in one quiet caption,
+*Your earlier Needs You rules are no longer used; the slider is the one
+control.* (keyed `settings-old-needs-you-rules`), and never reads the text. The old `attention_threshold`
 setting is not carried over: its scale was the 0..2 attention score, not a
 probability, so the Needs You slider starts at its default of 30% and the old
 value is simply never read again.
@@ -428,7 +435,7 @@ not re-read by the button: the decision client re-reads it on its next claim
 when the file's mtime has moved. The line reads `Checking…` while it is out.
 Until the v3 decision model is installed, what `make decide-install`
 installs is the v2 model, whose schema-1 heads file this build refuses: the status says `Installed` until triage first claims a message, and
-then the `decision_misconfigured` park's sentence.
+then the `decision_older_model` park's sentence (below).
 
 **Generative model on This Mac** adds a second control,
 `SettingsSegments<String>` keyed `settings-generative-managed`, choosing
@@ -565,7 +572,13 @@ installed · run make decide-install DECIDE_DIR='<models
 folder>/local_bond-decide'`, because the command writes to the default folder
 otherwise), `decision_misconfigured` (`The decision server is not the
 decision model, or its heads file does not match this build. Check its
-address here, or run make decide-install.`, with no retry promised) and
+address here, or run make decide-install.`, with no retry promised),
+`decision_older_model` (`The installed decision model is an older version
+that this app no longer reads. Install the current decision model to resume
+sorting new mail.`, plain words with no command, and under it one quieter
+caption keyed `settings-decision-older-hint`: `For developers: make
+decide-install`, with the same `DECIDE_DIR='…'` as the not-installed line
+when the models folder is not the default one) and
 `decision_unauthorized` (`The decision server refused the access key. Change
 it here.`) are said under the Decision model whatever the generative
 placement. A `decision_not_installed` park that the install has overtaken

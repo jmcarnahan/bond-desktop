@@ -6,9 +6,9 @@ Needs You rail: thread state, recency of movement, what the model found in it
 (triage/extraction verdicts), and how often that sender gets answered. The
 score ORDERS Needs You and the rail and never gates either: whether a thread is
 on Needs You at all is the decision model's needs-you probability against the
-owner's Settings slider (see [11-needs-you.md](11-needs-you.md)). Threads
-awaiting the user's reply rank first; threads waiting on somebody else follow,
-dimmed.
+owner's Settings slider (see [11-needs-you.md](11-needs-you.md)). There is no
+second "waiting on somebody else" block: a thread with no kept inbound after
+the owner's last reply has no probability, so it is never in Needs You to rank.
 
 **Where the verdicts come from.** Since schema v20 the classification the
 score reads is the DECISION MODEL's: `urgency` (and the thread's

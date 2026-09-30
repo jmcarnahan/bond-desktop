@@ -1072,6 +1072,10 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     gate: ref.watch(fastDrainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // The slider a decision's chip rule reads (`applyDecision`): a re-decided
+    // settled message whose answer crosses it has its chip moved.
+    needsYouThreshold:
+        needsYouThresholdReader(ref.watch(messageStoreProvider)),
     // The processing switch — see [processingProvider] and [_enabledReader].
     enabled: _enabledReader(ref),
     // The knock on the worker's door. Extraction and needs-you are no longer
@@ -1215,6 +1219,26 @@ final decisionClientProvider = Provider<DecisionClient>((ref) {
         return spec.id == boxDecideId && spec.url == target.baseUrl;
       } catch (_) {
         return false;
+      }
+    },
+    // The file the managed router serves for the decision role, for the
+    // heads pairing check: the router lists only its preset ids, and the
+    // preset serves the manifest's file. Null for any other target (the
+    // client reads that server's own listing), and for a container without
+    // a manifest, which skips the check rather than refusing.
+    servedFile: (target) {
+      try {
+        final prefs = ref.read(appPrefsProvider);
+        final spec = prefs.decisionSpec;
+        if (!prefs.managedServer ||
+            spec.id != localDecisionId ||
+            spec.url != target.baseUrl) {
+          return null;
+        }
+        return ref.read(modelManifestProvider).byRoleOrNull(ModelRole.decide)
+            ?.file;
+      } catch (_) {
+        return null;
       }
     },
   );

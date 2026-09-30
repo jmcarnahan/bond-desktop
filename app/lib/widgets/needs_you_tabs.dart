@@ -4,7 +4,6 @@ import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../services/deadline_parse.dart' show showableDeadline;
 import '../theme/tokens.dart';
-import 'app_rail.dart' show isWaitingRow;
 import 'chips.dart';
 
 /// The pile's ORDER travels with its lenses: everything that draws Needs You
@@ -53,7 +52,7 @@ extension NeedsYouTabLabel on NeedsYouTab {
 /// All, and a reader who switches tabs is not re-reading a reshuffled pile.
 ///
 /// The two halves are complements of one predicate, as Needs You itself is:
-/// [NeedsYouTab.askedOfMe] is everything [isWaitingRow] denies, and
+/// [NeedsYouTab.askedOfMe] is everything [_isWaitingRow] denies, and
 /// [NeedsYouTab.waitingOnOthers] is everything it claims — so every row is on
 /// exactly one of the two and the counts add up to [NeedsYouTab.all].
 List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows,
@@ -62,11 +61,11 @@ List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows,
       NeedsYouTab.all => rows,
       NeedsYouTab.askedOfMe => [
           for (final c in rows)
-            if (!isWaitingRow(c)) c,
+            if (!_isWaitingRow(c)) c,
         ],
       NeedsYouTab.waitingOnOthers => [
           for (final c in rows)
-            if (isWaitingRow(c)) c,
+            if (_isWaitingRow(c)) c,
         ],
       // Through [showableDeadline]: a plan-relative phrase the extractor
       // repeated ("Day 1") is not a date, and a tab the reader picked
@@ -84,6 +83,12 @@ List<Conversation> needsYouTabRows(NeedsYouTab tab, List<Conversation> rows,
             if (c.pendingDraftCount > 0) c,
         ],
     };
+
+/// Whether a Needs You row is not asking for the owner's reply by its thread
+/// state. Rare since Needs You became the probability: a thread the owner
+/// answered last has no probability to be here with. It remains the one
+/// split that makes the two tabs complements.
+bool _isWaitingRow(Conversation c) => c.state != ConversationState.needsReply;
 
 /// The rows of the pile filed under one label, or the pile itself when nothing
 /// is picked.

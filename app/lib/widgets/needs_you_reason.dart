@@ -41,16 +41,41 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
   return '${collapsed.substring(0, maxChars).trimRight()}…';
 }
 
+/// Whether [p] is an EARLIER model's verdict rather than a probability.
+///
+/// v21 carried the old yes/no verdicts across as `needs_you_p` 1.0 and 0.0, so
+/// a message nothing has re-decided since holds a number no model said. It
+/// still counts by the predicate — the verdict is the best answer the app has
+/// — but it is never drawn as `100%` or `0%`.
+///
+/// [decidedNow] is whether the message has a `message_decisions` row under the
+/// question set this build reads: true shows the number whatever it is, and a
+/// reader that cannot know cheaply passes null, which leaves only the two
+/// exact values in question.
+bool needsYouFromEarlierModel(double? p, {bool? decidedNow}) =>
+    decidedNow != true && (p == 0.0 || p == 1.0);
+
 /// [p] as the whole percentage every needs-you surface shows, or null when the
-/// message has not been decided. The Settings slider is set in the same unit,
+/// message has not been decided or holds an earlier model's verdict
+/// ([needsYouFromEarlierModel]). The Settings slider is set in the same unit,
 /// so the two read as one number.
-String? needsYouPercentWords(double? p) =>
-    p == null ? null : '${(p * 100).round()}%';
+///
+/// FLOORED, not rounded: 0.296 against a 30% line is below it, and `30%`
+/// beside "below your 30% line" would be the app contradicting itself. For a
+/// line on a slider notch the number shown is at or above the line's exactly
+/// when `needsYouAt` says yes. The 1e-9 is for the binary fractions: 0.57 is
+/// stored as 0.56999…, and it is 57%.
+String? needsYouPercentWords(double? p, {bool? decidedNow}) {
+  if (p == null || needsYouFromEarlierModel(p, decidedNow: decidedNow)) {
+    return null;
+  }
+  return '${((p + 1e-9) * 100).floor()}%';
+}
 
 /// [words] with the thread's probability after it, `<words> · 72%`, or
 /// [words] alone when there is no probability to show.
-String _withPercent(String words, double? p) {
-  final percent = needsYouPercentWords(p);
+String _withPercent(String words, double? p, bool? decidedNow) {
+  final percent = needsYouPercentWords(p, decidedNow: decidedNow);
   return percent == null ? words : '$words · $percent';
 }
 
@@ -80,7 +105,7 @@ List<Widget> needsYouReasonChips(Conversation c, {int maxChars = 36}) {
   final words = needsYouReasonWords(c.needsYouReason, maxChars: maxChars);
   if (words == null) return const [];
   return [
-    BondChip.metric(_withPercent(words, c.needsYouP),
+    BondChip.metric(_withPercent(words, c.needsYouP, c.needsYouDecidedNow),
         key: needsYouReasonChipKey),
   ];
 }
@@ -108,6 +133,10 @@ class NeedsYouWhyLine extends StatelessWidget {
   /// a percentage after the reason. Null draws no percentage.
   final double? p;
 
+  /// Whether [p] was decided under the current question set
+  /// ([Conversation.needsYouDecidedNow]); see [needsYouFromEarlierModel].
+  final bool? decidedNow;
+
   /// Jump to the message the reason came from. Resolved by the host from
   /// `needs_you_reason_message_id`, so this widget never learns which message
   /// that is. Null leaves the line inert.
@@ -118,6 +147,7 @@ class NeedsYouWhyLine extends StatelessWidget {
     required this.reason,
     this.at,
     this.p,
+    this.decidedNow,
     this.onTap,
   });
 
@@ -125,7 +155,7 @@ class NeedsYouWhyLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final reasonWords = needsYouReasonWords(reason);
     if (reasonWords == null) return const SizedBox.shrink();
-    final words = _withPercent(reasonWords, p);
+    final words = _withPercent(reasonWords, p, decidedNow);
     final stamp = formatTimestamp(at);
     final line = Text(
       stamp == null ? 'Why: $words' : 'Why: $words · $stamp',

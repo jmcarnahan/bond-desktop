@@ -206,7 +206,8 @@ typedef _Selection = ({
 /// placements, because there the answer changes what a person should go and
 /// look at; `embed_unavailable` does not, because that server is on this Mac
 /// under either placement, `decision_unavailable`, `decision_not_installed`,
-/// `decision_misconfigured` and `decision_unauthorized` name the decision
+/// `decision_older_model`, `decision_misconfigured` and
+/// `decision_unauthorized` name the decision
 /// model rather than a machine, and `not_installed` is a generative model this Mac has not
 /// downloaded, which no server restart fixes.
 ///
@@ -252,6 +253,14 @@ String railProgressLine({
     case 'decision_not_installed':
       return 'The decision model is not installed · $waiting waiting · run '
           'make decide-install, then Check in Settings';
+    // The installed decision model is the older one, whose heads file this
+    // build no longer reads. Its fix is an install, not an address, and the
+    // sentence says so in plain words, with no command: whoever reads the
+    // rail may not be a developer. No retry cadence either.
+    case 'decision_older_model':
+      return 'The installed decision model is an older version that this '
+          'app no longer reads · $waiting waiting · install the current '
+          'decision model to resume sorting new mail';
     // A server that answers, but not as the decision model does (another
     // model's tokenizer, normalised vectors, no /tokenize), or a heads file
     // this build refuses. Waiting fixes neither, so no retry cadence is

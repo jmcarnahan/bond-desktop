@@ -90,7 +90,8 @@ enforce the ones that are commands.
   body and the same seeding as `golden-sweep`, stopped after the embedding,
   one embed server and no model call. A new live STAGE goes inside the
   existing test body under a define, never as a second test name.
-  `SWEEP_STAGE=declared` and `make golden-declared` are the same shape again.
+  `SWEEP_STAGE=declared` and `make golden-declared` are the same shape again,
+  and so are `SWEEP_STAGE=pairs` and `make golden-pairs`.
 - Read only SCALAR fields off a sweep timing JSON. `extra.sweep.coverage`
   carries a `by_slug` map keyed by the registry's slugs, which name real
   efforts, so print `coverage.mean` and nothing under it. The same rule holds
@@ -243,8 +244,9 @@ enforce the ones that are commands.
   thread texts' `cardHash` and, in the `qhash` column, `decidedBy` =
   `'<qhash>|<model identity>'`
   (`DecisionClient.modelIdentity`, so a swapped or re-installed model re-asks;
-  a test's fake answers `fake-model`), pruned at each decision pass to the
-  current `decidedBy` and 30 days, at most `pairBudgetPerPass` new pairs a
+  a test's fake answers `fake-model`), pruned at each decision pass by AGE
+  only (30 days; reads filter on `decidedBy`, so both backends' caches
+  survive a role switch), at most `pairBudgetPerPass` new pairs a
   pass, written per batch only after the batch returns. The namer
   (`NameStorylineTask`) only WRITES — no `coherent`/`outliers` — and
   `StorylineTuning.charterCheck` (`CharterCheck.model`: `charter_specific` at
@@ -626,9 +628,11 @@ enforce the ones that are commands.
   one storyline question. `decisionHeadsProvider` re-reads it when its mtime
   moves and refuses a file whose `qhash` is not `decisionQhash`
   (`'f495a7dc48aa34d5'`, `decision_questions.dart`, the one place it is
-  named). A schema-1 file (the older model) is refused under
-  `decision_misconfigured` with `DecisionHeads.olderModelText`, which says to
-  run `make decide-install`. A missing file parks the decision pass. Tests
+  named). A schema-1 file (the older model) throws
+  `DecisionOlderModelException` (in `llm_client.dart`, so `parkReasonFor`
+  can name it), park `decision_older_model`, with `DecisionHeads.olderModelText`
+  in plain words and no command; Settings adds a quieter `For developers:
+  make decide-install` line. A missing file parks the decision pass. Tests
   build heads from `test/fixtures/decision_heads_fixture.dart`
   (`syntheticHeadsJson`, schema 2, one axis per option, `yesAxisOf`).
   `MessageStore.decisionFor` answers null for a row stored under another
@@ -668,11 +672,14 @@ enforce the ones that are commands.
   pass again for the last 30 days of kept inbound messages decided under
   another qhash (at most 2,000, newest first), writing only the decision row,
   the four triage fields, `needs_you_p`, the extraction's intent and
-  importance, and the thread's CTA fold (`foldCtaUp`, as the claim does). The
-  mail sync starts it unawaited on the pref `decision_redecide_qhash`, whose
-  value IS the qhash it finished for; a park, the processing switch, or a run
-  whose skipped 4xx messages are at least as many as its re-decided ones
-  leaves it owed. It asks nothing while triage is parked on the decision
+  importance, the thread's CTA fold and the chip, through `applyDecision`
+  (`triage_queue.dart`), the ONE writer the claim, the re-decide and the
+  needs-you pass's re-decide share. The mail sync starts it unawaited on the
+  pref `decision_redecide_qhash`, whose value IS the qhash it finished for; a
+  run is complete when it did not park. A 4xx message is SETTLED
+  (`settleFailedDecision`: the current qhash plus a `redecide_failed` mark in
+  `answers_json`, which `decisionFor` reads as no decision), so it leaves the
+  stale list; a park or the processing switch leaves it owed. It asks nothing while triage is parked on the decision
   model, and logs a park once per qhash and reason per app run. Not in
   `derivedOneShotPrefs`: a clear re-triages everything.
 - `message_decisions` is DERIVED (Clear AI results empties it; the triage

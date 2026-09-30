@@ -563,8 +563,8 @@ void main() {
       expect(await store.loadStorylines(statuses: ['suggested']), isEmpty);
     });
 
-    test('a decision backend swapped in re-asks every pair, and prunes the '
-        'old answers', () async {
+    test('a decision backend swapped in re-asks every pair, and switching back '
+        'finds the first cache warm', () async {
       await seedNear(3);
       final llm = llmWith(const {'p': 0.0});
       final decision = ScriptedDecisionClient(llm);
@@ -587,11 +587,22 @@ void main() {
       decision.identity = 'systemone:kev-4b';
       await service.sweep();
       expect(askedPairs(llm), hasLength(3));
+      // Both backends' answers stay: the prune is by age only, and every
+      // read filters on its own key.
       final byModel = await db
-          .customSelect('SELECT DISTINCT qhash FROM pair_decisions')
+          .customSelect(
+              'SELECT DISTINCT qhash FROM pair_decisions ORDER BY qhash')
           .get();
-      expect([for (final r in byModel) r.data['qhash']],
-          ['$decisionQhash|systemone:kev-4b']);
+      expect([for (final r in byModel) r.data['qhash']], [
+        '$decisionQhash|fake-model',
+        '$decisionQhash|systemone:kev-4b',
+      ]);
+
+      // Back to the first backend: nothing is asked again.
+      decision.identity = 'fake-model';
+      llm.calls.clear();
+      await service.sweep();
+      expect(llm.callsFor('same_effort'), 0);
     });
 
     test('rows older than a month are pruned at the top of a pass', () async {

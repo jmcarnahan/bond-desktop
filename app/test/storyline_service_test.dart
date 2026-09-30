@@ -1611,8 +1611,8 @@ void main() {
       expect(user, contains('Sarah: body of kept-c1'));
     });
 
-    test('a storyline with no charter is judged against its summary',
-        () async {
+    test('a storyline with no charter is judged against (none), never its '
+        'summary', () async {
       await seedStoryline(store, charter: null);
       await seed(store, 'c1', vector: vectorAt(0.8));
       final llm = fakeLlm({
@@ -1623,8 +1623,10 @@ void main() {
       await StorylineService(store, llm, judge: sweepJudge(store, llm))
           .assignConversation('email', 'c1');
 
-      expect(confirmMessageOf(llm),
-          contains('Charter: The studio is reviewing the homepage copy.'));
+      final state = confirmMessageOf(llm);
+      expect(state, contains('Charter: (none)'));
+      expect(state,
+          isNot(contains('The studio is reviewing the homepage copy.')));
     });
 
     test('naming cards carry the summary but never the topics', () async {

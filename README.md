@@ -48,15 +48,28 @@ placed on its own (Settings → Models, or the first-run wizard):
   F16 GGUF plus a heads file) that sorts and flags every kept message in one
   forward pass of about 40 ms on this Mac: the learned gate, urgency,
   category, the asks, needs-you, intent, importance, and whether a reply is
-  expected. It is served as a mean-pooled embedding model, and the app applies
-  its nine heads itself, so the heads file is needed on this Mac even when the
-  model runs elsewhere. It is not published yet: `make decide-install` copies
+  expected — and judges storylines: which threads are one effort, which
+  storyline a thread belongs to, whether a charter is specific. That is twelve
+  questions: nine message fields and three storyline questions. It is served
+  as a mean-pooled embedding model, and the app applies its heads itself from
+  the heads file on this Mac. It is not published yet: `make decide-install` copies
   it, sha256-checked, from the training project's export (`DECIDE_SRC`) into
   the app's models folder, where the app's own server (the managed router)
   picks it up; `make decide` serves it by hand on `:8083`. On this branch it
   still copies the v2 model, whose nine-field heads file the app now refuses
   (the heads are schema 2: the nine fields plus three storyline questions),
   so triage parks until the v3 decision model is installed.
+
+  **Decision model on your server.** Under Settings → Models the Decision
+  role can instead be **Your server**, a URL, and what that URL serves decides
+  what this Mac needs. A URL to ModernBERT on llama-server (`…/v1/embeddings`)
+  returns vectors, and the app applies the heads itself, so this Mac still
+  needs the heads file. A URL to a Kev 4B wrapper (`…/v1/systemone`) answers
+  the questions there, and this Mac needs no decision files at all. The app
+  detects which one it is from the server's model listing when it checks the
+  address, and names it under the form: "ModernBERT on your server (uses this
+  Mac's heads file)" or "Kev 4B on your server (answers there; no files needed
+  on this Mac)".
 - **Generative** — ONE chat model for every piece of text: each message's
   summary, action items and deadline, storylines, drafts. Whether a message
   needs you is the decision model's probability against your Needs You slider,
@@ -225,8 +238,9 @@ decision model gives every kept inbound message a probability that it needs
 the user, and a thread is in Needs You when its highest unanswered probability
 is at or above the Needs You slider in Settings (30% by default); every row
 shows its own percentage. An attention score (the thread's state, how recently
-it moved, how often that sender gets answered) only orders the list. Threads
-awaiting a reply come first, then threads waiting on somebody else, dimmed.
+it moved, how often that sender gets answered) only orders the list. The Home
+feed's "Needs you" label follows the slider live too, so moving it relabels
+Home without re-running anything.
 
 **Storylines** are groups of threads about the same thing — one project, one
 trip, one event — proposed by the model and kept or dismissed by the user. A

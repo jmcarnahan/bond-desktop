@@ -252,6 +252,14 @@ class Conversation {
   /// not run the expression, which reads as "needs nobody".
   final double? needsYouP;
 
+  /// Whether the message [needsYouP] comes off was decided under the question
+  /// set this build reads — a `message_decisions` row under `decisionQhash`.
+  /// False is a p an earlier model left, which the surfaces do not draw as a
+  /// percentage when it is exactly 1.0 or 0.0 (v21's carried-over verdicts,
+  /// `needsYouFromEarlierModel`). Null on every read that does not run the
+  /// check, which leaves only those two exact values in question.
+  final bool? needsYouDecidedNow;
+
   /// The envelope address of the newest KEPT inbound message — who the thread
   /// is waiting on. Null on every read that does not run the subquery in
   /// `loadConversations`, and on a thread with no inbound mail at all.
@@ -292,6 +300,7 @@ class Conversation {
     this.needsYouReasonAt,
     this.replyExpected,
     this.needsYouP,
+    this.needsYouDecidedNow,
     this.latestInboundFrom,
   });
 
@@ -376,6 +385,7 @@ class Conversation {
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
       needsYouP: needsYouP,
+      needsYouDecidedNow: needsYouDecidedNow,
       latestInboundFrom: latestInboundFrom,
     );
   }
@@ -414,6 +424,7 @@ class Conversation {
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
       needsYouP: needsYouP,
+      needsYouDecidedNow: needsYouDecidedNow,
       latestInboundFrom: latestInboundFrom,
     );
   }
@@ -500,6 +511,8 @@ class Conversation {
       // The thread's needs-you probability, computed by the store's one
       // expression; absent reads as undecided.
       needsYouP: (row['needs_you_p'] as num?)?.toDouble(),
+      // Off the same `nr` row, and null on every read that does not run it.
+      needsYouDecidedNow: _boolFromInt(row['needs_you_decided_now']),
       // The last subquery, and null on every read that does not run it — which
       // reads as "cannot tell who this is from", and [isExternalTo] answers
       // false to that rather than calling an unknown sender a stranger.

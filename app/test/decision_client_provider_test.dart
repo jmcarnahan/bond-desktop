@@ -329,8 +329,12 @@ void main() {
         expect(
           first,
           isA<DecisionMisconfiguredException>()
+              // The older model's file parks under its own word: its fix is
+              // an install, not an address.
               .having((e) => parkReasonFor(e), 'park word',
-                  'decision_misconfigured')
+                  what.startsWith('the older model')
+                      ? 'decision_older_model'
+                      : 'decision_misconfigured')
               .having((e) => e.message, 'message', sentence),
         );
         // Cached on the file's mtime: the same failure, with no re-parse.

@@ -210,12 +210,12 @@ class StorylineGrouper {
   ) async {
     final judge = _judge ??
         (throw StateError('StorylineGrouper: no decision judge to ask'));
-    // Who answers this pass, and the cache pruned to it: rows another model
-    // or question set wrote are never read again, and rows older than
-    // [_pairCacheAge] mostly key texts that have since moved on.
+    // Who answers this pass, and the cache pruned by age: rows older than
+    // [_pairCacheAge] mostly key texts that have since moved on. Rows
+    // another model or question set wrote stay (reads filter on
+    // [decidedBy]), so a role switched back finds its own answers.
     final decidedBy = await judge.decidedBy();
     await _store.prunePairDecisions(
-      keep: decidedBy,
       olderThanIso: MessageStore.isoStamp(
         DateTime.now().subtract(_pairCacheAge),
       ),

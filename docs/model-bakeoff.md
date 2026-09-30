@@ -1570,8 +1570,10 @@ neighbours where the box's 4B accepts 22%, the loosest of the four, and that
 speed buys nothing a confirm needs. No candidate meets the roadmap's target of
 at or above 88% with neighbours at or below 10% after the prompt. The target
 stands unmet and the rows say so. For E1, where targets become settings, the
-confirm stage defaults to `Local fast`, and to the GPU 27B target whenever one
-is configured.
+confirm stage then defaulted to `Local fast`, and to the GPU 27B target
+whenever one was configured. (History: the decision-questions round, 2026-09-29,
+deleted the generative confirm stage; membership is now the decision model's
+`member_of` question.)
 
 
 **Phase 2 (2026-09-19): the vector moved, the grouping did not.** Neither
@@ -1966,6 +1968,23 @@ reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreeme
 end of the 0.30–0.55 plateau (`NeedsYouTuning.defaultThreshold`, the owner's Needs You slider);
 the band and the 27B needs-you call removed.
 
+**The v2 models as they are, on the new questions** (2026-09-29, decision-questions round Phase 2, no training;
+jev-prototype `distill/eval_questions/`, golden eval sets rebuilt from the golden set with the app's bench rules:
+85 same-effort / 1,346 cross-effort pairs, 98 confirm items, 453 candidate calls; counts and metrics only):
+
+| Question (bar) | Kev 4B v2 | ModernBERT v2 | Baseline |
+|---|---|---|---|
+| same_effort, false links at 70% recall (≤ 5%) | 8.0% (AUC 0.919; 3.9% at 50% recall) | 68% (AUC 0.552: its vector carries no effort signal) | app cosine 15%; Qwen cosine on the thread text 36.7% |
+| member_of on the confirm bench (≥ 88/98, ≤ 10% forbidden) | 87/98 at 0.5 (88 at its best τ), 20.5% forbidden accepts | 69/98 (charter cosine, τ fitted on golden) | box 27B 84/98, 8%; Qwen charter cosine 78/98, 33% |
+| charter_specific (≥ the lint) | 94.1% golden (lint 91.2%), 87.5% on 40 synthetic (lint 80.0%) | no answer | the regex lint |
+| needs_you, default prompt, keep-only (≥ 88) | 94.7 | 89.5 at 0.50, 86.8 at 0.30 | trained path: ModernBERT 90.8 at 0.30, Kev 96.1 |
+| an edited needs-you prompt, teacher flips reproduced (≥ 70%) | 7.1% (agreement 91.1%) | 4.2% (agreement 88.7%) | Jev itself flips 4.2% of answers under edits and 5.0% under paraphrases |
+
+Reading: neither student follows an edited prompt, and the teacher barely does on random messages, so the owner
+chose the slider as the only Needs You control this round. ModernBERT cannot judge storylines without training;
+Kev is close but accepts too many threads that belong elsewhere. Both are being trained on storyline labels
+(jev-prototype `docs/PLAN-storyline-questions-training.md`); the v3 rows land here.
+
 **The sweep on the decision model** (decision-questions round, Phase 7; NO
 rows yet — the v3 model that answers `same_effort` and `charter_specific` is
 not installed, so a run today parks on the decision pass). When v3 serves,
@@ -1977,6 +1996,7 @@ make golden-sweep GOLDEN_RUN=<run>                                        # what
 make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=cosine                  # the grouping baseline, same charter check
 make golden-sweep GOLDEN_RUN=<run> SWEEP_CHARTER=lint                     # the charter baseline, same grouping
 make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=cosine SWEEP_CHARTER=lint   # the cosine clustering and the lint, a NEW baseline
+make golden-pairs GOLDEN_RUN=<run>                                        # same_effort alone over golden-vector's pool pairs: AUC, p at 70% recall, false links at 50/70/90% (DECIDE_URL=…/v1/systemone benches Kev v3 through the app's wire)
 ```
 
 The last row is NOT the 59/98 configuration. The namer no longer gatekeeps
