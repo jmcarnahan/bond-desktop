@@ -282,6 +282,14 @@ void main() {
       expect(await ask('chat.read', ['chat.readwrite']), isTrue);
     });
 
+    test('calendars.readwrite subsumes calendars.read', () async {
+      // The deployed grant is Calendars.ReadWrite and `calendarPrecheck` asks
+      // the read-only question: without this pair the whole calendar reads as
+      // a missing scope.
+      expect(await ask('calendars.read', ['Calendars.ReadWrite']), isTrue);
+      expect(await ask('calendars.readwrite', ['calendars.read']), isFalse);
+    });
+
     test('user.read.all subsumes user.readbasic.all', () async {
       // Admins hand out the wider directory read far more often than the
       // basic one; reading only the narrow name would hide a directory the

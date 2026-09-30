@@ -190,6 +190,7 @@ void main() {
     List<String> removed = const [],
     String cursor = '',
     bool complete = true,
+    bool? explicitlyComplete,
     String windowStart = '',
     String windowEnd = '',
   }) =>
@@ -198,6 +199,7 @@ void main() {
         removed: removed,
         cursor: cursor,
         complete: complete,
+        explicitlyComplete: explicitlyComplete,
         windowStart: windowStart,
         windowEnd: windowEnd,
       );
@@ -325,6 +327,23 @@ void main() {
 
       expect(outcome.removed, 1);
       expect(await storedIds(), ['b']);
+    });
+
+    test('a page without a complete key ends the loop but does not sweep',
+        () async {
+      await calendar.upsertEvents([event('a'), event('b')],
+          syncRun: 'old-run');
+      // A fresh run whose one page lacks the flag: the backend reads that as
+      // complete (no spinning) but not as explicitly so.
+      backend.steps.add(page(ids: ['a'], explicitlyComplete: false));
+      final outcome = await build().syncNow();
+
+      expect(outcome.status, CalendarSyncStatus.synced);
+      expect(outcome.complete, isTrue);
+      expect(outcome.swept, 0);
+      expect(backend.calls, hasLength(1));
+      expect(await storedIds(), ['a', 'b']);
+      expect((await runState())['swept'], isFalse);
     });
 
     test('a page handing back the cursor it was sent stops the tick',
@@ -553,18 +572,64 @@ void main() {
       expect(backend.calls, hasLength(3));
     });
 
-    test('a call while one runs joins it, forced or not', () async {
+    test('an unforced call while one runs joins it', () async {
       final gate = Completer<CalendarSyncPage>();
       backend.steps.add(() => gate.future);
       final sync = build();
 
       final first = sync.syncNow();
-      final second = sync.syncNow(force: true);
+      final second = sync.syncNow();
       expect(identical(first, second), isTrue);
 
       gate.complete(page(cursor: 'd1'));
       expect((await first).status, CalendarSyncStatus.synced);
       expect(backend.calls, hasLength(1));
+    });
+
+    test('a forced call during a tick runs one more forced tick after it',
+        () async {
+      final gate = Completer<CalendarSyncPage>();
+      backend.steps
+        ..add(() => gate.future)
+        ..add(page(ids: ['written'], cursor: 'd2'));
+      final sync = build();
+
+      final first = sync.syncNow();
+      await untilCalled(1);
+      final forced = sync.syncNow(force: true);
+      expect(identical(first, forced), isFalse);
+
+      gate.complete(page(cursor: 'd1'));
+      expect((await first).status, CalendarSyncStatus.synced);
+      final second = await forced;
+
+      // The clock never moved, so only the force carried the second tick
+      // past the throttle the first one stamped.
+      expect(second.status, CalendarSyncStatus.synced);
+      expect(second.upserts, 1);
+      expect([for (final c in backend.calls) c.cursor], ['', 'd1']);
+      expect(await storedIds(), ['written']);
+      expect((await sync.syncNow()).status, CalendarSyncStatus.skipped);
+      expect(backend.calls, hasLength(2));
+    });
+
+    test('two forced calls during a tick share the one extra tick', () async {
+      final gate = Completer<CalendarSyncPage>();
+      backend.steps
+        ..add(() => gate.future)
+        ..add(page(cursor: 'd2'));
+      final sync = build();
+
+      final first = sync.syncNow();
+      await untilCalled(1);
+      final a = sync.syncNow(force: true);
+      final b = sync.syncNow(force: true);
+      expect(identical(a, b), isTrue);
+
+      gate.complete(page(cursor: 'd1'));
+      await first;
+      expect((await a).status, CalendarSyncStatus.synced);
+      expect(backend.calls, hasLength(2));
     });
 
     test('every answer backs off, not only a synced one', () async {

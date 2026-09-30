@@ -510,6 +510,64 @@ void main() {
     expect(rekeyed, isNot(moved), reason: 'the event changing moves it too');
   });
 
+  test('a rewritten storyline recap moves the inputs hash', () async {
+    await thread('c-1');
+    await store.insertStoryline(
+      id: 's-1',
+      title: 'Renewal',
+      summary: 'Where it stands.',
+      status: 'active',
+      createdBy: 'user',
+    );
+    await store.addStorylineMember('s-1', 'email', 'c-1', addedBy: 'user');
+    await store.updateStoryline('s-1', recapText: 'The quote is out.');
+    final first = (await eligible(meeting())).inputsHash;
+
+    await store.updateStoryline('s-1', recapText: 'The quote was signed.');
+    final rewritten = await eligible(meeting());
+    expect(rewritten.storylines.single.summary, contains('signed'));
+    expect(rewritten.inputsHash, isNot(first));
+  });
+
+  test('a room is left out whatever the case of its type', () async {
+    expect(
+      briefOthers(
+        meeting(
+          attendees: const [
+            Attendee(
+                name: 'Room 4', address: 'room4@contoso.com', type: 'Resource'),
+            Attendee(name: 'Dana', address: dana),
+          ],
+          isOrganizer: true,
+        ),
+        owner: owner,
+      ).map((p) => p.address),
+      [dana],
+    );
+  });
+
+  test('with the owner unknown, gather throws for a retry rather than '
+      'counting the owner as someone else', () async {
+    await thread('c-1');
+    final unknown = BriefGatherer(
+      store,
+      calendar,
+      ownerAddress: () async => null,
+      zone: () => la,
+    );
+    await expectLater(unknown.gather(meeting(), now: now),
+        throwsA(isA<BriefOwnerUnknown>()));
+  });
+
+  test('capRunes never ends on half of a surrogate pair', () {
+    const s = 'ab\u{1F600}cd'; // the emoji is two code units, at 2 and 3
+    expect(capRunes(s, 3), 'ab');
+    expect(capRunes(s, 4), 'ab\u{1F600}');
+    expect(capRunes(s, 2), 'ab');
+    expect(capRunes(s, 99), s);
+    expect(capRunes(s, 0), '');
+  });
+
   test('last met: the latest meeting with them that ended', () async {
     await thread('c-1');
     final past = now.subtract(const Duration(days: 3));

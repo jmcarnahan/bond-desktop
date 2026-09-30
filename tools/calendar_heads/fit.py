@@ -36,8 +36,11 @@ Steps:
      standardised features, the weights folded back onto the RAW vector so
      the app needs no scaler. The L2 weight is chosen from a small grid by
      5-fold cross-validation on train; the temperature is then fitted by
-     minimising the negative log-likelihood on one fold the weights did not
-     see.
+     minimising the negative log-likelihood on the OUT-OF-FOLD logits at that
+     setting (every train row, each scored by the fold model that did not see
+     it), and ships with the weights refitted on all of train. One fold's
+     logits alone came from a weaker model than the one shipped, which left
+     the temperature too soft.
   3. Evaluate on the held-out file: accuracy, per-class recall, the most
      frequent confusions, and how many answers clear the app's 0.80 bar.
      With --heldout-hard, the accuracy on that harder set too (indirect
@@ -54,7 +57,9 @@ Exits non-zero when the installed heads cannot be read, the server is down,
 is not the decision model, answers the wrong width or out-of-range indexes,
 or normalises.
 
-numpy only; the server is spoken to with urllib.
+numpy only; the server is spoken to with urllib. There is no test harness
+for this file: the fitting step (`choose_l2_and_temperature`, `fit_raw`)
+needs no server and can be imported and run on synthetic vectors.
 """
 
 import argparse
@@ -287,6 +292,28 @@ def nll(logits, y, temperature):
     return -np.mean(np.log(p[np.arange(len(y)), y] + 1e-12))
 
 
+def choose_l2_and_temperature(x, y, rng):
+    """(l2, temperature): the L2 weight by stratified k-fold accuracy, then
+    the temperature minimising NLL on that setting's out-of-fold logits.
+    Needs no server, so it can be run on synthetic vectors."""
+    fold = folds_of(y, rng)
+    best = None
+    for l2 in L2_GRID:
+        oof = np.empty((len(y), len(ACTIONS)))
+        for f in range(FOLDS):
+            fit_rows, val_rows = fold != f, fold == f
+            w, b = fit_raw(x[fit_rows], y[fit_rows], l2)
+            oof[val_rows] = x[val_rows] @ w.T + b
+        accuracy = float((oof.argmax(axis=1) == y).mean())
+        print(f"  l2 {l2:g}: cv accuracy = {accuracy:.3f}")
+        if best is None or accuracy > best[1]:
+            best = (l2, accuracy, oof)
+    l2, _, oof = best
+    grid = np.exp(np.linspace(np.log(0.05), np.log(20.0), 121))
+    temperature = float(min(grid, key=lambda t: nll(oof, y, t)))
+    return l2, temperature
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--decide-url",
@@ -337,29 +364,9 @@ def main():
     print(f"embedded {len(train_text)} train and {len(held_text)} held-out "
           f"commands ({WIDTH} wide, raw)")
 
-    # (2) The L2 weight by 5-fold cross-validation on train.
-    fold = folds_of(y_train, rng)
-    best = None
-    for l2 in L2_GRID:
-        correct = 0
-        for f in range(FOLDS):
-            fit_rows, val_rows = fold != f, fold == f
-            w, b = fit_raw(x_train[fit_rows], y_train[fit_rows], l2)
-            predicted = (x_train[val_rows] @ w.T + b).argmax(axis=1)
-            correct += int((predicted == y_train[val_rows]).sum())
-        accuracy = correct / len(y_train)
-        print(f"  l2 {l2:g}: cv accuracy = {accuracy:.3f}")
-        if best is None or accuracy > best[1]:
-            best = (l2, accuracy)
-    l2 = best[0]
-
-    # The temperature on a fold the weights did not see.
-    fit_rows, val_rows = fold != 0, fold == 0
-    w, b = fit_raw(x_train[fit_rows], y_train[fit_rows], l2)
-    logits = x_train[val_rows] @ w.T + b
-    grid = np.exp(np.linspace(np.log(0.05), np.log(20.0), 121))
-    temperature = float(min(grid, key=lambda t: nll(logits, y_train[val_rows],
-                                                    t)))
+    # (2) The L2 weight by 5-fold cross-validation on train, and the
+    # temperature on that setting's out-of-fold logits.
+    l2, temperature = choose_l2_and_temperature(x_train, y_train, rng)
     print(f"chosen l2 = {l2:g}, temperature = {temperature:.3f}")
 
     # The head itself, on all of train.

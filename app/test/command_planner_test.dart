@@ -385,6 +385,17 @@ void main() {
   });
 
   group('cancel, by role', () {
+    test("tomorrow's standup with no standup tomorrow is no meeting, never "
+        "tomorrow's other one", () async {
+      final sync = timed('sync', thu, 10, subject: 'Sync', guests: [danaAddress]);
+      final standup = timed('standup', fri, 9, subject: 'Standup');
+      final r =
+          await plan("cancel tomorrow's standup", events: [sync, standup]);
+      expect(r, isA<CannotDo>());
+      expect((r as CannotDo).reason, startsWith("I couldn't find that meeting"));
+      expect(writer.previews, isEmpty);
+    });
+
     test('an organiser with guests cancels the meeting', () async {
       final e = timed('e', thu, 11, subject: 'Review', guests: [danaAddress]);
       final r = await plan('cancel the review', events: [e]) as CalendarProposal;

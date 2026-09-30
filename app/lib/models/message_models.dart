@@ -797,6 +797,20 @@ class Message {
     }
   }
 
+  /// Whether the server said this is an automatic reply — `read_email`'s
+  /// `is_auto_reply`, stored as `auto_reply` only when true. MCP only, so
+  /// false means "nobody said", never "a person wrote it".
+  bool get isAutoReply {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map && decoded['auto_reply'] == true;
+    } on FormatException {
+      return false;
+    }
+  }
+
   factory Message.fromJson(Map<String, dynamic> json) {
     final rawTo = json['to'] as List<dynamic>?;
     final rawActionItems = json['action_items'] as List<dynamic>?;

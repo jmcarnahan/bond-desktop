@@ -446,8 +446,15 @@ class CommandRouter {
       contributed = true;
     }
 
-    if (out.duration == null && intent.durationMin > 0) {
-      out = out.copyWith(duration: Duration(minutes: intent.durationMin));
+    // Length: a phrase copied from the request that the duration rules
+    // read, never a number the model worked out.
+    final lengthPhrase = copied(intent.duration);
+    final length = lengthPhrase == null ? null : parseDuration(lengthPhrase);
+    if (out.duration == null &&
+        length != null &&
+        length.inMinutes >= CalendarIntentTask.minDuration &&
+        length.inMinutes <= CalendarIntentTask.maxDuration) {
+      out = out.copyWith(duration: length);
       contributed = true;
     }
     return (

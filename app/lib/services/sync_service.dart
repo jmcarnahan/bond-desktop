@@ -1874,6 +1874,9 @@ class SyncService implements MailSync {
     final eventId = (detail['calendarEventId'] as String?)?.trim();
     final hasMeeting = meeting != null && meeting.isNotEmpty;
     final hasEventId = eventId != null && eventId.isNotEmpty;
+    // `read_email`'s `is_auto_reply`, MCP only. Stored as a fact and only
+    // when true, so an ordinary row carries no key; nothing gates on it yet.
+    final autoReply = detail['isAutoReply'] == true;
 
     final rawAttachments = detail['attachments'];
     final rawCount = rawAttachments is List ? rawAttachments.length : 0;
@@ -1923,12 +1926,16 @@ class SyncService implements MailSync {
       // reader looks its own key up and tolerates its absence, which is what
       // lets a row written before `meeting` or `event_id` existed keep
       // reading correctly.
-      sourceMetaJson: headers.isEmpty && !hasMeeting && !hasEventId
+      sourceMetaJson: headers.isEmpty &&
+              !hasMeeting &&
+              !hasEventId &&
+              !autoReply
           ? null
           : jsonEncode({
               if (headers.isNotEmpty) 'headers': headers,
               if (hasMeeting) 'meeting': meeting,
               if (hasEventId) 'event_id': eventId,
+              if (autoReply) 'auto_reply': true,
             }),
     );
 

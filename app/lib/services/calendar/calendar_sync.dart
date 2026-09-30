@@ -216,7 +216,9 @@ class _RunState {
 /// [throttle] after ANY answer — a failure, a missing scope and SDK mode
 /// included, so a broken calendar is not asked every poll — unless forced,
 /// single-flight so an overlapping refresh joins
-/// the tick already running.
+/// the tick already running. A FORCED call that lands mid-tick queues one
+/// more forced tick after it instead, because the running tick's pages were
+/// asked for before whatever the caller just wrote.
 ///
 /// **The write guard.** A write this app makes (Phase 5) calls [noteWrite]
 /// and stores the server's answer itself; a sync page that was requested
@@ -229,9 +231,12 @@ class _RunState {
 /// state, sweep — is ONE transaction whose first statement re-reads
 /// [calendarRunKey] and abandons the tick, writing nothing, unless it still
 /// names this tick's run. `wipeAll` deletes that pref inside its own
-/// transaction, so the two serialize: a tick in flight across a wipe (or
-/// across a rebuild of the provider, whose fresh sync starts its own run)
-/// cannot write the old account's rows back.
+/// transaction, so the two serialize: a tick in flight across a wipe cannot
+/// write the old account's rows back. A rebuild of the provider is NOT
+/// fenced this way: the fresh instance reuses the stored run whenever a
+/// cursor exists and the window has not rolled, so an old instance's
+/// in-flight tick and the new one's first tick can overlap for one tick.
+/// Deltas are idempotent, so the cost is pages read twice, not bad rows.
 class CalendarSync {
   CalendarSync(
     this._backend,
@@ -284,6 +289,10 @@ class CalendarSync {
 
   Future<CalendarSyncOutcome>? _inFlight;
 
+  /// The forced tick queued behind [_inFlight], shared by every forced call
+  /// that lands before it starts.
+  Future<CalendarSyncOutcome>? _forcedNext;
+
   /// When the last tick that reached an answer ended — any answer, so a
   /// failing or permissionless calendar is asked no more often than a working
   /// one.
@@ -301,11 +310,23 @@ class CalendarSync {
 
   CalendarAvailability get availability => _availability;
 
-  /// One tick. A call while one runs returns that tick's future, [force] or
-  /// not. Never throws.
+  /// One tick. An unforced call while one runs returns that tick's future. A
+  /// [force]d one returns the ONE forced tick queued behind it, queuing it if
+  /// none is: the running tick's pages may predate the write that asked, and
+  /// it stamps the throttle, so joining it would leave the write out of the
+  /// mirror for a couple of minutes. Never throws.
   Future<CalendarSyncOutcome> syncNow({bool force = false}) {
     final running = _inFlight;
-    if (running != null) return running;
+    if (running != null) {
+      if (!force) return running;
+      return _forcedNext ??= () async {
+        // The tick never throws, and its `finally` has cleared [_inFlight]
+        // by the time this resumes.
+        await running;
+        _forcedNext = null;
+        return syncNow(force: true);
+      }();
+    }
     final last = _lastAttemptAt;
     if (!force && last != null && _clock().difference(last) < throttle) {
       return Future.value(
@@ -586,7 +607,9 @@ class CalendarSync {
         }
         var sweptNow = 0;
         if (page.complete) {
-          if (!next.swept) {
+          // Only a page that SAID complete sweeps; a missing flag ends the
+          // loop but is no proof the run saw everything.
+          if (!next.swept && page.explicitlyComplete) {
             _prune(_clock());
             sweptNow = await _calendar.sweepRun(
               next.run,

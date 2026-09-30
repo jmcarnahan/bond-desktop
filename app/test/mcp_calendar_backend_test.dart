@@ -133,7 +133,24 @@ void main() {
       expect(mcp.argsFor('sync_calendar'),
           {'cursor': 'c1', 'start_date': '', 'end_date': ''});
       expect(page.complete, isTrue);
+      expect(page.explicitlyComplete, isTrue);
       expect(page.windowStart, '');
+    });
+
+    test('a missing complete key ends the loop but is not explicit', () async {
+      final mcp = _FakeMcp({
+        'sync_calendar': [
+          {
+            'events': const [],
+            'removed': const [],
+            'cursor': 'c2',
+          },
+        ],
+      });
+      final page = await McpCalendarBackend(mcp).syncPage(cursor: 'c1');
+
+      expect(page.complete, isTrue);
+      expect(page.explicitlyComplete, isFalse);
     });
   });
 

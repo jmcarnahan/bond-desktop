@@ -15,6 +15,8 @@ import 'time_format.dart';
 /// thread this app stored, by its key.
 ///
 /// The states, in the order they win:
+/// 0. declined or cancelled ([eligible] false with that reason) — even over
+///    a ready brief, since the owner is not going;
 /// 1. a ready brief — shown even while a new one is being written, because
 ///    the old one is still the best answer until the new one lands;
 /// 2. queued, with processing on — "Writing the brief…";
@@ -83,6 +85,11 @@ class BriefSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final v = view;
     if (v == null) return const SizedBox.shrink();
+    // A meeting the owner declined or that was cancelled is not one they are
+    // going to: a brief stored before that stops being offered.
+    if (eligible == false && _ends.contains(ineligibleReason)) {
+      return _status(reasonText(ineligibleReason));
+    }
     final stored = v.brief;
     final brief = stored?.brief;
     if (stored != null && brief != null && brief.headline.isNotEmpty) {
@@ -116,6 +123,9 @@ class BriefSection extends StatelessWidget {
         'past' => startedText,
         _ => ineligibleText,
       };
+
+  /// The quick-check words that outrank even a ready brief.
+  static const Set<String> _ends = {'declined', 'cancelled'};
 
   Widget _status(String text) => Text(text, key: statusKey, style: _muted);
 

@@ -13,7 +13,7 @@ import 'prompt_guard.dart';
 /// into the room on the strength of it. So every line is tied to a numbered
 /// thread where it can be, and an empty section is the honest answer.
 const String _meetingBriefRules = '''
-You are writing a short brief for the inbox's owner, who is about to walk into a meeting. You are given the meeting and what the owner's recent mail and chat with the people in it says. Write only what those inputs say.
+You are writing a short brief for the inbox's owner, who is about to walk into a meeting. You are given the meeting and what the owner's recent mail with the people in it says. Write only what those inputs say.
 
 Rules:
 - headline: one sentence, the single most useful thing to know going in. When nothing is open with these people, say so plainly.
@@ -292,6 +292,5 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
     ].take(max).toList();
   }
 
-  static String _clamp(String value, int cap) =>
-      value.length > cap ? value.substring(0, cap) : value;
+  static String _clamp(String value, int cap) => capRunes(value, cap);
 }

@@ -586,6 +586,12 @@ class CalendarSyncPage {
   /// False means "call again NOW with [cursor]".
   final bool complete;
 
+  /// The server SAID `complete: true`. [complete] also counts a missing flag
+  /// as done, so a malformed page cannot spin the loop; only this licenses
+  /// the sweep, which deletes every row the run has not seen. Defaults to
+  /// [complete].
+  final bool explicitlyComplete;
+
   /// The run's window as UTC `…Z` instants — reported on a FIRST call only,
   /// `''` on every continuation, so the caller persists the first answer.
   final String windowStart;
@@ -596,9 +602,10 @@ class CalendarSyncPage {
     this.removed = const [],
     this.cursor = '',
     this.complete = true,
+    bool? explicitlyComplete,
     this.windowStart = '',
     this.windowEnd = '',
-  });
+  }) : explicitlyComplete = explicitlyComplete ?? complete;
 }
 
 /// One `find_meeting_times` suggestion.
@@ -946,11 +953,15 @@ DateTime? _stampOrNull(Object? raw) {
 
 /// A tool instant: the `…Z` [utc] the server gave, or null when it gave
 /// none (never the legacy naive `start`/`end`; see
-/// [CalendarEvent.fromToolRow]).
+/// [CalendarEvent.fromToolRow]). A string with neither a `Z` nor a `±hh:mm`
+/// offset is null too: `DateTime.tryParse` would read it as this machine's
+/// local time, which is a guess.
 DateTime? _instant(Object? utc) {
-  if (utc is String && utc.isNotEmpty) {
+  if (utc is String && _zoned.hasMatch(utc)) {
     final parsed = DateTime.tryParse(utc);
     if (parsed != null) return parsed.toUtc();
   }
   return null;
 }
+
+final RegExp _zoned = RegExp(r'(?:[zZ]|[+-]\d{2}:?\d{2})$');

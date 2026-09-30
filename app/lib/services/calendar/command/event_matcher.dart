@@ -123,15 +123,26 @@ List<EventCandidate> matchEvents({
     } else if (t != null && localDay == when.today) {
       score += 1;
     }
+    var personHits = 0;
     for (final a in addresses) {
       final onIt = e.organizerAddress.trim().toLowerCase() == a ||
           e.attendees.any((x) => x.address == a);
-      if (onIt) score += 2;
+      if (onIt) personHits++;
     }
+    score += 2.0 * personHits;
+    var overlap = 0;
     if (wanted.isNotEmpty) {
       final have = subjectTokens(e.subject);
-      score += wanted.where(have.contains).length;
+      overlap = wanted.where(have.contains).length;
     }
+    // Subject words that match nothing here, with no clock time or person to
+    // stand in for them, mean this is not the meeting: "cancel tomorrow's
+    // standup" must never bind tomorrow's only other meeting on its day
+    // alone, when a confirm would then email that meeting's guests.
+    if (wanted.isNotEmpty && t == null && personHits == 0 && overlap == 0) {
+      continue;
+    }
+    score += overlap;
     if (score > 0) out.add(EventCandidate(e, score));
   }
 

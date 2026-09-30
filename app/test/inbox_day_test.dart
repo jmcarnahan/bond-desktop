@@ -19,6 +19,7 @@ import 'package:bond_inbox/models/calendar_models.dart'
         calendarStamp;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/day_providers.dart' show dayEventsProvider;
+import 'package:bond_inbox/providers/draft_provider.dart' show DraftNotifier;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/models/person.dart';
@@ -224,6 +225,7 @@ void main() {
   Future<void> pumpScreen(
     WidgetTester tester, {
     List<Override> overrides = const [],
+    RailSection section = RailSection.needsYou,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -247,7 +249,7 @@ void main() {
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
         noCommandHeads(),
-        initialSectionProvider.overrideWithValue(RailSection.needsYou),
+        initialSectionProvider.overrideWithValue(section),
         initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),
         syncServiceProvider.overrideWithValue(_FakeSync()),
@@ -353,6 +355,100 @@ void main() {
 
     expect(find.text(dayTitle(tomorrow, today)), findsOneWidget);
     expect(find.text(dayTitle(today, today)), findsNothing);
+  });
+
+  testWidgets('stepping the day keeps the event open beside', (tester) async {
+    final today = la.dateOf(DateTime.now().toUtc());
+    final start = la.localDateTime(today, 12, 0).toUtc();
+    await CalendarStore(db).upsertEvents([
+      CalendarEvent(
+        id: 'evt-1',
+        subject: 'Contoso planning',
+        startUtc: start,
+        endUtc: start.add(const Duration(minutes: 30)),
+        responseStatus: 'accepted',
+        showAs: 'busy',
+      ),
+    ], syncRun: 'run-1');
+    await pumpScreen(tester);
+    await tester.tap(find.text('Day'));
+    await pumps(tester);
+    await tester.tap(find.text('Contoso planning'));
+    await pumps(tester);
+    expect(find.byType(SidePanelHost), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Next day'));
+    await pumps(tester);
+
+    expect(find.text(dayTitle(today.addDays(1), today)), findsOneWidget);
+    expect(find.byType(SidePanelHost), findsOneWidget,
+        reason: 'a step on the Day stop is not a new stop');
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.text('Contoso planning'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets("Inbox's Today section: a meeting opens beside, the invites "
+      'row opens the Invites view', (tester) async {
+    // Under way now, so it is still "today" whatever the hour, and one
+    // invite owed an answer, safely ahead of the clock.
+    final now = DateTime.now().toUtc();
+    final ahead = now.add(const Duration(days: 3));
+    await CalendarStore(db).upsertEvents([
+      CalendarEvent(
+        id: 'evt-now',
+        subject: 'Contoso planning',
+        startUtc: now.subtract(const Duration(minutes: 10)),
+        endUtc: now.add(const Duration(minutes: 50)),
+        responseStatus: 'accepted',
+        showAs: 'busy',
+      ),
+      CalendarEvent(
+        id: 'inv-1',
+        subject: 'Fabrikam roadmap',
+        startUtc: ahead,
+        endUtc: ahead.add(const Duration(minutes: 30)),
+        responseStatus: 'notResponded',
+        responseRequested: true,
+        showAs: 'tentative',
+      ),
+    ], syncRun: 'run-1');
+    await pumpScreen(tester, section: RailSection.home);
+
+    expect(find.text('TODAY'), findsOneWidget);
+    await tester.tap(find.textContaining('Contoso planning').first);
+    await pumps(tester);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.text('Contoso planning'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Invites · 1'));
+    await pumps(tester);
+    expect(find.text('Invites'), findsOneWidget);
+    expect(find.text('Fabrikam roadmap'), findsOneWidget);
+  });
+
+  test('a calendar Undo is honoured for twice the toast window, then not', () {
+    final offered = DateTime.utc(2026, 10, 14, 10);
+    expect(calendarUndoWindow, DraftNotifier.undoWindow * 2);
+    expect(calendarUndoStillOpen(offered, offered), isTrue);
+    expect(calendarUndoStillOpen(offered, offered.add(calendarUndoWindow)),
+        isTrue);
+    expect(
+        calendarUndoStillOpen(
+            offered, offered.add(calendarUndoWindow + const Duration(seconds: 1))),
+        isFalse);
+    expect(
+        calendarUndoStillOpen(offered, offered.add(const Duration(minutes: 5))),
+        isFalse);
   });
 
   testWidgets('back from the invites lands on the day that was open',

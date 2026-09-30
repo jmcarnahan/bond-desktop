@@ -1,3 +1,5 @@
+import 'package:bond_inbox/services/calendar/command/command_lexicon.dart'
+    show looksLikeCalendarCommand;
 import 'package:bond_inbox/widgets/find_field.dart';
 import 'package:bond_inbox/widgets/triage_intents.dart';
 import 'package:flutter/material.dart';
@@ -641,6 +643,40 @@ void main() {
       expect(invoked.single, const AskDayIntent("what's on tomorrow"));
       expect(submitted, isNull, reason: 'the row took Enter, not the list');
       expect(controller.text, isEmpty);
+    });
+
+    // The host's real predicate: the row takes Enter, so it must only show
+    // for a command, never for a search that happens to start like one.
+    Future<(List<Intent>, String?)> enterWithLexicon(
+        WidgetTester tester, String text) async {
+      final invoked = <Intent>[];
+      String? submitted;
+      await pumpField(
+        tester,
+        onCommand: invoked.add,
+        onSubmit: (value) => submitted = value,
+        asksDay: looksLikeCalendarCommand,
+      );
+      await type(tester, text);
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+      return (invoked, submitted);
+    }
+
+    testWidgets('a search that opens with an ask keeps its Enter',
+        (tester) async {
+      final (invoked, submitted) =
+          await enterWithLexicon(tester, "what's on the invoice from Dana");
+      expect(invoked.whereType<AskDayIntent>(), isEmpty);
+      expect(submitted, "what's on the invoice from Dana");
+    });
+
+    testWidgets('a calendar ask with the lexicon runs the Ask Day row',
+        (tester) async {
+      final (invoked, submitted) =
+          await enterWithLexicon(tester, "what's on tomorrow");
+      expect(invoked.single, const AskDayIntent("what's on tomorrow"));
+      expect(submitted, isNull);
     });
   });
 }

@@ -58,6 +58,9 @@ class McpCalendarBackend implements CalendarBackend {
       // Anything but an explicit false ends the loop: a missing flag must not
       // spin the drain forever.
       complete: complete != false,
+      // ...but only an explicit true licenses the sweep: a malformed page on
+      // a fresh run would otherwise delete every row it did not carry.
+      explicitlyComplete: complete == true,
       windowStart: window is Map ? _str(window['start']) : '',
       windowEnd: window is Map ? _str(window['end']) : '',
     );

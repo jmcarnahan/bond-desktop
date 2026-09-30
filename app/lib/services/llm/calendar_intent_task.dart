@@ -33,7 +33,7 @@ Actions:
 Rules:
 - COPY phrases exactly as they appear in the request. Never rewrite, normalise or complete them.
 - when: the exact words that say when ("next Tuesday 3pm", "tomorrow morning"), or "" when none. NEVER compute, convert or work out a date or a time.
-- duration_min: the length in minutes only when the request states one ("30 min", "an hour"), else -1.
+- duration: the exact words that say how long ("30 min", "an hour"), or "" when none. NEVER compute or convert a length into minutes.
 - people: the names or addresses exactly as written. Never invent a person, and never add the person typing.
 - event_ref: the words that name an existing meeting ("my 3pm", "the design sync"), or "".
 - subject: the words that say what a new meeting is about, or "".
@@ -56,7 +56,7 @@ class CalendarIntent {
     this.people = const [],
     this.eventRef = '',
     this.when = '',
-    this.durationMin = -1,
+    this.duration = '',
     this.constraints = const [],
   });
 
@@ -66,14 +66,16 @@ class CalendarIntent {
   final String eventRef;
   final String when;
 
-  /// Minutes, or -1 when the request stated no length.
-  final int durationMin;
+  /// The words that say how long, copied, or '' when the request stated no
+  /// length. The router reads them with the same duration rules as the
+  /// typed text, so the model never supplies a number.
+  final String duration;
   final List<String> constraints;
 
   @override
   String toString() => 'CalendarIntent(${action.wire}, when: "$when", '
       'people: $people, event: "$eventRef", subject: "$subject", '
-      'duration: $durationMin)';
+      'duration: "$duration")';
 }
 
 /// One request and the clock it was typed against.
@@ -163,9 +165,9 @@ class CalendarIntentTask implements JsonTask<CalendarIntent> {
             'type': 'string',
             'description': 'the words that say when, copied exactly, or ""',
           },
-          'duration_min': {
-            'type': 'integer',
-            'description': 'a stated length in minutes, or -1',
+          'duration': {
+            'type': 'string',
+            'description': 'the words that say how long, copied, or ""',
           },
           'constraints': {
             'type': 'array',
@@ -179,7 +181,7 @@ class CalendarIntentTask implements JsonTask<CalendarIntent> {
           'people',
           'event_ref',
           'when',
-          'duration_min',
+          'duration',
           'constraints',
         ],
         'additionalProperties': false,
@@ -213,17 +215,13 @@ class CalendarIntentTask implements JsonTask<CalendarIntent> {
               if (str(x).isNotEmpty) str(x),
         ].take(cap).toList(growable: false);
 
-    final rawDuration = json['duration_min'];
-    var duration = rawDuration is num ? rawDuration.toInt() : -1;
-    if (duration < minDuration || duration > maxDuration) duration = -1;
-
     return CalendarIntent(
       action: CommandActionWire.parse(str(json['action'])),
       subject: str(json['subject']),
       people: list(json['people'], maxPeople),
       eventRef: str(json['event_ref']),
       when: str(json['when']),
-      durationMin: duration,
+      duration: str(json['duration']),
       constraints: list(json['constraints'], maxConstraints),
     );
   }

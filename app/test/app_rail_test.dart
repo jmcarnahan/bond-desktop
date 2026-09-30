@@ -2282,16 +2282,18 @@ void main() {
       expect(find.text('Nothing else today'), findsOneWidget);
     });
 
-    testWidgets('a Today meeting row goes to the Day stop', (tester) async {
-      final sections = <RailSection>[];
+    testWidgets("the Today section's invites row opens the Invites view",
+        (tester) async {
+      var invitesOpened = 0;
       await pumpRail(
         tester,
-        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
-        onSelectSection: sections.add,
+        invitesCount: 2,
+        onOpenInvites: () => invitesOpened++,
       );
 
-      await tester.tap(find.text('10:00 AM · Standup with Fabrikam'));
-      expect(sections, [RailSection.day]);
+      await tester.tap(find.text('Invites · 2'));
+      await tester.pump();
+      expect(invitesOpened, 1);
     });
 
     testWidgets('the Day column lists the invites and the days',

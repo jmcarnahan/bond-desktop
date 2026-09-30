@@ -605,6 +605,9 @@ that bite.
     - loop while `complete == false`;
     - `cursor_expired` means a fresh run over the same window, then
       mark-and-sweep the whole table once `complete`;
+    - sweep ONLY on an explicit `complete: true`
+      (`CalendarSyncPage.explicitlyComplete`); a missing flag ends the loop
+      but proves nothing;
     - ignore `removed` ids you never stored.
   - `manage_event.update` requires `if_match` (the stored `change_key`).
     Store the NEW key from the answer. `event_changed` means re-read.
@@ -647,6 +650,9 @@ that bite.
     briefs off it. A test that overrides the sync with a recording subclass
     builds it in `overrideWith` and publishes through the same function
     (`calendar_poll_test`).
+  - A forced `syncNow` during a tick queues ONE more forced tick behind it
+    (`_forcedNext`); never let it join the running tick, whose pages may
+    predate the write.
   - A notifier a closure bumps later is read ONCE at build and captured
     (`final revision = ref.read(….notifier)`), never read inside the closure,
     where a debug outdated-ref assert would drop the bump.
@@ -656,7 +662,12 @@ that bite.
     every RSVP, cancel and delete, and for any create with attendees.
   - Undo is offered only when a preview was shown, it emailed nobody, and
     the write is not itself an undo. The Undo is the app's one 5 s toast
-    plus `z`.
+    plus `z`, honoured by the host for twice that (`calendarUndoWindow`).
+  - An Undo dry-runs first and is refused, with nothing sent, when that dry
+    run lists anyone or the event's change key moved since the write it
+    undoes (`_refuseUndo`).
+  - A move's retry and a move's undo pin the `if_match` they were built
+    against, so anything since becomes `event_changed`.
   - Once the server has accepted a write, every local step is best-effort,
     and the outcome never says "Nothing was changed". A real write's
     transient error retries only Create (its `transactionId`) and Move (its
@@ -700,11 +711,13 @@ that bite.
 - **Briefs:**
   - Briefs read MAIL only. Teams participants are `teams:<id>` and carry no
     address to match an attendee.
-  - `BriefPlanner` runs after each `synced` tick. It rechecks an event at
+  - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
+    forced sync after a write). It rechecks an event at
     most every 15 minutes in memory, except rows with no brief, which it
     plans at once after Clear AI results.
   - A failed or skipped run over a ready brief calls `touchBrief` (it moves
-    only `generated_at`) and never destroys the brief.
+    only `generated_at`) — except a skip for `gone`, `declined` or
+    `cancelled`, which replaces the brief with a skipped row.
   - Briefs are keyed by OCCURRENCE, never by master.
 - **The Day command bar:**
   - The order is: Dart resolution, then the decision head, then the

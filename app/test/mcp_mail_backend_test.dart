@@ -410,6 +410,30 @@ void main() {
       }
     });
 
+    test('an auto-reply flag rides only when the server says true', () async {
+      final away = _FakeMcp({
+        'read_email': [
+          {'body_text': 'I am away.', 'is_auto_reply': true},
+        ],
+      });
+      expect(
+        (await McpMailBackend(away).getMessageDetail('m1'))['isAutoReply'],
+        isTrue,
+      );
+
+      for (final row in <Map<String, dynamic>>[
+        {'body_text': 'hi'},
+        {'body_text': 'hi', 'is_auto_reply': false},
+        {'body_text': 'hi', 'is_auto_reply': 'true'},
+      ]) {
+        final detail =
+            await McpMailBackend(_FakeMcp({'read_email': [row]}))
+                .getMessageDetail('m1');
+        expect(detail.containsKey('isAutoReply'), isFalse,
+            reason: '$row says nothing');
+      }
+    });
+
     test('an event id with no meeting kind still rides', () async {
       final mcp = _FakeMcp({
         'read_email': [

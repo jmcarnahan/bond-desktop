@@ -192,7 +192,7 @@ void main() {
     List<String> people = const [],
     String subject = '',
     String eventRef = '',
-    int duration = -1,
+    String duration = '',
   }) =>
       {
         'action': action,
@@ -200,7 +200,7 @@ void main() {
         'people': people,
         'event_ref': eventRef,
         'when': when,
-        'duration_min': duration,
+        'duration': duration,
         'constraints': const <String>[],
       };
 
@@ -265,6 +265,25 @@ void main() {
     // No time in the request: openings, never a proposal at a made-up time.
     expect(out.plan, isA<SlotChoice>());
     expect(writer.previews, isEmpty);
+  });
+
+  test('a duration the model did not copy from the text is dropped',
+      () async {
+    llm.answer(
+        'calendar_intent',
+        intent(
+          when: 'next Tuesday 3pm',
+          people: ['Dana'],
+          subject: 'design sync',
+          duration: 'an hour',
+        ));
+    final out = await submit('design sync w/ Dana next Tuesday 3pm pls');
+    expect(llm.calls, hasLength(1));
+    expect(out.parsed.duration, isNull);
+    final create = (out.plan as CalendarProposal).write as CreateEvent;
+    // The default length, not the model's hour.
+    expect(create.endUtc.difference(create.startUtc),
+        isNot(const Duration(hours: 1)));
   });
 
   group('the model unavailable', () {

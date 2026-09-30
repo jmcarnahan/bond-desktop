@@ -87,9 +87,20 @@ void main() {
       meeting('morning', today.addDays(1), 9),
       meeting('dinner', today.addDays(1), 19),
       meeting('other', today.addDays(2), 9, subject: 'Standup'),
-    ], text: 'tomorrow', subject: 'standup');
+    ], text: 'tomorrow');
     expect(c.map((x) => x.event.id), ['morning', 'dinner']);
     expect(c.first.score, 2);
+  });
+
+  test('a named day never binds a meeting whose subject matches nothing', () {
+    // "cancel tomorrow's standup" with the standup on another day: the two
+    // Syncs tomorrow are not it, however alone they are on that day.
+    final c = match([
+      meeting('morning', today.addDays(1), 9),
+      meeting('dinner', today.addDays(1), 19),
+      meeting('other', today.addDays(2), 9, subject: 'Standup'),
+    ], text: 'tomorrow', subject: 'standup');
+    expect(c, isEmpty);
   });
 
   test('a named person on the attendee list or organising scores 2 each', () {

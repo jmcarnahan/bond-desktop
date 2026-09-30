@@ -68,9 +68,17 @@ class _FakeCalendarBackend implements CalendarBackend {
   }) async =>
       page ?? (throw UnimplementedError());
 
+  /// Thrown by the next live read instead of answering it.
+  Object? failGet;
+
   @override
   Future<CalendarEvent> getEvent(String id) async {
     calls.add((method: 'get', dryRun: false, args: {'id': id}));
+    final fail = failGet;
+    if (fail != null) {
+      failGet = null;
+      throw fail;
+    }
     final e = live[id];
     if (e == null) throw const CalendarEventGone();
     return e;
@@ -734,6 +742,129 @@ void main() {
       expect(invited.undo, isNull);
     });
 
+    test('an undo of a private create is refused when its dry run now emails '
+        'someone', () async {
+      final start = t0.add(const Duration(days: 3));
+      backend.answers['create'] = [const EventWriteAck(id: 'made-1')];
+      final made = await writes.commit(
+        CreateEvent.propose(
+            subject: 'Focus',
+            startUtc: start,
+            endUtc: start.add(const Duration(minutes: 30))),
+        preview: const WritePreview(method: 'POST', path: '/me/events'),
+      );
+      // A guest was added in Outlook since: the delete would now email them.
+      backend.answers['delete'] = [
+        const WritePreview(
+            method: 'DELETE', path: '/me/events/made-1', notifies: [dana]),
+      ];
+      final back = await writes.commit(made.undo!, isUndo: true);
+      expect(back.ok, isFalse);
+      expect(back.message, undoRefusedSentence);
+      expect(back.retry, isNull);
+      expect(backend.callsTo('delete', dryRun: true), hasLength(1));
+      expect(backend.callsTo('delete', dryRun: false), isEmpty);
+
+      // Counts and enum words only.
+      final row = (await writeRows()).first;
+      expect(row['status'], 'refused');
+      final detail =
+          jsonDecode(row['detail_json'] as String) as Map<String, dynamic>;
+      expect(detail, {
+        'action': 'delete',
+        'outcome': 'undo_emails',
+        'notified': 0,
+        'undo': true,
+      });
+    });
+
+    test('an undo of a private create is refused when the event\'s key moved '
+        'on', () async {
+      final start = t0.add(const Duration(days: 3));
+      final end = start.add(const Duration(minutes: 30));
+      CalendarEvent made(String key) => CalendarEvent(
+          id: 'made-1',
+          subject: 'Focus',
+          isOrganizer: true,
+          startUtc: start,
+          endUtc: end,
+          changeKey: key);
+      backend.answers['create'] = [
+        EventWriteAck(id: 'made-1', event: made('ck-made')),
+      ];
+      final outcome = await writes.commit(
+        CreateEvent.propose(subject: 'Focus', startUtc: start, endUtc: end),
+        preview: const WritePreview(method: 'POST', path: '/me/events'),
+      );
+      final undo = outcome.undo as DeleteEvent;
+      expect(undo.expectChangeKey, 'ck-made');
+
+      // Edited in Outlook, and the sync stored it.
+      await calendar.upsertEvents([made('ck-outlook')], syncRun: run);
+      final back = await writes.commit(undo, isUndo: true);
+      expect(back.ok, isFalse);
+      expect(back.message,
+          'This event changed in Outlook — check it and try again.');
+      expect(backend.callsTo('delete'), isEmpty);
+      final detail = jsonDecode((await writeRows()).first['detail_json']
+          as String) as Map<String, dynamic>;
+      expect(detail['outcome'], 'changed');
+
+      // Unchanged, the same undo goes.
+      await calendar.upsertEvents([made('ck-made')], syncRun: run);
+      expect((await writes.commit(undo, isUndo: true)).ok, isTrue);
+      expect(backend.callsTo('delete', dryRun: false), hasLength(1));
+    });
+
+    test('an undo of a private move sends the post-move key as if_match',
+        () async {
+      await calendar.upsertEvents([timed('e1', changeKey: 'ck-1')],
+          syncRun: run);
+      final newStart = t0.add(const Duration(days: 2));
+      final newEnd = t0.add(const Duration(days: 2, hours: 1));
+      final moved = CalendarEvent(
+        id: 'e1',
+        isOrganizer: true,
+        startUtc: newStart,
+        endUtc: newEnd,
+        changeKey: 'ck-2',
+      );
+      backend.answers['update'] = [EventWriteAck(id: 'e1', event: moved)];
+      final outcome = await writes.commit(
+        MoveEvent.timed('e1', startUtc: newStart, endUtc: newEnd),
+        preview: privately,
+      );
+      final undo = outcome.undo as MoveEvent;
+      expect(undo.ifMatch, 'ck-2');
+
+      // Edited in Outlook since, and synced: the mirror's key is ck-3, but
+      // the undo still pins the key the move left, and the server says so.
+      await calendar.upsertEvents([timed('e1', changeKey: 'ck-3')],
+          syncRun: run);
+      backend.live['e1'] = timed('e1', changeKey: 'ck-3');
+      backend.answers['update'] = [privately, const CalendarEventChanged()];
+      final back = await writes.commit(undo, isUndo: true);
+      expect(backend.callsTo('update', dryRun: true).last.args['ifMatch'],
+          'ck-2');
+      expect(backend.callsTo('update', dryRun: false).last.args['ifMatch'],
+          'ck-2');
+      expect(back.ok, isFalse);
+      expect(back.message,
+          'This event changed in Outlook — check it and try again.');
+    });
+
+    test('an undo of a private move whose dry run now emails someone is '
+        'refused', () async {
+      await calendar.upsertEvents([timed('e1')], syncRun: run);
+      final undo = MoveEvent.timed('e1',
+          startUtc: t0, endUtc: t0.add(const Duration(hours: 1)),
+          ifMatch: 'ck-1');
+      backend.answers['update'] = [toDana];
+      final back = await writes.commit(undo, isUndo: true);
+      expect(back.message, undoRefusedSentence);
+      expect(backend.callsTo('update', dryRun: false), isEmpty);
+    });
+
     test('a commit with no preview offers none: nobody showed it emailed '
         'nobody', () async {
       final start = t0.add(const Duration(days: 3));
@@ -917,8 +1048,8 @@ void main() {
       expect((await writes.commit(const DeleteEvent('e1'))).retry, isNull);
     });
 
-    test('a transient move commit retries the SAME move: if_match turns a '
-        'landed first try into event_changed', () async {
+    test('a transient move commit retries the move pinned to its key: a '
+        'landed first try turns the retry into event_changed', () async {
       await calendar.upsertEvents([timed('e1')], syncRun: run);
       backend.answers['update'] = [
         const CalendarTransient('dropped', statusCode: 503),
@@ -928,8 +1059,49 @@ void main() {
           endUtc: t0.add(const Duration(days: 2, hours: 1)));
       final outcome = await writes.commit(move, preview: privately);
       expect(outcome.ok, isFalse);
-      expect(identical(outcome.retry, move), isTrue);
+      final retry = outcome.retry as MoveEvent;
+      expect(retry.startUtc, move.startUtc);
+      expect(retry.endUtc, move.endUtc);
+      expect(retry.ifMatch, 'ck-1');
       expect(sync.forced, 1);
+    });
+
+    test('a move retry after a landed first try becomes event_changed even '
+        'once the sync stored the new key', () async {
+      await calendar.upsertEvents([timed('e1', changeKey: 'ck-1')],
+          syncRun: run);
+      backend.answers['update'] = [
+        const CalendarTransient('dropped', statusCode: 503),
+      ];
+      final move = MoveEvent.timed('e1',
+          startUtc: t0.add(const Duration(days: 2)),
+          endUtc: t0.add(const Duration(days: 2, hours: 1)));
+      final outcome = await writes.commit(move, preview: privately);
+
+      // The first try landed after all; the forced sync stores the moved row.
+      await calendar.upsertEvents([timed('e1', changeKey: 'ck-2')],
+          syncRun: run);
+      await writes.commit(outcome.retry!, preview: privately);
+      expect(backend.callsTo('update', dryRun: false).last.args['ifMatch'],
+          'ck-1');
+    });
+
+    test('a transient on the pre-read says nothing was changed and forces no '
+        'sync', () async {
+      // Not in the mirror, so the live read runs — and drops.
+      backend.failGet = const CalendarTransient('dropped', statusCode: 503);
+      final outcome = await writes.commit(
+        MoveEvent.timed('master',
+            startUtc: t0.add(const Duration(days: 2)),
+            endUtc: t0.add(const Duration(days: 2, hours: 1))),
+        preview: privately,
+      );
+      expect(outcome.ok, isFalse);
+      expect(outcome.message,
+          "Couldn't reach the calendar. Nothing was changed.");
+      expect(outcome.retry, isNotNull);
+      expect(sync.forced, 0);
+      expect(backend.callsTo('update'), isEmpty);
     });
   });
 

@@ -134,6 +134,7 @@ class McpMailBackend implements MailBackend {
     final meeting = result['meeting_message_type'];
     final meetingKind = meeting is String ? meeting.trim() : '';
     final eventId = result['event_id'];
+    final autoReply = result['is_auto_reply'];
 
     final headers = result['headers'];
     final attachments = result['attachments'];
@@ -171,6 +172,10 @@ class McpMailBackend implements MailBackend {
       // backend, which simply never sets it; null from the server (not a
       // meeting message, or the event is gone) is omitted the same way.
       if (eventId is String && eventId.isNotEmpty) 'calendarEventId': eventId,
+      // The server's own reading of the auto-reply headers. Only a JSON true
+      // is carried; false, a string or no key all say nothing, and nothing
+      // gates on it yet.
+      if (autoReply == true) 'isAutoReply': true,
     };
   }
 

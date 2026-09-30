@@ -469,7 +469,10 @@ class DayPane extends StatelessWidget {
             ],
           ],
         ),
-        if (!cancelled && (briefHeadlines[e.id] ?? '').isNotEmpty)
+        // A meeting the owner is not going to offers no brief.
+        if (!cancelled &&
+            !declined &&
+            (briefHeadlines[e.id] ?? '').isNotEmpty)
           Text(
             briefHeadlines[e.id]!,
             key: briefTeaserKeyFor(e.id),

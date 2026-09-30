@@ -114,6 +114,28 @@ void main() {
       expect(e.endUtc, isNull);
     });
 
+    test('a naive start_utc leaves the row unplaced; Z and offset forms parse',
+        () {
+      // A string with no zone would parse as this machine's local time.
+      final naive = CalendarEvent.fromToolRow(_timedRow(overrides: {
+        'start_utc': '2026-10-02T10:00:00',
+        'end_utc': '2026-10-02T11:00:00',
+      }));
+      expect(naive.startUtc, isNull);
+      expect(naive.endUtc, isNull);
+
+      final zulu = CalendarEvent.fromToolRow(_timedRow(overrides: {
+        'start_utc': '2026-10-02T10:00:00Z',
+      }));
+      expect(zulu.startUtc, DateTime.utc(2026, 10, 2, 10));
+
+      final offset = CalendarEvent.fromToolRow(_timedRow(overrides: {
+        'start_utc': '2026-10-02T10:00:00+02:00',
+      }));
+      expect(offset.startUtc, DateTime.utc(2026, 10, 2, 8));
+      expect(offset.startUtc!.isUtc, isTrue);
+    });
+
     test('an all-day row is dates with an exclusive end, never instants', () {
       final e = CalendarEvent.fromToolRow(_timedRow(overrides: {
         'is_all_day': true,

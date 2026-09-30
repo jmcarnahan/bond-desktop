@@ -52,7 +52,8 @@ class BriefRequest {
 /// Every outcome is a row in `event_briefs`, so the panel can always say
 /// something: `ready` with the brief, `skipped` with the rule that kept the
 /// meeting out, or `failed` — except over a READY brief, which a failure or a
-/// skip never replaces: the old brief keeps its text and status and only its
+/// skip never replaces (short of a decline, a cancel or a gone event): the
+/// old brief keeps its text and status and only its
 /// `generated_at` moves ([CalendarStore.touchBrief]), so the planner's
 /// two-hour rule throttles the retries. A dead model server is NOT an outcome: the
 /// [LlmUnavailableException] goes straight through to the worker, which parks
@@ -200,14 +201,16 @@ class MeetingBriefHandler extends WorkHandler {
   /// Records why the meeting got no brief — unless a ready brief is stored,
   /// which stands (a meeting that has just started, or whose mail aged out
   /// of the window, still has a brief worth reading) with only its stamp
-  /// moved.
+  /// moved. A meeting the owner declined, or one cancelled or gone, is not
+  /// one they are going to: the skip replaces its brief, so neither the
+  /// panel nor the Day's teaser goes on offering it.
   Future<void> _skip(
     String id,
     BriefIneligibility why,
     String stamp, {
     EventBrief? existing,
   }) async {
-    if (existing != null && existing.isReady) {
+    if (existing != null && existing.isReady && !_ends.contains(why)) {
       await _calendar.touchBrief(id, generatedAt: stamp);
       _log
         ..noteStatus('skipped')
@@ -226,6 +229,13 @@ class MeetingBriefHandler extends WorkHandler {
       ..note({'reason': why.wire});
     _stored();
   }
+
+  /// The reasons that end a ready brief rather than leaving it standing.
+  static const Set<BriefIneligibility> _ends = {
+    BriefIneligibility.declined,
+    BriefIneligibility.cancelled,
+    BriefIneligibility.gone,
+  };
 
   /// The model the stage resolved to, for the row. Empty when the client
   /// cannot say: the row is still worth writing without it.

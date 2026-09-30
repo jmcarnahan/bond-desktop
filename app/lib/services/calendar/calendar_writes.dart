@@ -74,6 +74,7 @@ final class MoveEvent extends CalendarWrite {
     this.eventId, {
     required DateTime this.startUtc,
     required DateTime this.endUtc,
+    this.ifMatch,
   })  : startDate = null,
         endDate = null;
 
@@ -81,6 +82,7 @@ final class MoveEvent extends CalendarWrite {
     this.eventId, {
     required CalendarDate this.startDate,
     required CalendarDate this.endDate,
+    this.ifMatch,
   })  : startUtc = null,
         endUtc = null;
 
@@ -93,7 +95,19 @@ final class MoveEvent extends CalendarWrite {
   /// Exclusive, as every all-day end is.
   final CalendarDate? endDate;
 
+  /// The change key this move was built against, sent as `if_match` in place
+  /// of the one read at send time; null reads it then. An undo and a retry
+  /// pin it so that any change since becomes `event_changed` on the server.
+  final String? ifMatch;
+
   bool get isAllDay => startDate != null;
+
+  /// The same move pinned to [key].
+  MoveEvent withIfMatch(String? key) => isAllDay
+      ? MoveEvent.allDay(eventId,
+          startDate: startDate!, endDate: endDate!, ifMatch: key)
+      : MoveEvent.timed(eventId,
+          startUtc: startUtc!, endUtc: endUtc!, ifMatch: key);
 
   @override
   String get action => 'move';
@@ -113,10 +127,15 @@ final class CancelMeeting extends CalendarWrite {
 }
 
 final class DeleteEvent extends CalendarWrite {
-  const DeleteEvent(this.eventId);
+  const DeleteEvent(this.eventId, {this.expectChangeKey});
 
   @override
   final String eventId;
+
+  /// An undo's delete: the change key the event had when the write being
+  /// undone landed. A different key now means someone changed it since, and
+  /// the undo is refused rather than deleting what they did.
+  final String? expectChangeKey;
 
   @override
   String get action => 'delete';
@@ -262,6 +281,11 @@ bool needsConfirm(CalendarWrite w, WritePreview p) =>
     w is RespondToEvent ||
     (w is CreateEvent && w.attendees.isNotEmpty);
 
+/// An Undo whose dry run now emails somebody: the event gained guests since
+/// the write it undoes, and an Undo is only ever a private write.
+const String undoRefusedSentence =
+    'Undo would email people now — open the event instead.';
+
 /// One failure, mapped: the sentence, the activity log's word, and whether
 /// the same write may be tried again.
 typedef _Failure = ({String message, String outcome, CalendarWrite? retry});
@@ -298,6 +322,9 @@ class CalendarWrites implements CalendarWriter {
   static const String _unconfirmedSentence =
       "Couldn't confirm the calendar got this — check it before trying again.";
 
+  static const String _changedSentence =
+      'This event changed in Outlook — check it and try again.';
+
   @override
   Future<PreviewResult> preview(CalendarWrite write) async {
     try {
@@ -322,26 +349,53 @@ class CalendarWrites implements CalendarWriter {
   }) async {
     final notified = preview?.notifies.length ?? 0;
     final started = _clock();
-    // The failure mapping covers the request and nothing after it: once the
-    // server has answered with an ack the write HAS happened, and a throw
-    // from a local step must not come back as "Couldn't confirm…" with a Try
-    // again — a second RSVP emails the organiser twice.
-    final CalendarEvent? before;
-    final EventWriteAck ack;
+    // Everything before the real request only reads, so a failure there is
+    // mapped as a dry run's: nothing was sent, nothing was changed, and no
+    // sync is forced to find out.
+    CalendarEvent? before;
+    String? zone;
     try {
       // Read at commit time, never carried from the preview: an Undo runs
       // after the first move stored a new change key.
-      before = write is MoveEvent ? await _eventForWrite(write.eventId) : null;
-      final result = await _send(write, dryRun: false, current: before);
-      if (result is! EventWriteAck) {
-        throw StateError('a real write answered a preview');
+      if (write is MoveEvent) {
+        before = await _eventForWrite(write.eventId);
+        if (write.isAllDay) zone = await _mailboxZone();
+      } else if (isUndo &&
+          write is DeleteEvent &&
+          (write.expectChangeKey ?? '').isNotEmpty) {
+        before = await _eventForWrite(write.eventId);
       }
-      ack = result;
+      if (isUndo) {
+        final refused = await _refuseUndo(write, before, zone);
+        if (refused != null) {
+          await _record(
+              write, 'refused', refused.outcome, notified, isUndo, started);
+          return WriteOutcome.failed(refused.message);
+        }
+      }
     } on _NoZone {
       await _record(write, 'failed', 'no_zone', notified, isUndo, started);
       return const WriteOutcome.failed(_NoZone.sentence);
     } on Object catch (e) {
-      final failure = await _fail(write, e, dryRun: false);
+      final failure = await _fail(write, e, dryRun: true);
+      await _record(write, 'failed', failure.outcome, notified, isUndo, started);
+      return WriteOutcome.failed(failure.message, retry: failure.retry);
+    }
+
+    // The failure mapping covers the request and nothing after it: once the
+    // server has answered with an ack the write HAS happened, and a throw
+    // from a local step must not come back as "Couldn't confirm…" with a Try
+    // again — a second RSVP emails the organiser twice.
+    final EventWriteAck ack;
+    try {
+      final result =
+          await _send(write, dryRun: false, current: before, zone: zone);
+      if (result is! EventWriteAck) {
+        throw StateError('a real write answered a preview');
+      }
+      ack = result;
+    } on Object catch (e) {
+      final failure = await _fail(write, e, dryRun: false, current: before);
       await _record(write, 'failed', failure.outcome, notified, isUndo, started);
       return WriteOutcome.failed(failure.message, retry: failure.retry);
     }
@@ -370,6 +424,35 @@ class CalendarWrites implements CalendarWriter {
     return WriteOutcome.ok(undo: undo, eventId: ack.id);
   }
 
+  /// Why an Undo must not go, or null when it may. An Undo is offered only
+  /// for a write shown to email nobody and is sent with no confirm of its
+  /// own, so it runs its own dry run first and is refused when that now
+  /// emails anybody (a guest added since); an undo's delete is also refused
+  /// when the event's key moved on from the one the undone write left. What
+  /// passes is still a private write that emails nobody. A throw is a dry
+  /// run's failure: nothing was sent.
+  Future<({String message, String outcome})?> _refuseUndo(
+    CalendarWrite write,
+    CalendarEvent? before,
+    String? zone,
+  ) async {
+    if (write is DeleteEvent) {
+      final expected = write.expectChangeKey ?? '';
+      final now = before?.changeKey ?? '';
+      if (expected.isNotEmpty && now.isNotEmpty && now != expected) {
+        return (message: _changedSentence, outcome: 'changed');
+      }
+    }
+    final dry = await _send(write, dryRun: true, current: before, zone: zone);
+    if (dry is! WritePreview) {
+      throw StateError('a dry run answered an ack');
+    }
+    if (dry.notifies.isNotEmpty) {
+      return (message: undoRefusedSentence, outcome: 'undo_emails');
+    }
+    return null;
+  }
+
   /// Runs one step after a write the server took; a throw is logged by type
   /// (its text can carry the endpoint) and goes no further.
   Future<void> _quietly(String what, FutureOr<void> Function() step) async {
@@ -381,11 +464,13 @@ class CalendarWrites implements CalendarWriter {
   }
 
   /// The one backend call [write] makes, dry or real. [current] is a move's
-  /// event when the caller already read it.
+  /// event and [zone] an all-day move's mailbox zone, when the caller already
+  /// read them.
   Future<CalendarWriteResult> _send(
     CalendarWrite write, {
     required bool dryRun,
     CalendarEvent? current,
+    String? zone,
   }) async {
     switch (write) {
       case RespondToEvent():
@@ -400,23 +485,25 @@ class CalendarWrites implements CalendarWriter {
           dryRun: dryRun,
         );
       case MoveEvent():
-        final event = current ?? await _eventForWrite(write.eventId);
+        // An undo and a retry pin the key they were built against, so any
+        // change since becomes `event_changed` on the server.
+        final ifMatch = write.ifMatch ??
+            (current ?? await _eventForWrite(write.eventId)).changeKey;
         if (!write.isAllDay) {
           return _backend.update(
             write.eventId,
-            ifMatch: event.changeKey,
+            ifMatch: ifMatch,
             startUtc: write.startUtc,
             endUtc: write.endUtc,
             dryRun: dryRun,
           );
         }
-        final zone = await _mailboxZone();
         return _backend.update(
           write.eventId,
-          ifMatch: event.changeKey,
+          ifMatch: ifMatch,
           startDate: write.startDate,
           endDate: write.endDate,
-          allDayZone: zone,
+          allDayZone: zone ?? await _mailboxZone(),
           dryRun: dryRun,
         );
       case CancelMeeting():
@@ -492,6 +579,10 @@ class CalendarWrites implements CalendarWriter {
   /// the times it had. An RSVP, a cancel and a delete have none — an answer
   /// is sent the moment it is written, and a deleted event cannot be put back
   /// as the same event.
+  ///
+  /// Each undo pins the change key the ack answered — the key the server
+  /// holds now and the mirror will once the forced sync lands — so an edit in
+  /// Outlook in between refuses the undo instead of being reverted.
   CalendarWrite? _undoFor(
     CalendarWrite write,
     EventWriteAck ack,
@@ -499,19 +590,26 @@ class CalendarWrites implements CalendarWriter {
   ) {
     switch (write) {
       case CreateEvent():
-        return write.attendees.isEmpty ? DeleteEvent(ack.id) : null;
+        final key = ack.event?.changeKey ?? '';
+        return write.attendees.isEmpty
+            ? DeleteEvent(ack.id, expectChangeKey: key.isEmpty ? null : key)
+            : null;
       case MoveEvent():
         if (before == null) return null;
+        final key = ack.event?.changeKey ?? '';
+        final ifMatch = key.isEmpty ? null : key;
         if (write.isAllDay) {
           final s = before.startDate;
           final e = before.endDate;
           if (s == null || e == null) return null;
-          return MoveEvent.allDay(write.eventId, startDate: s, endDate: e);
+          return MoveEvent.allDay(write.eventId,
+              startDate: s, endDate: e, ifMatch: ifMatch);
         }
         final s = before.startUtc;
         final e = before.endUtc;
         if (s == null || e == null) return null;
-        return MoveEvent.timed(write.eventId, startUtc: s, endUtc: e);
+        return MoveEvent.timed(write.eventId,
+            startUtc: s, endUtc: e, ifMatch: ifMatch);
       case RespondToEvent():
       case CancelMeeting():
       case DeleteEvent():
@@ -548,10 +646,13 @@ class CalendarWrites implements CalendarWriter {
   /// nothing whatever happened to it; a real write lost in transit may have
   /// landed, so it is never "Nothing was changed", the mirror is sent to
   /// look, and only a write whose repeat is harmless offers Try again.
+  /// [current] is the event a real move was sent against (null for a dry
+  /// run), whose key its retry pins.
   Future<_Failure> _fail(
     CalendarWrite write,
     Object e, {
     required bool dryRun,
+    CalendarEvent? current,
   }) async {
     final id = write.eventId;
     switch (e) {
@@ -567,7 +668,7 @@ class CalendarWrites implements CalendarWriter {
           }
         }
         return (
-          message: 'This event changed in Outlook — check it and try again.',
+          message: _changedSentence,
           outcome: 'changed',
           retry: null,
         );
@@ -639,10 +740,16 @@ class CalendarWrites implements CalendarWriter {
           message: _unconfirmedSentence,
           outcome: 'transient',
           // A create repeats safely under its transaction id, and a move
-          // under its if_match — a landed first try turns the second into
-          // event_changed. An answer, a cancel or a delete repeated would
-          // email everybody a second time.
-          retry: write is CreateEvent || write is MoveEvent ? write : null,
+          // under the if_match it was sent with, pinned here — a landed
+          // first try turns the second into event_changed even after the
+          // forced sync has stored the new key. An answer, a cancel or a
+          // delete repeated would email everybody a second time.
+          retry: switch (write) {
+            CreateEvent() => write,
+            MoveEvent() =>
+              write.withIfMatch(write.ifMatch ?? current?.changeKey),
+            _ => null,
+          },
         );
     }
   }

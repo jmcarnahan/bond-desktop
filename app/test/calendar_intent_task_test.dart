@@ -20,6 +20,8 @@ void main() {
       expect(task.systemPrompt, endsWith(untrustedDataClause));
       expect(task.systemPrompt,
           contains('NEVER compute, convert or work out a date or a time'));
+      expect(task.systemPrompt,
+          contains('NEVER compute or convert a length into minutes'));
       expect(task.systemPrompt, contains('Never invent a person'));
       expect(task.systemPrompt, contains('COPY phrases exactly'));
       expect(task.systemPrompt, contains('Return ONLY valid JSON'));
@@ -45,14 +47,15 @@ void main() {
         'people',
         'event_ref',
         'when',
-        'duration_min',
+        'duration',
         'constraints',
       });
       final flat = s.toString();
       expect(flat, isNot(contains(r'$defs')));
       expect(flat, isNot(contains('maxLength')));
       expect(flat, isNot(contains('maxItems')));
-      expect(props['duration_min']['type'], 'integer');
+      // A phrase to copy, never a number the model works out.
+      expect(props['duration']['type'], 'string');
     });
 
     test('the action enum is the eleven wire words', () {
@@ -102,7 +105,7 @@ void main() {
     Map<String, dynamic> answer({
       Object? action = 'move',
       Object? people = const ['Dana'],
-      Object? duration = -1,
+      Object? duration = '',
       Object? constraints = const [],
       Object? when = 'Thursday',
       Object? subject = '',
@@ -113,7 +116,7 @@ void main() {
           'people': people,
           'event_ref': ' my 3pm ',
           'when': when,
-          'duration_min': duration,
+          'duration': duration,
           'constraints': constraints,
         };
 
@@ -123,7 +126,7 @@ void main() {
       expect(i.when, 'Thursday');
       expect(i.eventRef, 'my 3pm');
       expect(i.people, ['Dana']);
-      expect(i.durationMin, -1);
+      expect(i.duration, '');
     });
 
     test('an action off the list is unknown', () {
@@ -143,11 +146,10 @@ void main() {
       expect(i.constraints, ['one', 'two', 'three']);
     });
 
-    test('a duration outside 5..480 minutes is none', () {
-      expect(task.validate(answer(duration: 30)).durationMin, 30);
-      expect(task.validate(answer(duration: 4)).durationMin, -1);
-      expect(task.validate(answer(duration: 481)).durationMin, -1);
-      expect(task.validate(answer(duration: 'an hour')).durationMin, -1);
+    test('a duration is a copied phrase; a number is none', () {
+      expect(task.validate(answer(duration: ' an hour ')).duration, 'an hour');
+      expect(task.validate(answer(duration: 30)).duration, '');
+      expect(task.validate(answer(duration: -1)).duration, '');
     });
 
     test('a wrong shape never throws', () {

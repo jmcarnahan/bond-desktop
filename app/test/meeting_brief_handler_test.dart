@@ -70,6 +70,8 @@ void main() {
       Attendee(name: 'Me', address: owner),
       Attendee(name: 'Dana Lee', address: dana),
     ],
+    String responseStatus = 'accepted',
+    bool isCancelled = false,
   }) async {
     final start = now.add(startsIn);
     await calendar.upsertEvents([
@@ -78,7 +80,8 @@ void main() {
         subject: 'Fabrikam sync',
         startUtc: start,
         endUtc: start.add(const Duration(minutes: 30)),
-        responseStatus: 'accepted',
+        responseStatus: responseStatus,
+        isCancelled: isCancelled,
         attendees: attendees,
       ),
     ], syncRun: 'run-1');
@@ -250,6 +253,57 @@ void main() {
       expect(row.briefJson, json);
       expect(row.generatedAt, calendarStamp(now));
     });
+  });
+
+  group('a ready brief ends with the meeting', () {
+    for (final (name, declined, cancelled) in [
+      ('declined', true, false),
+      ('cancelled', false, true),
+    ]) {
+      test('$name: the brief is replaced by a skip', () async {
+        await seedEvent(
+          responseStatus: declined ? 'declined' : 'accepted',
+          isCancelled: cancelled,
+        );
+        await seedReady('evt-1');
+
+        await handler(ScriptedLlm.never()).run(item('evt-1'));
+
+        final row = (await calendar.brief('evt-1'))!;
+        expect(row.status, EventBrief.skipped);
+        expect(row.skipReason, name);
+        expect(row.briefJson, isNull);
+        expect(row.brief, isNull);
+      });
+    }
+
+    test('gone: the brief is replaced by a skip', () async {
+      await seedReady('evt-missing');
+      await handler(ScriptedLlm.never()).run(item('evt-missing'));
+      final row = (await calendar.brief('evt-missing'))!;
+      expect(row.status, EventBrief.skipped);
+      expect(row.briefJson, isNull);
+    });
+  });
+
+  test('with the owner unknown the handler retries rather than writing a '
+      'brief', () async {
+    await seedEvent();
+    await seedThread();
+    final unknown = BriefGatherer(
+      store,
+      calendar,
+      ownerAddress: () async => null,
+      zone: () => CalendarZone.tryNamed('America/Los_Angeles')!,
+    );
+    final llm = ScriptedLlm.never();
+    final h = MeetingBriefHandler(calendar, unknown,
+        client: () => llm, clock: () => now);
+
+    await expectLater(
+        h.run(item('evt-1')), throwsA(isA<BriefOwnerUnknown>()));
+    expect(await calendar.brief('evt-1'), isNull);
+    expect(llm.calls, isEmpty);
   });
 
   test("a series master is briefed as its next occurrence, under the "

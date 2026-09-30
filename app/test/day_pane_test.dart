@@ -134,7 +134,7 @@ void main() {
 
   group('agenda', () {
     testWidgets('a written brief is a one-line teaser under its meeting, '
-        'and a cancelled meeting shows none', (tester) async {
+        'and a cancelled or declined meeting shows none', (tester) async {
       await pumpPane(
         tester,
         events: [
@@ -142,10 +142,13 @@ void main() {
           timed('plain', 'Contoso standup', DateTime.utc(2026, 9, 29, 21)),
           timed('off', 'Fabrikam retro', DateTime.utc(2026, 9, 29, 22),
               isCancelled: true),
+          timed('no', 'Northwind review', DateTime.utc(2026, 9, 29, 23),
+              responseStatus: 'declined'),
         ],
         briefHeadlines: const {
           'briefed': 'Dana is waiting on the quote.',
           'off': 'Should not show.',
+          'no': 'Should not show either.',
         },
       );
 
@@ -155,6 +158,8 @@ void main() {
       expect(tester.widget<Text>(teaser).maxLines, 1);
       expect(find.byKey(DayPane.briefTeaserKeyFor('plain')), findsNothing);
       expect(find.byKey(DayPane.briefTeaserKeyFor('off')), findsNothing);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('no')), findsNothing,
+          reason: 'a declined meeting offers no brief either');
     });
 
     testWidgets('meetings by subject, with their time, place and marks',

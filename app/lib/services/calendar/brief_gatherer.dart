@@ -204,6 +204,29 @@ final class BriefIneligible extends BriefGather {
   const BriefIneligible(this.why);
 }
 
+/// [BriefGatherer.gather] with the owner's address not known yet. Thrown
+/// rather than answered, so the worker's retry picks the meeting up again.
+class BriefOwnerUnknown implements Exception {
+  const BriefOwnerUnknown();
+
+  @override
+  String toString() => "BriefOwnerUnknown: the owner's address is not known "
+      'yet';
+}
+
+/// [s] cut to at most [max] UTF-16 code units, never ending on the first half
+/// of a surrogate pair: a cut through an emoji would leave a lone surrogate,
+/// which is not text and which a JSON encoder or a model server may refuse.
+String capRunes(String s, int max) {
+  if (s.length <= max) return s;
+  var end = max;
+  if (end > 0) {
+    final last = s.codeUnitAt(end - 1);
+    if (last >= 0xD800 && last <= 0xDBFF) end -= 1;
+  }
+  return s.substring(0, end);
+}
+
 /// One other person in a meeting.
 typedef BriefPerson = ({String name, String address});
 
@@ -302,7 +325,11 @@ List<BriefPerson> briefOthers(CalendarEvent e, {required String? owner}) {
       owner != null && owner.isNotEmpty && address == owner;
   for (final a in e.attendees) {
     final address = a.address.trim().toLowerCase();
-    if (address.isEmpty || a.type == 'resource' || isOwner(address)) continue;
+    if (address.isEmpty ||
+        a.type.trim().toLowerCase() == 'resource' ||
+        isOwner(address)) {
+      continue;
+    }
     if (!seen.add(address)) continue;
     out.add((name: a.name.trim(), address: address));
   }
@@ -412,6 +439,10 @@ class BriefGatherer {
     required DateTime now,
   }) async {
     final owner = await this.owner();
+    // Unknown, the owner's own attendee row counts as somebody else, and a
+    // meeting with nobody would be briefed as one with them. The worker
+    // retries it; the keychain answers soon after launch.
+    if (owner == null) throw const BriefOwnerUnknown();
     final zone = _zone();
     final nowUtc = now.toUtc();
     final quick = briefQuickCheck(event, owner: owner, now: nowUtc, zone: zone);
@@ -629,13 +660,14 @@ class BriefGatherer {
         .trim();
   }
 
-  static String _cap(String s, int cap) =>
-      s.length > cap ? s.substring(0, cap) : s;
+  static String _cap(String s, int cap) => capRunes(s, cap);
 
   /// sha256 over every input that could change what the brief says: the
   /// event's version and times, the owner, and the ids and stamps of every
-  /// thread, ask, storyline and file. The snippets are not hashed — a thread
-  /// whose newest message changed moved its stamp and its count.
+  /// thread, ask and file. The snippets are not hashed — a thread whose
+  /// newest message changed moved its stamp and its count. A storyline's
+  /// text is: a recap is rewritten in place, and neither its id nor any
+  /// stamp moves when it falls back to a rewritten summary.
   static String _hash({
     required CalendarEvent event,
     required String? owner,
@@ -652,7 +684,8 @@ class BriefGatherer {
       for (final t in threads)
         'thread|${t.source}|${t.conversationKey}|${t.lastAt}|${t.messageCount}',
       for (final a in asks) 'ask|${a.messageId}',
-      for (final s in storylines) 'storyline|${s.id}',
+      for (final s in storylines)
+        'storyline|${s.id}|${sha256.convert(utf8.encode(s.summary))}',
       for (final f in files) 'file|$f',
     ];
     return sha256.convert(utf8.encode(lines.join('\n'))).toString();

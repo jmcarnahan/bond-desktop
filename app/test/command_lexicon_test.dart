@@ -176,16 +176,21 @@ void main() {
     test('positives', () {
       for (final t in [
         'move my 3pm to Thursday',
-        'tomorrow\'s meeting',
         'what\'s on tomorrow',
         'am I free Friday',
         'invite Dana Friday',
-        'standup on Monday',
         'cancel the standup',
-        'move my 3pm to Thursday',
         'book lunch with Dana Friday',
         'am I free Thursday at 3',
         'find 30 min with Sam next week',
+        // The verb or ask leads, then a when, a noun or a person.
+        'move my 3pm to Friday',
+        'book 30 min with Dana next week',
+        'when did I last meet Sam',
+        'find time with Dana',
+        'cancel Friday\'s sync',
+        'accept the invite',
+        'please move my 3pm to Friday',
       ]) {
         expect(looksLikeCalendarCommand(t), isTrue, reason: t);
       }
@@ -213,6 +218,21 @@ void main() {
         // A Find facet is a search being built.
         'label:invoices meeting',
         'from:dana tomorrow\'s meeting',
+        // An ask that does not lead, or leads into no when, noun or person,
+        // is a search: the Ask Day row would take its Enter away.
+        'what\'s on the invoice from Dana',
+        'when can we ship the release',
+        'notes from Monday\'s meeting',
+        'Friday call recap',
+        'sync notes from Tuesday',
+        'had a good time at the offsite',
+        'Dana',
+        'invoice',
+        'meeting',
+        'tomorrow',
+        // A day beside a noun with no leading verb is a search too.
+        'tomorrow\'s meeting',
+        'standup on Monday',
       ]) {
         expect(looksLikeCalendarCommand(t), isFalse, reason: t);
       }

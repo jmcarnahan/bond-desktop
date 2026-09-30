@@ -20,7 +20,7 @@ use. None of them goes to the cloud.
    the primary calendar only. It also caches the mailbox settings that give
    the display zone ([The sync](#the-sync)). A message that carried an invite
    stores its event's id ([Meeting fields on messages](#meeting-fields-on-messages)).
-2. **The Day stop** is the eighth rail stop, right after Needs You. It draws
+2. **The Day stop** is one of eight rail stops, right after Needs You. It draws
    one day out of the mirror, either as an agenda (meetings, deadlines,
    threads coming back from Later, the Now marker) or as a day or week grid.
    It also holds the invites owed. The Inbox's Today section is a slice of it
@@ -87,8 +87,8 @@ Two tables (`app/lib/data/schema.drift`, schema v21).
 
 | Table | Holds | Class | Written by |
 |---|---|---|---|
-| `calendar_events` | one row per event id, as `sync_calendar` last reported it | **synced** | `CalendarSync` via `CalendarStore.upsertEvents` / `deleteEvents` / `sweepRun` |
-| `event_briefs` | one pre-meeting brief per event occurrence ([Briefs](#briefs)) | **derived** | `MeetingBriefHandler` via `CalendarStore.putBrief`; `BriefPlanner` deletes out-of-window rows |
+| `calendar_events` | one row per event id, as `sync_calendar` last reported it | **synced** | `CalendarSync` via `CalendarStore.upsertEvents` / `retagRun` / `deleteEvents` / `sweepRun`; `CalendarWrites` via `CalendarSync.storeWritten` (an `upsertEvents`), `setResponseStatus` and `deleteWithOccurrences` |
+| `event_briefs` | one pre-meeting brief per event occurrence ([Briefs](#briefs)) | **derived** | `MeetingBriefHandler` via `CalendarStore.putBrief`; `BriefPlanner` puts skipped rows (`putBrief`) and deletes out-of-window rows |
 
 `calendar_events` is in `MessageStore.syncedTables`: it is mailbox data, so
 **Clear AI results** leaves it and a mailbox wipe (`wipeAll`, sign-out,
@@ -100,7 +100,11 @@ The time rules (D13) hold in the columns:
 
 - A **timed** event fills `start_utc` / `end_utc` with stamps at
   `calendarStamp`'s fixed width (identical to `MessageStore.isoStamp`), so
-  string comparison in SQL is chronological, and leaves the dates NULL.
+  string comparison in SQL is chronological, and leaves the dates NULL. A
+  tool row's `start_utc` / `end_utc` is read only when it ends in `Z` or a
+  `±hh:mm` offset (`CalendarEvent.fromToolRow`); an empty or zoneless string
+  would be read as this machine's local time, a guess, so the row is stored
+  with NULL instants — unplaced — until a sync brings a usable one.
 - An **all-day** event fills `start_date` / `end_date` (`yyyy-mm-dd`, end
   EXCLUSIVE) and leaves the instants NULL. It is never converted through a
   zone, which is what moves an all-day event a day for everyone west of UTC.
@@ -181,9 +185,12 @@ transaction, behind the generation check (below):
 3. deletes `removed` — ids never stored are ignored;
 4. persists a non-empty returned cursor, **after every page**, so a failure
    keeps what was read;
-5. on the run's first `complete`, the sweep and `swept: true`.
+5. on the run's first page that says `complete: true` explicitly, the sweep
+   and `swept: true`.
 
-The loop stops on `complete`; on a page that is not complete and hands back
+The loop stops on `complete` (a page with no `complete` flag counts as done,
+so a malformed page cannot spin the loop, but only an explicit `true` sweeps —
+`CalendarSyncPage.explicitlyComplete`); on a page that is not complete and hands back
 the cursor it was sent (the server's signal that a later Graph page failed —
 tried again next tick, no error); and at the cap, leaving the cursor for the
 next tick. A first read bigger than ten pages therefore spreads across ticks,
@@ -191,7 +198,7 @@ and its sweep waits until the run completes.
 
 ### Mark-and-sweep
 
-When a run first reaches `complete`, every row whose `sync_run` is not the
+When a run first reaches an explicit `complete: true`, every row whose `sync_run` is not the
 run's id is something the calendar no longer holds inside the window, and
 `sweepRun` deletes it, except ids written by this app within the write guard's
 span. The state is then marked `swept: true`, and later delta pages of the
@@ -200,18 +207,25 @@ server's "start a new run next time": the stored cursor is cleared.
 
 ### The generation check
 
-Every write transaction of a tick — a page, the cursor-expired restart, the
-mailbox-settings cache — opens by re-reading `calendar_run` and abandons the
-tick, writing nothing, unless it still names the tick's run. `wipeAll` deletes
-that pref inside its own transaction, so the two serialize: a tick whose
-`sync_calendar` call was in the air across a sign-out or **Forget everything
-and re-sync** cannot write the old account's rows, cursor or zone back. An
-abandoned tick ends `skipped`, leaves availability alone and starts no
-backoff, so the next tick begins the new run at once.
+A page's transaction and the cursor-expired restart's open by re-reading
+`calendar_run` and abandon the tick, writing nothing, unless it still names
+the tick's run. `wipeAll` deletes that pref inside its own transaction, so the
+two serialize: a tick whose `sync_calendar` call was in the air across a
+sign-out or **Forget everything and re-sync** cannot write the old account's
+rows or cursor back. An abandoned tick ends `skipped`, leaves availability
+alone and does not stamp the throttle, so the next tick begins the new run at
+once. The new-run transaction at the top of a tick needs no check: it is the
+one that writes the run.
 
-A rebuild of `calendarSyncProvider` (a backend or server URL change) starts a
-fresh `CalendarSync`; the generation check keeps a tick the old one still has
-in flight from writing into a run the new one has since replaced.
+The mailbox-settings write sits behind the same check but only skips itself
+when superseded: the tick has already ended `synced`, so it still sets
+`available` and stamps the throttle.
+
+The check fences a wipe, not a rebuild. A rebuild of `calendarSyncProvider`
+(a backend or server URL change) starts a fresh `CalendarSync`, which reuses
+the stored run whenever a cursor exists and the window has not rolled, so the
+old instance's in-flight tick and the new one's first tick can overlap for one
+tick. Deltas are idempotent, so the cost is pages read twice, not bad rows.
 
 ### An expired cursor
 
@@ -235,10 +249,14 @@ call inside `throttle` (120 s) of the last tick that reached ANY answer —
 `synced`, `failed`, `unavailable`, `scopeMissing` or `sdkMode` — returns
 `skipped` without a request, so a broken or permissionless calendar is asked
 no more often than a working one. Startup and the refresh button go through `_refreshAll`,
-which forces it.
+which forces it, and arriving on the Day stop forces a tick too.
 
-**Single flight:** a call while a tick runs returns that tick's future, forced
-or not.
+**Single flight:** an unforced call while a tick runs returns that tick's
+future. A forced one returns ONE forced tick queued behind the running one
+(`_forcedNext`), shared by every forced call that lands before it starts: the
+running tick's pages may predate the write that asked, and it stamps the
+throttle, so joining it would leave the write out of the mirror for a couple
+of minutes.
 
 `syncNow` **never throws**. Outcomes: `synced`; `skipped`; `scopeMissing`
 (`CalendarScopeMissing`, or the precheck finding no `calendars.read` in a grant
@@ -247,7 +265,8 @@ that still answers `mail.read`); `sdkMode`; `unavailable` (`CalendarUnavailable`
 `mail.read` — an MCP server offline or mid-restart, which the precheck
 `calendarPrecheck` tells apart from a missing scope with `read_ack_queue`'s
 idiom); `failed` (anything else — a transport drop, a Graph 5xx — traced with
-`debugPrint` by exception type only, retried after the backoff). Progress persisted before a failure stays.
+`debugPrint` by exception type only, and asked again once the throttle
+lapses — there is no separate backoff). Progress persisted before a failure stays.
 
 After each tick that reached an answer (never a `skipped` one) the sync's own
 `onOutcome` — wired in `calendarSyncProvider` as `calendarOutcomePublisher` —
@@ -292,7 +311,9 @@ the mailbox's, then UTC.
 ## Activity
 
 Kind `sync_calendar`, labelled **Calendar sync**. A row is recorded when a
-synced tick changed rows or completed a new run: `count` = rows upserted,
+synced tick changed rows, or started a new run and completed it in that same
+tick (a first read spread over several ticks that ends with no changes logs
+nothing): `count` = rows upserted,
 detail `{removed, swept, pages, run: new|delta}`. The one error row is
 `status: error`, `detail: {outcome: scope_missing}`, recorded on the
 TRANSITION into that state, not every tick. `failed`, `unavailable` and SDK
@@ -331,8 +352,11 @@ empty. `Message.meetingMessageType` and `Message.meetingEventId` read them;
 null means "nobody said", never "not a meeting". `event_id` is how the
 event panel and the invite cards link a message to its event
 (`CalendarStore.messagesForEvent`). The
-SDK backend never sets `calendarEventId`. `read_email`'s `not_found` error is
-mapped to a 404, which the sync skips like any vanished message.
+SDK backend never sets `calendarEventId`. `read_email`'s `is_auto_reply` is
+mapped the same way, to `isAutoReply`, and stored as `auto_reply: true` only
+when true; `Message.isAutoReply` reads it, and nothing gates on it yet (D15,
+[the follow-ups](#owner-checks-and-follow-ups)). `read_email`'s `not_found`
+error is mapped to a 404, which the sync skips like any vanished message.
 
 **The backfill.** Rows fetched before the server sent these fields carry
 neither key. The one-shot `meeting_detail_backfill` in `SyncService._pass`
@@ -358,7 +382,7 @@ pref; Clear AI results keeps it, because it keeps `source_meta_json`.
 
 ## The Day stop
 
-**What happens.** The icon rail's Day stop (the eighth, right after Needs You)
+**What happens.** The icon rail's Day stop (one of eight rail stops, right after Needs You)
 shows one day at a time as a MERGE of three things the app already holds: the mirror's events,
 the deadlines triage read out of the mail, and the threads coming back from
 Later. The merge is pure (`app/lib/services/calendar/day_items.dart`,
@@ -371,7 +395,9 @@ a date for the two event reads, and for the invites an "as of" UTC instant
 floored to the quarter hour (`invitesAsOf`) — so a stop left open across
 midnight moves on with the next rebuild and a started invite drops off within
 fifteen minutes. Picking today stores no date: an explicit Today follows the
-clock just as arriving on the stop does.
+clock just as arriving on the stop does. Arriving on the stop from another
+one clears the side panel, as any stop does; stepping the date once there
+(the arrows, the column's day rows, the grid's paging) keeps it open.
 
 ### What a day holds, in order
 
@@ -382,7 +408,10 @@ clock just as arriving on the stop does.
    deadlines resolve against the inbound message that named them
    (`lastInboundAt`, falling back to now), so "EOD" said three weeks ago is not
    due today; a deadline whose day has passed does not appear on today's
-   agenda — overdue work lives in Needs You.
+   agenda — overdue work lives in Needs You. A deadline's day is read in the
+   device zone (`DateTime.toLocal()`), meetings and returns in the display
+   zone; the two differ only when the OS zone lookup fails and the display
+   zone falls back to the mailbox's — a known edge.
 3. **Everything with an instant**, by that instant: meetings, **returns**
    (threads in Later — `bucket = 'later'`, not done — whose `snoozed_until`
    falls on this day in the display zone) and the **Now marker**. The marker
@@ -391,8 +420,9 @@ clock just as arriving on the stop does.
    A meeting and a return at the same instant put the meeting first.
 
 A thread gives ONE row per day: a deadline beats a return. Declined and
-cancelled meetings stay on the day, faded and struck through, because a
-meeting that silently vanished is one somebody turns up to. Each meeting's
+cancelled meetings stay on the day — a cancelled one struck through with a
+`Cancelled` caption, a declined one faded with a `Declined` caption — because
+a meeting that silently vanished is one somebody turns up to. Each meeting's
 overlap line comes from `overlapsForEvent` against that same day's events,
 which skips cancelled, declined, free and workingElsewhere. A timed event sits
 on every local date it touches, from the date of its start through the date of
@@ -534,8 +564,9 @@ in-memory.
   never moves the tile itself: it renders from the store, so a refused,
   failed or dismissed move leaves the tile where it was, and a move that went
   through moves it when the mirror does.
-- **The ghost tile.** `DayGrid.proposal` draws a translucent, outlined,
-  undraggable tile for a time that is not on the calendar: the pending
+- **The ghost tile.** `DayGrid.proposal` draws an undraggable tile — a solid
+  1.5 px primary outline on an 8 % fill; solid because Flutter's `Border` has
+  no dashed style — for a time that is not on the calendar: the pending
   drop's "Moving here…", and a command's standing proposal, "Proposed"
   ([The bar](#the-bar)).
 
@@ -550,18 +581,22 @@ The id resolves through `eventByIdProvider`
    says the Day stop's sentence. Neither the store nor the server is asked.
 2. The mirror row, when there is one. A series master brings its mirrored
    occurrences (`CalendarStore.occurrencesOf`), and every view shows the
-   first one that has not ended (`displayOccurrence`), marked `· series`.
+   first non-cancelled one that has not ended, else the last
+   (`displayOccurrence`), marked `· series`.
    A date outside the current year carries its year.
 3. Otherwise a live `get_calendar_event` — an invite for a meeting outside the
    121-day window, say, or a recurring invite: the mail names the series
    MASTER, and calendarView mirrors the occurrences without it, so a live
    master still takes its occurrences from the mirror. The answer is held in memory ONLY: a row written
    outside `CalendarSync` would be swept by the next run (gotcha 36).
-   `CalendarEventGone` → "This event no longer exists."; any other failure →
-   "Couldn't reach the calendar. Try again in a moment." — except a live
-   RE-read after an earlier one found the event (a revision bump re-runs the
-   read, and a master is always read live), which keeps the event it had
-   rather than turning an open panel into that sentence.
+   `CalendarEventGone` → "This event no longer exists."; a live
+   `CalendarScopeMissing` → `blocked`, with the permission sentence and
+   **Open Settings**; a `CalendarUnavailable` in SDK mode → `blocked` with
+   SDK mode's sentence; any other failure → "Couldn't reach the calendar. Try
+   again in a moment." — except a live RE-read after an earlier one found the
+   event (a revision bump re-runs the read, and a master the mirror does not
+   hold is read live each time), which keeps the event it had rather than
+   turning an open panel into that sentence.
 
 The panel holds: when (`Tomorrow · Wednesday, Sep 30 · 10:00–10:30 AM`, or
 `All day · …`) with a live countdown; Join (emphasised from fifteen minutes
@@ -590,8 +625,9 @@ never as a panel stuck on "Reading…".
 
 **Linked conversations** (`eventLinksProvider`): every stored message whose
 `source_meta_json.event_id` is the event — or, for an occurrence, its series
-master — folded to one row per conversation, newest first, each with its
-storyline chip when the thread is in one. The Teams meeting chat is added when
+master — folded to one row per conversation, each with its storyline chip
+when the thread is in one: the occurrence's own links newest first, then the
+master's, then the meeting chat. The Teams meeting chat is added when
 `teamsThreadId` parses out of the join link AND a `teams` conversation with
 exactly that chat id is stored; a short join link carries no id, and nothing
 is guessed from one. A conversation row opens the thread pushed on the event,
@@ -605,14 +641,16 @@ already kept them out of the list. A request card shows the when line, the
 overlap line, the tally, Yes / Maybe / No (see Writes), Join and **Open
 event**; a cancellation, or a request
 whose event has since been cancelled, is one line — `Cancelled: Design review
-· Thursday, Oct 2 · 10:00–10:30 AM`. An event the calendar no longer has says
+· Friday, Oct 2 · 10:00–10:30 AM`. An event the calendar no longer has says
 so in one line. A message with a request card never starts folded in the transcript; a
 cancellation folds like any other history.
 
 **People.** A person's room leads with `Next meeting: … · Last met 12 days
 ago`, from `nextMeetingWith` / `lastMetWith` over every address in the room
 (`personMeetingsProvider`, keyed by the addresses and the host's quarter-hour
-"as of" instant). "Days ago" counts display-zone dates, not 24-hour spans.
+"as of" instant). Because that instant is floored to the quarter hour, a
+meeting already under way can still be named "Next meeting" for up to fifteen
+minutes. "Days ago" counts display-zone dates, not 24-hour spans.
 
 ## Writes
 
@@ -626,17 +664,40 @@ pure, in `write_rules.dart`.
 run's `notifies` — the addresses the real write would email — decides what
 happens next: a write that emails anybody, and every answer, cancel or delete,
 waits on an inline confirm (`WriteConfirmStrip`: the summary, "This emails:
-…", Send / Cancel, Enter and Esc — and, when a write that confirms by its kind
+…", the confirm and dismiss buttons — **Send** / **Cancel**, **Delete** /
+**Keep it**, **Cancel meeting** / **Keep it** (`confirmLabelFor`,
+`dismissLabelFor`; the plan said Send / Cancel throughout, but a second
+"Cancel" beside "Cancel meeting" reads as the same press) — Enter and Esc —
+and, when a write that confirms by its kind
 came back from the dry run naming nobody, "This may email: …" from the event
 as the app reads it (`mayEmailFor`: the organiser for an answer, the people on
 a create, the guests of a cancel or a delete), so a strip never confirms while
 saying nothing about mail); anything else goes at once and offers an
 **Undo** through the app's one toast (five seconds, `DraftNotifier.undoWindow`,
-and `z`). Every answer confirms by its
+and `z`). The host honours an Undo — the toast's button or `z` — for twice
+that window (`calendarUndoWindow`, 10 s, `calendarUndoStillOpen`); after it,
+"Too late to undo that — open the event instead." and nothing is sent. Every
+answer confirms by its
 kind, not by the dry run's list: each one is sent and emails the organiser,
 whatever the server happened to name. An Undo exists only for a write whose
 DRY RUN emailed nobody — a commit made without a preview never offers one —
 because an answer, once sent, can be followed by another but not taken back.
+
+The Undo is itself a write sent with no confirm, so it runs its own dry run
+first (`_refuseUndo`) and is refused, with nothing sent, when:
+
+- the dry run now lists anyone (a guest added since) — "Undo would email
+  people now — open the event instead." (`undoRefusedSentence`);
+- the event's change key moved since the write it undoes — "This event
+  changed in Outlook — check it and try again." A create's undo, a delete,
+  carries the ack's key as `DeleteEvent.expectChangeKey` and checks it against
+  the mirror's (else the live) key before sending; a move's undo carries the
+  post-move key as `MoveEvent.ifMatch`, so the server refuses it with
+  `event_changed`.
+
+A refused undo's activity row reads `status: refused`, `outcome: undo_emails
+| changed`, `undo: true`.
+
 One send per confirm: the flow moves to committing before its first await, so
 a click and an Enter in the same frame send once.
 
@@ -644,10 +705,10 @@ a click and an Enter in the same frame send once.
 |---|---|---|---|
 | Accept / Maybe / Decline (+ a note, + a proposed time) | the organiser | always | none |
 | Move — organiser with guests | the attendees | yes | none |
-| Move — your own event | nobody | no, acts at once | the move back, with the new change key read at undo time |
+| Move — your own event | nobody | no, acts at once | the move back, pinned to the post-move change key (`if_match`) |
 | Cancel meeting (+ a note to everyone) | the attendees | always | none |
 | Delete | an organiser's delete sends cancellations | always | none |
-| Create | whoever it invites | always when it invites anyone — named outright in `needsConfirm`, not left to the dry run's notifies list, because the Day command bar builds invites from typed words | delete it, when it invited nobody |
+| Create | whoever it invites | always when it invites anyone — named outright in `needsConfirm`, not left to the dry run's notifies list, because the Day command bar builds invites from typed words | delete it, when it invited nobody, refused if its change key has moved |
 
 A create carries a transaction id (32 hex characters from `Random.secure`) made
 once per proposal; a retry reuses the same `CreateEvent`, so a create whose
@@ -683,8 +744,16 @@ not a receipt. The buttons are rebuilt
 fresh, so a "Move to…" field typed for the old time is gone, and the keyboard
 stays in the panel, so `z` reaches the Undo without a click.
 
-**When it fails**, the sentence stands under the buttons that caused it,
-never in a toast:
+**When it fails**, the sentence stands under the buttons that caused it —
+unless the flow that started it has gone (the panel closed, a new command
+replaced its card), when the host toasts it (`_calendarWriteFailed`), because
+the inline line has nowhere left to stand.
+
+Everything a commit does before the real request only reads: the event (for
+a move, and for an undo's delete) and, for an all-day move, the mailbox zone.
+A failure there is mapped as a dry run's — nothing was sent, nothing changed,
+no sync forced. "Couldn't confirm the calendar got this" is only for a
+failure on the real request.
 
 | Failure | Sentence | Also |
 |---|---|---|
@@ -693,9 +762,14 @@ never in a toast:
 | scope missing | "Calendar write permission missing — reconnect in Settings." | |
 | `not_found` | "This event no longer exists." | dropped from the mirror |
 | any other refusal | the first sentence of the server's reason | |
+| `CalendarUnavailable` | its own sentence (SDK mode's, naming the connection that would give one) | |
 | reconsent / signed out | "Reconnect Microsoft in Settings, then try again. Nothing was changed." | |
-| transient, dry run | "Couldn't reach the calendar. Nothing was changed." | **Try again** re-runs the same write |
-| transient, real write | "Couldn't confirm the calendar got this — check it before trying again." | it may have landed: a forced sync; **Try again** only for a create (its transaction id) and a move (its `if_match` turns a landed first try into `event_changed`), never for an answer, a cancel or a delete, which would email everyone twice |
+| `ArgumentError` (a write the backend will not build) | "This can't be sent as it stands. Nothing was changed." | |
+| no mailbox zone for an all-day move | "Couldn't read your mailbox's time zone. Nothing was changed." | |
+| transient, dry run or a read before the write | "Couldn't reach the calendar. Nothing was changed." | **Try again** re-runs the same write; no sync is forced |
+| transient, real write | "Couldn't confirm the calendar got this — check it before trying again." | it may have landed: a forced sync; **Try again** only for a create (its transaction id) and a move (its retry pins the `if_match` it was first sent with, so a landed first try becomes `event_changed` even after the forced sync stored the new key), never for an answer, a cancel or a delete, which would email everyone twice |
+| an undo that would email anyone | "Undo would email people now — open the event instead." | `status: refused`, `outcome: undo_emails` |
+| an undo whose event's key moved | "This event changed in Outlook — check it and try again." | `status: refused`, `outcome: changed` |
 
 **Where they appear, by role** (`eventRoleOf`). An attendee gets Yes / Maybe /
 No (the current answer shown chosen), **Add note** and **Propose new time**; an
@@ -747,7 +821,7 @@ the mail rule in `BriefGatherer.gather`; each failure is an enum word
 | starts after now (an all-day event at its local midnight) | `past` |
 | starts within the next 36 hours (`briefHorizon`; exactly 36 h is in, a minute past is not) | `too_far` |
 | at least one other person: an attendee whose address is not the owner's (case-insensitive) and whose type is not `resource`, or an organiser who is not the owner — an attendee's copy with a hidden guest list names only the organiser, and is still a meeting with someone | `no_others` |
-| at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast | `too_many` |
+| at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast — a narrowing of D6, which set no ceiling | `too_many` |
 | at least one conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
 | (handler only) the event is no longer in the mirror | `gone` |
 
@@ -755,11 +829,17 @@ the mail rule in `BriefGatherer.gather`; each failure is an enum word
 addresses, so the address match never finds a chat; mapping them through the
 people directory is a follow-up. And `participants_json` holds at most 8
 people per conversation, so an attendee beyond the 8th in a busy thread is
-not matched by that thread.
+not matched by that thread. The prompt says so too: it speaks of the owner's
+"mail" only, never chats.
+
+The owner's address unknown (the keychain has not answered), the gatherer
+throws `BriefOwnerUnknown` rather than answer — the owner's own attendee row
+would count as somebody else — and the worker retries the row; nothing is
+written.
 
 The owner's address is the sync's own lookup (`storedAccount`, `mail` then
-`userPrincipalName`); unknown, an event the owner organised still leaves its
-organiser out, and the planner does not run at all (below). Briefs are keyed
+`userPrincipalName`); unknown, the planner does not run at all (below) and the
+handler's gather throws, as above. Briefs are keyed
 by the OCCURRENCE: the planner reads the mirror's rows, never a series
 master, and a master that reaches the handler anyway is briefed as its
 `displayOccurrence` and stored under THAT occurrence's id, which is the id
@@ -786,10 +866,15 @@ reads only, no model):
   is the owner's, at most 3.
 - **Storylines** — the live storylines of the kept threads, at most 2: the
   title, and the recap (else the summary) capped at 400 and fenced.
-- **Files** — attachment names from the attendees' messages in the kept
-  threads (not inline, not a quoted message or a card), at most 8.
+- **Files** — attachment names from any inbound message in the kept threads
+  (no sender check, unlike the asks; not inline, not a quoted message or a
+  card), at most 8.
 - **Last met** — `lastMetWith` → `lastMetLabel`.
 - **The invite's `body_preview`**, capped at 600 and fenced.
+
+Every cap here, and the task's ceilings below, cuts with `capRunes`, which
+never ends on the first half of a surrogate pair (a lone surrogate is not
+text, and a JSON encoder or model server may refuse it).
 
 The fencing rule: every free-text body arrives from the gatherer inside
 `wrapUntrusted`; the short labels (subjects, names, titles, file names) stay
@@ -803,9 +888,11 @@ coming (the prompt also forbids it) rather than risk saying something false.
 
 **The inputs hash** is sha256 over the event's id, `change_key` and times,
 the owner's address, each kept thread's `source|key|last_message_at|
-message_count`, each ask's message id, each storyline id and each file name.
-A new message moves its thread's stamp and count, so it moves the hash; an
-edit to an existing message's text alone does not. The hash never reads the
+message_count`, each ask's message id, each storyline's id with the sha256
+of its shown text (the recap, else the summary), and each file name. A new
+message moves its thread's stamp and count, so it moves the hash; an edit to
+an existing message's text alone does not. A storyline's text is hashed
+because a recap is rewritten in place, moving no id or stamp. The hash never reads the
 clock.
 
 **The task** (`MeetingBriefTask`, `lib/services/llm/meeting_brief_task.dart`):
@@ -839,10 +926,13 @@ shown them, so the panel links a point to its thread without gathering again
 A dead server (`LlmUnavailableException` and its subclasses) propagates and
 PARKS the kind like a draft, writing nothing; any other failure writes
 `failed` and rethrows, so the worker's retry-once-then-error policy applies.
-**A ready brief is never destroyed** by a later run: over one, a failure or a
-skip keeps `brief_json` and `status = ready` and moves only `generated_at`
-(`CalendarStore.touchBrief`), so the two-hour rule throttles the retries; the
-activity note says `kept: ready`.
+**A ready brief outlives most later runs**: over one, a failure, or a skip
+for `past` (the meeting has started) or aged-out mail, keeps `brief_json` and
+`status = ready` and moves only `generated_at` (`CalendarStore.touchBrief`),
+so the two-hour rule throttles the retries; the activity note says `kept:
+ready`. A skip for `gone`, `declined` or `cancelled` REPLACES it with a
+skipped row: the owner is not going to that meeting, so neither the panel nor
+the teaser should go on offering its brief.
 
 `AiWorker.sources` carries `calendar` for these rows: a work row's source is
 the row's origin, and a brief's is the calendar.
@@ -854,9 +944,12 @@ the walk is already inside, so `DraftNotifier.generate` names the draft's
 message as a priority ref (`pump(first: …)`): it is served at the next claim
 boundary, after at most the one brief already at the model.
 
-**Planning** (`BriefPlanner.plan`). After each calendar sync whose outcome is
-`synced`, and only while processing is on, `InboxScreen._syncCalendar` fires
-the planner (never awaited by the mail load; every failure a trace) and pumps
+**Planning** (`BriefPlanner.plan`). After each calendar sync that
+`InboxScreen._syncCalendar` ran — the poll's, startup's, the refresh button's,
+arriving on the Day stop — whose outcome is `synced`, and only while
+processing is on, it fires the planner. The forced syncs `CalendarWrites`
+starts after a write call `syncNow` directly and plan no briefs. The planner
+runs (never awaited by the mail load; every failure a trace) and pumps
 the draft lane when it queued anything. It returns 0 at once while the
 owner's address is unknown (the keychain has not answered): without it the
 owner counts among every meeting's people. Otherwise it reads every event
@@ -890,8 +983,10 @@ way included), and walks the meetings soonest first, timed before all-day:
 **Regenerate** in the panel is `requeueWork('meeting_brief', 'calendar', id,
 payloadJson: '{"asked":true}', refreshCreatedAt: true)` — a person asked, so
 it goes to the front and is rewritten even when nothing changed — then a
-draft-lane pump. It is offered with processing off too; the request waits and
-runs when the switch comes back.
+draft-lane pump. Over a ready brief it is offered with processing off too
+("Briefs are paused while processing is off." stands in for "Rewriting…"); the
+request waits and runs when the switch comes back. A failed row with
+processing off shows only the paused sentence, with no Regenerate.
 
 **Clear AI results** empties `event_briefs` (a derived table) and the next
 sync plans the briefs again. Briefs are per meeting, not per message, so
@@ -899,7 +994,9 @@ nothing is added to `clearDerived`'s per-message loop.
 
 **The panel.** `BriefSection` (prop-only, `lib/widgets/brief_section.dart`)
 over `eventBriefProvider(<shown occurrence id>)`, drawn while the meeting has
-not ended. In order of precedence: a ready brief (headline, points with a chip
+not ended. In order of precedence: a meeting the owner declined or that was
+cancelled — its sentence, even over a ready brief, since the owner is not
+going; a ready brief (headline, points with a chip
 naming the thread, Open asks, Prep, "Generated 2h ago · Regenerate" — or
 "Rewriting…" while a new one is queued; the old brief stands until the new one
 lands); "Writing the brief…"; "Briefs are paused while processing is off.";
@@ -916,7 +1013,7 @@ lane's progress for this kind, which lands after the work row is written).
 
 **The agenda teaser.** `briefHeadlinesProvider(day)` → `DayPane
 .briefHeadlines`: a ready brief's headline as a muted one-line line under the
-meeting's subject; none on a cancelled meeting.
+meeting's subject; none on a cancelled or a declined meeting.
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks}` → "Meeting brief
@@ -927,8 +1024,11 @@ adds "; the last brief stands"; a park keeps the general sentence. Counts
 and enum words only: an answer that was not the JSON asked for is recorded as
 its category (`format: not JSON`, `rowErrorFor`) in the row's `error` and
 `llm_error` and the work row's error, never a word of the answer. The row's
-`entity_id` is the work row's — the OCCURRENCE id the brief is keyed by (the
-worker's convention: an activity row names the entity its work row does).
+`entity_id` is the work row's (the worker's convention: an activity row
+names the entity its work row does) — the OCCURRENCE id the brief is keyed
+by, except when a series master reached the handler: then the work row and
+the activity row carry the master's id while the brief is stored under the
+occurrence's.
 
 ## Commands
 
@@ -961,18 +1061,27 @@ weak cue wherever it sits; among one strength the earliest wins, and at one
 position the longest ("tentatively accept" is a maybe). Confidence is 0.9 for
 a strong phrase that leads (after "please", "can you" and the like), 0.75 for
 one further in, 0.6 for a weak cue, 0.0 for `unknown`.
-`looksLikeCalendarCommand` (for the ⌘K hand-off) is true for one of three
-shapes: a strong verb that LEADS the text beside a day or clock phrase or a
-calendar noun (meeting, call, invite, calendar, sync, standup, 1:1, lunch,
-event, appointment — "move my 3pm to Thursday", "cancel the standup"); an ask
-phrase — free, agenda, a person's meetings, find a time — as a strong phrase
-anywhere ("what's on tomorrow", "find 30 min with Sam next week"); or a day or
-clock phrase beside a calendar noun, verb or none ("tomorrow's meeting",
-"invite Dana Friday"). A verb alone is never enough — "push notifications",
-"cancel subscription", "book club", "delete account" are searches for mail —
-and a needle carrying a Find facet (`label:`, `-label:`, `from:`, `to:`,
-`is:`, `has:`, `in:`, `before:`, `after:`) is a search being built, so it is
-never handed over.
+`looksLikeCalendarCommand` (for the ⌘K hand-off) is narrow, because the row
+that answers true takes Enter away from the search. A calendar verb or ask
+phrase must LEAD the text — after one optional please / hey / ok / okay / can
+you / could you / would you — and then:
+
+- a person ask stands alone ("when did I last meet Sam");
+- a find-a-time stands alone only with a "with" after it ("find time with
+  Dana");
+- every other phrase needs a day or clock time, or a calendar noun (meeting,
+  call, invite, calendar, sync, standup, 1:1, lunch, event, appointment),
+  after it ("move my 3pm to Thursday", "cancel the standup", "what's on
+  tomorrow").
+
+A phrase further in is a search ("had a good time at the offsite", "notes
+from Monday's meeting"), and so is a day beside a noun with no verb ("Friday
+call recap"). A verb alone is never enough — "push notifications", "cancel
+subscription", "book club", "delete account" are searches for mail — and a
+needle carrying a Find facet (`label:`, `-label:`, `from:`, `to:`, `is:`,
+`has:`, `in:`, `before:`, `after:`) is a search being built, so it is never
+handed over. A false negative costs one click on the Day stop; a false
+positive loses what was typed.
 
 **The parser** (`parseCommand`, SYNCHRONOUS — the live preview runs it per
 keystroke) composes the lexicon, the resolver (in question mode for the three
@@ -981,7 +1090,7 @@ leftover rule:** take away the verb phrase, every when-phrase, every person and
 the filler ("my", "the", "with", "meeting", "please", "in my calendar"…), and
 the words that remain are the subject; quoted text is the subject verbatim
 and is never read as a when or a person. **The move split:** the words before
-the last "to"/"until" followed by a when-phrase say WHICH meeting
+the last "to" / "until" / "till" / "til" / "into" followed by a when-phrase say WHICH meeting
 (`eventWhen`); the rest is the target. With no such "to", a when-phrase
 marked as a reference ("my 3pm", "Monday's") is the meeting. A slot is
 **unresolved** when: no action; no day or time for a create, a move's target
@@ -1007,15 +1116,20 @@ all-day event, is no candidate at all — "cancel my 3pm" with only a 4 PM call
 today finds nothing and says so, rather than cancelling the 4 PM on the
 strength of being today's. Series masters and cancelled meetings are never
 candidates; a tie at the top is a choice, never broken by anything the
-person did not say.
+person did not say. Subject words bind nothing on their own day alone: when
+the typed subject words match none of a meeting's, and no clock time was
+named and no named person is on it, that meeting is no candidate, so "cancel
+tomorrow's standup" never binds tomorrow's only other meeting on its day.
+With a clock time or a person match, the day rule stands.
 
 **The planner never invents a time.** A create with no clock time, and a
 move to a PART of a day ("to tomorrow morning"), is a `SlotChoice` of up to
-three real openings: the owner's own free slots
-(`freeSlotsOnDay` / `freeSlotsInRange`, working hours from the cached mailbox
-settings) when nobody else is invited, `find_meeting_times` with the bare
-addresses when somebody is (a personal account's `unsupported_account` falls
-back to the owner's own, and the title says so). With no when at all it looks
+three real openings. A move's openings are always the owner's own free slots
+(`_localSlots`: `freeSlotsOnDay` / `freeSlotsInRange`, working hours from the
+cached mailbox settings), whoever attends. A create's and a find-a-time's are
+the owner's own when nobody else is invited, `find_meeting_times` with the
+bare addresses when somebody is (a personal account's `unsupported_account`
+falls back to the owner's own, and the title says so). With no when at all it looks
 across the next five working days. A time with no day is today's. A moved
 meeting keeps whatever the text leaves out (`resolveNewTime`): a move to a
 DAY keeps its wall time and its length ("move my 3pm to Thursday" is Thursday
@@ -1057,9 +1171,15 @@ event reference, subject, duration — out of the request; it never computes a
 date. Each phrase is checked against the request and dropped when it is not
 in it — as whole words over the whitespace-collapsed text, so "Dan" is not in
 "Danielle" — then goes through the same resolvers as typed text. A slot the
-rules filled keeps its value, with one exception: when the ACTION was the
+rules filled keeps its value, with two exceptions: when the ACTION was the
 model's, its subject replaces the rules' (the rules never read the leftover
-words as a subject then, they only failed to read them). A move's `when` is
+words as a subject then, they only failed to read them); and when an action
+that needs a meeting found no candidate, the copied event reference is
+appended to the subject and, resolved, replaces `eventWhen`. The length is a
+copied phrase too: `duration` is the exact words ("30 min", "an hour"), `""`
+when none, never a number of minutes; it is used only when it appears in the
+typed text, the duration rules read it as 5 to 480 minutes, and the rules
+found no length of their own. A move's `when` is
 never merged: the planner reads a move's target from the typed words after
 the split, so a merged `when` would be drawn and never used. The outcome's
 `path` is `generative` only when the model's answer changed the action or
@@ -1181,8 +1301,9 @@ path for a long text, and one call record labelled `command_head`.
   `app/assets/calendar/command_heads.json`; otherwise nothing ships and the
   lexicon reads commands alone. All four numbers go in the
   `docs/model-bakeoff.md` ledger — measured: head **pending owner run**,
-  lexicon **pending owner run** (serverless, the heldout test reads the
-  lexicon at 0.710 held-out and 0.140 hard on the fixture set; it read 0.830
+  lexicon **pending owner run** (serverless, the Dart heldout test reads the
+  LEXICON — not the head — at 0.710 held-out and 0.140 hard on the fixture
+  set; it read 0.830
   held-out before fifteen held-out and hard lines that were train templates
   with other slots were rephrased, which is the leakage the mask check now
   refuses).
@@ -1193,8 +1314,9 @@ path for a long text, and one call record labelled `command_head`.
 title row in the agenda AND the grid (never in the invites view), hint "Ask
 or tell: move my 3pm with Dana to tomorrow morning". It is prop-only: the
 screen binds the clock, the zone, the people (`knownPeopleOfRooms` over the
-People rooms) and the meetings (`upcomingEventsProvider(today)`, the next
-two weeks) into `CommandRouter.preview` and `submit`, through
+People rooms) and the meetings (`upcomingEventsProvider(today)`, fifteen
+days from today; the event matcher then looks 14 days ahead when no day is
+named) into `CommandRouter.preview` and `submit`, through
 `commandRouterProvider` / `commandPlannerProvider`.
 
 - **The live preview.** 150 ms after the text stops moving, the synchronous
@@ -1243,8 +1365,8 @@ two weeks) into `CommandRouter.preview` and `submit`, through
   (the `_selectedDay` rule); the text goes with the pane.
 
 **⌘K hand-off.** A plain Find needle of four characters or more that
-`looksLikeCalendarCommand` accepts (the three shapes above, never with a
-Find facet), while the calendar is shown (`calendarShowsMirror`), gets ONE
+`looksLikeCalendarCommand` accepts (a leading verb or ask, above, never with
+a Find facet), while the calendar is shown (`calendarShowsMirror`), gets ONE
 dynamic row in Find's strip, "Ask Day: <text> ↵" (`AskDayIntent`). It is not a `findCommands` entry — that
 list stays fixed at eleven. Enter on it clears Find, selects the Day stop
 and hands the text to the bar, which writes it in and submits it a frame
@@ -1418,6 +1540,11 @@ server or the real calendar.
 - **Resolver gaps:**
   - "this weekend", "the 14th" and recurrence are not read;
   - "in 30 min" is a duration, not a relative time.
+- **Auto-replies (D15).** `read_email`'s `is_auto_reply` is now kept:
+  `McpMailBackend` maps it to `isAutoReply`, the sync stores
+  `source_meta_json.auto_reply: true` (only when true), and
+  `Message.isAutoReply` reads it. Nothing gates on it yet; the follow-ups
+  round consumes it.
 - **Out of scope for this round (D2, D3, D10, D11, D15):**
   - secondary and shared calendars, which need new scopes;
   - the follow-ups engine F1–F4 and To Do, which still lacks

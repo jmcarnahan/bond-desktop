@@ -325,6 +325,17 @@ String railProgressLine({
   }
 }
 
+/// How long a calendar write's Undo is honoured: the toast's own window, and
+/// the same again for `z` after the bar has gone.
+final Duration calendarUndoWindow = DraftNotifier.undoWindow * 2;
+
+/// Whether a calendar Undo offered at [offered] may still run at [now].
+/// Top-level so a test can hold the window without driving a write and a
+/// wait through the screen.
+@visibleForTesting
+bool calendarUndoStillOpen(DateTime offered, DateTime now) =>
+    now.difference(offered) <= calendarUndoWindow;
+
 class InboxScreen extends ConsumerStatefulWidget {
   /// Fired after the stored credentials are cleared, so the gate above can
   /// swap back to the sign-in screen.
@@ -1855,13 +1866,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// today is a moving thing, and a pinned date would leave a pane left open
   /// across midnight titled "Yesterday" — the reader asked for today, not for
   /// the date today happened to be.
+  ///
+  /// Arriving from another stop clears everything beside, as any stop does.
+  /// Already on the Day stop, a new date is only a step (the pane's arrows,
+  /// the column's day rows, the grid paging), so the side panel stays: an
+  /// event open beside, a Find time or a reply is still the reader's work.
+  /// Only a main-pane takeover goes, since the reader asked to see a day.
   void _selectDay(CalendarDate day) {
     final today = ref
         .read(calendarZoneProvider)
         .valueOrNull
         ?.dateOf(DateTime.now().toUtc());
     setState(() {
-      _clearOverlays();
+      if (_section == RailSection.day) {
+        _railOpen = false;
+        _showingActivityLog = false;
+        _showingSettings = false;
+        _showingCompose = false;
+      } else {
+        _clearOverlays();
+      }
       _section = RailSection.day;
       _selectedDay = day == today ? null : day;
       _showingInvites = false;
@@ -5390,11 +5414,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// undoable write (a private change that emailed nobody) offers its Undo
   /// there and on `z`. `cleared: 0`: a calendar write takes no row off the
   /// pile.
-  void _calendarWriteDone(String message, CalendarWrite? undo) => _toast(
-        message,
-        onUndo: undo == null ? null : () => unawaited(_undoCalendarWrite(undo)),
-        cleared: 0,
-      );
+  ///
+  /// The Undo is honoured for [calendarUndoWindow] from the offer, then says
+  /// it is too late: `z` keeps the slot until the next toast, and a calendar
+  /// undo an hour on would overwrite whatever changed on the event since.
+  void _calendarWriteDone(String message, CalendarWrite? undo) {
+    final offered = DateTime.now();
+    _toast(
+      message,
+      onUndo: undo == null
+          ? null
+          : () {
+              if (!calendarUndoStillOpen(offered, DateTime.now())) {
+                _toast('Too late to undo that — open the event instead.',
+                    cleared: 0);
+                return;
+              }
+              unawaited(_undoCalendarWrite(undo));
+            },
+      cleared: 0,
+    );
+  }
 
   /// A calendar write that failed after the place it started had gone (the
   /// panel closed, a new command replaced its card): said here, because the

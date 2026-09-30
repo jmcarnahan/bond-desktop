@@ -235,6 +235,15 @@ void main() {
       expect(brief.prep, ['one', 'two', 'three']);
     });
 
+    test('a clamp at an emoji never leaves half of it', () {
+      // The emoji's two code units straddle the headline cap.
+      final head = 'h' * (MeetingBriefTask.headlineCap - 1);
+      final brief = const MeetingBriefTask().validate({
+        'headline': '$head\u{1F600}tail',
+      });
+      expect(brief.headline, head);
+    });
+
     test('never throws on a malformed answer', () {
       final brief = const MeetingBriefTask().validate({
         'headline': 42,

@@ -198,30 +198,35 @@ final RegExp _findFacet = RegExp(
   caseSensitive: false,
 );
 
-/// The actions whose phrases are questions about the calendar, so strong
-/// enough on their own to hand to the Day stop.
-const Set<CommandAction> _askActions = {
-  CommandAction.askFree,
-  CommandAction.askAgenda,
-  CommandAction.askPerson,
-  CommandAction.findTime,
-};
+/// The polite lead ⌘K strips once before asking whether a verb leads.
+final RegExp _askLead = RegExp(
+  r'^(?:please|hey|ok|okay|can\s+you|could\s+you|would\s+you)[,\s]+',
+  caseSensitive: false,
+);
+
+/// A find-a-time names who it is for with this word.
+final RegExp _with = RegExp(r'\bwith\b', caseSensitive: false);
 
 /// Whether ⌘K's Find text reads as something to hand the Day stop.
 ///
-/// True for one of three shapes, and never for a needle carrying a Find
-/// facet:
+/// The row that answers true takes Enter away from the search, so the test
+/// is narrow: a calendar verb or ask must LEAD the text (after "please",
+/// "can you" and the like), and then
 ///
-/// - a strong verb that LEADS the text, beside a when-phrase or a calendar
-///   noun ("move my 3pm to Thursday", "cancel the standup");
-/// - an ask phrase — free, agenda, a person's meetings, find a time — as a
-///   strong phrase anywhere ("what's on tomorrow", "am I free Thursday");
-/// - a when-phrase beside a calendar noun, verb or none ("tomorrow's
-///   meeting", "invite Dana Friday").
+/// - a person ask stands alone ("when did I last meet Sam");
+/// - a find-a-time stands alone only with a "with" after it ("find time
+///   with Dana");
+/// - every other phrase needs a day or clock time, or a calendar noun, after
+///   it ("move my 3pm to Thursday", "cancel the standup", "what's on
+///   tomorrow").
 ///
-/// A verb alone is not enough, however strong: "push notifications",
-/// "cancel subscription", "book club" and "delete account" are searches for
-/// mail, and the hand-off row would then sit on top of every one of them.
+/// A phrase further in is a search ("had a good time at the offsite", "notes
+/// from Monday's meeting"), as is a day beside a noun with no verb ("Friday
+/// call recap") and any needle carrying a Find facet. A verb alone is not
+/// enough either, however strong: "push notifications", "cancel
+/// subscription", "book club" and "delete account" are searches for mail.
+/// A false negative costs the person one click on the Day stop; a false
+/// positive loses what they typed.
 ///
 /// [now] and [zone] only feed the resolver, whose question here — is there a
 /// when-phrase at all — does not depend on either; they default to the clock
@@ -234,24 +239,24 @@ bool looksLikeCalendarCommand(
   final t = text.trim();
   if (t.isEmpty) return false;
   if (_findFacet.hasMatch(t)) return false;
-  final hit = lexiconHit(t);
-  if (hit != null &&
-      _askActions.contains(hit.action) &&
-      hit.confidence >= lexiconInside) {
+  final lead = _askLead.firstMatch(t)?.end ?? 0;
+  final body = t.substring(lead);
+  final hit = lexiconHit(body);
+  if (hit == null || hit.start != 0) return false;
+  final rest = body.substring(hit.end);
+  if (hit.action == CommandAction.askPerson) return true;
+  if (hit.action == CommandAction.findTime && _with.hasMatch(rest)) {
     return true;
   }
-  final noun = _calendarNoun.hasMatch(t);
+  if (_calendarNoun.hasMatch(rest)) return true;
   final when = resolveWhen(
-    t,
+    rest,
     now: now ?? DateTime.now().toUtc(),
     zone: zone ?? CalendarZone.utc(),
     mode: WhenMode.booking,
   );
   // Only a day or a clock time counts: a bare duration ("30 min") or part of
   // day ("lunch") says nothing about a calendar on its own.
-  final hasWhen = when.spans.any((s) =>
+  return when.spans.any((s) =>
       s.kind != WhenKind.duration && s.kind != WhenKind.part);
-  final leads = hit != null && hit.confidence >= lexiconLeading;
-  if (leads && (hasWhen || noun)) return true;
-  return hasWhen && noun;
 }

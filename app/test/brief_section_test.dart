@@ -186,6 +186,20 @@ void main() {
         reason: 'nothing while the read is in flight');
   });
 
+  testWidgets('a decline or a cancel outranks a ready brief; another reason '
+      'does not', (tester) async {
+    for (final reason in ['declined', 'cancelled']) {
+      await pump(tester, EventBriefView(brief: ready()),
+          eligible: false, reason: reason);
+      expect(find.byKey(BriefSection.headlineKey), findsNothing);
+      expect(status(tester), BriefSection.ineligibleText);
+    }
+    // A meeting that has started keeps the brief it has.
+    await pump(tester, EventBriefView(brief: ready()),
+        eligible: false, reason: 'past');
+    expect(find.byKey(BriefSection.headlineKey), findsOneWidget);
+  });
+
   testWidgets('a failed brief offers Regenerate', (tester) async {
     await pump(tester, EventBriefView(brief: row(EventBrief.failed)));
     expect(status(tester), BriefSection.failedText);

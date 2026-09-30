@@ -439,7 +439,9 @@ beside `headers`, each key omitted when it has nothing to say; the
 meeting-response gate reads it ([02-gates.md](02-gates.md)). In MCP mode the
 backend maps `read_email`'s `meeting_message_type` onto the same key and adds
 `calendarEventId`, stored as `event_id` — the link from a message to its
-calendar event ([14-calendar.md](14-calendar.md)).
+calendar event ([14-calendar.md](14-calendar.md)). It also maps `is_auto_reply`
+to `isAutoReply`, stored as `auto_reply: true` only when true and read by
+`Message.isAutoReply`; nothing gates on it yet.
 
 Two one-shots repair what earlier builds stored, and neither stamps
 `messages.updated_at`, so the keyword index keeps the old text until a
