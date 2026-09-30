@@ -47,16 +47,11 @@ ScriptedLlm routed(String label, Map<String, List<Object>> scripts) {
 /// A unit vector whose cosine against `[1, 0]` is exactly [c].
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
-Map<String, dynamic> groupAnswer(List<int> threads) => {
-      'groups': [
-        {'threads': threads, 'why': 'All three are the homepage rebuild.'},
-      ],
-    };
-
 Map<String, dynamic> nameAnswer() => {
       'evidence': 'shared deal',
       'title': 'Website redesign',
       'summary': 'The studio is reviewing the homepage copy.',
+      'charter': 'The redesign of the Northline Studio website.',
     };
 
 /// The refresh pass's answer — the description coming back unchanged, which
@@ -206,11 +201,11 @@ void main() {
 
     test('the sweep names on the primary and judges on the decision model',
         () async {
-      // Five unassigned threads, three of which link — the sweep proposes one
-      // storyline and names it. Three and not two because a cosine cluster
-      // under `proposeMinClusterSize` never reaches the namer at all. The
-      // cluster is a shortlist, not a verdict, so each of its threads is then
-      // judged against that name, in one batch, by the decision model.
+      // Five unassigned threads. Cosine proposes the pairs and the decision
+      // model's `same_effort` judges them: c1–c3 are one effort, and any pair
+      // with c4 or c5 is a no, so the three form the one cluster. The namer
+      // only writes; the charter check and each member's `member_of` are the
+      // decision model's again.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed('c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
@@ -221,67 +216,20 @@ void main() {
         'storyline_name': [nameAnswer()],
       });
       final (:judge, :decision) = yesJudge();
+      decision
+        ..yes(StorylineQuestion.sameEffort, 'kept-c4', 0.05)
+        ..yes(StorylineQuestion.sameEffort, 'kept-c5', 0.05);
 
       await StorylineService(store, primary, judge: judge).sweep();
 
       expect(primary.schemas, ['storyline_name']);
-      expect(decision.asks, hasLength(1));
+      expect(decision.asks.map((a) => a.question), [
+        StorylineQuestion.sameEffort,
+        StorylineQuestion.charterSpecific,
+        StorylineQuestion.memberOf,
+      ]);
       expect(decision.statesFor(StorylineQuestion.memberOf), hasLength(3));
       expect(await store.loadStorylines(), hasLength(1));
-    });
-
-    test('the neighbourhood grouping goes to the naming client by default',
-        () async {
-      // The dark path, exercised with the test-only override rather than by
-      // flipping the const the rest of the suite reads. Grouping is prose
-      // work of the same kind naming is, so it lands on the 27B — and the
-      // membership questions it produces still go to the decision model.
-      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      await seed('c2',
-          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
-      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      await seed('c4', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
-      final primary = routed('primary', {
-        'storyline_group': [groupAnswer([1, 2, 3])],
-        'storyline_name': [nameAnswer()],
-      });
-      final (:judge, :decision) = yesJudge();
-
-      await StorylineService(
-        store,
-        primary,
-        judge: judge,
-        groupingMode: GroupingMode.model,
-      ).sweep();
-
-      expect(primary.schemas, ['storyline_group', 'storyline_name']);
-      expect(decision.statesFor(StorylineQuestion.memberOf), hasLength(3));
-    });
-
-    test('a group client takes the grouping off the naming client', () async {
-      // The third handle Phase 3 points at a stage of its own. Naming stays
-      // where it was, which is what makes this a split rather than a move.
-      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      await seed('c2',
-          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
-      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      final primary = routed('primary', {
-        'storyline_name': [nameAnswer()],
-      });
-      final grouper = routed('grouper', {
-        'storyline_group': [groupAnswer([1, 2, 3])],
-      });
-
-      await StorylineService(
-        store,
-        primary,
-        judge: yesJudge().judge,
-        groupClient: grouper,
-        groupingMode: GroupingMode.model,
-      ).sweep();
-
-      expect(grouper.schemas, ['storyline_group']);
-      expect(primary.schemas, ['storyline_name']);
     });
 
     test('without a judge a membership question throws, and asks no language '

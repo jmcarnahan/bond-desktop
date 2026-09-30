@@ -13,6 +13,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../llm/llm_client.dart'
@@ -215,6 +216,12 @@ class DecisionHeads {
   final String model;
   final String qhash;
 
+  /// The first 12 hex of the file's sha256, or empty for heads built in
+  /// memory. Two installs that share a [model] name but differ in any weight
+  /// differ here, which is what the sweep's pair cache keys on
+  /// (`DecisionClient.modelIdentity`).
+  final String fingerprint;
+
   /// The vector width every head reads: the file's weight rows', which is
   /// always [width].
   final int hidden;
@@ -232,6 +239,7 @@ class DecisionHeads {
   DecisionHeads._(
     this.model,
     this.qhash,
+    this.fingerprint,
     this.hidden,
     this.maxTokens,
     this._heads,
@@ -244,8 +252,10 @@ class DecisionHeads {
   /// read.
   static Future<DecisionHeads> load(File file) async {
     final Object? decoded;
+    final String text;
     try {
-      decoded = jsonDecode(await file.readAsString());
+      text = await file.readAsString();
+      decoded = jsonDecode(text);
     } on FormatException {
       throw const LlmFormatException(
         'The decision heads file is not JSON.',
@@ -256,8 +266,15 @@ class DecisionHeads {
         'The decision heads file is not a JSON object.',
       );
     }
-    return DecisionHeads.fromJson(decoded.cast<String, Object?>());
+    return DecisionHeads.fromJson(
+      decoded.cast<String, Object?>(),
+      fingerprint: headsFingerprint(text),
+    );
   }
+
+  /// [fingerprint] for a heads file's [text].
+  static String headsFingerprint(String text) =>
+      sha256.convert(utf8.encode(text)).toString().substring(0, 12);
 
   /// Validates everything [apply] and [pYes] rely on, so a bad file fails
   /// once, here, with a sentence, rather than as a wrong answer on every
@@ -267,7 +284,10 @@ class DecisionHeads {
   /// [decisionFields] order, renderer `message`, then `same_effort` (`pair`),
   /// `member_of` (`membership`) and `charter_specific` (`charter`), each
   /// `{id, renderer, options, weight, bias, temperature}`.
-  factory DecisionHeads.fromJson(Map<String, Object?> json) {
+  factory DecisionHeads.fromJson(
+    Map<String, Object?> json, {
+    String fingerprint = '',
+  }) {
     Never refuse(String why) =>
         throw LlmFormatException('The decision heads file $why.');
 
@@ -370,6 +390,7 @@ class DecisionHeads {
     return DecisionHeads._(
       model,
       qhash as String,
+      fingerprint,
       hidden,
       maxTokens,
       heads.sublist(0, fields),

@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 22;
+  int get schemaVersion => 23;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -777,6 +777,20 @@ WHERE needs_you_p IS NULL''');
               from21To22: (m, schema) async {
                 if (!await _tableExists('decision_labels')) {
                   await m.createTable(schema.decisionLabels);
+                }
+              },
+              // v23 — the sweep judges with the decision model. One DERIVED
+              // table, `pair_decisions`: the `same_effort` answers the sweep
+              // has already paid for, keyed by the two thread texts' hashes
+              // and what decided them (`qhash` holds '<qhash>|<model
+              // identity>'), so a pass scores only the pairs it has never
+              // seen. Nothing to backfill: no pair was ever asked before
+              // this version, and Clear AI results empties it.
+              //
+              // Guarded like every step here (db_adoption_test replays them).
+              from22To23: (m, schema) async {
+                if (!await _tableExists('pair_decisions')) {
+                  await m.createTable(schema.pairDecisions);
                 }
               },
             ),

@@ -2,12 +2,10 @@
 ///
 /// They came out of `storyline_service.dart` when that file was split into the
 /// service, `StorylineEdits` and `StorylineGrouper`: every one of them is a
-/// pure function of its arguments, and the naming pass, the grouping pass and
-/// the confirms all have to build a card and order a cluster the same way or
-/// the model that groups a thread reads something different from the model
-/// that names it. Public rather than private to one half for exactly that
-/// reason, and re-exported by `storyline_service.dart` so nothing that imported
-/// the service for them has to change.
+/// pure function of its arguments, and the passes that build a card or order
+/// a cluster have to do it the same way. Public rather than private to one
+/// half for exactly that reason, and re-exported by `storyline_service.dart`
+/// so nothing that imported the service for them has to change.
 library;
 
 import '../models/message_models.dart';
@@ -50,23 +48,16 @@ List<int> centralIndexes(
 /// [cards] numbered `[1] `, `[2] `, … in the order given, each clamped to
 /// [NameStorylineTask.cardCap] AFTER its number is prefixed, then whole
 /// cards dropped from the END until the set joined with `\n---\n` fits
-/// [cap], which defaults to [NameStorylineTask.cardsCap]. Only the grouping
-/// call passes one, and only because `GroupingMode.pool` shows four times
-/// as many cards as the namer ever does; every other caller builds to the
-/// namer's set, which is what makes a card read the same to the model that
-/// groups it as to the model that names it.
+/// [NameStorylineTask.cardsCap].
 ///
-/// The numbers are what the prompt's `outliers` rule points at, so they are
-/// 1-based and the caller maps them back. Dropping whole cards rather than
+/// The numbers are 1-based, so the namer can refer to a thread by the number
+/// a person would read it under. Dropping whole cards rather than
 /// truncating the joined string is the whole change: the old prompt fitted
 /// every card into four thousand characters by cutting each one to eighty
 /// characters, which left the model a list of subject lines. The sweep
 /// orders by centrality, so a dropped card is an edge; the bootstrap path
 /// passes member order and a dropped card there is the last member.
-List<String> numberedCards(
-  List<String> cards, {
-  int cap = NameStorylineTask.cardsCap,
-}) {
+List<String> numberedCards(List<String> cards) {
   const separator = '\n---\n';
   final numbered = <String>[
     for (var i = 0; i < cards.length; i++)
@@ -76,7 +67,7 @@ List<String> numberedCards(
   final kept = <String>[];
   for (final card in numbered) {
     final cost = card.length + (kept.isEmpty ? 0 : separator.length);
-    if (total + cost > cap) break;
+    if (total + cost > NameStorylineTask.cardsCap) break;
     kept.add(card);
     total += cost;
   }

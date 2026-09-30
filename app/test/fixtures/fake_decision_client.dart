@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/providers/app_providers.dart'
     show decisionClientProvider;
@@ -165,6 +167,13 @@ class FakeDecisionClient extends DecisionClient {
     if (error != null) throw error;
     return [for (final state in states) yesFor(question, state)];
   }
+
+  /// What [modelIdentity] answers: a test swaps it to stand for another
+  /// model.
+  String identity = 'fake-model';
+
+  @override
+  Future<String> modelIdentity() async => identity;
 
   /// How many [ensureReady] checks were made.
   int readyChecks = 0;
@@ -343,3 +352,49 @@ DecisionAnswers scriptedAnswers(Map<String, dynamic> json) {
 /// `member_of`, and `llm.callsFor('member_of')` counts the threads judged.
 StorylineJudge scriptedJudge(MessageStore store, ScriptedLlm llm) =>
     StorylineJudge(decision: ScriptedDecisionClient(llm), store: store);
+
+/// The two thread texts of a `same_effort` state (`renderStorylinePair`):
+/// Thread A's, then Thread B's.
+(String, String) pairTextsOf(String state) {
+  const a = 'Thread A:\n';
+  const b = '\n\nThread B:\n';
+  final split = state.indexOf(b);
+  if (!state.startsWith(a) || split < 0) {
+    throw StateError('not a pair state: $state');
+  }
+  return (state.substring(a.length, split), state.substring(split + b.length));
+}
+
+/// A computed [ScriptedLlm] step for the `same_effort` schema: `{'p': …}`
+/// from [p] over the pair's two thread texts. `askPairs` asks both orders, so
+/// a symmetric [p] answers a pair the same whichever thread is A.
+FutureOr<Map<String, dynamic>> Function(LlmCall) sameEffortBy(
+  double Function(String a, String b) p,
+) =>
+    (call) {
+      final (a, b) = pairTextsOf(call.user);
+      return {'p': p(a, b)};
+    };
+
+/// [sameEffortBy] over efforts named by MARKERS: [yes] when both threads'
+/// texts carry a marker of one group, [no] otherwise. A marker matches on
+/// word boundaries, so `kept-c1` is not found inside `kept-c10`.
+FutureOr<Map<String, dynamic>> Function(LlmCall) sameEffortAmong(
+  List<List<String>> groups, {
+  double yes = 0.9,
+  double no = 0.05,
+}) {
+  bool carries(String text, String marker) =>
+      RegExp('(?<![\\w-])${RegExp.escape(marker)}(?![\\w-])').hasMatch(text);
+  int? groupOf(String text) {
+    for (var g = 0; g < groups.length; g++) {
+      if (groups[g].any((marker) => carries(text, marker))) return g;
+    }
+    return null;
+  }
+
+  return sameEffortBy((a, b) {
+    final ga = groupOf(a);
+    return ga != null && ga == groupOf(b) ? yes : no;
+  });
+}

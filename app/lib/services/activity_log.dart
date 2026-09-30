@@ -129,7 +129,14 @@ class ActivityLog {
   /// scan tally counted as "something happened", no Teams sync would ever be
   /// quiet and the panel would fill with "nothing new" rows from the one
   /// connector that only syncs when the user asks.
-  static const Set<String> _scanKeys = {'chats_seen', 'chats_fetched'};
+  ///
+  /// `pairs_cached` is the sweep's for the same reason: a pass that re-read
+  /// its cached `same_effort` answers and proposed nothing did nothing.
+  static const Set<String> _scanKeys = {
+    'chats_seen',
+    'chats_fetched',
+    'pairs_cached',
+  };
 
   /// Where each pass's completion time is stamped. `storyline` is absent on
   /// purpose: it is per-thread work, so "when did it last run" is a fact about

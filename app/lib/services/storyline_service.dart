@@ -43,37 +43,44 @@ export 'storyline_judge.dart' show MembershipAnswer, StorylinePolicy;
 
 /// How [StorylineService.sweep] decides which threads go together.
 ///
-/// [cosine] is the shipped pass: [clusterBySimilarity] over the pool at
-/// [StorylineTuning.clusterLinkThreshold], and the clusters it forms are the
-/// proposals. [model] keeps that pass but demotes it to a NEIGHBOURHOOD
-/// finder — one generous, unsplit sweep at
-/// [StorylineTuning.groupingNeighbourhoodThreshold] — and then asks
-/// [GroupThreadsTask] which threads inside each neighbourhood are one project
-/// or event. Everything below the branch is identical: either way what comes
-/// out is a list of index lists, and `_propose` names it, confirms it and
-/// files what the model declined exactly as before.
+/// [decision] is the shipped pass: cosine only PROPOSES candidate pairs, the
+/// decision model's `same_effort` judges each one, and average linkage over
+/// the judged pairs forms the clusters (`StorylineGrouper`). [cosine] is
+/// [clusterBySimilarity] over the pool at
+/// [StorylineTuning.clusterLinkThreshold], kept ONLY as the golden-sweep
+/// baseline (`make golden-sweep SWEEP_GROUPING=cosine`). Either way what comes
+/// out is a list of index lists, and `_propose` names it, checks its charter,
+/// confirms it and files what the models declined exactly the same.
 ///
-/// The reason the second mode exists is a base rate, not a tuning miss. Over
-/// the golden pool there are 1,346 cross-effort pairs to 85 same-effort ones,
-/// so a threshold that keeps 70% of the real pairs admits sixteen wrong pairs
-/// for every right one and the clusters it builds are mixed by construction
-/// (Round D, confirmed by Round E Phase 1 across twenty-four vector
-/// configurations). Reading a whole neighbourhood at once is the only thing
-/// that can see what a single pairwise number cannot.
+/// The reason the cosine pass stopped deciding is a base rate, not a tuning
+/// miss. Over the golden pool there are 1,346 cross-effort pairs to 85
+/// same-effort ones, so a threshold that keeps 70% of the real pairs admits
+/// sixteen wrong pairs for every right one and the clusters it builds are
+/// mixed by construction (Round D, confirmed by Round E Phase 1 across
+/// twenty-four vector configurations). A pair question the model was trained
+/// on reads what a single cosine cannot.
 enum GroupingMode {
-  /// The cosine clustering forms the proposals. What ships.
+  /// The cosine clustering forms the proposals. The bench baseline.
   cosine,
 
-  /// The cosine clustering draws neighbourhoods and a model says what is
-  /// inside them. Dark until a `make golden-sweep` row clears the ship rule
-  /// in `docs/pipeline/06-storylines.md`.
-  model,
+  /// Cosine proposes pairs, `same_effort` judges them. What ships.
+  decision,
+}
 
-  /// One model call per chunk of the WHOLE pool, in pool order, with no cosine
-  /// neighbourhood drawn at all. Dark until a `make golden-sweep
-  /// SWEEP_GROUPING=pool` row clears the ship rule in
-  /// `docs/pipeline/06-storylines.md`.
-  pool,
+/// How [StorylineService.sweep] checks a named cluster's title and charter
+/// before a confirm is spent on it.
+///
+/// [model] ships: the decision model's `charter_specific` at
+/// `StorylinePolicy.charterSpecificTau`. [lint] is the regex `charterLint`
+/// (`storyline_lint.dart`), kept so `make golden-sweep SWEEP_CHARTER=lint`
+/// can measure the two side by side; `model` stays only if its row is at
+/// least as good. Either way a failed check files the cluster as `possible`.
+enum CharterCheck {
+  /// The regex lint: placeholder, person, category.
+  lint,
+
+  /// The decision model's `charter_specific`. What ships.
+  model,
 }
 
 /// Every number the storyline logic turns on, in one place.
@@ -117,6 +124,10 @@ class StorylineTuning {
   /// score a candidate against — the only thing holding a cluster together is
   /// how close its members sit to each other.
   ///
+  /// Read only by the [GroupingMode.cosine] baseline, as are
+  /// [clusterCoherenceFloor], [clusterSplitStep] and [clusterSplitCeiling]:
+  /// the decision grouping links on `StorylinePolicy.linkTau` instead.
+  ///
   /// A link is no longer a join. Reaching this against ONE member of a group
   /// used to be enough to be in it, which is what chained the golden mailbox
   /// into a single storyline holding 56% of every filed thread on 2026-09-18.
@@ -150,13 +161,13 @@ class StorylineTuning {
 
   /// A storyline of one is just a thread. This is the SURVIVOR floor, applied
   /// after the confirms have spoken: see [proposeMinClusterSize] for how many
-  /// threads a cosine cluster needs before it is worth asking about at all.
+  /// threads a cluster needs before it is worth asking about at all.
   static const int minClusterSize = 2;
 
-  /// How many threads one COSINE cluster needs before the sweep spends a
-  /// naming call on it.
+  /// How many threads one cluster, from either grouping, needs before the
+  /// sweep spends a naming call on it.
   ///
-  /// Two threads that merely embed alike are a coincidence, and the confirms
+  /// Two threads that merely look alike are a coincidence, and the confirms
   /// cannot rescue a pair: they are judged against a charter written from
   /// those same two threads, so a coincidence describes itself and then agrees
   /// with its own description. Three is a pattern — something a charter can be
@@ -169,7 +180,7 @@ class StorylineTuning {
   static const int proposeMinClusterSize = 3;
 
   /// How many threads sharing one series key make a SERIES the sweep seeds as
-  /// a cluster of its own, ahead of the cosine clustering.
+  /// a cluster of its own, ahead of the grouping.
   ///
   /// Three, for [proposeMinClusterSize]'s reason and one of its own: two
   /// threads with the same folded subject are usually a thread and its
@@ -235,62 +246,15 @@ class StorylineTuning {
 
   /// Which pass decides what goes together. See [GroupingMode].
   ///
-  /// A const and not a setting, and the three numbers below it are dark while
-  /// it reads [GroupingMode.cosine]: the model-read grouping ships behind it
-  /// until a full `make golden-sweep` row clears the pre-registered rule —
-  /// correct positives at or above 10, forbidden hits at or below 3,
-  /// `storyline.id` above 50, and the formed clusters at or above 60% pure
-  /// before naming. A measuring pass flips this one line and puts it back,
-  /// which is the diagnostic idiom every `StorylineTuning` number is moved
-  /// under.
-  static const GroupingMode groupingMode = GroupingMode.cosine;
+  /// A const and not a setting. [GroupingMode.decision] ships; the golden
+  /// sweep bench flips it per run (`SWEEP_GROUPING`) to take the cosine
+  /// baseline's row beside it, which is the diagnostic idiom every
+  /// `StorylineTuning` number is moved under.
+  static const GroupingMode groupingMode = GroupingMode.decision;
 
-  /// The cosine a pair needs for the two threads to land in the same
-  /// NEIGHBOURHOOD, under [GroupingMode.model].
-  ///
-  /// Deliberately under [clusterCoherenceFloor], the Qwen vector's recall-70
-  /// rung of 0.43: the neighbourhood is not a proposal and does not have to
-  /// be right, it only has to be a list that HOLDS the threads that belong
-  /// together, so it is drawn to catch more than 70% of same-effort pairs and
-  /// the model throws the rest away. It is the retired scale's 0.55 carried
-  /// over by the same 0.48 / 0.65 rescale the other gates took, rounded to two
-  /// places. Drawing it any tighter would hand the model the same small pure
-  /// groups the cosine pass already forms, and there would be nothing for it
-  /// to decide.
-  static const double groupingNeighbourhoodThreshold = 0.41;
-
-  /// The smallest neighbourhood worth a grouping call. Two threads that link
-  /// are a question the model would be answering from the pair alone, which
-  /// is the coincidence-describes-itself problem [proposeMinClusterSize]
-  /// exists for; three is the first count where leaving one out means
-  /// something.
-  static const int groupingNeighbourhoodMinSize = 3;
-
-  /// The largest neighbourhood the finder will build, before the card budget
-  /// splits it further.
-  ///
-  /// Forty rather than [maxClusterSize]'s twelve, because a neighbourhood is
-  /// a region and not a group: capping it at a group's size would re-cluster
-  /// exactly the seams the model is being asked to find. The card budget is
-  /// the real limit — twelve cards fit one call — so a neighbourhood above
-  /// that is split up the [clusterSplitStep] ladder until each piece fits,
-  /// and this cap only stops a single link chain from swallowing the mailbox
-  /// before that ladder ever runs.
-  static const int groupingNeighbourhoodCap = 40;
-
-  /// How many cards ride one call under [GroupingMode.pool]: forty-eight.
-  ///
-  /// The arithmetic: 48 whole cards of [GroupThreadsTask.cardCap] plus the 47
-  /// separators between them is 29,035 characters, about 7.3K tokens, and the
-  /// answer's ceiling is 24 groups. That fits the prose slot's 16K context
-  /// with the bulk slot loaded beside it, which is the machine every row on
-  /// this number was measured on. The golden pool of about 71 threads is two
-  /// calls.
-  ///
-  /// Nothing else about the pool mode is a number: the chunks are consecutive
-  /// slices of the pool's own order, so this is the only knob and the mode is
-  /// deterministic for the reason the store's order is.
-  static const int poolCardsPerCall = 48;
+  /// Which check a named cluster's charter faces. See [CharterCheck]. The
+  /// bench flips it per run (`SWEEP_CHARTER`).
+  static const CharterCheck charterCheck = CharterCheck.model;
 
   /// How many unanswered PROPOSALS the app may have sitting in the rail at
   /// once: three. A wall of proposals is not a feature; it is a chore, and it
@@ -316,15 +280,19 @@ class StorylineTuning {
   /// Moves only with a golden-sweep row on each side, like every number here.
   static const bool possibleHoldsRoom = false;
 
-  /// How many QUESTIONS one sweep pass may ask — proposals and possible
-  /// filings together — whatever the room says. Three, the old room ceiling.
+  /// How many NAMING calls one sweep pass may make, whatever the room says.
+  /// Three, the old room ceiling. Every cluster that is not already answered
+  /// by its hash costs one, whether it ends as a proposal or as a possible
+  /// row.
   ///
-  /// With [possibleHoldsRoom] off a filing spends no room, and without this a
-  /// pass whose models declined everything would name every cluster it built:
-  /// the first sweep after an upgrade would ask every cluster the old rule
-  /// held back, all at once. A cluster past the cap reaches no model and
-  /// writes no hash, so a later pass builds it again and asks then — the old
-  /// behaviour, unchanged.
+  /// The decision model's questions — the pairs, the charter check, the
+  /// member confirms — are not counted: each is tens of milliseconds, where a
+  /// naming call is seconds of the generative model. With
+  /// [possibleHoldsRoom] off a filing spends no room, and without this a pass
+  /// whose models declined everything would name every cluster it built: the
+  /// first sweep after an upgrade would ask every cluster the old rule held
+  /// back, all at once. A cluster past the cap is not named and writes no
+  /// hash, so a later pass builds it again and asks then.
   static const int maxQuestionsPerPass = 3;
 
   /// The share of a new cluster's threads that, sitting in ONE live automatic
@@ -344,9 +312,9 @@ class StorylineTuning {
   /// unassigned threads — mail or chat — there is no pair for any rule to
   /// consider, so the pass returns before it reads a vector. It says nothing
   /// about whether the pool holds a group worth naming. That is
-  /// [proposeMinClusterSize]'s question on the cosine side and the series
-  /// pre-pass's on the subject side, and [clusterLinkThreshold], the
-  /// per-member confirm and [maxPendingSuggestions] decide the rest. Raising
+  /// [proposeMinClusterSize]'s question on the grouping side and the series
+  /// pre-pass's on the subject side, and the pair judgements, the per-member
+  /// confirm and [maxPendingSuggestions] decide the rest. Raising
   /// this floor would only starve a light mailbox of its first storyline
   /// without sparing a single model call.
   static const int sweepMinUnassigned = 2;
@@ -477,25 +445,27 @@ typedef _MemberContext = ({
 });
 
 /// What one proposal did, as [StorylineService._propose] reports it to the
-/// sweep: whether a suggested storyline was written, whether the cluster was
-/// filed as a `possible` one instead, how many members the confirms kept and
-/// turned away, how many finished threads the probe pulled in, whether the
-/// namer or the charter lint refused the cluster, how many outliers were
-/// dropped, and how many fragment siblings rode a survivor.
+/// sweep: whether the namer was called, whether a suggested storyline was
+/// written, whether the cluster was filed as a `possible` one instead, how
+/// many members the confirms kept and turned away, how many finished threads
+/// the probe pulled in, whether the charter check refused the cluster (the
+/// regex lint's `lint` or the decision model's `charterModel`), and how many
+/// fragment siblings rode a survivor.
 ///
 /// [proposed] and [filed] are two flags rather than one word because the sweep
 /// spends its room on both and the activity row counts only the first: a
 /// filing is a question asked as surely as a proposal is, but it is not a
-/// storyline anybody offered.
+/// storyline anybody offered. [named] is what
+/// [StorylineTuning.maxQuestionsPerPass] counts.
 typedef _ProposeTally = ({
+  bool named,
   bool proposed,
   bool filed,
   int confirmed,
   int rejected,
   int joined,
-  int incoherent,
   int lint,
-  int outliers,
+  int charterModel,
   int fragments,
 });
 
@@ -507,18 +477,18 @@ typedef _Survivor = ({Map<String, Object?> row, String evidence});
 /// sweep bench and to nobody else. See [StorylineService.new]'s
 /// `clusterObserver`.
 ///
-/// [threads] is the cluster AS FORMED: its representatives in pool order,
-/// before the namer's outliers narrowed it and without the fragment siblings
+/// [threads] is the cluster AS PROPOSED: its representatives in pool order,
+/// after the grouping dropped its outliers and without the fragment siblings
 /// that ride those representatives. [outcome] is one of five words:
-/// `formed` (a suggested storyline was written), `incoherent` (the namer
-/// declined it, or kept fewer than [StorylineTuning.minClusterSize]),
-/// `lint` (the charter lint refused the name), `thin` (the confirms left
-/// fewer than [StorylineTuning.minClusterSize] survivors) and `answered`
-/// (a row already held this set's hash and no model was asked).
+/// `formed` (a suggested storyline was written), `lint` (the regex charter
+/// lint refused the name), `charter_model` (the decision model's
+/// `charter_specific` refused it), `thin` (the confirms left fewer than
+/// [StorylineTuning.minClusterSize] survivors) and `answered` (a row already
+/// held this set's hash and no model was asked).
 ///
-/// The last four are not thrown away: a cluster the model declined for any of
-/// those reasons is filed as a `possible` storyline with its members, for a
-/// person to keep or dismiss. See [StorylineService._filePossible].
+/// The three refusals are not thrown away: a cluster declined for any of
+/// them is filed as a `possible` storyline with its members, for a person to
+/// keep or dismiss. See [StorylineService._filePossible].
 typedef SweepClusterObserver = void Function(
   List<({String source, String key})> threads,
   String outcome,
@@ -565,24 +535,14 @@ class StorylineService {
   /// without one throws, which parks the lane rather than guessing.
   final StorylineJudge? _judge;
 
-  /// Where the neighbourhood grouping questions go under
-  /// [GroupingMode.model]: reading a neighbourhood and saying what is one
-  /// project is prose work of the same kind naming is, so it defaults to
-  /// [_client]. Since the decision-model round every chat stage resolves to
-  /// the one generative model, so the handles are the same server in the app;
-  /// they stay separate so a bench can point one stage somewhere else without
-  /// touching the others.
-  ///
-  /// Never dialled while [StorylineTuning.groupingMode] reads
-  /// [GroupingMode.cosine], which is what ships.
-  final LlmClient _groupClient;
-
   /// Where a storyline's REFRESH goes — the re-read of a group as it grows.
   ///
-  /// Its own handle for [_groupClient]'s reason: `storyline_refresh` is a
-  /// stage of its own, so it can be pointed at a different server from the
-  /// naming one without moving either. Defaults to [_client], which is what
-  /// every caller that passes one client gets.
+  /// Its own handle because `storyline_refresh` is a stage of its own: since
+  /// the decision-model round every chat stage resolves to the one generative
+  /// model, so the handles are the same server in the app, but they stay
+  /// separate so a bench can point one stage somewhere else without touching
+  /// the others. Defaults to [_client], which is what every caller that
+  /// passes one client gets.
   final LlmClient _refreshClient;
 
   /// Where a storyline's RECAP goes, on [_refreshClient]'s rule. The most
@@ -635,6 +595,10 @@ class StorylineService {
   /// (`make golden-sweep SWEEP_POSSIBLE_ROOM=0`).
   final bool _possibleHoldsRoom;
 
+  /// [StorylineTuning.charterCheck] unless a bench or a test passed otherwise
+  /// (`make golden-sweep SWEEP_CHARTER=lint`).
+  final CharterCheck _charterCheck;
+
   /// The user actions, which touch no model — see [StorylineEdits]. Every one
   /// of this service's twelve is a delegate onto it.
   late final StorylineEdits _edits;
@@ -647,7 +611,6 @@ class StorylineService {
     this._store,
     LlmClient client, {
     this._judge,
-    LlmClient? groupClient,
     LlmClient? refreshClient,
     LlmClient? recapClient,
     ActivityLog? activityLog,
@@ -658,8 +621,8 @@ class StorylineService {
     @visibleForTesting GroupingMode groupingMode = StorylineTuning.groupingMode,
     @visibleForTesting
     this._possibleHoldsRoom = StorylineTuning.possibleHoldsRoom,
+    @visibleForTesting this._charterCheck = StorylineTuning.charterCheck,
   })  : _client = client,
-        _groupClient = groupClient ?? client,
         _refreshClient = refreshClient ?? client,
         _recapClient = recapClient ?? client,
         _context = contextStore,
@@ -676,7 +639,7 @@ class StorylineService {
     );
     // Straight through, with no field of its own: the grouper is the only
     // reader this ever had, and a copy here could only disagree with it.
-    _grouper = StorylineGrouper(_store, _groupClient, mode: groupingMode);
+    _grouper = StorylineGrouper(_store, judge: _judge, mode: groupingMode);
   }
 
   // ── automatic: one thread ──────────────────────────────────────────────
@@ -1439,11 +1402,8 @@ class StorylineService {
   ///
   /// Returns the charter it wrote, or null when it wrote none.
   ///
-  /// The cards are numbered the same way the sweep numbers them, so the
-  /// prompt's sentence about threads "as listed in [brackets]" is true here
-  /// too. What comes back in `coherent` and `outliers` is IGNORED by design: a
-  /// storyline a person made by hand is not the sweep's to split, and a model
-  /// told to find the odd thread out will always find one.
+  /// The cards are numbered the same way the sweep numbers them, so a card
+  /// reads the same here as it does to the namer in a sweep.
   Future<String?> _bootstrapDescription(
     String storylineId,
     List<String> cards,
@@ -2118,10 +2078,12 @@ class StorylineService {
   /// there is too little unassigned conversation to group, and nothing when
   /// the clusters it finds have all been dismissed before.
   ///
-  /// A cluster is a shortlist, not a decision. Each one is named, and then
-  /// every thread in it is confirmed against that name individually — the same
-  /// question [assignConversation] asks — so a group that merely embeds alike
-  /// cannot ship as a storyline.
+  /// A cluster is a shortlist, not a decision. Cosine proposes pairs and the
+  /// decision model's `same_effort` judges them into groups; each group is
+  /// then named, its charter checked, and every thread in it confirmed
+  /// against that charter individually — the same question
+  /// [assignConversation] asks — so a group that merely embeds alike cannot
+  /// ship as a storyline.
   ///
   /// Mail and chat are clustered together, in one pool. A thread and a chat
   /// about the same launch are one story, and the pass that cannot see both
@@ -2144,6 +2106,10 @@ class StorylineService {
   /// and the deadlock the expiry exists to break would survive it. The long
   /// form is in `docs/pipeline/06-storylines.md`, *When the sweep runs*.
   Future<void> sweep() async {
+    // A new pass: every thread's body is fetched at most once in it, and a
+    // fetch that failed in an earlier pass is tried again.
+    _judge?.beginPass();
+
     // Before the early returns, not after them, and that placement is the
     // whole point: this heals refreshes that were LOST, and the sweep returns
     // early on nearly every pass — there is usually no room and usually
@@ -2252,7 +2218,7 @@ class StorylineService {
     // feed still is: same subject exactly, the same single sender, issues days
     // apart. Folded first, three issues of one vendor's alerts would collapse
     // to a single representative, never reach
-    // [StorylineTuning.seriesMinSize], and land in the cosine pool — where a
+    // [StorylineTuning.seriesMinSize], and land in the grouping pool — where a
     // charter written about something else could admit every issue of the feed
     // one confirm at a time. The pre-pass has to see the raw rows to recognise
     // it.
@@ -2277,7 +2243,7 @@ class StorylineService {
 
     final seededGroups = _foldSeededGroups(series.seeded, repOf);
 
-    // What is left for the cosine clustering: the representatives the seeded
+    // What is left for the grouping: the representatives the seeded
     // series did not take. `fragments.representatives` already excludes
     // everything the pre-pass excluded, and a sibling is never a candidate in
     // its own right — it rides its representative's verdict. The indexes the
@@ -2291,31 +2257,44 @@ class StorylineService {
     final poolRows = [for (final index in poolIndexes) rows[index]];
     final poolVectors = [for (final index in poolIndexes) vectors[index]];
 
-    // Pair-discovery and grouping, all of it inside [StorylineGrouper]: on the
-    // index when there is one and in Dart when there is not under
-    // [GroupingMode.cosine], and a model reading the cards under the other
-    // two. Every path answers in index lists into the pool, so everything from
-    // the next statement down is the pass it always was and nothing here knows
+    // Before a single pair is judged or a naming call spent: a cluster is
+    // judged, named on the 27B and confirmed on the decision model, so a
+    // decision model that cannot answer parks the pass HERE, having asked
+    // nothing and written nothing. Only when something is about to be asked
+    // — a pool the decision grouping will judge, or a seeded series — so a
+    // quiet sweep asks nothing; the cosine baseline's clusters are checked
+    // for below, once it has formed them.
+    final judgesPool = _grouper.judgesPairs && poolRows.length >= 2;
+    var ready = false;
+    if (judgesPool || seededGroups.isNotEmpty) {
+      await _judgeOrThrow().ensureReady();
+      ready = true;
+    }
+
+    // Pair-discovery and grouping, all of it inside [StorylineGrouper]: the
+    // decision model's `same_effort` over cosine-proposed pairs under
+    // [GroupingMode.decision], and the cosine clustering under the baseline.
+    // Every path answers in index lists into the pool, so everything from the
+    // next statement down is the pass it always was and nothing here knows
     // which ran.
     //
-    // Skipped outright under two rows. `clusterBySimilarity` handles a count
-    // of 0 and 1 perfectly well, but a pool that small cannot produce a
-    // cluster of [StorylineTuning.proposeMinClusterSize] and the index probe
-    // is a query, so the guard is here rather than relied on there.
+    // Skipped outright under two rows. Both passes handle a count of 0 and 1,
+    // but a pool that small cannot produce a cluster of
+    // [StorylineTuning.proposeMinClusterSize] and the index probe is a query,
+    // so the guard is here rather than relied on there.
     final grouping = GroupingTally();
-    final cosineClusters = poolRows.length < 2
+    final poolClusters = poolRows.length < 2
         ? const <List<int>>[]
-        : await _grouper.candidates(poolRows, poolVectors, grouping,
-            room: room);
+        : await _grouper.candidates(poolRows, poolVectors, grouping);
 
     // Series first, in the order [seriesOf] produced them, then the clusters
     // largest first, ties by smallest member index — the order BOTH grouping
     // passes answer in, so the branch above does not change what `room` is
-    // spent on. It is a pure function of the store's order either way, which
-    // is what the cluster hashes rest on.
+    // spent on. It is a pure function of the store's order and the pair
+    // answers either way, which is what the cluster hashes rest on.
     final clusters = <List<int>>[
       ...seededGroups,
-      for (final cluster in cosineClusters)
+      for (final cluster in poolClusters)
         [for (final index in cluster) poolIndexes[index]],
     ];
     // The groups actually seeded, after the folding: a series that turned out
@@ -2333,9 +2312,9 @@ class StorylineService {
     // ranked behind it.
     //
     // With the switch off (what ships) a filing spends no ROOM, but every
-    // question — proposal or filing — spends one of
+    // naming call — proposal or filing — spends one of
     // [StorylineTuning.maxQuestionsPerPass], so a pass whose models declined
-    // everything still asks at most three and the rest are rebuilt and asked
+    // everything still names at most three and the rest are rebuilt and asked
     // on a later pass. Each filing writes its hash, so the identical set is
     // never asked again, and a re-cluster that mostly overlaps a live possible
     // storyline is skipped by [_overlapsLivePossible] without a model call.
@@ -2348,11 +2327,14 @@ class StorylineService {
     var rejected = 0;
     var joined = 0;
     var attempted = 0;
-    // The three the namer decides: a cluster it refused, a cluster the charter
-    // lint refused, and the individual threads it named as not belonging.
-    var incoherent = 0;
+    // The naming calls this pass made: what [StorylineTuning.maxQuestionsPerPass]
+    // caps.
+    var namerCalls = 0;
+    // The clusters the charter check refused, by which check refused them.
     var lintRejected = 0;
-    var outliersDropped = 0;
+    var charterModelRejected = 0;
+    // Outliers set aside from the clusters this pass named.
+    var outliersNamed = 0;
     // The siblings that joined on their representative's verdict, summed over
     // every proposal this pass made.
     var fragmentsJoined = 0;
@@ -2375,15 +2357,12 @@ class StorylineService {
           },
     ];
     var overlapsPossible = 0;
-    // Before the first naming call: a cluster is named on the 27B and then
-    // confirmed on the decision model, so a decision model that cannot answer
-    // parks the pass HERE, with no naming call spent on a proposal it could
-    // never finish. Only when there is a cluster to ask about, so a quiet
-    // sweep asks nothing.
-    if (clusters.isNotEmpty) await _judgeOrThrow().ensureReady();
-    for (final cluster in clusters) {
+    // The cosine baseline's clusters, checked before their first naming call
+    // for the reason the check above is made.
+    if (!ready && clusters.isNotEmpty) await _judgeOrThrow().ensureReady();
+    for (final (at, cluster) in clusters.indexed) {
       if (proposed + (_possibleHoldsRoom ? filed : 0) >= room) break;
-      if (proposed + filed >= StorylineTuning.maxQuestionsPerPass) break;
+      if (namerCalls >= StorylineTuning.maxQuestionsPerPass) break;
       final threads = [
         for (final index in cluster)
           (
@@ -2401,9 +2380,9 @@ class StorylineService {
         [for (final index in cluster) vectors[index]],
         doneCandidates: doneCandidates,
         claimedByProbe: claimedByProbe,
-        // Keyed by the representative's thread key, because that is the only
-        // handle `_propose` has on a row once the outliers have narrowed its
-        // list: the index into `rows` does not survive that narrowing.
+        // Keyed by the representative's thread key, because that is the handle
+        // `_propose` reads a survivor's siblings by: the index into `rows`
+        // does not survive the confirms' narrowing.
         siblings: {
           for (final index in cluster)
             if (fragments.siblings[index] case final List<int> group)
@@ -2424,6 +2403,16 @@ class StorylineService {
         ],
         _outcomeOf(tally),
       );
+      if (tally.named) {
+        namerCalls++;
+        // The members the grouping set aside from THIS cluster, counted once,
+        // when it is named: a cluster rebuilt pass after pass and answered
+        // by its hash is not counted again.
+        final pool = at - seededGroups.length;
+        if (pool >= 0 && pool < grouping.clusterOutliers.length) {
+          outliersNamed += grouping.clusterOutliers[pool];
+        }
+      }
       if (tally.proposed) proposed++;
       if (tally.filed) filed++;
       // Summed across every cluster the pass named, the declined ones
@@ -2436,9 +2425,8 @@ class StorylineService {
       // count the CLUSTER's members being judged, and a finished thread the
       // probe pulled in was never part of the cluster.
       joined += tally.joined;
-      incoherent += tally.incoherent;
       lintRejected += tally.lint;
-      outliersDropped += tally.outliers;
+      charterModelRejected += tally.charterModel;
       fragmentsJoined += tally.fragments;
     }
 
@@ -2452,40 +2440,47 @@ class StorylineService {
         overlapsPossible > 0 ||
         seriesExcluded > 0 ||
         folded > 0 ||
-        grouping.calls > 0) {
+        grouping.scored > 0 ||
+        grouping.deferred > 0 ||
+        grouping.clustersDeferred > 0) {
       _log.note({
         'proposed': proposed,
         'confirmed': confirmed,
         'rejected': rejected,
         // A number, always, and never a null or a string: the quiet-kind
         // check reads these as numerics, and a non-numeric here would make
-        // every all-zero sweep loud again. That holds for the eight below too,
-        // `lint` included: the reason the lint gave is on the possible
-        // storyline it filed, and what this row carries is how many there
-        // were. The one deliberate
+        // every all-zero sweep loud again. That holds for every count below
+        // too, `lint` and `charter_model` included: what this row carries is
+        // how many clusters each check filed as possible. The one deliberate
         // exception on this row is `deferred`, written by [_deferSweep]
         // instead of any of these, whose value is a STRING so that a deferred
         // pass is never suppressed as quiet.
         'joined': joined,
         'series': seriesSeeded,
         'series_excluded': seriesExcluded,
-        'incoherent': incoherent,
         'lint': lintRejected,
-        'outliers': outliersDropped,
+        'charter_model': charterModelRejected,
+        // Members the grouping set aside from the clusters this pass named,
+        // back to the pool.
+        'outliers': outliersNamed,
+        // Clusters formed but not proposed because the pass's pair budget
+        // could not complete them.
+        'clusters_deferred': grouping.clustersDeferred,
         'fragments': fragmentsJoined,
         'folded': folded,
         // Clusters skipped because most of their threads already sit in one
         // live possible storyline — see [StorylineTuning.possibleOverlapShare].
         'overlaps_possible': overlapsPossible,
-        // The four grouping counts, and they are on the row in BOTH modes —
-        // four zeroes under [GroupingMode.cosine]. The bench reads the same
-        // keys off either tree, so a row missing them would read as a pass
-        // that grouped nothing rather than as one that never grouped, and the
-        // two are the comparison the whole measurement is.
-        'grouping_calls': grouping.calls,
-        'grouped': grouping.grouped,
-        'grouping_failed': grouping.failed,
-        'grouping_unfit': grouping.unfit,
+        // The naming calls, and the pair counts on the row in BOTH modes —
+        // zeroes under [GroupingMode.cosine]. The bench reads the same keys
+        // off either tree, so a row missing them would read as a pass that
+        // judged nothing rather than as one that never judged. `pairs_cached`
+        // is a scan key to the log: a pass that only re-read its cache did
+        // nothing worth a row.
+        'namer_calls': namerCalls,
+        'pairs_scored': grouping.scored,
+        'pairs_cached': grouping.cached,
+        'pairs_deferred': grouping.deferred,
       });
     }
   }
@@ -2586,7 +2581,7 @@ class StorylineService {
   ///
   /// Three issues of ONE cancelled meeting are one thread and not a recurring
   /// series, so a group that folds that far is not seeded at all and its single
-  /// representative falls back to the cosine pool with everything else.
+  /// representative falls back to the grouping pool with everything else.
   /// [repOf] maps every pool index to the row that stands for it, a
   /// representative to itself.
   static List<List<int>> _foldSeededGroups(
@@ -2611,13 +2606,13 @@ class StorylineService {
   /// The one word [SweepClusterObserver] gets for what [_propose] returned.
   ///
   /// Read in the order the exits happen: a proposal beats everything, the
-  /// namer's refusal and the lint's come before any confirm was spent, a
-  /// cluster whose confirms ran but left too few is `thin`, and a cluster
-  /// that spent nothing was answered by a hash already on file.
+  /// charter check's refusal comes before any confirm was spent, a cluster
+  /// whose confirms ran but left too few is `thin`, and a cluster that spent
+  /// nothing was answered by a hash already on file.
   static String _outcomeOf(_ProposeTally tally) {
     if (tally.proposed) return 'formed';
-    if (tally.incoherent > 0) return 'incoherent';
     if (tally.lint > 0) return 'lint';
+    if (tally.charterModel > 0) return 'charter_model';
     if (tally.confirmed + tally.rejected > 0) return 'thin';
     return 'answered';
   }
@@ -2730,7 +2725,7 @@ class StorylineService {
   ///
   /// A seeded group is capped at [StorylineTuning.maxClusterSize] and takes
   /// the FIRST of its members in row order, which is the newest: the rest are
-  /// neither seeded nor excluded, so they stay in the cosine pool and are
+  /// neither seeded nor excluded, so they stay in the grouping pool and are
   /// there for a later pass.
   ///
   /// Public for that pin, on [fragmentsOf]'s precedent: a pre-pass that takes
@@ -2804,16 +2799,19 @@ class StorylineService {
     return sender != null;
   }
 
-  /// Names one cluster, asks whether each of its threads actually belongs
-  /// under that name, and stores the survivors as a suggestion.
+  /// Names one cluster, checks what the namer wrote, asks whether each of its
+  /// threads actually belongs under it, and stores the survivors as a
+  /// suggestion.
   ///
-  /// The naming call reads the whole cluster — a group is named after what
-  /// most of it is about, and hiding the outliers from that call would only
-  /// make the name worse. What comes back is then the criteria: the title, the
-  /// summary and above all the charter the model just wrote are what each
-  /// thread is confirmed against, one at a time. Before this, a cluster shipped
-  /// whole, and a naming pass that wrote "this excludes unrelated work
-  /// requests" would file the unrelated work requests anyway.
+  /// The cluster arrives already judged: under [GroupingMode.decision] its
+  /// members are the ones the decision model's `same_effort` put together,
+  /// with the outliers already back in the pool. So the namer only WRITES —
+  /// the title, the summary and above all the charter — and what it wrote is
+  /// the criteria: the charter check reads it before a confirm is spent, and
+  /// each thread is then confirmed against it, one `member_of` at a time.
+  /// Before the confirms, a cluster shipped whole, and a naming pass that
+  /// wrote "this excludes unrelated work requests" would file the unrelated
+  /// work requests anyway.
   ///
   /// A storyline that IS born then runs one bounded probe over
   /// [doneCandidates] — the finished threads the sweep diverted out of the
@@ -2824,12 +2822,12 @@ class StorylineService {
   /// so a thread that joins now is in the storyline's very first recap.
   ///
   /// Returns a tally rather than a bool: the sweep budgets its room on
-  /// proposals, but the activity row is about the judging, which happens
-  /// whether or not anything is proposed. `confirmed` and `rejected` are the
-  /// CLUSTER's members being judged and nothing else — the probe's own
-  /// confirmations are reported only as `joined`, because a finished thread
-  /// that was offered and turned away was never a member of the group the
-  /// user is being asked about.
+  /// proposals and its naming calls on [_ProposeTally.named], but the
+  /// activity row is about the judging, which happens whether or not anything
+  /// is proposed. `confirmed` and `rejected` are the CLUSTER's members being
+  /// judged and nothing else — the probe's own confirmations are reported
+  /// only as `joined`, because a finished thread that was offered and turned
+  /// away was never a member of the group the user is being asked about.
   /// [claimedByProbe] is the sweep's running set of threads an earlier
   /// proposal in the SAME pass already took — read and written by the probe,
   /// so one finished thread joins at most one newborn storyline.
@@ -2841,10 +2839,11 @@ class StorylineService {
   /// whose representative was rejected joins nothing. They are counted as
   /// `fragments` and they never count toward either cluster-size floor.
   ///
-  /// The work runs in three helpers, in this order: [_confirmMembers] judges
-  /// the cluster member by member, [_writeProposal] stores what survived
-  /// together with its fragment siblings, and [_probeFinished] offers the
-  /// diverted finished threads the same membership question.
+  /// The work runs in five helpers, in this order: [_name] writes the text,
+  /// [_charterRefusal] checks it, [_confirmMembers] judges the cluster member
+  /// by member, [_writeProposal] stores what survived together with its
+  /// fragment siblings, and [_probeFinished] offers the diverted finished
+  /// threads the same membership question.
   Future<_ProposeTally> _propose(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors, {
@@ -2854,14 +2853,14 @@ class StorylineService {
     Map<String, List<Map<String, Object?>>> siblings = const {},
   }) async {
     const nothing = (
+      named: false,
       proposed: false,
       filed: false,
       confirmed: 0,
       rejected: 0,
       joined: 0,
-      incoherent: 0,
       lint: 0,
-      outliers: 0,
+      charterModel: 0,
       fragments: 0,
     );
 
@@ -2879,108 +2878,31 @@ class StorylineService {
     if (await _answeredByHash(threads)) return nothing;
 
     final id = newStorylineId();
-    final named = await _name(rows, vectors);
-    final result = named.result;
-
-    // The model's own out, read as the live model actually uses it. Asked the
-    // prompt as it ships, the 27B answers `coherent: false` whenever ANY
-    // thread does not belong and then lists those threads in `outliers`,
-    // writing its title and charter for the group that remains — which is
-    // what the prompt's own sentence tells it to do. Measured on the golden
-    // pool: eight clusters of eight came back false, four of them listing
-    // every thread and the rest listing 4 of 7, 3 of 6, 2 of 3 and 1 of 3. So
-    // `false` means "not all of them", and refusing on it threw away every
-    // cluster the sweep formed.
-    //
-    // What is left of the out is the two answers that name no group to keep:
-    // `false` with an empty outlier list, which is the model declining
-    // outright, and a kept set under [StorylineTuning.minClusterSize], which
-    // is the same refusal spelled as a list. Everything else proceeds on the
-    // kept threads, `coherent` false or true alike, and the per-member
-    // confirms are the guard on them: each is judged against the charter the
-    // model wrote for the group it kept, and `minClusterSize` is applied again
-    // to the survivors.
-    //
-    // Filed rather than thrown away, and filed WHOLE: the namer declined the
-    // group it was shown, so the group it was shown is what a person gets to
-    // look at. The row carries the ORIGINAL cluster's hash, so the identical
-    // set is recognised by `dismissedHashExistsAny` next pass and costs
-    // nothing. `incoherent` counts it either way — the tally is about what the
-    // judging did, and what it did was decline.
-    final dropped = rows.length - named.kept.length;
-    if ((!result.coherent && result.outliers.isEmpty) ||
-        named.kept.length < StorylineTuning.minClusterSize) {
-      await _filePossible(id, result, clusterHash, rows, siblings);
-      return (
-        proposed: false,
-        filed: true,
-        confirmed: 0,
-        rejected: 0,
-        joined: 0,
-        incoherent: 1,
-        lint: 0,
-        outliers: 0,
-        fragments: 0,
-      );
-    }
-
-    // Everyone in the cluster AS THE NAMER KEPT IT, computed once: the charter
-    // was written for the kept group, so the lint reads it against those
-    // people and not against a roster that still holds the outliers' threads.
-    final seen = <String>{};
-    final storylineParticipants = <String>[];
-    for (final index in named.kept) {
-      for (final display in _displaysOf(Conversation.fromRow(rows[index]))) {
-        if (seen.add(display.toLowerCase())) storylineParticipants.add(display);
-      }
-    }
+    final result = await _name(rows, vectors);
 
     // The charter the confirms are about to be judged against, read before a
-    // single one is spent. A placeholder, a roster of the cluster's own
-    // people, or a bare class of message is a charter that admits everything,
-    // and the confirm stage cannot refuse what the charter allows.
-    final lintReason = charterLint(
-      title: result.title,
-      charter: result.charter,
-      participants: storylineParticipants,
-    );
-    if (lintReason != null) {
-      // The namer's KEPT rows, not the whole cluster: the charter it could not
-      // write was for the group it kept, and the outliers it named are threads
-      // it said are not part of this at all. `lint` counts it as it always
-      // did — the counter says why the cluster was filed as possible, not that
-      // nothing was written.
-      await _filePossible(
-        id,
-        result,
-        clusterHash,
-        [for (final index in named.kept) rows[index]],
-        siblings,
-      );
+    // single one is spent. A charter that names a person, a team or a kind of
+    // message admits everything, and the confirm stage cannot refuse what the
+    // charter allows. Filed rather than thrown away, and filed WHOLE: the
+    // group is real enough to have been formed, and a person may know what
+    // it is where the namer could not say. The row carries the cluster's
+    // hash, so the identical set is recognised by `dismissedHashExistsAny`
+    // next pass and costs nothing.
+    final refusal = await _charterRefusal(result, rows);
+    if (refusal != null) {
+      await _filePossible(id, result, clusterHash, rows, siblings);
       return (
+        named: true,
         proposed: false,
         filed: true,
         confirmed: 0,
         rejected: 0,
         joined: 0,
-        incoherent: 0,
-        lint: 1,
-        outliers: 0,
+        lint: refusal == CharterCheck.lint ? 1 : 0,
+        charterModel: refusal == CharterCheck.model ? 1 : 0,
         fragments: 0,
       );
     }
-
-    // The outliers are simply not confirmed and not members. Nothing is
-    // written for them and nothing blocks them: they go back into the pool,
-    // where the next pass may cluster them with something they do belong to.
-    // `rows` is narrowed because everything below reads it: the confirms, the
-    // member writes and the participants the probe re-reads. `vectors` is NOT,
-    // and deliberately: nothing past this line reads it. The probe builds its
-    // centroid by decoding `survivor.row['embedding']` for the threads that
-    // actually survived the confirms, which is a different set again, so
-    // narrowing the parameter here would be a store nobody loads.
-    final outliersDropped = dropped;
-    rows = [for (final index in named.kept) rows[index]];
 
     // Never stored, and deliberately so: this exists only to give the judge
     // the title and charter to ask about, and the whole point of the
@@ -3003,24 +2925,23 @@ class StorylineService {
     // forked three ways clear a floor that exists to ask for three
     // conversations.
     if (judged.survivors.length < StorylineTuning.minClusterSize) {
-      // `rows` is already the namer's kept set — narrowed a few lines above —
-      // and that, not the survivors, is what is filed. The confirms are the
-      // decision model's answer thread by thread; the question being handed to
-      // the person is the group the namer kept, and pruning it by an answer
-      // the person is not being shown would ask them about something else.
+      // The whole cluster, not the survivors, is what is filed. The confirms
+      // are the decision model's answer thread by thread; the question being
+      // handed to the person is the group, and pruning it by an answer the
+      // person is not being shown would ask them about something else.
       await _filePossible(id, result, clusterHash, rows, siblings);
       // No probe on this branch, and that is the point of saying so: a group
       // nobody has vouched for must not go recruiting history to make itself
       // big enough to ship.
       return (
+        named: true,
         proposed: false,
         filed: true,
         confirmed: judged.survivors.length,
         rejected: judged.rejected,
         joined: 0,
-        incoherent: 0,
         lint: 0,
-        outliers: outliersDropped,
+        charterModel: 0,
         fragments: 0,
       );
     }
@@ -3044,16 +2965,62 @@ class StorylineService {
     );
 
     return (
+      named: true,
       proposed: true,
       filed: false,
       confirmed: judged.survivors.length,
       rejected: judged.rejected,
       joined: joined,
-      incoherent: 0,
       lint: 0,
-      outliers: outliersDropped,
+      charterModel: 0,
       fragments: written.fragments,
     );
+  }
+
+  /// Which check refused what the namer wrote for [rows], or null when the
+  /// title and charter name something specific enough to confirm against.
+  ///
+  /// [CharterCheck.model] asks the decision model's `charter_specific` and
+  /// refuses under [StorylinePolicy.charterSpecificTau], and refuses the
+  /// namer's fallback title or an empty charter without asking;
+  /// [CharterCheck.lint]
+  /// is the regex `charterLint`, read against everyone on the cluster's
+  /// threads so a charter that is only a roster of them is caught.
+  Future<CharterCheck?> _charterRefusal(
+    NameResult result,
+    List<Map<String, Object?>> rows,
+  ) async {
+    switch (_charterCheck) {
+      case CharterCheck.model:
+        // A title the namer could not write (the task's fallback) or no
+        // charter at all names no effort by construction: refused without
+        // asking, under the model arm's word.
+        if (result.title.trim() == NameStorylineTask.fallbackTitle ||
+            result.charter.trim().isEmpty) {
+          return CharterCheck.model;
+        }
+        final p = await _judgeOrThrow().charterSpecific(
+          result.title,
+          result.charter.isEmpty ? null : result.charter,
+        );
+        return p < StorylinePolicy.charterSpecificTau
+            ? CharterCheck.model
+            : null;
+      case CharterCheck.lint:
+        final seen = <String>{};
+        final participants = <String>[];
+        for (final row in rows) {
+          for (final display in _displaysOf(Conversation.fromRow(row))) {
+            if (seen.add(display.toLowerCase())) participants.add(display);
+          }
+        }
+        final reason = charterLint(
+          title: result.title,
+          charter: result.charter,
+          participants: participants,
+        );
+        return reason == null ? null : CharterCheck.lint;
+    }
   }
 
   /// Judges each of [rows] against the charter [proposal] was just named
@@ -3348,20 +3315,14 @@ class StorylineService {
     return joined;
   }
 
-  /// One naming call over the cluster's most central cards, and what it said.
-  ///
-  /// [kept] are the indexes into [rows] the model did NOT name as outliers, in
-  /// order. `vectors[i]` is `rows[i]`'s decoded vector, which is what makes
+  /// One naming call over the cluster's most central cards, and what it
+  /// wrote. `vectors[i]` is `rows[i]`'s decoded vector, which is what makes
   /// "most central" answerable here rather than a second decode.
-  ///
-  /// The range check on the outlier numbers is this method's rather than the
-  /// task's: only the caller knows how many cards it numbered, and a number
-  /// past the end is a card the model never saw.
-  Future<({NameResult result, List<int> kept})> _name(
+  Future<NameResult> _name(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
   ) async {
-    var central = centralIndexes(
+    final central = centralIndexes(
       vectors,
       take: StorylineTuning.namingCards,
     );
@@ -3376,39 +3337,23 @@ class StorylineService {
         ),
       ));
     }
-    final numbered = numberedCards(cards);
-    // Dropping from the far end can leave fewer cards than there are central
-    // indexes, and card `[k]` must keep meaning the k-th of what was SENT.
-    final shown = numbered.length;
-    central = central.take(shown).toList();
-
-    final result = await runTask(
+    return runTask(
       _client,
       const NameStorylineTask(),
-      NameInput(numbered),
+      NameInput(numberedCards(cards)),
       maxTokens: NameStorylineTask.maxTokens,
       temperature: 0,
-    );
-
-    final outliers = <int>{
-      for (final number in result.outliers)
-        if (number >= 1 && number <= shown) central[number - 1],
-    };
-    return (
-      result: result,
-      kept: [
-        for (var i = 0; i < rows.length; i++)
-          if (!outliers.contains(i)) i,
-      ],
     );
   }
 
   /// Files a cluster the model declined as a `possible` storyline, WITH its
   /// members, so a person decides what the model would not.
   ///
-  /// One insert site, three reasons: the namer said these threads are not one
-  /// storyline, the charter lint refused what it wrote, or the confirms left
-  /// fewer than [StorylineTuning.minClusterSize] survivors. All three used to
+  /// One insert site, two reasons: the charter check (the decision model's
+  /// `charter_specific`, or the regex lint on the bench's other arm) refused
+  /// what the namer wrote, or the confirms left fewer than
+  /// [StorylineTuning.minClusterSize] survivors. Before the decision model
+  /// grouped, the namer could decline a cluster too; every reason used to
   /// write a member-less `dismissed` tombstone, and on the owner's own mailbox
   /// that was the whole sweep: four groups a person would recognise, two
   /// declined by the namer and two refused by the lint, and a rail reading
@@ -3430,11 +3375,10 @@ class StorylineService {
   ///   cluster is never re-asked. That is what the tombstone was for, and the
   ///   hash does it just as well from a row the user can see.
   ///
-  /// [rows] are the members to file, and which rows those are differs by
-  /// reason: the whole cluster when the namer declined it outright, and the
-  /// namer's kept rows when the lint or the confirms are what refused. The
-  /// confirms' own verdicts are deliberately not applied — the person is being
-  /// asked about the GROUP, not about the decision model's answer on each thread.
+  /// [rows] are the members to file: the whole cluster as the grouping
+  /// proposed it, whichever check refused. The confirms' own verdicts are
+  /// deliberately not applied — the person is being asked about the GROUP,
+  /// not about the decision model's answer on each thread.
   ///
   /// [siblings] are the pool rows that are FRAGMENTS of one of those rows,
   /// keyed by its `'<source>\n<key>'` the way [_writeProposal] reads them, and
@@ -3451,12 +3395,12 @@ class StorylineService {
   /// proposal path's: no description worth keeping was written here, so the
   /// moment a person KEEPS this storyline it reads as stale and the refresh
   /// pass describes it properly — which is the first point at which spending a
-  /// 27B call on it is worth anything. [clusterHash] is always the ORIGINAL
-  /// cluster's, the question that was asked, even when outliers had already
-  /// been dropped: what must not be asked twice is the group the sweep built.
+  /// 27B call on it is worth anything. [clusterHash] is the cluster's, the
+  /// question that was asked: what must not be asked twice is the group the
+  /// sweep built.
   ///
   /// The title is the one thing the naming call cannot be trusted for here,
-  /// since this is the path where it declined: a rail row reading
+  /// since this is a path where its words were refused: a rail row reading
   /// [NameStorylineTask.fallbackTitle] says nothing about what the user is
   /// looking at. So a real title is used when there is one, and otherwise the
   /// subject the members most share — [fragmentKeyFor]'s folding, which is the

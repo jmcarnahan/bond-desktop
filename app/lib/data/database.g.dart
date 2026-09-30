@@ -20303,6 +20303,364 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
   }
 }
 
+class PairDecisions extends Table with TableInfo<PairDecisions, PairDecision> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  PairDecisions(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _aHashMeta = const VerificationMeta('aHash');
+  late final GeneratedColumn<String> aHash = GeneratedColumn<String>(
+    'a_hash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _bHashMeta = const VerificationMeta('bHash');
+  late final GeneratedColumn<String> bHash = GeneratedColumn<String>(
+    'b_hash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _qhashMeta = const VerificationMeta('qhash');
+  late final GeneratedColumn<String> qhash = GeneratedColumn<String>(
+    'qhash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _pMeta = const VerificationMeta('p');
+  late final GeneratedColumn<double> p = GeneratedColumn<double>(
+    'p',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _decidedAtMeta = const VerificationMeta(
+    'decidedAt',
+  );
+  late final GeneratedColumn<String> decidedAt = GeneratedColumn<String>(
+    'decided_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [aHash, bHash, qhash, p, decidedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'pair_decisions';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<PairDecision> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('a_hash')) {
+      context.handle(
+        _aHashMeta,
+        aHash.isAcceptableOrUnknown(data['a_hash']!, _aHashMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_aHashMeta);
+    }
+    if (data.containsKey('b_hash')) {
+      context.handle(
+        _bHashMeta,
+        bHash.isAcceptableOrUnknown(data['b_hash']!, _bHashMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_bHashMeta);
+    }
+    if (data.containsKey('qhash')) {
+      context.handle(
+        _qhashMeta,
+        qhash.isAcceptableOrUnknown(data['qhash']!, _qhashMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_qhashMeta);
+    }
+    if (data.containsKey('p')) {
+      context.handle(_pMeta, p.isAcceptableOrUnknown(data['p']!, _pMeta));
+    } else if (isInserting) {
+      context.missing(_pMeta);
+    }
+    if (data.containsKey('decided_at')) {
+      context.handle(
+        _decidedAtMeta,
+        decidedAt.isAcceptableOrUnknown(data['decided_at']!, _decidedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_decidedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {aHash, bHash, qhash};
+  @override
+  PairDecision map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return PairDecision(
+      aHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}a_hash'],
+      )!,
+      bHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}b_hash'],
+      )!,
+      qhash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}qhash'],
+      )!,
+      p: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}p'],
+      )!,
+      decidedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}decided_at'],
+      )!,
+    );
+  }
+
+  @override
+  PairDecisions createAlias(String alias) {
+    return PairDecisions(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(a_hash, b_hash, qhash)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class PairDecision extends DataClass implements Insertable<PairDecision> {
+  final String aHash;
+  final String bHash;
+  final String qhash;
+  final double p;
+  final String decidedAt;
+  const PairDecision({
+    required this.aHash,
+    required this.bHash,
+    required this.qhash,
+    required this.p,
+    required this.decidedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['a_hash'] = Variable<String>(aHash);
+    map['b_hash'] = Variable<String>(bHash);
+    map['qhash'] = Variable<String>(qhash);
+    map['p'] = Variable<double>(p);
+    map['decided_at'] = Variable<String>(decidedAt);
+    return map;
+  }
+
+  PairDecisionsCompanion toCompanion(bool nullToAbsent) {
+    return PairDecisionsCompanion(
+      aHash: Value(aHash),
+      bHash: Value(bHash),
+      qhash: Value(qhash),
+      p: Value(p),
+      decidedAt: Value(decidedAt),
+    );
+  }
+
+  factory PairDecision.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return PairDecision(
+      aHash: serializer.fromJson<String>(json['a_hash']),
+      bHash: serializer.fromJson<String>(json['b_hash']),
+      qhash: serializer.fromJson<String>(json['qhash']),
+      p: serializer.fromJson<double>(json['p']),
+      decidedAt: serializer.fromJson<String>(json['decided_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'a_hash': serializer.toJson<String>(aHash),
+      'b_hash': serializer.toJson<String>(bHash),
+      'qhash': serializer.toJson<String>(qhash),
+      'p': serializer.toJson<double>(p),
+      'decided_at': serializer.toJson<String>(decidedAt),
+    };
+  }
+
+  PairDecision copyWith({
+    String? aHash,
+    String? bHash,
+    String? qhash,
+    double? p,
+    String? decidedAt,
+  }) => PairDecision(
+    aHash: aHash ?? this.aHash,
+    bHash: bHash ?? this.bHash,
+    qhash: qhash ?? this.qhash,
+    p: p ?? this.p,
+    decidedAt: decidedAt ?? this.decidedAt,
+  );
+  PairDecision copyWithCompanion(PairDecisionsCompanion data) {
+    return PairDecision(
+      aHash: data.aHash.present ? data.aHash.value : this.aHash,
+      bHash: data.bHash.present ? data.bHash.value : this.bHash,
+      qhash: data.qhash.present ? data.qhash.value : this.qhash,
+      p: data.p.present ? data.p.value : this.p,
+      decidedAt: data.decidedAt.present ? data.decidedAt.value : this.decidedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PairDecision(')
+          ..write('aHash: $aHash, ')
+          ..write('bHash: $bHash, ')
+          ..write('qhash: $qhash, ')
+          ..write('p: $p, ')
+          ..write('decidedAt: $decidedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(aHash, bHash, qhash, p, decidedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is PairDecision &&
+          other.aHash == this.aHash &&
+          other.bHash == this.bHash &&
+          other.qhash == this.qhash &&
+          other.p == this.p &&
+          other.decidedAt == this.decidedAt);
+}
+
+class PairDecisionsCompanion extends UpdateCompanion<PairDecision> {
+  final Value<String> aHash;
+  final Value<String> bHash;
+  final Value<String> qhash;
+  final Value<double> p;
+  final Value<String> decidedAt;
+  final Value<int> rowid;
+  const PairDecisionsCompanion({
+    this.aHash = const Value.absent(),
+    this.bHash = const Value.absent(),
+    this.qhash = const Value.absent(),
+    this.p = const Value.absent(),
+    this.decidedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  PairDecisionsCompanion.insert({
+    required String aHash,
+    required String bHash,
+    required String qhash,
+    required double p,
+    required String decidedAt,
+    this.rowid = const Value.absent(),
+  }) : aHash = Value(aHash),
+       bHash = Value(bHash),
+       qhash = Value(qhash),
+       p = Value(p),
+       decidedAt = Value(decidedAt);
+  static Insertable<PairDecision> custom({
+    Expression<String>? aHash,
+    Expression<String>? bHash,
+    Expression<String>? qhash,
+    Expression<double>? p,
+    Expression<String>? decidedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (aHash != null) 'a_hash': aHash,
+      if (bHash != null) 'b_hash': bHash,
+      if (qhash != null) 'qhash': qhash,
+      if (p != null) 'p': p,
+      if (decidedAt != null) 'decided_at': decidedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  PairDecisionsCompanion copyWith({
+    Value<String>? aHash,
+    Value<String>? bHash,
+    Value<String>? qhash,
+    Value<double>? p,
+    Value<String>? decidedAt,
+    Value<int>? rowid,
+  }) {
+    return PairDecisionsCompanion(
+      aHash: aHash ?? this.aHash,
+      bHash: bHash ?? this.bHash,
+      qhash: qhash ?? this.qhash,
+      p: p ?? this.p,
+      decidedAt: decidedAt ?? this.decidedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (aHash.present) {
+      map['a_hash'] = Variable<String>(aHash.value);
+    }
+    if (bHash.present) {
+      map['b_hash'] = Variable<String>(bHash.value);
+    }
+    if (qhash.present) {
+      map['qhash'] = Variable<String>(qhash.value);
+    }
+    if (p.present) {
+      map['p'] = Variable<double>(p.value);
+    }
+    if (decidedAt.present) {
+      map['decided_at'] = Variable<String>(decidedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PairDecisionsCompanion(')
+          ..write('aHash: $aHash, ')
+          ..write('bHash: $bHash, ')
+          ..write('qhash: $qhash, ')
+          ..write('p: $p, ')
+          ..write('decidedAt: $decidedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -20449,6 +20807,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   );
   late final MessageDecisions messageDecisions = MessageDecisions(this);
   late final DecisionLabels decisionLabels = DecisionLabels(this);
+  late final PairDecisions pairDecisions = PairDecisions(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -20512,6 +20871,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixConvLabelsLabel,
     messageDecisions,
     decisionLabels,
+    pairDecisions,
   ];
 }
 
@@ -30020,6 +30380,206 @@ typedef $DecisionLabelsProcessedTableManager =
       DecisionLabel,
       PrefetchHooks Function()
     >;
+typedef $PairDecisionsCreateCompanionBuilder =
+    PairDecisionsCompanion Function({
+      required String aHash,
+      required String bHash,
+      required String qhash,
+      required double p,
+      required String decidedAt,
+      Value<int> rowid,
+    });
+typedef $PairDecisionsUpdateCompanionBuilder =
+    PairDecisionsCompanion Function({
+      Value<String> aHash,
+      Value<String> bHash,
+      Value<String> qhash,
+      Value<double> p,
+      Value<String> decidedAt,
+      Value<int> rowid,
+    });
+
+class $PairDecisionsFilterComposer
+    extends Composer<_$BondDatabase, PairDecisions> {
+  $PairDecisionsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get aHash => $composableBuilder(
+    column: $table.aHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get bHash => $composableBuilder(
+    column: $table.bHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get qhash => $composableBuilder(
+    column: $table.qhash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get p => $composableBuilder(
+    column: $table.p,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get decidedAt => $composableBuilder(
+    column: $table.decidedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $PairDecisionsOrderingComposer
+    extends Composer<_$BondDatabase, PairDecisions> {
+  $PairDecisionsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get aHash => $composableBuilder(
+    column: $table.aHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get bHash => $composableBuilder(
+    column: $table.bHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get qhash => $composableBuilder(
+    column: $table.qhash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get p => $composableBuilder(
+    column: $table.p,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get decidedAt => $composableBuilder(
+    column: $table.decidedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $PairDecisionsAnnotationComposer
+    extends Composer<_$BondDatabase, PairDecisions> {
+  $PairDecisionsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get aHash =>
+      $composableBuilder(column: $table.aHash, builder: (column) => column);
+
+  GeneratedColumn<String> get bHash =>
+      $composableBuilder(column: $table.bHash, builder: (column) => column);
+
+  GeneratedColumn<String> get qhash =>
+      $composableBuilder(column: $table.qhash, builder: (column) => column);
+
+  GeneratedColumn<double> get p =>
+      $composableBuilder(column: $table.p, builder: (column) => column);
+
+  GeneratedColumn<String> get decidedAt =>
+      $composableBuilder(column: $table.decidedAt, builder: (column) => column);
+}
+
+class $PairDecisionsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          PairDecisions,
+          PairDecision,
+          $PairDecisionsFilterComposer,
+          $PairDecisionsOrderingComposer,
+          $PairDecisionsAnnotationComposer,
+          $PairDecisionsCreateCompanionBuilder,
+          $PairDecisionsUpdateCompanionBuilder,
+          (
+            PairDecision,
+            BaseReferences<_$BondDatabase, PairDecisions, PairDecision>,
+          ),
+          PairDecision,
+          PrefetchHooks Function()
+        > {
+  $PairDecisionsTableManager(_$BondDatabase db, PairDecisions table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $PairDecisionsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $PairDecisionsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $PairDecisionsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> aHash = const Value.absent(),
+                Value<String> bHash = const Value.absent(),
+                Value<String> qhash = const Value.absent(),
+                Value<double> p = const Value.absent(),
+                Value<String> decidedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => PairDecisionsCompanion(
+                aHash: aHash,
+                bHash: bHash,
+                qhash: qhash,
+                p: p,
+                decidedAt: decidedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String aHash,
+                required String bHash,
+                required String qhash,
+                required double p,
+                required String decidedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => PairDecisionsCompanion.insert(
+                aHash: aHash,
+                bHash: bHash,
+                qhash: qhash,
+                p: p,
+                decidedAt: decidedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $PairDecisionsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      PairDecisions,
+      PairDecision,
+      $PairDecisionsFilterComposer,
+      $PairDecisionsOrderingComposer,
+      $PairDecisionsAnnotationComposer,
+      $PairDecisionsCreateCompanionBuilder,
+      $PairDecisionsUpdateCompanionBuilder,
+      (
+        PairDecision,
+        BaseReferences<_$BondDatabase, PairDecisions, PairDecision>,
+      ),
+      PairDecision,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -30082,4 +30642,6 @@ class $BondDatabaseManager {
       $MessageDecisionsTableManager(_db, _db.messageDecisions);
   $DecisionLabelsTableManager get decisionLabels =>
       $DecisionLabelsTableManager(_db, _db.decisionLabels);
+  $PairDecisionsTableManager get pairDecisions =>
+      $PairDecisionsTableManager(_db, _db.pairDecisions);
 }

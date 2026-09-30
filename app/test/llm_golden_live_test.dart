@@ -1140,6 +1140,7 @@ void main() {
       final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
       final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
       final groupingMode = parseSweepGrouping(GoldenDefines.sweepGroupingRaw);
+      final charterCheck = parseSweepCharter(GoldenDefines.sweepCharterRaw);
       final possibleHoldsRoom =
           parseSweepPossibleRoom(GoldenDefines.sweepPossibleRoomRaw);
       final roomRule = sweepRoomRuleName(possibleHoldsRoom);
@@ -1171,6 +1172,7 @@ void main() {
         // ignore: avoid_print
         print(
           'stage ${stage.name}, grouping ${groupingMode.name}, '
+          'charter ${charterCheck.name}, '
           'card ${variant.wireName}, room $roomRule, '
           'prefix length ${report.prefixLength}, dims ${report.dims}, '
           'cards from the run for '
@@ -1211,14 +1213,14 @@ void main() {
 
         // The app's own log, because the sweep's per-pass counts — the series
         // it seeded and excluded, the clusters it refused, the outliers it
-        // dropped — are written there and nowhere else. The run records a row
+        // dropped, the pairs it judged — are written there and nowhere else. The run records a row
         // after each pass and sums them afterwards, rather than the bench
         // keeping a second set of counters that could disagree with the
         // app's.
         final log = ActivityLog(store);
         addTearDown(log.dispose);
-        // Every cluster the sweep judged, as it was formed and before the
-        // namer narrowed or refused it. The store keeps no record of a
+        // Every cluster the sweep judged, as the grouping proposed it and
+        // before the namer wrote a word about it. The store keeps no record of a
         // declined cluster, so this seam is the only place its gold purity can
         // be read from.
         final judged = <JudgedCluster>[];
@@ -1235,9 +1237,10 @@ void main() {
               judge: StorylineJudge(decision: decider, store: store),
               embeddings: EmbeddingsClient(),
               activityLog: log,
-              // No `groupClient`: the grouping call goes to the prose client,
-              // exactly as the naming call does.
+              // SWEEP_GROUPING and SWEEP_CHARTER, defaulting to what the app
+              // ships.
               groupingMode: groupingMode,
+              charterCheck: charterCheck,
               // SWEEP_POSSIBLE_ROOM, defaulting to what the app ships.
               possibleHoldsRoom: possibleHoldsRoom,
               clusterObserver: !observe
@@ -1579,23 +1582,25 @@ void main() {
               (callsByKind[metrics.task] ?? 0) + metrics.n + metrics.failures;
         }
 
-        // The five per-pass counts, summed off the sweep's own activity rows.
+        // The per-pass counts, summed off the sweep's own activity rows.
         // Read after the loop rather than per pass, so a pass the log
         // suppressed as quiet simply contributes nothing.
-        var sweptIncoherent = 0;
         var sweptLint = 0;
+        var sweptCharterModel = 0;
         var sweptOutliers = 0;
         var sweptSeries = 0;
         var sweptSeriesExcluded = 0;
         var sweptFragments = 0;
         var sweptFolded = 0;
-        // The four the model-read grouping writes, zero on a tree running
-        // `GroupingMode.cosine` — which is the point of reading them in both
-        // modes rather than only in the one that moves them.
-        var sweptGroupCalls = 0;
-        var sweptGrouped = 0;
-        var sweptGroupFailed = 0;
-        var sweptGroupUnfit = 0;
+        // The pair counts the decision grouping writes, zero under
+        // `SWEEP_GROUPING=cosine` — which is the point of reading them in both
+        // modes rather than only in the one that moves them — and the naming
+        // calls, which both modes make.
+        var sweptPairsScored = 0;
+        var sweptPairsCached = 0;
+        var sweptPairsDeferred = 0;
+        var sweptNamerCalls = 0;
+        var sweptClustersDeferred = 0;
         for (final row in await store.recentActivity(limit: 1000)) {
           if (row['kind'] != 'storyline_sweep') continue;
           final detail = ActivityEvent.fromRow(row).detail;
@@ -1609,33 +1614,35 @@ void main() {
                 'extract ${at('extract')}, embed ${at('embed')}, '
                 'triage ${at('triage')}');
           }
-          sweptIncoherent += at('incoherent');
           sweptLint += at('lint');
+          sweptCharterModel += at('charter_model');
           sweptOutliers += at('outliers');
           sweptSeries += at('series');
           sweptSeriesExcluded += at('series_excluded');
           sweptFragments += at('fragments');
           sweptFolded += at('folded');
-          sweptGroupCalls += at('grouping_calls');
-          sweptGrouped += at('grouped');
-          sweptGroupFailed += at('grouping_failed');
-          sweptGroupUnfit += at('grouping_unfit');
+          sweptPairsScored += at('pairs_scored');
+          sweptPairsCached += at('pairs_cached');
+          sweptPairsDeferred += at('pairs_deferred');
+          sweptNamerCalls += at('namer_calls');
+          sweptClustersDeferred += at('clusters_deferred');
         }
 
         final tally = SweepTally(
           formed: membership.storylines,
           tombstoned: tombstoned,
           lintRejected: sweptLint,
-          incoherent: sweptIncoherent,
+          charterModelRejected: sweptCharterModel,
           seriesSeeded: sweptSeries,
           seriesExcluded: sweptSeriesExcluded,
           outliersDropped: sweptOutliers,
           fragmentsJoined: sweptFragments,
           fragmentsFolded: sweptFolded,
-          groupingCalls: sweptGroupCalls,
-          grouped: sweptGrouped,
-          groupingFailed: sweptGroupFailed,
-          groupingUnfit: sweptGroupUnfit,
+          pairsScored: sweptPairsScored,
+          pairsCached: sweptPairsCached,
+          pairsDeferred: sweptPairsDeferred,
+          namerCalls: sweptNamerCalls,
+          clustersDeferred: sweptClustersDeferred,
           purityByStoryline: {
             for (final entry in membership.threadsByStoryline.entries)
               entry.key: purityOf(entry.value, goldByThread),
@@ -1709,6 +1716,7 @@ void main() {
             // On both stages, so the two are one row read two ways.
             'stage': stage.name,
             'grouping': groupingMode.name,
+            'charter': charterCheck.name,
             // Zero on every stage but `declared`.
             'declared': slugById.length,
             'recruit_calls': recruitCalls,

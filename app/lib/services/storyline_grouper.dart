@@ -4,61 +4,71 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/conversation_vec_index.dart';
 import '../data/message_store.dart';
+import 'conversation_state.dart' show seriesKeyFor;
+import 'decision/storyline_thread_input.dart' show StorylineThreadText;
 import 'llm/embeddings_client.dart';
-import 'llm/json_task.dart';
-import 'llm/llm_client.dart';
-import 'llm/storyline_tasks.dart';
 import 'storyline_cards.dart';
 import 'storyline_clustering.dart';
+import 'storyline_judge.dart';
 // `show`: the two things that stay declared with the service. Narrowed so the
 // card statics above can only come from `storyline_cards.dart` itself — the
 // service re-exports that file, and an unrestricted import here would make the
 // direct one above redundant.
 import 'storyline_service.dart' show GroupingMode, StorylineTuning;
 
-/// What one sweep's model-read grouping did, counted for the activity row.
+/// What one sweep's decision grouping did with its candidate pairs, counted
+/// for the activity row and the golden sweep bench.
 ///
-/// Mutable and handed DOWN rather than returned, so that
-/// `StorylineGrouper._groupCandidates` can answer in exactly the shape
-/// `_clusterCandidates` answers in — a list of index lists — and the branch
-/// between them stays one expression with nothing below it that knows which
-/// ran.
+/// Mutable and handed DOWN rather than returned, so that the decision path
+/// answers in exactly the shape the cosine path answers in — a list of index
+/// lists — and the branch between them stays one expression with nothing
+/// below it that knows which ran. Every counter stays zero under
+/// [GroupingMode.cosine].
 class GroupingTally {
-  /// Grouping calls made. One per piece shown to the model, which is one per
-  /// neighbourhood except where the card budget split a neighbourhood up.
-  int calls = 0;
+  /// Candidate pairs the pass proposed: the cosine neighbours and the
+  /// shared-subject pairs, de-duplicated.
+  int pairs = 0;
 
-  /// Threads placed in a returned group big enough to propose.
-  int grouped = 0;
+  /// Pairs answered from `pair_decisions`, with no question asked.
+  int cached = 0;
 
-  /// Calls that left their piece ungrouped: the answer threw, or it named no
-  /// group at all. The two are one number deliberately — an empty answer is
-  /// an honest reading of a neighbourhood that holds nothing, and what the
-  /// row is measuring is how much of the pool the pass could not use.
-  int failed = 0;
+  /// Pairs sent to the decision model this pass: candidates, and the
+  /// missing pairs inside a cluster being completed.
+  int scored = 0;
 
-  /// Pieces dropped before any call: too few threads left after a split, or
-  /// still too wide to show in one call at the top of the ladder.
-  int unfit = 0;
+  /// Pairs over [StorylinePolicy.pairBudgetPerPass], asked on a later pass:
+  /// candidates read as p = 0 this pass, and the missing pairs of a cluster
+  /// the budget could not complete.
+  int deferred = 0;
+
+  /// Clusters not proposed this pass because the budget could not complete
+  /// their pairs. Rebuilt and completed on a later pass.
+  int clustersDeferred = 0;
+
+  /// For each cluster [StorylineGrouper.candidates] returned, in order, how
+  /// many members its grouping set aside as outliers. The sweep counts them
+  /// only for the clusters it goes on to name, so a cluster rebuilt pass
+  /// after pass is not counted every time.
+  final List<int> clusterOutliers = [];
 }
 
 /// How a sweep's pool becomes candidate clusters.
 ///
 /// One entry point, [candidates], and behind it the two passes
-/// [GroupingMode] names: the cosine clustering that ships, and the model-read
-/// grouping that reads a neighbourhood or a whole chunk of the pool at once.
-/// Both answer in index lists into the rows they were handed, so nothing above
-/// this class can tell which ran — which is what keeps the namer, the confirms,
-/// the observer and the tombstones identical in either mode.
+/// [GroupingMode] names: the decision grouping that ships, where the cosine
+/// only PROPOSES pairs and the decision model's `same_effort` judges them,
+/// and the cosine clustering kept as the bench baseline. Both answer in
+/// index lists into the rows they were handed, so nothing above this class
+/// can tell which ran — which is what keeps the namer, the confirms, the
+/// observer and the tombstones identical in either mode.
 ///
-/// It came out of `storyline_service.dart` with its block intact. Nothing here
-/// touches a membership, a storyline row or the activity log: the grouping is
-/// pure pair-discovery plus at most one prose call per piece, and the only
-/// state it keeps is the process-wide set of fallback reasons already printed.
+/// Nothing here touches a membership, a storyline row or the activity log.
+/// The only rows it writes are the `pair_decisions` cache, and the only state
+/// it keeps is the process-wide set of fallback reasons already printed.
 class StorylineGrouper {
   StorylineGrouper(
-    this._store,
-    this._groupClient, {
+    this._store, {
+    this._judge,
     this._mode = StorylineTuning.groupingMode,
   });
 
@@ -70,35 +80,38 @@ class StorylineGrouper {
 
   final MessageStore _store;
 
-  /// Where the neighbourhood and pool grouping questions go. Never dialled
-  /// while [_mode] reads [GroupingMode.cosine], which is what ships.
-  final LlmClient _groupClient;
+  /// Who answers `same_effort` under [GroupingMode.decision]. Null only for a
+  /// service that never sweeps; a decision grouping without one throws, which
+  /// parks the lane rather than guessing.
+  final StorylineJudge? _judge;
 
   /// Which pass this grouper groups with. [StorylineTuning.groupingMode] for
-  /// every caller in `lib/`; a test may pass another to exercise a dark path
+  /// every caller in `lib/`; a test or the bench may pass the cosine baseline
   /// without flipping a const the whole suite reads.
   final GroupingMode _mode;
+
+  /// Whether this grouper asks the decision model anything: the sweep checks
+  /// the judge is ready before it hands over a pool that will be judged.
+  bool get judgesPairs => _mode == GroupingMode.decision;
 
   /// The clusters [rows] should be considered in, by whichever pass [_mode]
   /// names.
   ///
   /// The branch lives here rather than at the call site so the sweep asks one
   /// question and reads one answer: index lists into [rows], members ascending,
-  /// largest cluster first. [tally] is filled in only by the model-read passes,
-  /// which is why the cosine path leaves every one of its counters at zero, and
-  /// [room] is the number of proposals the sweep still has slots for.
+  /// largest cluster first. [tally] is filled in only by the decision pass,
+  /// which is why the cosine path leaves every one of its counters at zero.
   Future<List<List<int>>> candidates(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
-    GroupingTally tally, {
-    required int room,
-  }) async =>
+    GroupingTally tally,
+  ) async =>
       _mode == GroupingMode.cosine
           ? await _clusterCandidates(rows, vectors)
-          : await _groupCandidates(rows, vectors, tally, room: room);
+          : await _decisionCandidates(rows, vectors, tally);
 
-  /// The clusters this sweep will consider, from whichever pair-discovery is
-  /// available.
+  /// The clusters the COSINE baseline considers, from whichever
+  /// pair-discovery is available.
   ///
   /// The split is deliberate and narrow: measuring the pairs is the part an
   /// index can do faster, and forming the clusters out of them is the part
@@ -111,12 +124,9 @@ class StorylineGrouper {
   ) async =>
       _clusterBy(vectors.length, (await _similaritiesOf(rows, vectors)).get);
 
-  /// The one pairwise table a sweep builds, whichever pass reads it.
-  ///
-  /// Factored out when the model-read grouping arrived rather than copied
-  /// into it: the index probe is a query per candidate row, and two passes
-  /// each building their own table would double that for an answer that is
-  /// the same both times.
+  /// The one pairwise cosine table a sweep builds, whichever pass reads it:
+  /// the cosine baseline clusters on it whole, and the decision grouping reads
+  /// each row's nearest neighbours off it as candidate pairs.
   Future<PairSimilarities> _similaritiesOf(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
@@ -146,335 +156,278 @@ class StorylineGrouper {
         ceiling: StorylineTuning.clusterSplitCeiling,
       );
 
-  /// The clusters this sweep will consider when a MODEL does the grouping:
-  /// the cosine pass draws neighbourhoods and [GroupThreadsTask] says what is
-  /// inside each one.
+  /// The clusters the DECISION grouping proposes: cosine proposes the pairs,
+  /// the decision model's `same_effort` judges them, and average linkage over
+  /// the judged pairs forms the groups.
   ///
-  /// Answers in the same shape [_clusterCandidates] answers in — index lists
-  /// into [rows], members ascending, nothing below the branch point able to
-  /// tell which pass ran — which is what keeps the namer, the confirms, the
-  /// observer and the tombstones identical in both modes. The tombstone is
-  /// keyed on the member SET, so an identical group is recognised whichever
-  /// pass proposed it.
+  /// The candidate pairs, unordered and de-duplicated:
   ///
-  /// Three steps, and each one is a place a thread can drop out:
+  /// * each row's nearest [StorylinePolicy.pairNeighbours] by cosine, at
+  ///   [StorylinePolicy.pairRetrievalFloor] or above — retrieval, so a loose
+  ///   floor;
+  /// * every pair of rows sharing a series key ([seriesKeyFor], the subject
+  ///   pre-pass's own key), the first [StorylineTuning.maxClusterSize] of each
+  ///   key in pool order. Two issues of one series share a shape and not a
+  ///   subject matter, so the vector can miss them; a fragment key folds less
+  ///   than a series key, so every fragment pair is among these too.
   ///
-  /// * the neighbourhoods, at [StorylineTuning.groupingNeighbourhoodThreshold]
-  ///   with no coherence split — a region, not a proposal, so the only thing
-  ///   allowed to break one up is size;
-  /// * the card budget, which fits twelve whole cards in one call: a
-  ///   neighbourhood above that is re-clustered up the [clusterBySimilarity]
-  ///   ladder until every piece fits, and a piece that is still too wide at
-  ///   [StorylineTuning.clusterSplitCeiling] is dropped unasked;
-  /// * the call itself, whose groups under
-  ///   [StorylineTuning.proposeMinClusterSize] are dropped for the same
-  ///   reason a cosine cluster of two is.
+  /// Two rounds of linkage, because the candidates are not every pair. The
+  /// first reads only the pairs that have an answer ([averageLinkage] with
+  /// `unscoredAsZero: false`), so an effort whose threads are not all each
+  /// other's nearest neighbours still comes together. Each cluster it forms
+  /// of [StorylineTuning.proposeMinClusterSize] or more is then COMPLETED:
+  /// every pair inside it without an answer is asked, and linkage and the
+  /// outlier cut run again over that cluster alone on the full matrix, an
+  /// unscored pair now reading p = 0 ([clusterByAverageLinkage]). Only what
+  /// survives the second round is proposed, so a group is never named on
+  /// part of its evidence.
   ///
-  /// [room] is the number of proposals the sweep still has slots for, and it
-  /// is a budget on the CALLS as well as on the proposals: a naming call is
-  /// spent per cluster and the sweep breaks at `room`, so a pool of forty
-  /// neighbourhoods would otherwise spend forty prose calls to build a list
-  /// the caller reads three entries of. Pieces past the budget are left
-  /// unasked and are NOT counted `unfit`: nothing was judged about them, and
-  /// a count that mixed "the model could not use this" with "the pass ran out
-  /// of room" would be unreadable on a ledger row. Under [GroupingMode.pool]
-  /// it is not a budget on the calls at all: there are two of them on a pool
-  /// this size and the mode exists to read the whole thing.
+  /// Every answer is cached in `pair_decisions` under the two thread texts'
+  /// hashes and [StorylineJudge.decidedBy] (the qhash and the model), so only
+  /// a pair never seen in its current texts is asked, at most
+  /// [StorylinePolicy.pairBudgetPerPass] of them a pass: the candidates
+  /// first, newest threads' pairs first (the pool arrives newest first), and
+  /// the completions out of what is left, largest cluster first. A candidate
+  /// over the budget reads as p = 0 this pass; a cluster the budget cannot
+  /// complete is not proposed this pass and is counted
+  /// [GroupingTally.clustersDeferred]. The cache is what makes the sweep
+  /// converge over the passes that follow.
   ///
-  /// Deterministic at temperature 0 on a fixed order: the neighbourhoods are
-  /// walked in the pool's own order, the cards inside one are ordered by
-  /// centrality, and the members of every group come back ascending.
-  Future<List<List<int>>> _groupCandidates(
+  /// Each row's text is built ONCE here, with its preview rows' bodies
+  /// fetched first ([StorylineJudge.threadText]), because the hash that keys
+  /// the cache is the hash of the text the model reads. That is a store read
+  /// per pool thread in a candidate pair on every pass, whatever the cache
+  /// holds.
+  ///
+  /// The model is asked in batches of [_pairBatch], and each batch's answers
+  /// are written only once it returns. A batch that throws parks the lane
+  /// with nothing of its own written, and the batches before it stay cached:
+  /// the cache is the progress, so the re-run asks only what is left.
+  Future<List<List<int>>> _decisionCandidates(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
-    GroupingTally tally, {
-    required int room,
-  }) async {
-    // Under [GroupingMode.pool] there is no neighbourhood and no similarity
-    // table: the pool's own order is the chunking, consecutive slices of
-    // [StorylineTuning.poolCardsPerCall] cards, one call each. Deterministic
-    // because the store's order is, and nothing below this branch runs — no
-    // `clusterBySimilarity`, no ladder, no [_fittingPieces].
-    //
-    // And NO `room` break, which is the one place this branch departs from the
-    // cosine path deliberately. `room` is at most
-    // [StorylineTuning.maxPendingSuggestions], three, so a first chunk that
-    // returned three groups would end the loop with the second half of the
-    // mailbox unread — and reading the whole pool is the entire point of the
-    // mode. The cost it would be saving is small here in a way it is not
-    // there: a pool of about seventy threads is two prose calls a pass, where
-    // the cosine path can draw forty neighbourhoods. `_propose` still spends
-    // `room` on the sorted list below, so what ships is unchanged; only what
-    // was LOOKED at is.
-    if (_mode == GroupingMode.pool) {
-      final poolClusters = <List<int>>[];
-      for (var start = 0;
-          start < rows.length;
-          start += StorylineTuning.poolCardsPerCall) {
-        final chunk = [
-          for (var i = start;
-              i < start + StorylineTuning.poolCardsPerCall && i < rows.length;
-              i++)
-            i,
-        ];
-        // The tail of the pool can be shorter than a group. Counted `unfit`
-        // and never asked, for [_fittingPieces]'s reason.
-        if (chunk.length < StorylineTuning.groupingNeighbourhoodMinSize) {
-          tally.unfit++;
-          continue;
+    GroupingTally tally,
+  ) async {
+    final judge = _judge ??
+        (throw StateError('StorylineGrouper: no decision judge to ask'));
+    // Who answers this pass, and the cache pruned to it: rows another model
+    // or question set wrote are never read again, and rows older than
+    // [_pairCacheAge] mostly key texts that have since moved on.
+    final decidedBy = await judge.decidedBy();
+    await _store.prunePairDecisions(
+      keep: decidedBy,
+      olderThanIso: MessageStore.isoStamp(
+        DateTime.now().subtract(_pairCacheAge),
+      ),
+    );
+    final pairs = await _candidatePairs(rows, vectors);
+    tally.pairs += pairs.length;
+    if (pairs.isEmpty) return const [];
+
+    // One text per row per pass, however many pairs the row is in.
+    final texts = <int, StorylineThreadText>{};
+    for (final (i, j) in pairs) {
+      for (final index in [i, j]) {
+        if (texts.containsKey(index)) continue;
+        texts[index] = await judge.threadText(
+          rows[index]['source'] as String? ?? _workSource,
+          rows[index]['conversation_key'] as String? ?? '',
+        );
+      }
+    }
+    (String, String) hashesOf((int, int) pair) {
+      final a = texts[pair.$1]!.cardHash;
+      final b = texts[pair.$2]!.cardHash;
+      return a.compareTo(b) <= 0 ? (a, b) : (b, a);
+    }
+
+    // Every cached answer among these texts, candidate or not: a completion
+    // pair may have been asked on an earlier pass.
+    final cached = await _store.pairDecisionsFor(
+      [for (final text in texts.values) text.cardHash],
+      decidedBy,
+    );
+    final p = <(int, int), double>{};
+    var budget = StorylinePolicy.pairBudgetPerPass;
+
+    /// Asks [asked] in batches, writing each batch once it returns.
+    Future<void> ask(List<(int, int)> asked) async {
+      for (var start = 0; start < asked.length; start += _pairBatch) {
+        final batch = asked.sublist(
+          start,
+          start + _pairBatch < asked.length
+              ? start + _pairBatch
+              : asked.length,
+        );
+        final answers = await judge.sameEffortOfTexts([
+          for (final (i, j) in batch) (texts[i]!.text, texts[j]!.text),
+        ]);
+        tally.scored += batch.length;
+        budget -= batch.length;
+        // Two texts that render identically share one hash, and a pair of
+        // one hash has no row to live in: it is used this pass and asked
+        // again on the next, which is rare enough to cost nothing.
+        await _store.writePairDecisions(
+          [
+            for (final (index, pair) in batch.indexed)
+              (
+                a: hashesOf(pair).$1,
+                b: hashesOf(pair).$2,
+                p: answers[index],
+              ),
+          ],
+          decidedBy: decidedBy,
+        );
+        for (final (index, pair) in batch.indexed) {
+          p[pair] = answers[index];
         }
-        poolClusters.addAll(await _groupOne(
-          rows,
-          vectors,
-          chunk,
-          tally,
-          cardsPerCall: StorylineTuning.poolCardsPerCall,
+      }
+    }
+
+    /// The pairs of [asked] with no answer yet, the cached ones filled in.
+    List<(int, int)> missingOf(Iterable<(int, int)> asked) {
+      final missing = <(int, int)>[];
+      for (final pair in asked) {
+        if (p.containsKey(pair)) continue;
+        final known = cached[hashesOf(pair)];
+        if (known != null) {
+          p[pair] = known;
+          tally.cached++;
+        } else {
+          missing.add(pair);
+        }
+      }
+      return missing;
+    }
+
+    // The candidates. Newest threads' pairs first: the pool is newest first,
+    // so the pair with the smaller first index involves the newer thread.
+    final missing = missingOf(pairs)
+      ..sort((x, y) {
+        final byFirst = x.$1.compareTo(y.$1);
+        return byFirst != 0 ? byFirst : x.$2.compareTo(y.$2);
+      });
+    final first = missing.length > budget
+        ? missing.sublist(0, budget)
+        : missing;
+    tally.deferred += missing.length - first.length;
+    await ask(first);
+
+    // The optimistic round, then each cluster completed and judged again on
+    // the full matrix.
+    final formed = averageLinkage(
+      rows.length,
+      p,
+      tau: StorylinePolicy.linkTau,
+      maxSize: StorylineTuning.maxClusterSize,
+      unscoredAsZero: false,
+    ).where((c) => c.length >= StorylineTuning.proposeMinClusterSize).toList();
+    sortClusters(formed);
+
+    final out = <({List<int> members, int outliers})>[];
+    for (final cluster in formed) {
+      final inside = missingOf([
+        for (var a = 0; a < cluster.length; a++)
+          for (var b = a + 1; b < cluster.length; b++) (cluster[a], cluster[b]),
+      ]);
+      if (inside.length > budget) {
+        tally.clustersDeferred++;
+        tally.deferred += inside.length;
+        continue;
+      }
+      await ask(inside);
+
+      final local = <(int, int), double>{
+        for (var a = 0; a < cluster.length; a++)
+          for (var b = a + 1; b < cluster.length; b++)
+            (a, b): ?p[(cluster[a], cluster[b])],
+      };
+      final judged = clusterByAverageLinkage(
+        cluster.length,
+        local,
+        tau: StorylinePolicy.linkTau,
+        // The PROPOSE floor, as on the cosine path: a pair is not a question
+        // worth a naming call.
+        minSize: StorylineTuning.proposeMinClusterSize,
+        maxSize: StorylineTuning.maxClusterSize,
+      );
+      final dropped =
+          cluster.length - judged.clusters.fold<int>(0, (n, c) => n + c.length);
+      for (final (index, kept) in judged.clusters.indexed) {
+        out.add((
+          members: [for (final at in kept) cluster[at]],
+          // The members this cluster's judging set aside, once: on the
+          // largest group it left, and nowhere if it left none.
+          outliers: index == 0 ? dropped : 0,
         ));
       }
-      // The same order the cosine path answers in, spelled out for the same
-      // reason: `List.sort` makes no stability promise and a tombstone has to
-      // keep answering for the same set on a second pass.
-      poolClusters.sort((a, b) {
-        final bySize = b.length.compareTo(a.length);
-        return bySize != 0 ? bySize : a.first.compareTo(b.first);
-      });
-      return poolClusters;
     }
-
-    final table = await _similaritiesOf(rows, vectors);
-    final neighbourhoods = clusterBySimilarity(
-      vectors.length,
-      table.get,
-      threshold: StorylineTuning.groupingNeighbourhoodThreshold,
-      minSize: StorylineTuning.groupingNeighbourhoodMinSize,
-      maxSize: StorylineTuning.groupingNeighbourhoodCap,
-      // No coherence floor, which is the whole difference from [_clusterBy]:
-      // a neighbourhood is allowed to be a blob. Splitting it on its mean
-      // would re-form exactly the tight little clusters the cosine pass
-      // already makes and leave the model nothing to decide.
-      floor: 0,
-      step: StorylineTuning.clusterSplitStep,
-      ceiling: StorylineTuning.clusterSplitCeiling,
-    )
-      // Walked in the pool's own order, which is the one thing that is the
-      // same on a second run. What comes BACK is sorted largest-first below,
-      // because the sweep spends its room on the head of the list.
-      ..sort((a, b) => a.first.compareTo(b.first));
-
-    final clusters = <List<int>>[];
-    outer:
-    for (final neighbourhood in neighbourhoods) {
-      for (final piece in _fittingPieces(neighbourhood, table.get, tally)) {
-        if (clusters.length >= room) break outer;
-        clusters.addAll(await _groupOne(rows, vectors, piece, tally,
-            cardsPerCall: _groupingCardsPerCall));
-      }
-    }
-    // The same order [clusterBySimilarity] hands its clusters back in:
-    // largest first, ties by smallest member index. The sweep breaks at
-    // `room`, so the order IS what ships, and a proposal of six threads is a
-    // better use of a slot than one of three. Spelled out rather than left to
-    // the sort, for that function's reason: `List.sort` makes no stability
-    // promise, and this pass has to answer identically on a second run for a
-    // tombstone to keep holding.
-    clusters.sort((a, b) {
-      final bySize = b.length.compareTo(a.length);
-      return bySize != 0 ? bySize : a.first.compareTo(b.first);
+    out.sort((a, b) {
+      final bySize = b.members.length.compareTo(a.members.length);
+      return bySize != 0 ? bySize : a.members.first.compareTo(b.members.first);
     });
-    return clusters;
+    tally.clusterOutliers.addAll([for (final c in out) c.outliers]);
+    return [for (final c in out) c.members];
   }
 
-  /// How many whole cards fit one grouping call on the COSINE path: twelve.
-  /// The task reads the same number into its schema's two `maxItems`, so the
-  /// split ladder and the grammar cannot disagree about how many cards a call
-  /// holds. The card budget is what this ladder wants, which is why it reads
-  /// `defaultCardsPerCall` and not either of the two ceilings derived from
-  /// it. [GroupingMode.pool] asks for its own number instead —
-  /// [StorylineTuning.poolCardsPerCall] — and never comes down this ladder.
-  static const int _groupingCardsPerCall =
-      GroupThreadsTask.defaultCardsPerCall;
+  /// How long a cached pair is kept. A thread's text moves with every new
+  /// message, so an old row mostly keys a text nothing renders any more;
+  /// one still in use is simply asked again.
+  static const Duration _pairCacheAge = Duration(days: 30);
 
-  /// [members] as pieces the card budget can show in one call each, splitting
-  /// up the same threshold ladder [clusterBySimilarity] settles a capped
-  /// cluster with.
-  ///
-  /// Whole cards or nothing: truncating the joined set instead would hand the
-  /// model a last thread cut mid-sentence and then read its number back as a
-  /// group member. A piece that falls under
-  /// [StorylineTuning.groupingNeighbourhoodMinSize] on the way down, and a
-  /// piece still too wide at the top of the ladder, are both counted `unfit`
-  /// and dropped — nothing is asked about them, so nothing is tombstoned
-  /// either.
-  static List<List<int>> _fittingPieces(
-    List<int> members,
-    double Function(int, int) sim,
-    GroupingTally tally,
-  ) {
-    final fitting = <List<int>>[];
-    var pending = <List<int>>[members];
-    var threshold = StorylineTuning.groupingNeighbourhoodThreshold;
-    while (pending.isNotEmpty) {
-      final tooWide = <List<int>>[];
-      for (final piece in pending) {
-        if (piece.length > _groupingCardsPerCall) {
-          tooWide.add(piece);
-        } else if (piece.length >=
-            StorylineTuning.groupingNeighbourhoodMinSize) {
-          fitting.add(piece);
-        } else {
-          tally.unfit++;
-        }
-      }
-      if (tooWide.isEmpty) break;
-      threshold += StorylineTuning.clusterSplitStep;
-      if (threshold > StorylineTuning.clusterSplitCeiling + 1e-9) {
-        tally.unfit += tooWide.length;
-        break;
-      }
-      pending = [
-        for (final piece in tooWide) ..._splitAt(piece, sim, threshold),
-      ];
-    }
-    fitting.sort((a, b) => a.first.compareTo(b.first));
-    return fitting;
-  }
+  /// How many pairs one `same_effort` request carries: both orders of each,
+  /// so twice this many states. A batch is also the unit a failure loses.
+  static const int _pairBatch = 50;
 
-  /// [piece] re-clustered among itself at [threshold], in the piece's own
-  /// index space, back as indexes into the pool.
-  ///
-  /// `minSize: 1` because every member has to come back: what is too small to
-  /// group is the caller's count, and a member quietly dropped here would be
-  /// a thread the row never accounted for.
-  static List<List<int>> _splitAt(
-    List<int> piece,
-    double Function(int, int) sim,
-    double threshold,
-  ) {
-    final split = clusterBySimilarity(
-      piece.length,
-      (i, j) => sim(piece[i], piece[j]),
-      threshold: threshold,
-      minSize: 1,
-      maxSize: StorylineTuning.groupingNeighbourhoodCap,
-      floor: 0,
-      step: StorylineTuning.clusterSplitStep,
-      ceiling: StorylineTuning.clusterSplitCeiling,
-    );
-    return [
-      for (final cluster in split)
-        [for (final index in cluster) piece[index]]..sort(),
-    ];
-  }
-
-  /// One grouping call over [piece], and the groups it named that are worth
-  /// proposing.
-  ///
-  /// The cards are the naming call's cards, built by the same recipe and
-  /// ordered by centrality, so a thread reads the same to the model that
-  /// groups it as to the model that names the group. The numbers the answer
-  /// comes back with are mapped through that centrality order, and the range
-  /// check is here rather than in the task for [NameStorylineTask]'s reason:
-  /// only the caller knows how many cards it showed.
-  ///
-  /// [LlmUnavailableException] propagates, exactly as the naming call's does,
-  /// so the worker parks the sweep and re-runs it with its attempt unspent. A
-  /// malformed answer or a refusal is counted and the pass carries on: one
-  /// neighbourhood the model could not read is not a reason to abandon the
-  /// rest of the mailbox.
-  /// [cardsPerCall] is how many cards this call may show, and it is the
-  /// caller's because the two grouping modes ask different questions: the
-  /// cosine path splits a neighbourhood down to [_groupingCardsPerCall],
-  /// while [GroupingMode.pool] hands over a slice of
-  /// [StorylineTuning.poolCardsPerCall]. The task derives its whole-set clamp
-  /// and both of its array bounds from it, so the grammar always agrees with
-  /// what was sent.
-  Future<List<List<int>>> _groupOne(
+  /// The candidate pairs over [rows], each `(i, j)` with `i < j`, in the
+  /// order they were first proposed. See [_decisionCandidates].
+  Future<List<(int, int)>> _candidatePairs(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
-    List<int> piece,
-    GroupingTally tally, {
-    required int cardsPerCall,
-  }) async {
-    final task = GroupThreadsTask(cardsPerCall: cardsPerCall);
-    var central = centralIndexes(
-      [for (final index in piece) vectors[index]],
-      take: piece.length,
-    );
-    final cards = <String>[];
-    for (final at in central) {
-      final row = rows[piece[at]];
-      cards.add(namingCardForConversationRow(
-        row,
-        await _store.newestInboundCardData(
-          row['source'] as String? ?? _workSource,
-          row['conversation_key'] as String? ?? '',
-        ),
-      ));
-    }
-    // The task's OWN belt, not the namer's. At the default twelve cards the
-    // two differ by 45 characters — 7,255 against 7,300 — and building to the
-    // larger would leave an overhang `buildUserMessage` then cuts mid-sentence,
-    // which is the one thing the whole-cards rule exists to prevent. Twelve
-    // whole cards fit under either number, so the shipped path is unchanged;
-    // at [StorylineTuning.poolCardsPerCall] this is the only cap a chunk of
-    // that size fits under at all.
-    final numbered = numberedCards(cards, cap: task.cardsCap);
-    // Dropping from the far end can leave fewer cards than there are central
-    // indexes, and card `[k]` must keep meaning the k-th of what was SENT.
-    final shown = numbered.length;
-    central = central.take(shown).toList();
-    if (shown < StorylineTuning.groupingNeighbourhoodMinSize) {
-      tally.unfit++;
-      return const [];
+  ) async {
+    final seen = <(int, int)>{};
+    void add(int a, int b) {
+      if (a == b) return;
+      seen.add(a < b ? (a, b) : (b, a));
     }
 
-    tally.calls++;
-    GroupResult result;
-    try {
-      result = await runTask(
-        _groupClient,
-        task,
-        GroupInput(numbered),
-        maxTokens: GroupThreadsTask.maxTokens,
-        temperature: 0,
-      );
-    } on LlmUnavailableException {
-      rethrow;
-    } catch (_) {
-      tally.failed++;
-      return const [];
-    }
-    if (result.groups.isEmpty) {
-      tally.failed++;
-      return const [];
+    if (rows.length >= 2) {
+      final table = await _similaritiesOf(rows, vectors);
+      for (var i = 0; i < rows.length; i++) {
+        final near = <({int j, double sim})>[
+          for (var j = 0; j < rows.length; j++)
+            if (j != i && table.get(i, j) >= StorylinePolicy.pairRetrievalFloor)
+              (j: j, sim: table.get(i, j)),
+        ]..sort((x, y) {
+            final bySim = y.sim.compareTo(x.sim);
+            return bySim != 0 ? bySim : x.j.compareTo(y.j);
+          });
+        for (final hit in near.take(StorylinePolicy.pairNeighbours)) {
+          add(i, hit.j);
+        }
+      }
     }
 
-    final clusters = <List<int>>[];
-    for (final group in result.groups) {
-      // A set, though the task already de-duplicates across the whole answer:
-      // the range check below can map two different out-of-range numbers to
-      // nothing and two in-range ones to the same card only if that guarantee
-      // ever weakens, and a repeated member would be written twice.
-      final members = <int>{
-        for (final number in group.threads)
-          if (number >= 1 && number <= shown) piece[central[number - 1]],
-      }.toList()
-        ..sort();
-      if (members.length < StorylineTuning.proposeMinClusterSize) continue;
-      tally.grouped += members.length;
-      clusters.add(members);
+    final bySeries = <String, List<int>>{};
+    for (var i = 0; i < rows.length; i++) {
+      final key = seriesKeyFor(rows[i]['subject'] as String?);
+      if (key.isEmpty) continue;
+      bySeries.putIfAbsent(key, () => <int>[]).add(i);
     }
-    return clusters;
+    for (final group in bySeries.values) {
+      final members = group.take(StorylineTuning.maxClusterSize).toList();
+      for (var a = 0; a < members.length; a++) {
+        for (var b = a + 1; b < members.length; b++) {
+          add(members[a], members[b]);
+        }
+      }
+    }
+    return seen.toList();
   }
 
   /// Every candidate pair's similarity, computed in Dart — the fallback, and
-  /// the definition the index path is measured against.
-  ///
-  /// Full agglomerative clustering — repeatedly merging the closest pair —
-  /// would find slightly better groups and is O(n³) on a list that is
-  /// re-clustered after every sync. This is O(n²) against a mailbox of a few
-  /// hundred live threads, and the model call behind each proposal is the part
-  /// that decides quality anyway.
+  /// the definition the index path is measured against. O(n²) against a
+  /// mailbox of a few hundred live threads.
   static PairSimilarities _arithmeticSimilarities(
     List<List<double>> vectors,
   ) {

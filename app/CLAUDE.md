@@ -228,6 +228,37 @@ enforce the ones that are commands.
   `make golden-storyline` row on each side. Storyline tests script `member_of`
   through `scriptedJudge(store, llm)` (`fake_decision_client.dart`): a
   `{'p': …}` step under the `member_of` schema name, one call per thread.
+- The sweep GROUPS on the decision model: `StorylineTuning.groupingMode =
+  GroupingMode.decision` ships, where cosine only proposes candidate pairs
+  (each pool thread's top `StorylinePolicy.pairNeighbours` at
+  `pairRetrievalFloor`, plus every pair sharing a series key), the decision
+  model's `same_effort` judges them, and `clusterByAverageLinkage` forms the
+  clusters at `linkTau` — an optimistic round over the answered pairs, then
+  each cluster COMPLETED (its unasked internal pairs asked) and judged again
+  on the full matrix, or deferred when the budget cannot complete it — and
+  drops outliers before naming. `GroupingMode.cosine`
+  is kept ONLY as the golden-sweep baseline (`SWEEP_GROUPING=cosine`) and is the
+  one reader of `clusterLinkThreshold`, `clusterCoherenceFloor` and the split
+  ladder. The answers are cached in `pair_decisions` (v23, DERIVED) under both
+  thread texts' `cardHash` and, in the `qhash` column, `decidedBy` =
+  `'<qhash>|<model identity>'`
+  (`DecisionClient.modelIdentity`, so a swapped or re-installed model re-asks;
+  a test's fake answers `fake-model`), pruned at each decision pass to the
+  current `decidedBy` and 30 days, at most `pairBudgetPerPass` new pairs a
+  pass, written per batch only after the batch returns. The namer
+  (`NameStorylineTask`) only WRITES — no `coherent`/`outliers` — and
+  `StorylineTuning.charterCheck` (`CharterCheck.model`: `charter_specific` at
+  `charterSpecificTau`; `CharterCheck.lint`: the regex, `SWEEP_CHARTER=lint`)
+  files a refused cluster `possible`. `maxQuestionsPerPass` counts NAMING calls
+  only. `GroupThreadsTask`, the `storyline_group` stage and the `model`/`pool`
+  modes are gone. `ensureReady` runs before the first pair, and
+  `StorylineJudge.beginPass()` at the sweep's top makes each thread's body
+  fetch at most once a pass (it forgets successes only; the five-minute
+  failure memo survives passes). Storyline service tests answer `same_effort`
+  through `sweepJudge` (`storyline_service_test.dart`: from the seeded vectors
+  at the file's own `sweepJudgeLinkCosine`, unless the test scripts it) or
+  `sameEffortAmong`/`sameEffortBy` (`fake_decision_client.dart`), and
+  `charter_specific` with `{'p': …}` like `member_of`.
 - The storyline service is four files now and one public face: the user
   actions in `storyline_edits.dart` (`StorylineEdits`), the clustering in
   `storyline_grouper.dart` (`StorylineGrouper`), the shared card statics in
@@ -238,7 +269,7 @@ enforce the ones that are commands.
 - A cluster the models DECLINE is a `possible` storyline WITH its members, in
   the rail under **Possible · N** with Keep and Dismiss, never a member-less
   tombstone. `_filePossible` in `storyline_service.dart` is the one insert site
-  for all three reasons (namer, charter lint, too few confirm survivors);
+  for both reasons (the charter check, too few confirm survivors);
   `dismissedHashExistsAny` and `expireStaleSuggestions` read `possible` as well
   as their old status, and every pool, assign, recruit, refresh, recap and
   home-feed query names `('suggested','active')` and so leaves a possible

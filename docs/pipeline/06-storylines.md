@@ -55,22 +55,24 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    a verdict that deliberately filed nothing; `noCandidate` closes it `done`
    and notes nothing, so a quiet pass writes no row; and only `gated` closes
    the stage `skipped` without a verdict.
-2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
-   threads by embedding similarity (gate: three similar threads, or a
-   recurring series of three, form a proposal, and two confirmed members are
-   still a storyline), names the proposal, then confirms each member
-   individually.
-   Series are found by subject before any geometry runs and the
-   notification-shaped ones leave the pool, and the namer may decline a
-   cluster outright or name the threads in it that do not belong; both have
-   their own sections below. Pair-discovery
-   runs on the sqlite-vec index when there is one and on Dart arithmetic when
-   there is not, to the same clusters either way — its own section below.
-   A cluster the models decline is filed as a `possible` storyline, with its
-   members, and recognised afterwards by its immutable `cluster_hash`
-   (schema v7) so the same question is never asked twice — the same hash that
-   keeps a dismissed suggestion dismissed after membership drift. Three
-   reasons file one, listed once under *How the sweep finds its pairs*.
+2. **Sweep** (`StorylineSweepHandler` → `sweep`) — groups *unassigned*
+   threads on the decision model: cosine PROPOSES candidate pairs among them,
+   `same_effort` judges each pair (cached in `pair_decisions`), and average
+   linkage over the judged pairs forms the clusters, outliers dropped (gate:
+   three threads judged one effort, or a recurring series of three, form a
+   proposal, and two confirmed members are still a storyline). The namer then
+   only WRITES the title, summary and charter; the decision model's
+   `charter_specific` checks the charter, and each member is confirmed
+   individually on `member_of`. Series are found by subject before any
+   grouping runs and the notification-shaped ones leave the pool — its own
+   section below, with the grouping's. The cosine neighbours are read off the
+   sqlite-vec index when there is one and off Dart arithmetic when there is
+   not, to the same pairs either way. A cluster the models decline is filed
+   as a `possible` storyline, with its members, and recognised afterwards by
+   its immutable `cluster_hash` (schema v7) so the same question is never
+   asked twice — the same hash that keeps a dismissed suggestion dismissed
+   after membership drift. Two reasons file one, listed once under *How the
+   sweep finds its pairs*.
    Finished
    threads are held out of the clustering and offered to the newborn storyline
    afterwards instead — "join, not seed", its own section below. It runs only
@@ -902,8 +904,11 @@ Until then it read `possible` rows too, and a cluster filed as possible spent a
 slot in the pass that filed it, so three declined clusters stopped the proposer
 for a fortnight; `make golden-sweep SWEEP_POSSIBLE_ROOM=0|1` measured the two
 rules identical on `storyline.id` (59/98) and forbidden hits (1). What bounds a
-pass now is `maxQuestionsPerPass`, three: proposals and filings together, room
-or no room, and a cluster past it is rebuilt and asked on a later pass. A filed
+pass now is `maxQuestionsPerPass`, three NAMING calls, proposals and filings
+together, room or no room, and a cluster past it is rebuilt and asked on a
+later pass. The decision model's questions are not counted: a pair, a charter
+check or a confirm is tens of milliseconds where a naming call is seconds of
+the generative model. A filed
 set writes its hash, so the IDENTICAL set is never asked again; a re-cluster
 that is a different set but has at least half its threads in one live automatic
 possible storyline (`possibleOverlapShare`) is skipped without a model call and
@@ -986,14 +991,15 @@ test: both counters default to zero on a conversation nothing has recomputed,
 while the pool query has already proved the thread holds a kept inbound
 message.
 
-Every other series is **seeded** as a cluster of its own, ahead of the cosine
-clustering and taken out of the pool the clustering sees. This is a thing
-people take part in on a recurring subject, which the cosine pass would never
-have found: two issues of one series share a shape and not a subject matter. A
-seeded group takes at most `maxClusterSize` of its members, the newest twelve,
-and the rest stay in the pool for a later pass. A seed is a question and not a
-verdict. It goes through the same naming call, the same charter lint and the
-same per-member confirms as any cluster. The counts land on the activity row as
+Every other series is **seeded** as a cluster of its own, ahead of the
+grouping and taken out of the pool the grouping sees. This is a thing people
+take part in on a recurring subject, which the vector would never have found:
+two issues of one series share a shape and not a subject matter. A seeded
+group takes at most `maxClusterSize` of its members, the newest twelve, and
+the rest stay in the pool for a later pass. A seed is a question and not a
+verdict. It goes through the same naming call, the same charter check and the
+same per-member confirms as any cluster; its pairs are not judged, because the
+subject already said what `same_effort` would be asked. The counts land on the activity row as
 `series` and `series_excluded`. The three columns this reads,
 `message_count`, `inbound_count` and `newest_kept_from`, are the ones
 `conversationsWithEmbeddings` gained for it; the last is a correlated subquery
@@ -1057,19 +1063,19 @@ never a fragment group in the first place, because the fragment key keeps the
 date, so the two rules no longer compete for it. An UNDATED feed still is
 fragment-shaped: the same subject exactly, the same single sender, issues days
 apart. Folded first, three issues of one vendor's alerts would collapse to a
-single representative, never reach `seriesMinSize`, and land in the cosine pool,
+single representative, never reach `seriesMinSize`, and land in the grouping pool,
 where a charter written about something else could admit every issue of the feed
 one confirm at a time. Folding afterwards has the opposite and
 intended effect on a seeded SERIES: a group that folds to fewer than
 `seriesMinSize` representatives is not seeded at all, because three issues of
 one cancelled meeting are one thread and not something recurring, and its
-representative goes back to the cosine pool.
+representative goes back to the grouping pool.
 
 ### Three threads to propose, two to keep
 
 `proposeMinClusterSize` is three and `minClusterSize` is two, and they answer
-different questions. Three is what a COSINE cluster needs before the sweep will
-spend a naming call on it. Two threads that merely embed alike are a
+different questions. Three is what a cluster needs before the sweep will
+spend a naming call on it. Two threads that merely look alike are a
 coincidence, and the confirms cannot rescue a pair: they are judged against a
 charter written from those same two threads, so the coincidence describes
 itself and then agrees with its own description. Three is a pattern, which is
@@ -1078,26 +1084,27 @@ after the confirms have spoken, so a three-thread proposal that loses one
 member still ships as a storyline of two. A seeded series is already at least
 `seriesMinSize`, so the propose floor never turns one away.
 
-### The three reasons a cluster is filed as possible
+### The two reasons a cluster is filed as possible
 
 A `possible` row with `created_by = 'auto'`, a `cluster_hash`, a `member_hash`
 and its member rows is a group the sweep built and no model would vouch for.
-There are exactly three reasons one is written, all in `_propose` and all
-through the same `_filePossible` helper. The namer named no group to keep,
-which is a `coherent: false` carrying no outliers or an outlier list that
-leaves fewer than two threads, noted `incoherent`. The charter lint refused
-what the namer wrote, noted `lint`. Or the per-member confirms left fewer than
-`minClusterSize` survivors. Which rows are filed differs by reason: the whole
-cluster on the first, the namer's kept rows on the other two. The confirms' own
+There are exactly two reasons one is written, both in `_propose` and both
+through the same `_filePossible` helper. The charter check refused what the
+namer wrote — the decision model's `charter_specific` under
+`StorylinePolicy.charterSpecificTau`, noted `charter_model`, or on the bench's
+other arm the regex lint, noted `lint` (*The charter check*, below). Or the
+per-member confirms left fewer than `minClusterSize` survivors. Either way the
+WHOLE cluster, as the grouping proposed it, is filed. The confirms' own
 verdicts are deliberately not applied, because the person is being asked about
 the group and not about the confirm model's answer thread by thread.
 
-All three used to write a member-less `dismissed` tombstone instead, and on the
-owner's own mailbox that was the entire sweep: four groups a person would
-recognise, two declined by the namer and two refused by the lint, and a rail
-reading **Dismissed · 4** as though the owner had said no to each. The model
-declining is not the user declining, so the row is now stored the way a
-suggestion is and a person decides.
+Before the decision-questions round the namer could decline a cluster too
+(`coherent: false`), and every reason used to write a member-less `dismissed`
+tombstone instead. On the owner's own mailbox that was the entire sweep: four
+groups a person would recognise, two declined by the namer and two refused by
+the lint, and a rail reading **Dismissed · 4** as though the owner had said no
+to each. The model declining is not the user declining, so the row is stored
+the way a suggestion is and a person decides.
 
 What that means in each direction:
 
@@ -1115,8 +1122,8 @@ What that means in each direction:
 A filing spends no slot of the pass's room since the decision-model round's
 Phase 8 (`possibleHoldsRoom = false`): the room counts proposals alone. What
 bounds a pass whose models decline every cluster it built is
-`maxQuestionsPerPass`, three, which counts proposals and filings together, so
-such a pass asks three and never hands back **Possible · 40**. The clusters
+`maxQuestionsPerPass`, three naming calls, proposals and filings together, so
+such a pass names three and never hands back **Possible · 40**. The clusters
 past the cap are not lost: nothing wrote their hashes, so the next pass
 rebuilds them and asks the next three. A cluster whose threads are at least
 half one live automatic possible storyline's is skipped before any model call
@@ -1126,9 +1133,9 @@ model at all, because a hash already answered it, spends nothing — it would
 otherwise consume the same slot on every future sweep and starve the genuinely
 new clusters ranked behind it.
 
-A cluster the sweep merely dropped for sitting under the coherence floor or
-under `proposeMinClusterSize` is filed nowhere at all, because nothing was
-asked about it.
+A cluster the grouping never formed — pairs under the link bar, or a group
+left under `proposeMinClusterSize` once its outliers went back to the pool —
+is filed nowhere at all, because nothing was asked about it as a group.
 
 **Keeping one is not a bare status flip.** Its members stayed in the pool while
 it waited, so between the filing and the press a later sweep, a recruit or the
@@ -1142,10 +1149,143 @@ longer exists and a tombstone keeps its hashes on file. A `suggested` row skips
 all of this: its members left the pool the moment it was proposed. This is what
 holds ONE THREAD, ONE LIVE STORYLINE at the one press that could break it.
 
+### The decision grouping
+
+`StorylineTuning.groupingMode = GroupingMode.decision` ships (the
+decision-questions round, Phase 7). The cosine only PROPOSES which pairs to
+ask about; the decision model's `same_effort` says which of them are one
+effort; average linkage over those answers forms the groups. All of it is
+`StorylineGrouper._decisionCandidates` (`storyline_grouper.dart`) and
+`clusterByAverageLinkage` (`storyline_clustering.dart`).
+
+**Candidate pairs**, unordered and de-duplicated, over the pool as the series
+pre-pass and the fragment fold left it:
+
+- each thread's nearest `StorylinePolicy.pairNeighbours` (10) pool threads by
+  clustering-vector cosine, at `pairRetrievalFloor` (0.30) or above — a loose
+  floor, because it only decides what the model is asked;
+- every pair of pool threads sharing a series key (`seriesKeyFor`), the first
+  `maxClusterSize` of each key in pool order. Two issues of one series share a
+  shape and not a subject matter, so the vector can miss them; a fragment key
+  folds less than a series key, so every fragment pair left in the pool (one
+  outside the fold window) is among these too.
+
+**The pair cache.** Each pool thread's text (`storylineThreadTextFor`, the
+body fetch first, *Membership on the decision model* below) is built ONCE per
+pass, and its 16-hex `cardHash` keys the cache: `pair_decisions` (schema v23,
+DERIVED — Clear AI results empties it) holds one row per unordered pair of
+texts, `a_hash < b_hash`, under what decided it: the `qhash` column holds
+`'<qhash>|<model identity>'` (`StorylineJudge.decidedBy`, `decidedBy` in Dart;
+the column kept its generated name), with `p` the mean of
+p(yes) over both orders (`askPairs`). The identity is
+`DecisionClient.modelIdentity()`: the heads file's model name and the first 12
+hex of its sha256 for the encoder-heads kind, the listed name for Kev on Your
+server — so a swapped backend or a re-installed model asks its pairs again.
+Only a pair missing from the cache is asked. A thread whose text changes — a
+new message, a fetched body — has a new hash, so its pairs are asked again.
+Two threads that render identically share a hash and have no row to live in:
+such a pair is asked every pass, which is rare enough to cost nothing. Each
+decision pass first PRUNES the table: rows decided by another key, and
+rows older than 30 days, which mostly key texts nothing renders any more.
+
+The cache saves questions, not reads: every pass still builds the text of
+every pool thread in a candidate pair (a few store reads each, and a body
+fetch where a preview still shows) to learn its hash, even when every pair is
+cached.
+
+**The budget.** At most `StorylinePolicy.pairBudgetPerPass` (400) new pairs a
+pass are sent: the candidates first, the newest threads' pairs first (the pool
+arrives newest first, so the pair with the smaller first index involves the
+newer thread), and the completions below out of what is left. A candidate
+over the budget reads as p = 0 in the pass that skipped it and is asked on the
+next; the cache is what makes a large mailbox converge over a few passes. The model is asked in batches of 50 pairs (100 states), and each
+batch's answers are written only once it returns: a batch that throws parks
+the lane with nothing of its own written, and the batches before it stay
+cached, so the re-run asks only what is left.
+
+**Linkage, twice.** Average linkage (`averageLinkage`): every thread starts
+alone, and the two clusters whose mean p across their cross pairs is highest
+merge, while that mean is at least `StorylinePolicy.linkTau` (0.50) and the
+result holds at most `maxClusterSize` (12) threads. A tie goes to the pair of
+clusters with the smallest pool indexes, so the store's order breaks it and
+the same mailbox groups the same way twice — which the cluster hashes rest
+on. Average linkage is what keeps one strong pair from welding two groups
+together: a single likely pair across two sure trios is one pair in nine.
+
+The candidates are not every pair, so the first round is OPTIMISTIC: the mean
+is over the cross pairs that have an answer, and an unasked pair is left out
+rather than read as a no (two clusters with no answered pair between them
+never merge). Otherwise an effort whose threads are not all each other's
+nearest neighbours — the longer the effort, the likelier — would be split by
+questions nobody asked. Each cluster of at least `proposeMinClusterSize` the
+first round forms is then COMPLETED: every pair inside it with no answer (at
+most 66 for twelve threads) is asked, cached as usual, and linkage and the
+outlier cut run again over that cluster alone on the full matrix, an unasked
+pair now reading p = 0 (`clusterByAverageLinkage`). Only what survives is
+proposed, so no group is named on part of its evidence. A cluster whose
+missing pairs do not fit the budget left is not proposed this pass: its pairs
+count in `pairs_deferred` and the cluster in `clusters_deferred`, and a later
+pass, its candidates cached, completes it.
+
+**Outliers.** In a cluster of at least `proposeMinClusterSize`, a member whose
+mean p to the rest is under `linkTau` is an OUTLIER: average linkage can seat
+one, because it compares whole clusters, not members. Outliers are dropped
+before naming and go back to the pool, with nothing written for them and
+nothing blocking them. What is still at least `proposeMinClusterSize` is a
+candidate, largest first, ties by the smallest member — the order the cosine
+baseline answers in, which is what the sweep spends its budget on. The row's
+`outliers` counts the members set aside from the clusters the pass went on to
+NAME, so a cluster rebuilt pass after pass is not counted each time. (Ranking
+`possible` rows by a cluster's mean pairwise p, as the plan sketched, is
+deferred: nothing reads it yet.)
+
+**Park before anything is asked.** The sweep calls
+`StorylineJudge.ensureReady()` before the first pair is judged whenever the
+pool has two threads to judge or a series is seeded, so a decision model that
+cannot answer parks the pass having asked nothing, fetched no body and written
+nothing — no pair row and no naming call. The cosine baseline checks the same
+way before its first naming call.
+
+**The row.** The sweep's activity row carries `pairs_scored`, `pairs_cached`,
+`pairs_deferred`, `clusters_deferred` and `namer_calls` in both modes, zeroes
+for the pairs under the baseline. `pairs_cached` is a scan key to the log (`ActivityLog._scanKeys`), so
+a pass that only re-read its cache and proposed nothing stays quiet.
+
+**PROVISIONAL.** `pairNeighbours`, `pairRetrievalFloor`, `pairBudgetPerPass`,
+`linkTau` and `charterSpecificTau` have no measurement behind them yet: the v3
+model that answers `same_effort` and `charter_specific` has not been installed.
+They move with a `make golden-sweep` row on each side when it lands, the
+`StorylineTuning` rule; the bench's commands are in `docs/model-bakeoff.md`.
+
+### The charter check
+
+After the namer writes, and before a single confirm is spent,
+`StorylineTuning.charterCheck` decides whether the title and charter name one
+specific effort. `CharterCheck.model` ships: the decision model's
+`charter_specific` over `renderStorylineCharter(title, charter)`, refused under
+`StorylinePolicy.charterSpecificTau` (0.50) and noted `charter_model`.
+A title the namer could not write (`NameStorylineTask.fallbackTitle`) or an
+empty charter names no effort by construction, and the model arm refuses it
+without asking, under the same `charter_model`.
+`CharterCheck.lint` is the regex `charterLint` (`storyline_lint.dart`) — a
+placeholder word, a roster of the cluster's own people, or a bare class of
+message — noted `lint`, kept so `make golden-sweep SWEEP_CHARTER=lint` can
+measure the two side by side. `model` stays only if its row is at least as
+good; otherwise the lint comes back as the default. A refusal files the whole
+cluster as `possible`, either arm.
+
+### The cosine baseline
+
+`GroupingMode.cosine` is the pass that shipped until Phase 7, kept ONLY as the
+golden-sweep baseline (`SWEEP_GROUPING=cosine`). It is the one reader of
+`clusterLinkThreshold`, `clusterCoherenceFloor`, `clusterSplitStep` and
+`clusterSplitCeiling`.
+
 Clustering is two halves. **Measuring** the pairs is the half an index can do
 faster, and it does — `ConversationVectorIndex` (see `05-embeddings.md`),
 diff-backfilled at sweep start, one KNN probe per candidate, `1 - distance`
-converted back to a cosine. **Forming** the clusters out of those numbers is
+converted back to a cosine; the decision grouping reads its nearest neighbours
+off the same table. **Forming** the clusters out of those numbers is
 `clusterBySimilarity` in `storyline_clustering.dart`, which has no store, no
 model and no clock in it, and both halves meet at one table of similarities.
 
@@ -1218,10 +1358,14 @@ filed thread, eleven correct positives where there had never been one, and 37
 of 98 on the scorer, reached with 106 member confirms against 291. Purity fell
 from 71% to 51% over fourteen groups rather than seven, and coverage is still
 8%, which is what the series pre-pass and the fragment handling are for.
-The tally reads its own numbers off the sweep's activity rows: `incoherent`,
-`lint`, `series`, `series_excluded`, `outliers`, `fragments` and `folded` are
-summed over every `storyline_sweep` row the run recorded, so the printed row and
-the log tell one story rather than two. The bench's `tombstoned` figure counts
+The tally reads its own numbers off the sweep's activity rows: `lint`,
+`charter_model`, `series`, `series_excluded`, `outliers`, `fragments`,
+`folded`, `pairs_scored`, `pairs_cached`, `pairs_deferred`,
+`clusters_deferred` and `namer_calls`
+are summed over every `storyline_sweep` row the run recorded, so the printed
+row and the log tell one story rather than two. (A pass that only re-read its
+cached pairs is quiet and writes no row, so `pairs_cached` counts the passes
+that did something else too.) The bench's `tombstoned` figure counts
 `created_by = 'auto'` rows at `dismissed` or `possible`, which is the same
 population it always counted: the clusters no model would vouch for. The run fails outright if any of those
 rows carries a `deferred` key: the bench store has no queue behind it, so the
@@ -1236,10 +1380,11 @@ never applied to them: on a pool that held a series the two numbers would say
 how far those clusters stand from the ones a sweep would form. The sweep
 bench's `charter lint` line changed meaning with them.
 Before the lint was wired it was the whole reading, counted over every live
-storyline and applied to none. Now that a lint hit files a cluster as possible
-before its confirms, what that line counts is what SURVIVED and would still be
-refused, and it should read zero; a non-zero entry there is a bug report rather
-than a measurement. `docs/model-bakeoff.md` carries the protocol, the knobs and
+storyline and applied to none. Under `SWEEP_CHARTER=lint` a lint hit files a
+cluster as possible before its confirms, so what that line counts is what
+SURVIVED and would still be refused, and it should read zero. Under the
+shipped `model` arm it is where the regex and `charter_specific` disagree on
+what shipped. `docs/model-bakeoff.md` carries the protocol, the knobs and
 the ledger.
 The round's last row, taken on 2026-09-19, files 46 of 98 with no
 correct positive and one storyline formed. The two Phase 6 lines say where
@@ -1357,7 +1502,7 @@ The two assign gates were retired in the decision-questions round: assign,
 recruit and the probe retrieve at `StorylinePolicy.assignRetrievalFloor`
 (0.30) and the decision model's `member_of` decides.
 
-### Grouping
+### Grouping, and the modes that came before it
 
 **A threshold cannot form pure clusters on this mailbox, and the reason is a
 base rate.** Over the golden pool there are 1,346 cross-effort pairs to 85
@@ -1365,110 +1510,31 @@ same-effort ones, so at any cosine that keeps most of the real pairs the links
 a cluster forms on are mostly wrong ones, whatever the vector. Round D
 measured it from the other end: at the shipped threshold a link was a
 same-effort pair about 5% of the time, and the clusters the namer declined
-were 39% gold-pure. Phase 1 confirmed it holds across every vector it read.
-So the sweep has a second way to group, in which a model reads a whole
-neighbourhood at once and says what is inside it.
+were 39% gold-pure. That is why the sweep now groups on `same_effort`, a pair
+question the decision model is trained on (*The decision grouping*, above);
+the Phase 2 as-is evaluation put Kev v2 at an 8.0% false-link rate at 70%
+recall on the golden pairs, against cosine's 15%.
 
-`StorylineTuning.groupingMode` chooses between them, and it is a constant with
-no setting behind it. `GroupingMode.cosine` is what ships: the clustering
-above forms the proposals. The other two are dark. `GroupingMode.model` keeps
-the cosine pass and demotes it to a **neighbourhood finder** —
-
-- one sweep of `clusterBySimilarity` at `groupingNeighbourhoodThreshold`,
-  0.41, which is just under the recall-70 rung so that most same-effort pairs
-  survive into a neighbourhood, with `groupingNeighbourhoodMinSize` 3, a cap of
-  `groupingNeighbourhoodCap` 40, and **no coherence floor**: a neighbourhood is
-  a region, not a proposal, and splitting it on its mean would re-form exactly
-  the tight little clusters the cosine pass already makes;
-- one **`GroupThreadsTask`** call per neighbourhood, over its cards numbered
-  `[1]`…`[n]` in centrality order by the same recipe the naming call uses.
-  Twelve whole cards fit one call under `cardsCap`, so a neighbourhood above
-  that is re-clustered up the same `clusterSplitStep` ladder until every piece
-  fits; a piece that falls under the minimum size on the way down, and a piece
-  still too wide at `clusterSplitCeiling`, are dropped unasked;
-- each returned group of at least `proposeMinClusterSize` becomes a cluster
-  handed to `_propose` exactly as a cosine cluster is. The namer still runs,
-  the confirms still run, and the hash is still keyed on the member set — so a
-  group either pass proposes is recognised by a dismissal the other one
-  earned.
-
-`GroupingMode.pool` draws no neighbourhood at all. There is no similarity
-table, no ladder and no split: the pool is cut into consecutive slices of
-`StorylineTuning.poolCardsPerCall`, 48, in the pool's own order, and each
-slice is one `GroupThreadsTask` call. Forty-eight because 48 whole cards of
-`cardCap` plus the 47 separators between them is 29,035 characters, about 7.3K
-tokens, which fits the 16K context the box runs its prose slot at with the bulk
-slot loaded beside it; the answer's ceiling at that width is 24 groups. The
-golden pool of about 71 threads is two calls. A tail slice under
-`groupingNeighbourhoodMinSize` is counted `grouping_unfit` and never asked.
-
-Unlike the cosine path, `room` does **not** stop the slice loop. `room` is at
-most `maxPendingSuggestions`, three, so a first slice returning three groups
-would end the pass with the second half of the mailbox unread, and reading the
-whole pool is the point of the mode. The call budget it would be protecting is
-small here in a way it is not on the cosine path: about two prose calls a pass
-on this pool, where a neighbourhood walk can reach forty. `_propose` still
-spends `room` on the sorted list, so what ships is unchanged; only what was
-looked at is. Everything after the call is the pass it already was: the
-same centrality ordering inside a slice, the same range check on the numbers,
-the same propose floor, the same largest-first order.
-
-The task itself is parametrised by `cardsPerCall` rather than fixed, and its
-three ceilings are read off that one number: the whole-set clamp, the maximum
-groups an answer may name and the maximum threads in a group. At the default
-twelve that is 7,255 characters, 6 groups and 12 threads; at 48 it is 29,035,
-24 and 48. The per-card cap is still the namer's own, so a card reads the same
-to the model that groups it as to the model that names it. No prompt wording
-changed with any of this.
-
-Determinism holds the way the cosine pass's does: temperature 0, the
-neighbourhoods walked in the pool's own order, the cards inside one ordered by
-centrality, and every group's members returned ascending. The pool mode is
-deterministic for the simpler reason that the store's order is. A call that throws
-`LlmUnavailableException` parks the sweep exactly as the naming call does; a
-malformed answer or an answer naming no group leaves that neighbourhood
-ungrouped and the pass carries on.
-
-The sweep's activity row carries four counts in **all three** modes, zeroes
-under `cosine`, so any row can be read against any other: `grouping_calls`,
-`grouped` (threads placed in a proposable group), `grouping_failed` (calls that
-left their piece ungrouped) and `grouping_unfit` (pieces or slices dropped
-before any call). `make golden-sweep` prints them on its `calls` line.
+Two earlier attempts had a GENERATIVE model do the grouping, and both were
+deleted in the decision-questions round with their task (`GroupThreadsTask`,
+the `storyline_group` stage): `model` mode drew cosine neighbourhoods and asked
+the 27B which threads inside each were one effort, and `pool` mode showed it
+the whole pool in consecutive 48-card slices. Neither ever named a group on
+this pool (the rows below).
 
 **The mode is chosen by a define, never by a `sed`.** `make golden-sweep
-SWEEP_GROUPING=cosine|model|pool` sets it for one run, the define is refused
-loudly on anything else, and the run prints the mode it took on its stage line
-and records it in the result JSON. The default follows the app, so a run nobody
-passed a mode to measures the mode that ships.
+SWEEP_GROUPING=decision|cosine` and `SWEEP_CHARTER=model|lint` set them for one
+run; each define is refused loudly on anything else, and the run prints what
+it took on its stage line and records `grouping` and `charter` in the result
+JSON. The defaults follow the app, so a run nobody passed a mode to measures
+what ships.
 
-**Both budgets are 1024 tokens.** `NameStorylineTask.maxTokens` and
-`GroupThreadsTask.maxTokens` are task constants, on the recap task's precedent:
-a task that names no budget lands on the generic 512, and on the Converse wire
-512 becomes a `max_tokens` stop that throws, which is how one whole cloud
-naming pass was lost. A grammar-constrained local answer that already finished
-under 512 is unchanged by the larger ceiling, so the two local rows on each
-side of the change are expected to match exactly. It matters most in pool mode,
-where a 24-group answer runs closest to the ceiling: a pool row with
-`grouping_failed` above zero reads as a budget symptom first, and the answer to
-it is a larger budget rather than a narrower slice.
-
-**`model` ships dark behind `GroupingMode.cosine` until a sweep row clears the
-rule.** The rule was registered before the first row was taken: correct
-positives at or above 10, forbidden hits at or below 3, `storyline.id` above 50
-(the abstention score — a sweep that files nothing scores 50), and the formed
-clusters at or above 60% pure before naming. Otherwise the mode and the task
-stay in the tree unused and the row is the record.
-
-**`pool` ships dark behind the same constant too.** Its rule was registered on
-2026-09-20 before the first pool row was taken: on two passes with the grouper
-and the namer on the box 27B, correct positives at or above 15 among the
-formable items, forbidden hits at or below 3, `storyline.id` above 55, and the
-formed clusters at or above 60% pure before naming. Met and
-`StorylineTuning.groupingMode` would become `GroupingMode.pool` with a row on
-each side of the change; missed and it stays dark like `model`, and the row is
-the record either way. It was **MISSED on every clause on 2026-09-21**, in the
-dated section below, so `GroupingMode.cosine` stays the default and both other
-modes stay in the tree unused.
+**The naming budget is 1024 tokens.** `NameStorylineTask.maxTokens` is a task
+constant, on the recap task's precedent: a task that names no budget lands on
+the generic 512, and on the Converse wire 512 becomes a `max_tokens` stop that
+throws, which is how one whole cloud naming pass was lost. A
+grammar-constrained local answer that already finished under 512 is unchanged
+by the larger ceiling.
 
 **A row is read against the ceiling, not against the item count.** The sweep
 never proposes a group under `proposeMinClusterSize`, so an item whose gold
@@ -1492,8 +1558,8 @@ against, and the same three ride the result JSON as `formable_items`,
 
 Measured 2026-09-19 on the Qwen vector at `:8081`, 1,024 wide, prefix length
 86, with neighbourhoods at 0.41 / min 3 / cap 40, temperature 0, and the
-confirms on the local 4B. `GroupingMode` was flipped to `model` for each
-grouping pass and put back.
+confirms on the local 4B — the retired `model` mode against the cosine pass
+that shipped then.
 
 | Row | storyline.id | Correct positives | Forbidden | Formed | Sweep wall |
 |-----|--------------|-------------------|-----------|--------|------------|
@@ -1509,8 +1575,8 @@ group, 6 unfit pieces, 0 wire failures, and a `storyline.id` of 50 of 98,
 which is the abstention score a sweep that files nothing gets. The runs took
 51 s, 41 s and 146 s.
 
-**The rule is not met, so `GroupingMode.cosine` ships and the task and the
-mode ship dark.** The reason is the neighbourhood rather than the model: at
+**Its pre-registered rule was not met, so the mode stayed dark until it was
+deleted.** The reason is the neighbourhood rather than the model: at
 the neighbourhood cosine the linked pairs run about three cross-effort to one
 same-effort, and a model shown six such threads declines to call any two of
 them one thing. Six calls with four empty answers means two calls DID return
@@ -1554,8 +1620,8 @@ same shape as its 8% wrong accepts against the 4B's 17% on the human list. And
 vector, is the finding the round was for: what files a mailbox is a person
 saying what the storylines are, not the app guessing.
 
-**The pool reading was MISSED on every clause**, so `GroupingMode.pool` ships
-dark. Shown the whole mailbox in two calls of 48 numbered cards, the box 27B
+**The pool reading was MISSED on every clause**, so `pool` mode stayed dark
+until it was deleted. Shown the whole mailbox in two calls of 48 numbered cards, the box 27B
 named no group at all, the local 27B did the same, and `grouping_failed` is 0
 on every pass, so neither the wire nor the 1024-token budget is the cause. That
 is the third time a model has declined to group this pool: `model` mode at six
@@ -1632,18 +1698,23 @@ In the activity row the probe reports itself as `joined`, kept separate from
 `confirmed` and `rejected` — those two count the cluster's own members being
 judged, and a finished thread that was offered and turned away was never one.
 
-The sweep's row carries eleven numeric keys: `proposed`, `confirmed`,
+The sweep's row carries seventeen numeric keys: `proposed`, `confirmed`,
 `rejected` and `joined`, and beside them `series` and `series_excluded` from
-the subject pre-pass, `incoherent` and `lint` for the clusters the namer and
-the charter lint refused — which is to say the clusters filed as `possible`
-for each of those two reasons, since a refusal is filed rather than thrown
-away — `outliers` for the threads the namer named as not belonging, and `fragments` and `folded` for the rows the fragment fold joined
-and the rows it folded at all. Every one is a number and never a null or a
+the subject pre-pass, `lint` and `charter_model` for the clusters each arm of
+the charter check refused — which is to say the clusters filed as `possible`
+for that reason, since a refusal is filed rather than thrown away —
+`outliers` for the members the grouping set aside from the clusters it
+named, `clusters_deferred` for the clusters the pair budget could not
+complete,
+`fragments` and `folded` for the rows the fragment fold joined and the rows it
+folded at all, `overlaps_possible`, and the grouping's `pairs_scored`,
+`pairs_cached`, `pairs_deferred` and `namer_calls`. Every one is a number and never a null or a
 string, because the log's quiet-kind check reads them as numerics and a
 non-numeric would make every all-zero sweep loud again; the one string this
 row ever carries is `deferred`, and it is a string so that a deferred pass is
 never hidden as quiet. The row is written when the pass reached a cluster,
-excluded a series, or folded a row: each of those is something the pass did.
+excluded a series, folded a row, or asked or deferred a pair: each of those
+is something the pass did.
 
 ## Cross-source identity
 
@@ -1667,11 +1738,11 @@ recipe; a dismissal made under the old one holds forever.
 
 ## Storyline questions (bond-state/2)
 
-The decision model can answer three storyline questions. Membership asks
+The decision model answers three storyline questions. Membership asks
 `member_of` at all five confirm sites (*Membership on the decision model*,
-below); `same_effort` and `charter_specific` are implemented in
-`StorylineJudge` and not asked by any pass yet — the sweep moves onto them in
-the next round.
+below); the sweep asks `same_effort` to group its pool and `charter_specific`
+to check what the namer wrote (*The decision grouping* and *The charter
+check*, above).
 
 - `same_effort` asks whether two threads are about the same specific project,
   event or topic. It is asked of `renderStorylinePair(a, b)` in both orders,
@@ -1734,7 +1805,13 @@ the fetch failed partway, since the bodies that landed are real. A failure is
 logged, the thread is judged on what is stored, and the judge does not ask
 again for that thread for five minutes (`StorylineJudge.fetchRetryAfter`), so a
 mail server that is down costs one failed round trip per thread, not one per
-candidate. Teams has no fetch to ask for.
+candidate — and that memo outlives a sweep pass. A fetch that succeeded is
+not asked again for the same preview rows either, so a message whose fetched
+body is empty is fetched once, not once per question. The sweep calls
+`StorylineJudge.beginPass()` at its top, which forgets the successes (never
+the failures), so inside a pass each thread is fetched at most once — its
+pairs, its member confirm and the probe all read it. Teams has no fetch
+to ask for.
 
 **One batch per storyline.** `memberOf(storyline, threads)` asks every thread
 in one request batch: recruit, the audit, the sweep's members and the probe
@@ -1745,13 +1822,13 @@ around with `memberOfEach(storylines, thread)`: the thread's text is built
 once, with at most one body fetch, and one batch carries a state per
 retrieved candidate (at most six).
 
-**Park before the 27B.** A sweep that has clusters to propose calls
-`StorylineJudge.ensureReady()` (`DecisionClient.ensureReady`: a managed model
-the router does not serve, Your server's kind, the heads file on this Mac —
-no question asked) before its first naming call, so a decision model that
-cannot answer parks the pass without a naming call spent on proposals it
-could never confirm. A decision server that is merely down is found by the
-first `member_of`.
+**Park before anything is asked.** A sweep with a pool to judge or a series to
+propose calls `StorylineJudge.ensureReady()` (`DecisionClient.ensureReady`: a
+managed model the router does not serve, Your server's kind, the heads file on
+this Mac — no question asked) before its first pair, body fetch or naming
+call, so a decision model that cannot answer parks the pass without a 27B call
+or a written row. A decision server that is merely down is found by the first
+question.
 
 **The rule** is `StorylineService._accepts`, the one rule at all five sites:
 `p >= StorylinePolicy.acceptSuggested` (0.70) for a `suggested` storyline,
@@ -1763,8 +1840,11 @@ removals are hard blocks, never weighed.
 **The policy constants** (`StorylinePolicy`, beside the judge) are
 PROVISIONAL: `acceptActive` 0.50, `acceptSuggested` 0.70,
 `assignRetrievalFloor` 0.30, `assignTopK` 3, set from the Phase 2 as-is
-evaluation and refitted with a `make golden-storyline` row on each side when
-the v3 model lands — the `StorylineTuning` rule.
+evaluation, and the sweep's `pairNeighbours` 10, `pairRetrievalFloor` 0.30,
+`pairBudgetPerPass` 400, `linkTau` 0.50 and `charterSpecificTau` 0.50 with no
+measurement yet. All are refitted with a `make golden-storyline` or `make
+golden-sweep` row on each side when the v3 model lands — the `StorylineTuning`
+rule.
 
 **The evidence sentence.** The model gives a number, not a reason, so the
 member row's evidence — the italic line on the timeline card and the reason
@@ -1797,35 +1877,19 @@ gate's eviction):
 
 ## The model calls
 
-**GroupThreadsTask** — `app/lib/services/llm/storyline_tasks.dart`, schema
-`storyline_group`, **prose / 27B slot** (`groupClient` in `StorylineService`,
-defaulting to the naming client), **temperature 0**, one call per sweep
-neighbourhood and only under `GroupingMode.model`. Given a numbered list of
-threads that sit near each other, it returns `{groups: [{threads, why}]}`: the
-numbers of the threads that are one specific project, event or topic, and one
-sentence saying which. The rules are the namer's rules turned outward — a
-thread is referred to only by its number; a group is one specific project,
-event or topic and never a team, a person or sender, or a kind of message such
-as invoices, newsletters or meeting invites; a group needs at least two
-threads and each number is used at most once; and a `why` that reads "same
-team", "same sender", "same kind of request" or "all work email" is a group
-that should not have been returned. The rule the other prompts do
-not have is that **leaving a thread out is the expected answer**: the
-neighbourhood is drawn generously on purpose, so most of what the model is
-shown belongs to nothing on the list, and an empty answer is honest. The
-validator drops rather than repairs — a number that is not one, a number under
-1, a number a group already used, and a group left with fewer than two threads
-each cost that entry and nothing else. The upper bound is the service's, since
-only it knows how many cards it showed.
+No membership call and no grouping call: see *Membership on the decision
+model* and *The decision grouping*, above. Every storyline task left WRITES.
 
-No membership call: see *Membership on the decision model*, above.
-
-**NameStorylineTask** — same file, schema `storyline_name`, **prose / 27B
-slot**, **temperature 0**. Six fields in schema order, which is the order a
-grammar emits them in: `evidence`, `coherent`, `outliers`, `title`, `summary`,
-`charter`. The evidence sentence comes first and the two judgements come
-straight after it, so the title follows from them rather than being written
-first and defended afterwards. `title` is ≤6 words in the owner's own
+**NameStorylineTask** — `app/lib/services/llm/storyline_tasks.dart`, schema
+`storyline_name`, **prose / 27B slot**, **temperature 0**. Four fields in
+schema order, which is the order a grammar emits them in: `evidence`, `title`,
+`summary`, `charter`. The evidence sentence comes first, so the title follows
+from it rather than being written first and defended afterwards. It only
+writes: whether the threads are one storyline was decided before it was asked
+(`same_effort`), and whether what it wrote is specific enough is decided after
+(*The charter check*). Until the decision-questions round it also answered
+`coherent` and `outliers`, its own out and its own outlier list; both were
+removed from the schema, the validator and the prompt. `title` is ≤6 words in the owner's own
 vocabulary, with generic labels banned and now a person, a team, a department
 or a category of message banned with them; `summary` is a present-tense
 one-sentence status; `charter` is membership criteria so future threads can be
@@ -1833,14 +1897,6 @@ judged against it, and must name the specific thing, because a charter that
 would admit every thread from one person or one team is not a charter. The doc
 comment above the prompts explains the charter-vs-summary distinction — the
 charter is the membership contract, the summary is display text.
-
-`coherent` is the model's out: true only when the threads are ONE specific
-event, project or topic, with the same team, the same sender and the same kind
-of message named as things that are not one storyline. `outliers` are the
-numbers of the threads that do not belong to what the rest share. Both default
-in the validator. A missing `coherent` reads true and a missing `outliers`
-reads empty, so an answer from a server that never saw the fields still names
-its group.
 
 The cards it reads are the cluster's `namingCards`, twelve, nearest the
 centroid, most central first, each clamped whole to `cardCap`, 600 characters,
@@ -1855,44 +1911,17 @@ replaced was forty cards squeezed into four thousand characters at
 eighty-three characters each, which is a subject line and nothing a name could
 follow from.
 
-What the sweep does with the answer, in `_propose` and before any confirm is
-spent, follows how the live model actually uses the two fields. Asked this
-prompt, the 27B answers `coherent: false` whenever ANY thread does not belong
-and lists those threads in `outliers`, writing its title and charter for the
-group that remains, which is what the prompt's own sentence asks of it. On the
-golden pool eight clusters of eight came back false, four of them listing every
-thread and the rest listing 4 of 7, 3 of 6, 2 of 3 and 1 of 3. So a false is
-read as "not all of them" rather than as a refusal.
-
-First, a cluster is filed as possible and noted `incoherent` on the two answers
-that name no group to keep: `coherent: false` carrying no outliers, which is the
-model declining outright, and a kept set of fewer than `minClusterSize`
-threads, which is the same refusal spelled as a list.
-
-Then `charterLint` in `storyline_lint.dart` reads the title and charter against
-the WHOLE cluster's participants, and a hit on any of its three verdicts, which
-are `placeholder`, `person` and `category`, files the cluster as possible and
-notes `lint`. The confirm stage cannot refuse what the charter allows, so a charter
-that allows everything has to be caught before it is asked about, and the lint
-runs on the participant list as the sweep built it rather than on what survives
-the drop below.
-
-Only then are the outliers dropped, and the pass proceeds on the kept threads,
-`coherent` false or true alike. They go straight back into the pool, with
-nothing written for them and nothing blocking them, and the count lands on the
-row as `outliers`. The per-member confirms are the guard on what is left: each
-kept thread is judged against the charter the model wrote for the group it
-kept, and `minClusterSize` is applied again to the survivors. `_charterCap` on
-this task stays 300, which puts every charter the app writes under the
-membership renderer's 1,000-code-point cap; that cap bites only on charters a
-person typed.
+What the sweep does with the answer, in `_propose`: the charter check reads
+the title and charter before any confirm is spent, and a refusal files the
+whole cluster as possible (*The charter check*); otherwise each thread is
+judged against the charter on `member_of`, and `minClusterSize` is applied to
+the survivors. `_charterCap` on this task stays 300, which puts every charter
+the app writes under the membership renderer's 1,000-code-point cap; that cap
+bites only on charters a person typed.
 
 Called from the sweep's `_propose` and from the refresh pass's bootstrap
-branch. The bootstrap branch numbers its cards the same way, so the prompt's
-sentence about threads listed in brackets is true there too, and then IGNORES
-`coherent` and `outliers` by design: a storyline a person made by hand is not
-the sweep's to split, and a model asked to find the odd thread out will always
-find one.
+branch, which numbers its cards the same way, so a card reads the same to the
+namer on both paths.
 
 **RefineStorylineTask** — same file, schema `storyline_refresh`, **prose / 27B
 slot**, **temperature 0**. The same four fields as naming, asked of a

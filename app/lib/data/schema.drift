@@ -841,3 +841,22 @@ CREATE TABLE decision_labels (
   origin TEXT NOT NULL,
   created_at TEXT NOT NULL
 ) STRICT;
+
+-- The sweep's `same_effort` answers, one row per unordered pair of thread
+-- TEXTS: `a_hash` < `b_hash`, each the first 16 hex of the rendered thread
+-- text's sha256 (`StorylineThreadText.cardHash`). `qhash` holds the key of
+-- what decided the pair, `'<qhash>|<model identity>'` (`StorylineJudge.
+-- decidedBy`, called `decidedBy` in Dart): the question set and the model
+-- that answered it. `p` is the mean of p(yes) over both orders. A thread
+-- whose text changes (a new message, a fetched body) has a new hash and its
+-- pairs are asked again; another model, or the same model re-installed,
+-- reads none of these, and the sweep prunes them. DERIVED — Clear AI results
+-- empties it and the sweep asks again.
+CREATE TABLE pair_decisions (
+  a_hash TEXT NOT NULL,
+  b_hash TEXT NOT NULL,
+  qhash TEXT NOT NULL,
+  p REAL NOT NULL,
+  decided_at TEXT NOT NULL,
+  PRIMARY KEY (a_hash, b_hash, qhash)
+) STRICT;

@@ -3,7 +3,7 @@ import 'package:bond_inbox/services/storyline_clustering.dart';
 // parameters and has no opinion about them, so the tests below hard-code the
 // app's values and the first test is what keeps those two in step.
 import 'package:bond_inbox/services/storyline_service.dart'
-    show StorylineTuning;
+    show StorylinePolicy, StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 /// The clustering rule the sweep proposes storylines with, on explicit
@@ -94,11 +94,13 @@ void main() {
     expect(StorylineTuning.clusterSplitStep, 0.05);
     expect(StorylineTuning.clusterSplitCeiling, 0.68);
 
-    // And the neighbourhood numbers the model-read grouping draws with, which
-    // pass through this same module with no coherence floor.
-    expect(StorylineTuning.groupingNeighbourhoodThreshold, 0.41);
-    expect(StorylineTuning.groupingNeighbourhoodMinSize, 3);
-    expect(StorylineTuning.groupingNeighbourhoodCap, 40);
+    // And the numbers the decision grouping passes to
+    // `clusterByAverageLinkage`, PROVISIONAL until the v3 model's sweep row.
+    expect(StorylinePolicy.linkTau, 0.50);
+    expect(StorylinePolicy.pairNeighbours, 10);
+    expect(StorylinePolicy.pairRetrievalFloor, 0.30);
+    expect(StorylinePolicy.pairBudgetPerPass, 400);
+    expect(StorylinePolicy.charterSpecificTau, 0.50);
   });
 
   group('PairSimilarities', () {
@@ -383,6 +385,205 @@ void main() {
     test('nothing to cluster is nothing, not a throw', () {
       expect(cluster(0, simFrom(const {})), isEmpty);
       expect(cluster(1, simFrom(const {})), isEmpty);
+    });
+  });
+
+  group('clusterByAverageLinkage', () {
+    /// A sparse p table from `'<lo>-<hi>'` entries, as the grouper builds it.
+    Map<(int, int), double> pOf(Map<String, double> pairs) => {
+          for (final MapEntry(key: key, value: value) in pairs.entries)
+            (int.parse(key.split('-').first), int.parse(key.split('-').last)):
+                value,
+        };
+
+    ({List<List<int>> clusters, int outliers}) link(
+      int count,
+      Map<String, double> pairs, {
+      double tau = 0.5,
+      int minSize = 3,
+      int maxSize = 12,
+    }) =>
+        clusterByAverageLinkage(
+          count,
+          pOf(pairs),
+          tau: tau,
+          minSize: minSize,
+          maxSize: maxSize,
+        );
+
+    test('a judged trio is one cluster, and a pair is under the floor', () {
+      final formed = link(6, {
+        ...clique([0, 2, 4], 0.9),
+        ...clique([1, 3], 0.9),
+      });
+
+      expect(formed.clusters, [
+        [0, 2, 4],
+      ]);
+      expect(formed.outliers, 0);
+    });
+
+    test('an unscored pair reads as p = 0', () {
+      // 0-1 and 1-2 are sure, 0-2 was never asked: the mean between {0, 1}
+      // and {2} is (0 + 0.9) / 2, under the bar, so 2 stays out.
+      final formed = link(3, {'0-1': 0.9, '1-2': 0.9}, minSize: 2);
+
+      expect(formed.clusters, [
+        [0, 1],
+      ]);
+    });
+
+    test('clusters merge on the MEAN across them, not on one strong pair', () {
+      // One likely pair across two sure trios is a link a single-link rule
+      // would weld them on; averaged over nine cross pairs it is nothing.
+      final formed = link(6, {
+        ...clique([0, 1, 2], 0.95),
+        ...clique([3, 4, 5], 0.95),
+        '2-3': 0.9,
+      });
+
+      expect(formed.clusters, [
+        [0, 1, 2],
+        [3, 4, 5],
+      ]);
+    });
+
+    test('a member whose mean p to the rest is under the bar is an outlier',
+        () {
+      // 0, 1 and 2 are one effort, and 3 belongs with them. 4 is sure only of
+      // 3, so {3, 4} forms first, and the two clusters then merge at a mean
+      // of (3 × 0.95 + 3 × 0.1) / 6 = 0.525. Read per member, 4's mean to the
+      // rest is (3 × 0.1 + 1.0) / 4 = 0.325, and it goes back to the pool.
+      final formed = link(5, {
+        ...clique([0, 1, 2], 0.9),
+        '3-4': 1.0,
+        '0-3': 0.95,
+        '1-3': 0.95,
+        '2-3': 0.95,
+        '0-4': 0.1,
+        '1-4': 0.1,
+        '2-4': 0.1,
+      });
+
+      expect(formed.clusters, [
+        [0, 1, 2, 3],
+      ]);
+      expect(formed.outliers, 1);
+    });
+
+    test('a third thread that averages under the bar never joins', () {
+      final formed = link(3, {'0-1': 0.9, '0-2': 0.6, '1-2': 0.0});
+
+      // {0, 1} merge first, then {2} at (0.6 + 0) / 2 = 0.3 — under the bar,
+      // so the trio never forms and the pair is under the propose floor.
+      expect(formed.clusters, isEmpty);
+    });
+
+    test('the cap stops a merge that would pass it', () {
+      final formed = link(5, clique([0, 1, 2, 3, 4], 0.9), maxSize: 3);
+
+      expect(formed.clusters, [
+        [0, 1, 2],
+      ]);
+    });
+
+    test('ties go to the smallest pool index, so it answers the same twice',
+        () {
+      // Every pair equal: the merges run in index order, and the cap makes
+      // that order visible in which rows end up together.
+      final pairs = clique([0, 1, 2, 3, 4, 5], 0.8);
+      final first = link(6, pairs, maxSize: 3);
+      final second = link(6, Map.of(pairs), maxSize: 3);
+
+      expect(first.clusters, [
+        [0, 1, 2],
+        [3, 4, 5],
+      ]);
+      expect(second.clusters, first.clusters);
+    });
+
+    test('largest first, ties by the earliest member', () {
+      final formed = link(9, {
+        ...clique([1, 5, 7], 0.9),
+        ...clique([0, 3, 4, 8], 0.9),
+        ...clique([2, 6], 0.9),
+      }, minSize: 2);
+
+      expect(formed.clusters, [
+        [0, 3, 4, 8],
+        [1, 5, 7],
+        [2, 6],
+      ]);
+    });
+
+    test('an outlier drop that leaves a cluster under the floor drops it all',
+        () {
+      // The outlier case above at a floor of five: four are left, and four
+      // is not a proposal.
+      final formed = link(5, {
+        ...clique([0, 1, 2], 0.9),
+        '3-4': 1.0,
+        '0-3': 0.95,
+        '1-3': 0.95,
+        '2-3': 0.95,
+        '0-4': 0.1,
+        '1-4': 0.1,
+        '2-4': 0.1,
+      }, minSize: 5);
+
+      expect(formed.clusters, isEmpty);
+      expect(formed.outliers, 1);
+    });
+
+    test('the cap blocks the best merge while a lower one proceeds', () {
+      // {0, 1, 2} is at the cap of three, so 3 cannot join it at 0.9; the
+      // pair 3–4 at 0.6 is the best merge left, and it happens.
+      final formed = link(5, {
+        ...clique([0, 1, 2], 0.99),
+        '0-3': 0.9,
+        '1-3': 0.9,
+        '2-3': 0.9,
+        '3-4': 0.6,
+      }, minSize: 2, maxSize: 3);
+
+      expect(formed.clusters, [
+        [0, 1, 2],
+        [3, 4],
+      ]);
+    });
+
+    test('the optimistic reading merges on the pairs that have an answer', () {
+      // 0–2 was never asked. Read as zero it keeps 2 out; left out of the
+      // mean, 2 joins on its one answered pair.
+      final p = pOf({'0-1': 0.9, '1-2': 0.9});
+      expect(
+        averageLinkage(3, p, tau: 0.5, maxSize: 12)
+            .where((c) => c.length > 1)
+            .toList(),
+        [
+          [0, 1],
+        ],
+      );
+      expect(
+        averageLinkage(3, p, tau: 0.5, maxSize: 12, unscoredAsZero: false),
+        [
+          [0, 1, 2],
+        ],
+      );
+      // Two clusters with no answered pair between them never merge.
+      expect(
+        averageLinkage(2, const {}, tau: 0.5, maxSize: 12,
+            unscoredAsZero: false),
+        [
+          [0],
+          [1],
+        ],
+      );
+    });
+
+    test('nothing to cluster is nothing, not a throw', () {
+      expect(link(0, const {}).clusters, isEmpty);
+      expect(link(1, const {}).clusters, isEmpty);
     });
   });
 }

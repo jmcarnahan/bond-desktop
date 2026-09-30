@@ -205,9 +205,9 @@ class LlmCallRecord {
   /// (`DecisionClient`). The task names in the app today: `message_text`,
   /// `attachment_digest`, `context_file_digest`,
   /// `context_brief`, `context_select`, `draft_reply`
-  /// (Improve a draft reuses it), `storyline_name`, `storyline_group`,
-  /// `storyline_refresh` and `storyline_recap`. A storyline membership
-  /// question is the decision model's, labelled `decision:member_of`.
+  /// (Improve a draft reuses it), `storyline_name`, `storyline_refresh` and
+  /// `storyline_recap`. A storyline question — membership, a pair, a
+  /// charter — is the decision model's, labelled `decision:<question id>`.
   final String label;
 
   final int durationMs;

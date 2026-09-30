@@ -334,6 +334,31 @@ class DecisionClient {
     }
   }
 
+  /// Which model answers this client's questions right now, as a short
+  /// string that changes whenever the answers could:
+  /// `heads:<model>@<file sha>` for the encoder-heads kind (the heads run
+  /// here, so the file names the model), `systemone:<listed name>` for Your
+  /// server's Kev wrapper.
+  /// Cheap: the heads are cached per file modification and a server's kind
+  /// per address. The sweep keys its pair cache on this beside the qhash, so
+  /// a swapped or re-installed model asks its pairs again. Throws what
+  /// [ensureReady] throws.
+  Future<String> modelIdentity() async {
+    final destination = target;
+    if (destination.unavailable case final why?) {
+      throw DecisionNotInstalledException(why);
+    }
+    final facts = _CallFacts(yourServer: _yours(destination));
+    if (facts.yourServer) {
+      final kind = await _resolveKind(destination, facts);
+      if (kind.kind == DecisionServerKind.systemOne) {
+        return 'systemone:${kind.model}';
+      }
+    }
+    final heads = _heads();
+    return 'heads:${heads.model}@${heads.fingerprint}';
+  }
+
   /// `same_effort` for each pair of thread texts (`renderStorylineThread`),
   /// in order: the mean of p(yes) over both orders, A-then-B and B-then-A,
   /// which is how the model was trained and how the contract asks it. Both

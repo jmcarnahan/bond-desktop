@@ -81,8 +81,10 @@ class DecisionHeadsFile {
       throw failed;
     }
     final Object? decoded;
+    final String text;
     try {
-      decoded = jsonDecode(file.readAsStringSync());
+      text = file.readAsStringSync();
+      decoded = jsonDecode(text);
     } on FileSystemException {
       throw const DecisionNotInstalledException(notInstalledText);
     } on FormatException {
@@ -93,7 +95,10 @@ class DecisionHeadsFile {
     }
     final DecisionHeads heads;
     try {
-      heads = DecisionHeads.fromJson(decoded.cast<String, Object?>());
+      heads = DecisionHeads.fromJson(
+        decoded.cast<String, Object?>(),
+        fingerprint: DecisionHeads.headsFingerprint(text),
+      );
     } on DecisionOlderModelException catch (e) {
       // The older model's file is the refusal an upgrade brings, and its own
       // sentence names the cause; a mismatch prefix ahead of it would only

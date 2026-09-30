@@ -1,33 +1,31 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
+import 'package:bond_inbox/services/decision/storyline_thread_input.dart'
+    show storylineThreadTextFor;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/llm_client.dart'
+    show DecisionUnavailableException;
+import 'package:bond_inbox/services/storyline_judge.dart' show StorylineJudge;
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'fixtures/fake_decision_client.dart' show scriptedJudge;
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
-/// The model-read grouping: the cosine pass draws a neighbourhood and
-/// [GroupThreadsTask] says what is inside it.
+/// The decision grouping: cosine proposes candidate pairs, the decision
+/// model's `same_effort` judges each one, the answers are cached in
+/// `pair_decisions`, and average linkage over the judged pairs forms the
+/// clusters the namer then only writes text for.
 ///
-/// Dark behind `StorylineTuning.groupingMode`, which reads
-/// `GroupingMode.cosine` on every shipped build, so every test here but the
-/// last passes the mode in through the service's test-only constructor
-/// parameter rather than flipping a const the rest of the suite reads.
-///
-/// Nothing here scripts a group by NUMBER. The cards are numbered in
-/// centrality order, which is the service's business and not a thing a test
-/// should hard-code; instead [groupLlm] is told which THREADS go together
-/// and reads the numbering off the call it was handed. What the tests pin is
-/// the mapping back — that the numbers the model answers with come home to the
-/// threads whose cards carried them.
+/// Every test scripts its `same_effort` answers explicitly — the fake's
+/// default is a no — by the thread each state carries, never by call order:
+/// which pairs are asked, and in what order, is what several tests here pin.
 
 /// One report from the `clusterObserver` seam.
 typedef SeenCluster = ({
@@ -44,8 +42,9 @@ List<double> atDegrees(double degrees) {
 }
 
 /// [key] with every digit spelled out, so the default subject gives each
-/// thread its own series key — three subjects differing by a digit run read as
-/// one recurring series to the sweep's pre-pass and never reach the pool.
+/// thread its own series key — subjects differing by a digit run share one,
+/// and would be candidate pairs (and a seeded series) whatever the vectors
+/// said.
 String spellDigits(String key) {
   const words = {
     '0': 'zero',
@@ -73,98 +72,16 @@ String spellDigits(String key) {
 
 String subjectOf(String key) => 'Subject for ${spellDigits(key)}';
 
-/// The body of the one fence in a built user message.
-String fenceBody(String message) => message
-    .split('<untrusted_data source="threads">')
-    .last
-    .split('</untrusted_data>')
-    .first;
+/// The marker [sameEffortAmong] reads a thread by: its seeded body.
+String marker(String key) => 'kept-$key';
 
-/// The thread keys of a grouping call's cards, in the order the service
-/// numbered them.
-List<String> numberedKeys(String user, Iterable<String> keys) => [
-      for (final card in fenceBody(user).split('\n---\n'))
-        keys.firstWhere(
-          (key) => card.contains(subjectOf(key)),
-          orElse: () => throw StateError('no known thread in card: $card'),
-        ),
-    ];
-
-/// The thread keys each grouping call was sent, in call order.
-///
-/// Read back out of the user messages the client recorded rather than kept
-/// in a field of its own: the numbering IS what the service built, so
-/// deriving it cannot drift from the call it describes.
-List<List<String>> numberingsOf(ScriptedLlm llm, Iterable<String> keys) => [
-      for (final call in llm.calls)
-        if (call.schemaName == 'storyline_group')
-          numberedKeys(call.user, keys),
-    ];
-
-/// The grouping answer, computed from the call the service actually made.
-///
-/// [groups] names the threads that go together, in call order, the last entry
-/// repeating once the list runs out; [rawGroups] writes them as card NUMBERS
-/// instead, for the cases about numbers no card carries, and takes precedence.
-/// Either way the mapping back through the numbering is the whole point, so
-/// it happens here, where the call is.
-FutureOr<Map<String, dynamic>> Function(LlmCall) groupingAnswer({
-  required List<String> keys,
-  List<List<List<String>>> groups = const [],
-  List<List<int>>? rawGroups,
-}) {
-  var calls = 0;
-  return (LlmCall call) {
-    final order = numberedKeys(call.user, keys);
-    final at = calls++;
-    if (rawGroups case final List<List<int>> raw) {
-      return {
-        'groups': [
-          for (final group in raw)
-            {'threads': group, 'why': 'They are one specific piece of work.'},
-        ],
-      };
-    }
-    final answer = groups.isEmpty
-        ? const <List<String>>[]
-        : groups[at < groups.length ? at : groups.length - 1];
-    return {
-      'groups': [
-        for (final group in answer)
-          {
-            'threads': [
-              for (final key in group)
-                if (order.contains(key)) order.indexOf(key) + 1,
-            ],
-            'why': 'They are one specific piece of work.',
-          },
-      ],
-    };
-  };
+/// The thread keys a `same_effort` state is about, A then B.
+(String, String) keysOf(String state) {
+  final (a, b) = pairTextsOf(state);
+  String keyIn(String text) =>
+      RegExp(r'kept-([A-Za-z0-9]+)').firstMatch(text)!.group(1)!;
+  return (keyIn(a), keyIn(b));
 }
-
-/// A client that answers from a per-schema script, and answers a grouping call
-/// from a list of thread KEYS mapped back through the numbering the service
-/// actually sent. [groupThrows] is thrown instead of answering one.
-ScriptedLlm groupLlm({
-  required List<String> keys,
-  Map<String, List<Object>> scripts = const {},
-  List<List<List<String>>> groups = const [],
-  Object? groupThrows,
-  List<List<int>>? rawGroups,
-}) {
-  final llm = ScriptedLlm();
-  scripts.forEach(llm.scriptFor);
-  llm.answer(
-    'storyline_group',
-    groupThrows ??
-        groupingAnswer(keys: keys, groups: groups, rawGroups: rawGroups),
-  );
-  return llm;
-}
-
-/// A `member_of` yes over both bars, as the scripted judge reads it.
-Map<String, dynamic> confirmAnswer() => const {'p': 0.9};
 
 Map<String, dynamic> nameAnswer() => const {
       'evidence': 'shared deal',
@@ -188,34 +105,37 @@ void main() {
   /// One embedded, unfiled thread. [at] is its angle in degrees; the cosine of
   /// any two seeded threads is the cosine of the angle between them.
   Future<void> seed(
-    MessageStore into,
     String key, {
     required double at,
     required String lastMessageAt,
+    String? subject,
+    String? bodyText,
+    String? bodyPreview,
   }) async {
-    await into.upsertConversation({
+    await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
-      'subject': subjectOf(key),
+      'subject': subject ?? subjectOf(key),
       'state': 'waiting',
       'last_message_at': lastMessageAt,
       'participants_json': jsonEncode([
         {'name': 'Sarah Chen'},
       ]),
     });
-    await into.upsertMessage({
+    await store.upsertMessage({
       'source': 'email',
       'source_message_id': 'kept-$key',
       'conversation_key': key,
       'direction': 'inbound',
-      'subject': subjectOf(key),
+      'subject': subject ?? subjectOf(key),
       'from_name': 'Sarah',
       'from_address': 'sarah@example.com',
       'received_at': lastMessageAt,
-      'body_text': 'body of kept-$key',
+      'body_text': bodyText ?? 'body of kept-$key',
+      'body_preview': ?bodyPreview,
       'triage_status': 'triaged',
     });
-    await into.upsertConversationAi(
+    await store.upsertConversationAi(
       'email',
       key,
       embedding: encodeEmbedding(atDegrees(at)),
@@ -224,22 +144,38 @@ void main() {
     );
   }
 
-  /// Seven threads within twelve degrees of each other: every pair is far
-  /// above `groupingNeighbourhoodThreshold`, so they are ONE neighbourhood,
-  /// and seven cards fit one call.
-  Future<List<String>> seedOneNeighbourhood(MessageStore into) async {
-    final keys = [for (var i = 1; i <= 7; i++) 'g$i'];
+  /// [count] threads within a few degrees of each other, newest first: every
+  /// pair is a cosine candidate.
+  Future<List<String>> seedNear(int count, {String prefix = 'g'}) async {
+    final keys = [for (var i = 1; i <= count; i++) '$prefix$i'];
+    final now = DateTime.utc(2026, 8, 29, 12);
     for (var i = 0; i < keys.length; i++) {
       await seed(
-        into,
         keys[i],
-        at: i * 2,
-        // Newest first, which is the pool's own order.
-        lastMessageAt: '2026-08-2${9 - i}T10:00:00Z',
+        at: i * 0.5,
+        lastMessageAt: now.subtract(Duration(minutes: i)).toIso8601String(),
       );
     }
     return keys;
   }
+
+  /// A client whose storyline questions are scripted: `same_effort` by
+  /// [sameEffort], and every charter and member a yes over both bars.
+  ScriptedLlm llmWith(Object sameEffort) => ScriptedLlm()
+    ..answer('storyline_name', nameAnswer())
+    ..answer('same_effort', sameEffort)
+    ..answer('charter_specific', const {'p': 0.9})
+    ..answer('member_of', const {'p': 0.9});
+
+  /// The pairs a client was asked about, as sorted key pairs, once each
+  /// (both orders of a pair are one pair).
+  Set<(String, String)> askedPairs(ScriptedLlm llm) => {
+        for (final call in llm.calls)
+          if (call.schemaName == 'same_effort')
+          switch (keysOf(call.user)) {
+            (final a, final b) => a.compareTo(b) < 0 ? (a, b) : (b, a),
+          },
+      };
 
   /// The sweep's own activity row, as a detail map.
   Future<Map<String, Object?>> sweepDetail(
@@ -253,790 +189,689 @@ void main() {
     return ActivityEvent.fromRow(rows.first).detail;
   }
 
-  group('the model reads a neighbourhood', () {
-    test('two groups become two clusters and the outlier joins neither',
-        () async {
-      // Seven and not five: a group under `proposeMinClusterSize` is dropped,
-      // so two proposable groups plus a thread that belongs to neither is
-      // three plus three plus one.
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['g1', 'g2', 'g3'],
-            ['g4', 'g5', 'g6'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
+  Future<int> cachedPairs() async => (await db
+          .customSelect('SELECT COUNT(*) AS n FROM pair_decisions')
+          .getSingle())
+      .data['n'] as int;
+
+  group('the decision model judges the pairs', () {
+    test('a coherent trio proposes, an incoherent trio does not', () async {
+      // Six threads all near each other by cosine, so every pair is asked.
+      // g1, g3 and g5 are one effort; g2, g4 and g6 are three.
+      await seedNear(6);
+      final llm = llmWith(sameEffortAmong([
+        [marker('g1'), marker('g3'), marker('g5')],
+      ]));
       final seen = <SeenCluster>[];
 
       await StorylineService(
         store,
         llm,
         judge: scriptedJudge(store, llm),
-        groupingMode: GroupingMode.model,
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
       ).sweep();
 
-      final numberings = numberingsOf(llm, keys);
-
-      // One call over the whole neighbourhood, then a naming call per group.
-      expect(llm.callsFor('storyline_group'), 1);
-      expect(llm.callsFor('storyline_name'), 2);
-      expect(numberings.single.toSet(), keys.toSet());
-      // Two clusters, in the order the model named them, members ascending in
-      // the pool's order.
+      expect(askedPairs(llm), hasLength(15));
+      // The namer is asked about the one cluster the pairs formed, and
+      // nothing else: the incoherent trio never reaches it.
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(seen, hasLength(1));
+      expect([for (final t in seen.single.threads) t.key], ['g1', 'g3', 'g5']);
+      expect(seen.single.outcome, 'formed');
+      final storylines = await store.loadStorylines(statuses: ['suggested']);
+      expect(storylines, hasLength(1));
       expect(
-        [for (final cluster in seen) cluster.threads.map((t) => t.key).toList()],
-        [
-          ['g1', 'g2', 'g3'],
-          ['g4', 'g5', 'g6'],
-        ],
+        {for (final m in await store.membersOf(storylines.single.id)) m.conversationKey},
+        {'g1', 'g3', 'g5'},
       );
-      // And the seventh is in nothing: two storylines of three.
-      final storylines = await store.loadStorylines(statuses: const ['suggested']);
-      expect(storylines, hasLength(2));
-      for (final storyline in storylines) {
-        expect(await store.membersOf(storyline.id), hasLength(3));
-      }
     });
 
-    test('the call is made at temperature 0, on the naming client', () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['g1', 'g2', 'g3'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
+    test('an outlier returns to the pool before the namer sees the cluster',
+        () async {
+      // g1–g3 are one effort with g4; g5 is sure only of g4, which seats it
+      // with the rest at a mean of 0.525 and leaves its own mean to the rest
+      // at 0.325 — an outlier, dropped before naming.
+      await seedNear(5);
+      final p = <(String, String), double>{
+        ('g1', 'g2'): 0.9,
+        ('g1', 'g3'): 0.9,
+        ('g2', 'g3'): 0.9,
+        ('g4', 'g5'): 1.0,
+        ('g1', 'g4'): 0.95,
+        ('g2', 'g4'): 0.95,
+        ('g3', 'g4'): 0.95,
+        ('g1', 'g5'): 0.1,
+        ('g2', 'g5'): 0.1,
+        ('g3', 'g5'): 0.1,
+      };
+      final llm = llmWith((LlmCall call) {
+        final (a, b) = keysOf(call.user);
+        return {'p': p[a.compareTo(b) < 0 ? (a, b) : (b, a)] ?? 0.0};
+      });
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      final detail = await sweepDetail(
+        StorylineService(
+          store,
+          llm,
+          judge: scriptedJudge(store, llm),
+          activityLog: log,
+        ),
+        log,
       );
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm), groupingMode: GroupingMode.model)
+      final storyline =
+          (await store.loadStorylines(statuses: ['suggested'])).single;
+      expect(
+        {for (final m in await store.membersOf(storyline.id)) m.conversationKey},
+        {'g1', 'g2', 'g3', 'g4'},
+      );
+      // Never judged against the charter: it was not in the cluster named.
+      expect(
+        llm.calls.where((c) =>
+            c.schemaName == 'member_of' && c.user.contains(marker('g5'))),
+        isEmpty,
+      );
+      expect(detail['outliers'], 1);
+      expect(await store.assignedOrBlockedKeys('email'), isNot(contains('g5')));
+    });
+
+    test('a pair far apart by cosine is never asked', () async {
+      await seed('a1', at: 0, lastMessageAt: '2026-08-29T10:00:00Z');
+      await seed('a2', at: 1, lastMessageAt: '2026-08-29T09:00:00Z');
+      await seed('b1', at: 90, lastMessageAt: '2026-08-29T08:00:00Z');
+      final llm = llmWith(const {'p': 0.0});
+
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
           .sweep();
 
-      // Determinism rests on it: the tombstone recognises a cluster by its
-      // member set, so a pass that grouped differently on a second run would
-      // re-propose what the user threw away.
-      expect(llm.temperatures[llm.schemas.indexOf('storyline_group')], 0);
+      expect(askedPairs(llm), {('a1', 'a2')});
     });
 
-    test('a group under the propose floor is dropped', () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['g1', 'g2'],
-          ],
-        ],
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
+    test('each thread proposes only its nearest neighbours', () async {
+      // Twelve threads at one angle: every cosine ties, so each thread's
+      // nearest ten are the first ten others in pool order. The two OLDEST
+      // threads each list the ten newest and never each other, so every pair
+      // but that one is asked.
+      final keys = <String>[];
+      for (var i = 0; i < 12; i++) {
+        final key = 'n${String.fromCharCode(97 + i)}';
+        keys.add(key);
+        await seed(
+          key,
+          at: 0,
+          lastMessageAt:
+              DateTime.utc(2026, 8, 29, 12).subtract(Duration(minutes: i))
+                  .toIso8601String(),
+        );
+      }
+      final llm = llmWith(const {'p': 0.0});
 
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
-      );
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
 
-      // A pair is a coincidence describing itself: the confirms judge it
-      // against a charter written from those same two threads.
-      expect(llm.callsFor('storyline_name'), 0);
-      expect(await store.loadStorylines(), isEmpty);
-      expect(detail['grouping_calls'], 1);
-      expect(detail['grouped'], 0);
-      expect(detail['grouping_failed'], 0);
+      final asked = askedPairs(llm);
+      expect(asked, hasLength(12 * 11 ~/ 2 - 1));
+      expect(asked, isNot(contains((keys[10], keys[11]))));
     });
 
-    test('a number the model repeated is used once', () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['g1', 'g2', 'g1', 'g3'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final seen = <SeenCluster>[];
-
-      await StorylineService(
-        store,
-        llm,
-        judge: scriptedJudge(store, llm),
-        groupingMode: GroupingMode.model,
-        clusterObserver: (threads, outcome) =>
-            seen.add((threads: threads, outcome: outcome)),
-      ).sweep();
-
-      expect(seen.single.threads.map((t) => t.key), ['g1', 'g2', 'g3']);
-      expect(await store.membersOf((await store.loadStorylines()).single.id),
-          hasLength(3));
-    });
-
-    test('an answer naming nothing leaves the neighbourhood ungrouped',
+    test('two threads sharing a series key are asked whatever the cosine says',
         () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(keys: keys, groups: const [[]]);
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
+      // Orthogonal vectors, one folded subject: a series pre-pass needs three
+      // to seed, so both stay in the pool, and the subject makes them a
+      // candidate pair the vector never would.
+      await seed('s1',
+          at: 0,
+          subject: 'Budget review 2026-09-01',
+          lastMessageAt: '2026-08-29T10:00:00Z');
+      await seed('s2',
+          at: 90,
+          subject: 'Budget review 2026-09-08',
+          lastMessageAt: '2026-08-29T09:00:00Z');
+      final llm = llmWith(const {'p': 0.0});
 
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
-      );
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
 
-      expect(detail['grouping_calls'], 1);
-      expect(detail['grouping_failed'], 1);
-      expect(detail['grouped'], 0);
-      expect(await store.loadStorylines(), isEmpty);
+      expect(askedPairs(llm), {('s1', 's2')});
+    });
+
+    test('a fragment of one subject outside the fold window is asked too',
+        () async {
+      // One subject, one set of people, three weeks apart: too far apart for
+      // the fragment fold, so both reach the pool — and the fragment key is
+      // a series key, so the pair is a candidate.
+      await seed('f1',
+          at: 0,
+          subject: 'Studio keys',
+          lastMessageAt: '2026-08-29T10:00:00Z');
+      await seed('f2',
+          at: 90,
+          subject: 'Re: Studio keys',
+          lastMessageAt: '2026-08-05T10:00:00Z');
+      final llm = llmWith(const {'p': 0.0});
+
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
+
+      expect(askedPairs(llm), {('f1', 'f2')});
     });
   });
 
-  group('a grouping call that fails', () {
-    test('counts and carries on, rather than ending the pass', () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groupThrows: const LlmFormatException('not an object'),
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
+  group('a cluster is completed before it is named', () {
+    test('a trio whose third pair was never a candidate is completed, not '
+        'dropped', () async {
+      // t1 and t3 sit 120 degrees apart, under the retrieval floor, so the
+      // vector never proposes them; t2 is 60 degrees from each. The two
+      // answered pairs form the trio, and its missing pair is asked before
+      // the trio is named.
+      await seed('t1', at: 0, lastMessageAt: '2026-08-29T10:00:00Z');
+      await seed('t2', at: 60, lastMessageAt: '2026-08-29T09:00:00Z');
+      await seed('t3', at: 120, lastMessageAt: '2026-08-29T08:00:00Z');
+      final llm = llmWith(sameEffortAmong([
+        [marker('t1'), marker('t2'), marker('t3')],
+      ]));
 
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
-      );
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
 
-      expect(detail['grouping_calls'], 1);
-      expect(detail['grouping_failed'], 1);
-      expect(detail['grouped'], 0);
-      expect(detail['grouping_unfit'], 0);
-      expect(llm.callsFor('storyline_name'), 0);
-      expect(await store.loadStorylines(), isEmpty);
+      expect(askedPairs(llm), {('t1', 't2'), ('t2', 't3'), ('t1', 't3')});
+      final storyline =
+          (await store.loadStorylines(statuses: ['suggested'])).single;
+      expect(
+        {for (final m in await store.membersOf(storyline.id)) m.conversationKey},
+        {'t1', 't2', 't3'},
+      );
     });
 
-    test('an unavailable server parks the pass instead', () async {
-      // The namer's own behaviour, matched: the work row goes back pending
-      // with its attempt unspent rather than the mailbox being written off as
-      // ungroupable because a server was down for an afternoon.
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groupThrows: const LlmUnavailableException('server down'),
+    test('a completed pair that says no takes the cluster apart', () async {
+      // The same geometry, but the pair nobody proposed is a no: on the full
+      // matrix t1 and t3 average (0.9 + 0.05) / 2 against the rest, and the
+      // trio does not survive to be named.
+      await seed('t1', at: 0, lastMessageAt: '2026-08-29T10:00:00Z');
+      await seed('t2', at: 60, lastMessageAt: '2026-08-29T09:00:00Z');
+      await seed('t3', at: 120, lastMessageAt: '2026-08-29T08:00:00Z');
+      // t1–t2 and t2–t3 yes, so the optimistic round forms the chain.
+      final llm = llmWith((LlmCall call) {
+        final (a, b) = keysOf(call.user);
+        final pair = ([a, b]..sort()).join(' ');
+        return {'p': pair == 't1 t3' ? 0.05 : 0.9};
+      });
+
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
+
+      expect(askedPairs(llm), contains(('t1', 't3')));
+      expect(llm.callsFor('storyline_name'), 0);
+    });
+
+    test('a large effort whose threads are not all neighbours forms whole',
+        () async {
+      // Four threads 50 degrees apart: only neighbours clear the retrieval
+      // floor, so the vector proposes a chain of three pairs. Read as zero,
+      // the three unproposed pairs would split the effort into pairs; asked,
+      // they complete it.
+      for (var i = 0; i < 4; i++) {
+        await seed('e${String.fromCharCode(97 + i)}',
+            at: i * 50.0,
+            lastMessageAt: '2026-08-29T1$i:00:00Z');
+      }
+      final llm = llmWith(sameEffortAmong([
+        [marker('ea'), marker('eb'), marker('ec'), marker('ed')],
+      ]));
+
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
+
+      expect(askedPairs(llm), hasLength(6));
+      final storyline =
+          (await store.loadStorylines(statuses: ['suggested'])).single;
+      expect(await store.membersOf(storyline.id), hasLength(4));
+    });
+
+    test('a cluster the budget cannot complete waits for the next pass',
+        () async {
+      // Fifty threads at one angle propose 445 pairs, and the first pass
+      // spends all 400 of its budget on the newest of them. baa, baj and bba
+      // are one effort; their pair baj–bba is one of the 45 left over, so the
+      // trio forms on its two answered pairs and cannot be completed.
+      String keyAt(int i) => 'b${i.toString().padLeft(2, '0')}'
+          .replaceAllMapped(RegExp(r'\d'), (m) => 'abcdefghij'[int.parse(m[0]!)]);
+      for (var i = 0; i < 50; i++) {
+        await seed(
+          keyAt(i),
+          at: 0,
+          lastMessageAt:
+              DateTime.utc(2026, 8, 29, 12).subtract(Duration(minutes: i))
+                  .toIso8601String(),
+        );
+      }
+      final llm = llmWith(sameEffortAmong([
+        [marker(keyAt(0)), marker(keyAt(9)), marker(keyAt(10))],
+      ]));
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service = StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        activityLog: log,
+      );
+
+      final first = await sweepDetail(service, log);
+
+      expect(first['clusters_deferred'], 1);
+      expect(first['pairs_scored'], StorylinePolicy.pairBudgetPerPass);
+      expect(llm.callsFor('storyline_name'), 0);
+      expect(await store.loadStorylines(), isEmpty);
+
+      final second = await sweepDetail(service, log);
+
+      expect(second['clusters_deferred'], 0);
+      final storyline =
+          (await store.loadStorylines(statuses: ['suggested'])).single;
+      expect(
+        {for (final m in await store.membersOf(storyline.id)) m.conversationKey},
+        {keyAt(0), keyAt(9), keyAt(10)},
+      );
+    });
+  });
+
+  group('the pair cache', () {
+    test('a second pass asks nothing it already knows', () async {
+      await seedNear(4);
+      final decision = FakeDecisionClient.storyline();
+      final judge = StorylineJudge(decision: decision, store: store);
+      final service = StorylineService(store, ScriptedLlm(), judge: judge);
+
+      await service.sweep();
+      expect(decision.statesFor(StorylineQuestion.sameEffort), hasLength(12));
+      expect(await cachedPairs(), 6);
+
+      decision.asks.clear();
+      await service.sweep();
+      expect(decision.statesFor(StorylineQuestion.sameEffort), isEmpty);
+    });
+
+    test('a thread whose text changed is asked again, and only its pairs',
+        () async {
+      await seedNear(4);
+      final llm = llmWith(const {'p': 0.0});
+      final service =
+          StorylineService(store, llm, judge: scriptedJudge(store, llm));
+      await service.sweep();
+      llm.calls.clear();
+
+      // A new message on g2 changes its rendered text and so its hash.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'late-g2',
+        'conversation_key': 'g2',
+        'direction': 'inbound',
+        'subject': subjectOf('g2'),
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': '2026-08-29T13:00:00Z',
+        'body_text': 'one more thing on this',
+        'triage_status': 'triaged',
+      });
+      await service.sweep();
+
+      expect(askedPairs(llm), {('g1', 'g2'), ('g2', 'g3'), ('g2', 'g4')});
+    });
+
+    test('answers the same model gave are used without asking', () async {
+      await seedNear(3);
+      final hashes = <String, String>{
+        for (final key in ['g1', 'g2', 'g3'])
+          key: (await storylineThreadTextFor(store, 'email', key)).cardHash,
+      };
+      await store.writePairDecisions([
+        (a: hashes['g1']!, b: hashes['g2']!, p: 0.9),
+        (a: hashes['g3']!, b: hashes['g1']!, p: 0.9),
+        (a: hashes['g2']!, b: hashes['g3']!, p: 0.9),
+      ], decidedBy: '$decisionQhash|fake-model');
+      final llm = llmWith(const {'p': 0.0});
+
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
+
+      expect(llm.callsFor('same_effort'), 0);
+      // The cached yeses formed the trio.
+      expect(await store.loadStorylines(statuses: ['suggested']), hasLength(1));
+    });
+
+    test('answers under another question set are asked again', () async {
+      await seedNear(3);
+      final hashes = <String, String>{
+        for (final key in ['g1', 'g2', 'g3'])
+          key: (await storylineThreadTextFor(store, 'email', key)).cardHash,
+      };
+      await store.writePairDecisions([
+        (a: hashes['g1']!, b: hashes['g2']!, p: 0.9),
+        (a: hashes['g1']!, b: hashes['g3']!, p: 0.9),
+        (a: hashes['g2']!, b: hashes['g3']!, p: 0.9),
+      ], decidedBy: 'an-older-qhash|fake-model');
+      final llm = llmWith(const {'p': 0.0});
+
+      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
+          .sweep();
+
+      expect(askedPairs(llm), hasLength(3));
+      expect(await store.loadStorylines(statuses: ['suggested']), isEmpty);
+    });
+
+    test('a decision backend swapped in re-asks every pair, and prunes the '
+        'old answers', () async {
+      await seedNear(3);
+      final llm = llmWith(const {'p': 0.0});
+      final decision = ScriptedDecisionClient(llm);
+      final service = StorylineService(
+        store,
+        llm,
+        judge: StorylineJudge(decision: decision, store: store),
+      );
+
+      await service.sweep();
+      expect(askedPairs(llm), hasLength(3));
+      llm.calls.clear();
+
+      // The same model: every pair read back.
+      await service.sweep();
+      expect(llm.callsFor('same_effort'), 0);
+
+      // Another model behind the same role (Kev on Your server in place of
+      // this Mac's ModernBERT, or a re-installed heads file).
+      decision.identity = 'systemone:kev-4b';
+      await service.sweep();
+      expect(askedPairs(llm), hasLength(3));
+      final byModel = await db
+          .customSelect('SELECT DISTINCT qhash FROM pair_decisions')
+          .get();
+      expect([for (final r in byModel) r.data['qhash']],
+          ['$decisionQhash|systemone:kev-4b']);
+    });
+
+    test('rows older than a month are pruned at the top of a pass', () async {
+      await seedNear(3);
+      final llm = llmWith(const {'p': 0.0});
+      final service =
+          StorylineService(store, llm, judge: scriptedJudge(store, llm));
+      await service.sweep();
+      await store.writePairDecisions(const [
+        (a: 'old-a', b: 'old-b', p: 0.9),
+      ], decidedBy: '$decisionQhash|fake-model');
+      await db.customUpdate(
+        "UPDATE pair_decisions SET decided_at = '2020-01-01T00:00:00.000000Z' "
+        "WHERE a_hash = 'old-a'",
+      );
+      expect(await cachedPairs(), 4);
+
+      await service.sweep();
+
+      expect(await cachedPairs(), 3);
+    });
+
+    test('the budget caps new pairs per pass, newest first, and the cache '
+        'carries the rest', () async {
+      // Fifty threads at one angle propose 445 pairs (see the neighbour test
+      // for the shape): 400 are asked, 45 wait for the next pass.
+      for (var i = 0; i < 50; i++) {
+        await seed(
+          'b${i.toString().padLeft(2, '0')}'
+              .replaceAllMapped(RegExp(r'\d'), (m) => 'abcdefghij'[int.parse(m[0]!)]),
+          at: 0,
+          lastMessageAt:
+              DateTime.utc(2026, 8, 29, 12).subtract(Duration(minutes: i))
+                  .toIso8601String(),
+        );
+      }
+      final decision = FakeDecisionClient.storyline();
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service = StorylineService(
+        store,
+        ScriptedLlm(),
+        judge: StorylineJudge(decision: decision, store: store),
+        activityLog: log,
+      );
+
+      final first = await sweepDetail(service, log);
+      expect(first['pairs_scored'], StorylinePolicy.pairBudgetPerPass);
+      expect(first['pairs_deferred'], 45);
+      expect(first['pairs_cached'], 0);
+      // Newest first: every pair of the newest thread was asked.
+      final newest = (await storylineThreadTextFor(store, 'email', 'baa')).text;
+      expect(
+        decision
+            .statesFor(StorylineQuestion.sameEffort)
+            .where((state) => state.contains(newest)),
+        isNotEmpty,
+      );
+
+      final second = await sweepDetail(service, log);
+      expect(second['pairs_scored'], 45);
+      expect(second['pairs_deferred'], 0);
+      expect(second['pairs_cached'], 400);
+    });
+
+    test('a batch that fails parks the pass and keeps the batches before it',
+        () async {
+      // Twelve threads propose 65 pairs: a batch of 50, then one of 15.
+      for (var i = 0; i < 12; i++) {
+        await seed(
+          'n${String.fromCharCode(97 + i)}',
+          at: 0,
+          lastMessageAt:
+              DateTime.utc(2026, 8, 29, 12).subtract(Duration(minutes: i))
+                  .toIso8601String(),
+        );
+      }
+      final decision = _FailingPairs(failOn: 2);
+      final service = StorylineService(
+        store,
+        ScriptedLlm(),
+        judge: StorylineJudge(decision: decision, store: store),
       );
 
       await expectLater(
-        StorylineService(store, llm, judge: scriptedJudge(store, llm), groupingMode: GroupingMode.model).sweep(),
-        throwsA(isA<LlmUnavailableException>()),
+        service.sweep(),
+        throwsA(isA<DecisionUnavailableException>()),
       );
+      expect(await cachedPairs(), 50);
+
+      decision.failOn = null;
+      decision.asks.clear();
+      await service.sweep();
+      expect(decision.statesFor(StorylineQuestion.sameEffort), hasLength(30));
+      expect(await cachedPairs(), 65);
     });
   });
 
-  group('a neighbourhood the card budget cannot hold', () {
-    /// [near] threads on one axis and [far] threads 64° off it. Every cross
-    /// pair sits at cosine 0.438: above `groupingNeighbourhoodThreshold`
-    /// (0.41) so the two sets are one neighbourhood, and below the first rung
-    /// of the split ladder (0.46) so they come apart at exactly that seam.
-    Future<List<String>> seedTwoLobes(int near, int far) async {
-      final keys = <String>[];
-      var stamp = 40;
-      for (var i = 1; i <= near; i++) {
-        keys.add('n$i');
-        await seed(store, 'n$i',
-            at: 0, lastMessageAt: '2026-08-29T10:${stamp--}:00Z');
-      }
-      for (var i = 1; i <= far; i++) {
-        keys.add('f$i');
-        await seed(store, 'f$i',
-            at: 64, lastMessageAt: '2026-08-29T10:${stamp--}:00Z');
-      }
-      return keys;
-    }
+  group('readiness and the body fetch', () {
+    test('a parked decision model asks nothing, fetches nothing and writes '
+        'nothing', () async {
+      await seedNear(4);
+      final decision = FakeDecisionClient.storyline()
+        ..askError = const DecisionUnavailableException('decide is down');
+      var fetches = 0;
+      final llm = llmWith(const {'p': 0.9});
 
-    test('splits up the ladder into pieces that each fit, grouped separately',
-        () async {
-      // Thirteen threads, one more than the twelve whole cards a call holds.
-      final keys = await seedTwoLobes(7, 6);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['n1', 'n2', 'n3'],
-          ],
-          [
-            ['f1', 'f2', 'f3'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-
-      final detail = await sweepDetail(
+      await expectLater(
         StorylineService(
           store,
           llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
+          judge: StorylineJudge(
+            decision: decision,
+            store: store,
+            ensureBodies: (_, _, _) async => fetches++,
+          ),
+        ).sweep(),
+        throwsA(isA<DecisionUnavailableException>()),
       );
 
-      final numberings = numberingsOf(llm, keys);
-
-      // Two calls, one per piece, and neither piece was truncated: seven
-      // cards then six, every thread shown exactly once.
-      expect(detail['grouping_calls'], 2);
-      expect(detail['grouping_unfit'], 0);
-      expect(detail['grouped'], 6);
-      expect(numberings.map((order) => order.length), [7, 6]);
-      expect(
-        {for (final order in numberings) ...order},
-        keys.toSet(),
-      );
-      expect(llm.callsFor('storyline_name'), 2);
-    });
-
-    test('a piece too small to group is counted unfit and never asked',
-        () async {
-      // Eleven on one axis and two on the other: the split leaves a piece of
-      // two, which is under `groupingNeighbourhoodMinSize`.
-      final keys = await seedTwoLobes(11, 2);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['n1', 'n2', 'n3'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
-      );
-
-      expect(detail['grouping_calls'], 1);
-      expect(detail['grouping_unfit'], 1);
-      expect(numberingsOf(llm, keys).single, hasLength(11));
-      // Nothing was asked about the pair, so nothing is tombstoned either.
-      expect(await store.dismissedHashExistsAny(const ['nothing']), isFalse);
-    });
-  });
-
-  group('the order and the budget', () {
-    test('the clusters come back largest first, ties by first member',
-        () async {
-      // The same order `clusterBySimilarity` hands the cosine path back in,
-      // and it decides what ships: the sweep breaks at `room`, so a proposal
-      // of four threads should take a slot ahead of one of three however the
-      // model happened to list them.
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['g1', 'g2', 'g3'],
-            ['g4', 'g5', 'g6', 'g7'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final seen = <SeenCluster>[];
-
-      await StorylineService(
-        store,
-        llm,
-        judge: scriptedJudge(store, llm),
-        groupingMode: GroupingMode.model,
-        clusterObserver: (threads, outcome) =>
-            seen.add((threads: threads, outcome: outcome)),
-      ).sweep();
-
-      expect(
-        [for (final cluster in seen) cluster.threads.map((t) => t.key).toList()],
-        [
-          ['g4', 'g5', 'g6', 'g7'],
-          ['g1', 'g2', 'g3'],
-        ],
-      );
-    });
-
-    test('two groups of a size are ordered by their first member', () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['g5', 'g6', 'g7'],
-            ['g1', 'g2', 'g3'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final seen = <SeenCluster>[];
-
-      await StorylineService(
-        store,
-        llm,
-        judge: scriptedJudge(store, llm),
-        groupingMode: GroupingMode.model,
-        clusterObserver: (threads, outcome) =>
-            seen.add((threads: threads, outcome: outcome)),
-      ).sweep();
-
-      expect(
-        [for (final cluster in seen) cluster.threads.first.key],
-        ['g1', 'g5'],
-      );
-    });
-
-    test('the room the sweep has left is a budget on the CALLS', () async {
-      // Three neighbourhoods eighty degrees apart, so no pair across them
-      // links at `groupingNeighbourhoodThreshold` and each is a piece of its
-      // own. Two suggestions already sitting in the rail leave room for one.
-      var stamp = 40;
-      final keys = <String>[];
-      for (final (lobe, angle) in [('a', 0.0), ('b', 80.0), ('c', 160.0)]) {
-        for (var i = 1; i <= 3; i++) {
-          keys.add('$lobe$i');
-          await seed(store, '$lobe$i',
-              at: angle, lastMessageAt: '2026-08-29T10:${stamp--}:00Z');
-        }
-      }
-      for (final id in ['sl-old1', 'sl-old2']) {
-        await store.insertStoryline(
-          id: id,
-          title: 'Something already proposed',
-          status: 'suggested',
-          createdBy: 'auto',
-        );
-      }
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['a1', 'a2', 'a3'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
-      );
-
-      // One call, not three: a prose call per neighbourhood to build a list
-      // the caller reads one entry of is the cost this budget exists for.
-      expect(detail['grouping_calls'], 1);
-      // And the two neighbourhoods never asked about are not `unfit`: nothing
-      // was judged about them.
-      expect(detail['grouping_unfit'], 0);
-      expect(llm.callsFor('storyline_name'), 1);
-    });
-  });
-
-  group('numbers no card carries', () {
-    test('a number past the count and a zero are ignored', () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        rawGroups: const [
-          [1, 99, 2, 0, 3, -4],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final seen = <SeenCluster>[];
-
-      await StorylineService(
-        store,
-        llm,
-        judge: scriptedJudge(store, llm),
-        groupingMode: GroupingMode.model,
-        clusterObserver: (threads, outcome) =>
-            seen.add((threads: threads, outcome: outcome)),
-      ).sweep();
-
-      // Three real cards left, which still clears the propose floor.
-      expect(seen.single.threads, hasLength(3));
-      expect(seen.single.threads.map((t) => t.key).toSet(),
-          numberingsOf(llm, keys).single.take(3).toSet());
-    });
-
-    test('a group is dropped when the numbers it loses take it under the floor',
-        () async {
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        rawGroups: const [
-          [1, 2, 99],
-        ],
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.model,
-        ),
-        log,
-      );
-
-      expect(detail['grouping_calls'], 1);
-      expect(detail['grouped'], 0);
+      expect(decision.readyChecks, 1);
+      expect(decision.asks, isEmpty);
+      expect(llm.calls, isEmpty);
+      expect(fetches, 0);
+      expect(await cachedPairs(), 0);
       expect(await store.loadStorylines(), isEmpty);
     });
-  });
 
-  group('the whole pool, in chunks of its own order', () {
-    /// [count] threads spread right round the circle, so no two consecutive
-    /// pool rows are neighbours and the cosine pass would draw nothing like
-    /// these chunks. `lastMessageAt` strictly descends, which is the pool's
-    /// own order.
-    ///
-    /// The keys are zero-padded to three digits so that no thread's spelled
-    /// subject is a PREFIX of another's: `subjectOf('p1')` sits inside
-    /// `subjectOf('p11')`, and [numberedKeys] reads a card back by the first
-    /// subject it contains.
-    Future<List<String>> seedPool(int count) async {
-      final keys = <String>[];
-      for (var i = 0; i < count; i++) {
-        final key = 'p${(i + 1).toString().padLeft(3, '0')}';
-        keys.add(key);
-        final second = 3599 - i * 30;
+    test('a failed body fetch is not retried by the next pass inside five '
+        'minutes', () async {
+      await seed('p1',
+          at: 0,
+          bodyText: '',
+          bodyPreview: 'preview of kept-p1',
+          lastMessageAt: '2026-08-29T10:00:00Z');
+      var fetches = 0;
+      final judge = StorylineJudge(
+        decision: FakeDecisionClient.storyline(),
+        store: store,
+        ensureBodies: (_, _, _) async {
+          fetches++;
+          throw StateError('mail is down');
+        },
+      );
+
+      await judge.threadText('email', 'p1');
+      judge.beginPass();
+      await judge.threadText('email', 'p1');
+
+      // A new pass forgets what landed, not what failed.
+      expect(fetches, 1);
+    });
+
+    test('a thread showing its preview is fetched once per pass, however '
+        'many questions read it', () async {
+      // Every body is empty and the fetch fills nothing, so the preview is
+      // still showing at every judgement: the pairs and the member confirms
+      // all read these threads, and only the first asks for the body.
+      final now = DateTime.utc(2026, 8, 29, 12);
+      for (var i = 1; i <= 3; i++) {
         await seed(
-          store,
-          key,
-          at: i * 3.6,
-          lastMessageAt: '2026-08-29T10:'
-              '${(second ~/ 60).toString().padLeft(2, '0')}:'
-              '${(second % 60).toString().padLeft(2, '0')}Z',
+          'p$i',
+          at: i * 0.5,
+          bodyText: '',
+          bodyPreview: 'preview of kept-p$i',
+          lastMessageAt: now.subtract(Duration(minutes: i)).toIso8601String(),
         );
       }
-      return keys;
-    }
-
-    /// The pool in the order the service reads it, which is the order the
-    /// chunks are cut from. Read from the store rather than assumed, so the
-    /// assertion is about the chunking and not about the seeding.
-    Future<List<String>> poolOrder() async => [
-          for (final row in await store.conversationsWithEmbeddings(
-            embedModel: EmbeddingsClient.modelTag,
-            sources: const ['email', 'teams'],
-          ))
-            row['conversation_key'] as String,
-        ];
-
-    test('a hundred threads are three calls, cut in pool order', () async {
-      final keys = await seedPool(100);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          // The first chunk names three, the second four, the third nothing:
-          // the two groups come back largest first however the pool ordered
-          // the calls.
-          [
-            ['p001', 'p002', 'p003'],
-          ],
-          [
-            ['p049', 'p050', 'p051', 'p052'],
-          ],
-          const [],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-      final seen = <SeenCluster>[];
-
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.pool,
-          clusterObserver: (threads, outcome) =>
-              seen.add((threads: threads, outcome: outcome)),
+      final fetched = <String, int>{};
+      final llm = llmWith(const {'p': 0.9});
+      final service = StorylineService(
+        store,
+        llm,
+        judge: StorylineJudge(
+          decision: ScriptedDecisionClient(llm),
+          store: store,
+          ensureBodies: (_, key, _) async =>
+              fetched[key] = (fetched[key] ?? 0) + 1,
         ),
-        log,
       );
 
-      final numberings = numberingsOf(llm, keys);
+      await service.sweep();
 
-      // Three calls of 48, 48 and 4, and not one neighbourhood: the threads
-      // are spread round the whole circle, so the cosine ladder would have
-      // drawn something else entirely.
-      expect(detail['grouping_calls'], 3);
-      expect(detail['grouping_unfit'], 0);
-      expect(numberings.map((order) => order.length), [48, 48, 4]);
-
-      // Each call holds exactly its slice of the pool's own order. The cards
-      // inside one call are ordered by centrality, so the slices are compared
-      // as sets.
-      final pool = await poolOrder();
-      expect(numberings[0].toSet(), pool.sublist(0, 48).toSet());
-      expect(numberings[1].toSet(), pool.sublist(48, 96).toSet());
-      expect(numberings[2].toSet(), pool.sublist(96).toSet());
-
-      // Largest first, whichever chunk found it.
-      expect(
-        [for (final cluster in seen) cluster.threads.map((t) => t.key).toList()],
-        [
-          ['p049', 'p050', 'p051', 'p052'],
-          ['p001', 'p002', 'p003'],
-        ],
-      );
-    });
-
-    test('a tail chunk under the minimum is unfit and never asked', () async {
-      // Fifty threads: forty-eight in the first chunk and two in the second,
-      // which is under `groupingNeighbourhoodMinSize`.
-      final keys = await seedPool(50);
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          [
-            ['p001', 'p002', 'p003'],
-          ],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.pool,
-        ),
-        log,
-      );
-
-      expect(detail['grouping_calls'], 1);
-      expect(detail['grouping_unfit'], 1);
-      expect(numberingsOf(llm, keys).single, hasLength(48));
-    });
-
-    test('the room the sweep has left does NOT stop the chunk loop', () async {
-      // The opposite of the cosine path's rule, deliberately: reading the
-      // whole pool is what this mode is for, and `room` is at most three, so a
-      // first chunk that filled it would leave the rest of the mailbox unread
-      // for the sake of one prose call. A hundred threads, and one suggestion
-      // already in the rail so there is room for two.
-      final keys = await seedPool(100);
-      await store.insertStoryline(
-        id: 'sl-old1',
-        title: 'Something already proposed',
-        status: 'suggested',
-        createdBy: 'auto',
-      );
-      final llm = groupLlm(
-        keys: keys,
-        groups: [
-          // The first chunk alone returns three groups, one more than there is
-          // room for.
-          [
-            ['p001', 'p002', 'p003'],
-            ['p004', 'p005', 'p006'],
-            ['p007', 'p008', 'p009'],
-          ],
-          [
-            ['p049', 'p050', 'p051'],
-          ],
-          const [],
-        ],
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
-      final log = ActivityLog(store);
-      addTearDown(log.dispose);
-
-      final detail = await sweepDetail(
-        StorylineService(
-          store,
-          llm,
-          judge: scriptedJudge(store, llm),
-          activityLog: log,
-          groupingMode: GroupingMode.pool,
-        ),
-        log,
-      );
-
-      // Every chunk was asked, and the fourth group the pool found was seen
-      // even though the first chunk had already overrun `room`.
-      expect(detail['grouping_calls'], 3);
-      expect(detail['grouping_unfit'], 0);
-      expect(detail['grouped'], 12);
-
-      // And the caller still spends only what it has: two slots left, two
-      // naming calls, two new storylines beside the one already there.
-      expect(llm.callsFor('storyline_name'), 2);
-      expect(
-        await store.loadStorylines(statuses: const ['suggested']),
-        hasLength(3),
-      );
+      expect(llm.callsFor('member_of'), 3);
+      expect(fetched, {'p1': 1, 'p2': 1, 'p3': 1});
     });
   });
 
-  group('determinism and the shipped default', () {
+  group('determinism and the baseline', () {
     test('two identical mailboxes group identically', () async {
-      final otherDb = testDb();
-      final other = MessageStore(otherDb);
-      addTearDown(otherDb.close);
-
-      Future<List<List<String>>> run(MessageStore into) async {
-        final keys = await seedOneNeighbourhood(into);
-        final llm = groupLlm(
-          keys: keys,
-          groups: [
-            [
-              ['g3', 'g1', 'g2'],
-              ['g6', 'g5', 'g4'],
-            ],
-          ],
-          scripts: {
-            'storyline_name': [nameAnswer()],
-            'member_of': [confirmAnswer()],
-          },
-        );
-        final seen = <SeenCluster>[];
-        await StorylineService(
-          into,
-          llm,
-          judge: scriptedJudge(into, llm),
-          groupingMode: GroupingMode.model,
-          clusterObserver: (threads, outcome) =>
-              seen.add((threads: threads, outcome: outcome)),
-        ).sweep();
+      Future<List<Set<String>>> run(MessageStore into) async {
+        final llm = llmWith(sameEffortAmong([
+          [marker('g1'), marker('g2'), marker('g4')],
+          [marker('g3'), marker('g5'), marker('g6')],
+        ]));
+        await StorylineService(into, llm, judge: scriptedJudge(into, llm))
+            .sweep();
         return [
-          for (final cluster in seen) cluster.threads.map((t) => t.key).toList(),
+          for (final s in await into.loadStorylines(statuses: ['suggested']))
+            {for (final m in await into.membersOf(s.id)) m.conversationKey},
         ];
       }
 
+      await seedNear(6);
       final first = await run(store);
+
+      final otherDb = testDb();
+      addTearDown(otherDb.close);
+      final other = MessageStore(otherDb);
+      final saved = store;
+      store = other;
+      await seedNear(6);
+      store = saved;
       final second = await run(other);
 
-      // Members ascending whatever order the model listed them in, and the
-      // groups in the order it named them — which is what keeps a tombstone
-      // answering for the same set on a second pass.
-      expect(first, [
-        ['g1', 'g2', 'g3'],
-        ['g4', 'g5', 'g6'],
-      ]);
+      expect(first, hasLength(2));
       expect(second, first);
     });
 
-    test('the shipped mode never constructs a grouping call', () async {
-      // No `groupingMode` argument: the service takes
-      // `StorylineTuning.groupingMode`, and the fake has no grouping answer to
-      // give — a call would throw rather than pass quietly.
-      final keys = await seedOneNeighbourhood(store);
-      final llm = groupLlm(
-        keys: keys,
-        scripts: {
-          'storyline_name': [nameAnswer()],
-          'member_of': [confirmAnswer()],
-        },
-      );
+    test('the cosine baseline asks no pair question', () async {
+      await seedNear(4);
+      final llm = llmWith(const {'p': 0.9});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm)).sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.cosine,
+      ).sweep();
 
-      // Cosine and neither of the two dark modes: `model` reads a
-      // neighbourhood and `pool` reads the whole pool, and both ship behind a
-      // pre-registered rule in `docs/pipeline/06-storylines.md`.
-      expect(StorylineTuning.groupingMode, GroupingMode.cosine);
-      expect(StorylineTuning.groupingMode, isNot(GroupingMode.model));
-      expect(StorylineTuning.groupingMode, isNot(GroupingMode.pool));
-      expect(llm.callsFor('storyline_group'), 0);
-      expect(llm.schemas, isNot(contains('storyline_group')));
-      // And the cosine pass did its own job: one cluster of seven, named.
-      expect(llm.callsFor('storyline_name'), 1);
+      expect(llm.callsFor('same_effort'), 0);
+      expect(await cachedPairs(), 0);
+      expect(await store.loadStorylines(statuses: ['suggested']), hasLength(1));
+    });
+
+    test('the decision grouping ships', () {
+      expect(StorylineTuning.groupingMode, GroupingMode.decision);
+      expect(StorylineTuning.charterCheck, CharterCheck.model);
     });
   });
+
+  test('the pair cache is keyed by both hashes in order, under its model',
+      () async {
+    await store.writePairDecisions(const [
+      (a: 'zz', b: 'aa', p: 0.7),
+    ], decidedBy: 'q1');
+
+    final row = (await db
+            .customSelect(
+                'SELECT a_hash, b_hash, qhash, p FROM pair_decisions')
+            .getSingle())
+        .data;
+    expect(row, {'a_hash': 'aa', 'b_hash': 'zz', 'qhash': 'q1', 'p': 0.7});
+    expect(await store.pairDecisionsFor(['zz', 'aa', 'mm'], 'q1'),
+        {('aa', 'zz'): 0.7});
+    expect(await store.pairDecisionsFor(['zz', 'aa'], 'q2'), isEmpty);
+    expect(await store.pairDecisionsFor(['zz'], 'q1'), isEmpty);
+  });
+}
+
+/// A storyline decision client whose [failOn]-th `same_effort` batch throws
+/// the park, and which answers every other state no.
+class _FailingPairs extends FakeDecisionClient {
+  _FailingPairs({this.failOn})
+      : super((_) => throw StateError('decide never called'));
+
+  int? failOn;
+  int _pairBatches = 0;
+
+  @override
+  Future<List<double>> ask(
+    StorylineQuestion question,
+    List<String> states,
+  ) async {
+    if (question == StorylineQuestion.sameEffort) {
+      _pairBatches++;
+      if (_pairBatches == failOn) {
+        throw const DecisionUnavailableException('decide went down');
+      }
+    }
+    return super.ask(question, states);
+  }
 }

@@ -397,10 +397,10 @@ Map<String, int> charterLintCounts(List<LintCandidate> storylines) {
 /// One report from the service's `clusterObserver` seam: a cluster the sweep
 /// asked about, and the one word for what became of it.
 ///
-/// [threads] are [threadKeyOf] keys, the cluster as the clustering formed it —
-/// before the namer's outliers narrowed it and without the fragment siblings
-/// that ride its members. The words are the seam's five: `formed`,
-/// `incoherent`, `lint`, `thin`, `answered`.
+/// [threads] are [threadKeyOf] keys, the cluster as the grouping proposed it —
+/// after its outliers went back to the pool and without the fragment siblings
+/// that ride its members. The words are the seam's five: `formed`, `lint`,
+/// `charter_model`, `thin`, `answered`.
 typedef JudgedCluster = ({List<String> threads, String outcome});
 
 /// The clusters behind [judged], one entry per distinct thread set.
@@ -440,10 +440,10 @@ List<JudgedCluster> distinctClusters(Iterable<JudgedCluster> judged) {
 /// How pure a set of clusters was BEFORE the namer saw them.
 ///
 /// The one number Phase 5 could not read: the store keeps no record of a
-/// cluster the namer declined beyond its tombstone hash, so a namer that
-/// refuses gold-pure groups and a clustering that builds mixed ones look
-/// identical from the outside. Read per outcome, the two come apart — pure
-/// declined clusters accuse the naming rule, mixed ones accuse the clustering.
+/// declined cluster beyond its hash, so a check that refuses gold-pure groups
+/// and a grouping that builds mixed ones look identical from the outside.
+/// Read per outcome, the two come apart — pure declined clusters accuse the
+/// charter check or the confirms, mixed ones accuse the grouping.
 class ClusterPurity {
   /// Clusters in this bucket, the ones with nothing to say about purity
   /// included.
@@ -530,16 +530,16 @@ class ClusterPurity {
 /// The outcome words present in [distinct], each with its clusters' purity.
 ///
 /// In the seam's own order, absent words skipped, and with one derived bucket:
-/// `declined` is every cluster the sweep judged and did not ship — the namer's
-/// refusals, the lint's, and the groups the confirms thinned out — which is the
+/// `declined` is every cluster the sweep judged and did not ship — the charter
+/// check's refusals, either arm, and the groups the confirms thinned out — which is the
 /// bucket `formed` is read against. It overlaps the three it unions, so
 /// [SweepTally.clustersJudged] leaves it out.
 Map<String, ClusterPurity> clusterPurityByOutcome(
   List<JudgedCluster> distinct,
   Map<String, String> goldByThread,
 ) {
-  const order = ['formed', 'incoherent', 'lint', 'thin', 'answered'];
-  const declinedWords = {'incoherent', 'lint', 'thin'};
+  const order = ['formed', 'lint', 'charter_model', 'thin', 'answered'];
+  const declinedWords = {'lint', 'charter_model', 'thin'};
   final byOutcome = <String, ClusterPurity>{};
   for (final outcome in order) {
     final bucket = [
@@ -1124,7 +1124,7 @@ class SweepTally {
   /// rows whose status is `dismissed` or `possible`.
   ///
   /// `possible` counts because that is where a declined cluster goes since
-  /// decision 31: the namer, the charter lint or the confirms refused it, and
+  /// decision 31: the charter check or the confirms refused it, and
   /// instead of a member-less tombstone the sweep files the group with its
   /// members for a person to keep or dismiss. The word on the printed line
   /// stays `tombstoned` so a row taken today reads against every row in the
@@ -1132,15 +1132,13 @@ class SweepTally {
   /// would vouch for.
   final int tombstoned;
 
-  /// Clusters the charter lint refused, summed off the sweep's own
-  /// activity rows.
+  /// Clusters the regex charter lint refused, summed off the sweep's own
+  /// activity rows (`SWEEP_CHARTER=lint`).
   final int lintRejected;
 
-  /// Clusters the namer refused, summed the same way: a `coherent: false` that
-  /// named no outliers, or an outlier list that left fewer than two threads.
-  /// Both are the model naming no group to keep, so neither contributes to
-  /// [outliersDropped].
-  final int incoherent;
+  /// Clusters the decision model's `charter_specific` refused, summed the
+  /// same way (`SWEEP_CHARTER=model`, what ships).
+  final int charterModelRejected;
 
   /// Series the pre-pass seeded as clusters of their own.
   final int seriesSeeded;
@@ -1148,7 +1146,9 @@ class SweepTally {
   /// Threads the pre-pass took out of the pool as notification-shaped.
   final int seriesExcluded;
 
-  /// Threads the namer named as not belonging, dropped before the confirms.
+  /// Members the decision grouping dropped from a formed cluster because their
+  /// mean `same_effort` p to the rest was under the link bar, back to the
+  /// pool before naming. Zero under the cosine baseline.
   final int outliersDropped;
 
   /// Pool rows that were fragments of a member's own thread and joined on its
@@ -1210,26 +1210,29 @@ class SweepTally {
   /// Model calls per task label — `storyline_name`, `decision:member_of`.
   final Map<String, int> callsByKind;
 
-  /// Grouping calls the sweep made, summed off its own activity rows.
+  /// `same_effort` pairs the sweep sent to the decision model, summed off its
+  /// own activity rows.
   ///
-  /// Zero on a tree running `GroupingMode.cosine`, which is what ships: the
-  /// sweep writes all four of these keys in either mode so that a row from
-  /// the two trees is the same row with different numbers in it. The four
-  /// default to 0 here for the same reason a missing key reads 0 — a ledger
-  /// row taken before these existed is a cosine row, and that is what a
-  /// cosine row says.
-  final int groupingCalls;
+  /// Zero under `SWEEP_GROUPING=cosine`: the sweep writes all four of these
+  /// keys in either mode so that a row from the two modes is the same row
+  /// with different numbers in it. They default to 0 here for the same reason
+  /// a missing key reads 0 — a ledger row taken before these existed is a
+  /// cosine row, and that is what a cosine row says.
+  final int pairsScored;
 
-  /// Threads a grouping call placed in a group big enough to propose.
-  final int grouped;
+  /// Candidate pairs answered from the `pair_decisions` cache with no
+  /// question asked.
+  final int pairsCached;
 
-  /// Grouping calls that left their piece ungrouped: the call threw, or it
-  /// named no group at all.
-  final int groupingFailed;
+  /// Candidate pairs over a pass's budget, read as p = 0 in that pass.
+  final int pairsDeferred;
 
-  /// Pieces dropped before any call — too few threads after a split, or still
-  /// too wide to show in one call at the top of the ladder.
-  final int groupingUnfit;
+  /// Naming calls the sweep made — what `maxQuestionsPerPass` caps.
+  final int namerCalls;
+
+  /// Clusters formed but not proposed in a pass because its pair budget
+  /// could not complete them.
+  final int clustersDeferred;
 
   /// Model calls made in each sweep pass, in pass order.
   final List<int> callsPerPass;
@@ -1257,7 +1260,7 @@ class SweepTally {
   final Map<String, int> lintCounts;
 
   /// Outcome word to the purity of the clusters the sweep judged under it,
-  /// read BEFORE the namer narrowed or refused any of them. Carries the
+  /// read BEFORE the namer wrote a word about any of them. Carries the
   /// derived `declined` bucket as well as the seam's five words; see
   /// [clusterPurityByOutcome].
   final Map<String, ClusterPurity> clusterPurity;
@@ -1300,7 +1303,7 @@ class SweepTally {
     required this.formed,
     required this.tombstoned,
     required this.lintRejected,
-    required this.incoherent,
+    this.charterModelRejected = 0,
     required this.seriesSeeded,
     required this.seriesExcluded,
     required this.outliersDropped,
@@ -1318,10 +1321,11 @@ class SweepTally {
     required this.unmapped,
     required this.filedNowhere,
     required this.callsByKind,
-    this.groupingCalls = 0,
-    this.grouped = 0,
-    this.groupingFailed = 0,
-    this.groupingUnfit = 0,
+    this.pairsScored = 0,
+    this.pairsCached = 0,
+    this.pairsDeferred = 0,
+    this.namerCalls = 0,
+    this.clustersDeferred = 0,
     required this.callsPerPass,
     required this.wallPerPassMs,
     required this.cosineBins,
@@ -1378,7 +1382,7 @@ class SweepTally {
         'formed': formed,
         'tombstoned': tombstoned,
         'lint_rejected': lintRejected,
-        'incoherent': incoherent,
+        'charter_model_rejected': charterModelRejected,
         'series': seriesSeeded,
         'series_excluded': seriesExcluded,
         'outliers': outliersDropped,
@@ -1406,10 +1410,11 @@ class SweepTally {
         'unmapped': unmapped,
         'filed_nowhere': filedNowhere,
         'calls_by_kind': callsByKind,
-        'grouping_calls': groupingCalls,
-        'grouped': grouped,
-        'grouping_failed': groupingFailed,
-        'grouping_unfit': groupingUnfit,
+        'pairs_scored': pairsScored,
+        'pairs_cached': pairsCached,
+        'pairs_deferred': pairsDeferred,
+        'namer_calls': namerCalls,
+        'clusters_deferred': clustersDeferred,
         'calls_per_pass': callsPerPass,
         'wall_per_pass_ms': wallPerPassMs,
         'cosine_bins': {
@@ -1480,7 +1485,7 @@ class SweepTally {
         clusterPurity[outcome]?.line() ?? 'none';
     return 'sweep:\n'
         '  storylines  formed $formed  tombstoned $tombstoned'
-        '  lint-rejected $lintRejected  incoherent $incoherent\n'
+        '  lint-rejected $lintRejected  charter-rejected $charterModelRejected\n'
         '  series  seeded $seriesSeeded  excluded $seriesExcluded'
         '  outliers dropped $outliersDropped  fragments $fragmentsJoined'
         '  folded $fragmentsFolded\n'
@@ -1495,15 +1500,16 @@ class SweepTally {
         '  filed nowhere $filedNowhere  forbidden hits $forbiddenHits '
         'over ${forbiddenByAnti.length} buckets\n'
         '  calls  $calls   per pass ${callsPerPass.join(', ')}'
-        '   grouping calls $groupingCalls  grouped $grouped'
-        '  failed $groupingFailed  unfit $groupingUnfit\n'
+        '   pairs scored $pairsScored  cached $pairsCached'
+        '  deferred $pairsDeferred  namer calls $namerCalls'
+        '  clusters deferred $clustersDeferred\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines (0.50..0.65)  $bins\n'
         '  in-cluster cosines (0.35..0.50)  $binsQwen\n'
         '  clusters judged $clustersJudged'
         '  formed ${clustersAt('formed')}'
-        '  incoherent ${clustersAt('incoherent')}'
         '  lint ${clustersAt('lint')}'
+        '  charter ${clustersAt('charter_model')}'
         '  thin ${clustersAt('thin')}'
         '  answered ${clustersAt('answered')}\n'
         '  purity before naming  formed: ${purityAt('formed')}\n'

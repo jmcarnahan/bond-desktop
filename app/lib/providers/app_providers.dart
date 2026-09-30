@@ -1940,9 +1940,6 @@ final Provider<StorylineService> storylineServiceProvider =
             .ensureBodiesFor(conversationKey, ids);
       },
     ),
-    // Dark until `StorylineTuning.groupingMode` says otherwise, and routable
-    // anyway: the stage exists so that turning it on is a setting.
-    groupClient: ref.watch(stageLlmClientProvider('storyline_group')),
     refreshClient: ref.watch(stageLlmClientProvider('storyline_refresh')),
     recapClient: ref.watch(stageLlmClientProvider('storyline_recap')),
     activityLog: ref.watch(activityLogProvider),

@@ -7,15 +7,17 @@ import 'decision/decision_questions.dart';
 import 'decision/storyline_state.dart';
 import 'decision/storyline_thread_input.dart';
 
-/// The numbers every storyline membership judgement is read against: the
-/// decision model's `member_of` p(yes) and the cosine retrieval in front of
-/// it.
+/// The numbers every storyline judgement is read against: the decision
+/// model's `member_of`, `same_effort` and `charter_specific` p(yes), and the
+/// cosine retrieval in front of them.
 ///
-/// PROVISIONAL, every one of them. They were set from the Phase 2 as-is
-/// evaluation (Kev v2 put `member_of` at 87/98 at 0.5 on the confirm bench)
-/// and are refitted when the v3 model lands, with a `make golden-storyline`
-/// row on each side, like every `DecisionPolicy` and `StorylineTuning`
-/// number. One file, so a threshold is never spelled twice.
+/// PROVISIONAL, every one of them. The membership numbers were set from the
+/// Phase 2 as-is evaluation (Kev v2 put `member_of` at 87/98 at 0.5 on the
+/// confirm bench); the sweep's pair and charter numbers are the neutral 0.5
+/// and the plan's retrieval widths, with no measurement behind them yet. All
+/// are refitted when the v3 model lands, with a `make golden-storyline` or
+/// `make golden-sweep` row on each side, like every `DecisionPolicy` and
+/// `StorylineTuning` number. One file, so a threshold is never spelled twice.
 abstract final class StorylinePolicy {
   /// A thread joins a storyline the owner KEPT at p(member_of = yes) ≥ this.
   static const double acceptActive = 0.50;
@@ -37,6 +39,32 @@ abstract final class StorylinePolicy {
   /// this-many by centroid cosine and the top this-many by nearest-member
   /// cosine, merged.
   static const int assignTopK = 3;
+
+  /// How many nearest pool threads, by clustering-vector cosine, each pool
+  /// thread proposes as `same_effort` candidates in a sweep pass. The vector
+  /// only proposes the pair; the decision model judges it.
+  static const int pairNeighbours = 10;
+
+  /// The cosine a neighbour must reach to be proposed as a pair at all. As
+  /// loose as [assignRetrievalFloor], for the same reason: retrieval, never
+  /// a verdict.
+  static const double pairRetrievalFloor = 0.30;
+
+  /// How many NEW pairs one sweep pass may send to the decision model. The
+  /// answers are cached (`pair_decisions`), so a pool larger than this
+  /// converges over a few passes, newest threads' pairs first; a pair left
+  /// unscored reads as p = 0 in the pass that skipped it.
+  static const int pairBudgetPerPass = 400;
+
+  /// Two clusters merge while the mean `same_effort` p between them is at
+  /// least this (average linkage), and a member whose mean p to the rest of
+  /// its cluster falls under it is an outlier and returns to the pool.
+  static const double linkTau = 0.50;
+
+  /// A named cluster's title and charter pass the charter check at
+  /// p(charter_specific = yes) ≥ this; under it the cluster is filed
+  /// `possible`, as the regex lint files one today.
+  static const double charterSpecificTau = 0.50;
 }
 
 /// One membership judgement: the decision model's p(yes), and the sentence a
@@ -96,6 +124,13 @@ class StorylineJudge {
 
   /// When each thread's last body fetch failed, as `'<source>\n<key>'`.
   final Map<String, DateTime> _fetchFailedAt = {};
+
+  /// The fetches that already succeeded since [beginPass], as the thread and
+  /// the preview ids asked for. A message whose fetched body is empty still
+  /// renders its preview, so without this every judgement of its thread in a
+  /// pass would fetch it again; a NEW preview row is a different set of ids
+  /// and is fetched.
+  final Set<String> _fetched = {};
 
   /// Throws the park a question would throw when the decision model plainly
   /// cannot answer, asking it nothing ([DecisionClient.ensureReady]). The
@@ -171,8 +206,28 @@ class StorylineJudge {
     for (final (a, b) in pairs) {
       rendered.add((await textOf(a), await textOf(b)));
     }
-    return _decision.askPairs(rendered);
+    return sameEffortOfTexts(rendered);
   }
+
+  /// [sameEffort] over thread texts the caller already built — the sweep's
+  /// pair scoring, which builds each pool thread's text once per pass and
+  /// needs its hash for the pair cache before it asks anything.
+  Future<List<double>> sameEffortOfTexts(List<(String, String)> pairs) =>
+      _decision.askPairs(pairs);
+
+  /// Forgets which threads' body fetches already landed, so a pass that
+  /// starts now may fetch each of them once more; inside the pass a thread is
+  /// fetched at most once. The sweep calls it at the top of a pass. The
+  /// FAILURE memo is not touched: a mail server that was down a minute ago is
+  /// not asked again until [fetchRetryAfter] has passed, whichever pass asks.
+  void beginPass() => _fetched.clear();
+
+  /// Who answers `same_effort` now, as the sweep's pair cache keys it:
+  /// `'<qhash>|<model identity>'` ([DecisionClient.modelIdentity]). Another
+  /// question set, another backend or a re-installed model is another key,
+  /// and its pairs are asked again.
+  Future<String> decidedBy() async =>
+      '$decisionQhash|${await _decision.modelIdentity()}';
 
   /// One thread's text, with the bodies of its preview rows fetched first.
   ///
@@ -193,9 +248,12 @@ class StorylineJudge {
     if (failedAt != null && _now().difference(failedAt) < fetchRetryAfter) {
       return first;
     }
+    final asked = '$id\n${first.previewIds.join('\n')}';
+    if (_fetched.contains(asked)) return first;
     try {
       await ensure(source, key, first.previewIds);
       _fetchFailedAt.remove(id);
+      _fetched.add(asked);
     } catch (e) {
       _fetchFailedAt[id] = _now();
       debugPrint('storyline judge: fetching bodies for $source failed: $e');

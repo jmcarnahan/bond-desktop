@@ -29,12 +29,10 @@ void main() {
     test('the schema asks for one, last — the grammar emits in this order', () {
       final properties = name.schema['properties'] as Map<String, dynamic>;
 
-      // The two judgements sit between the evidence and the title since Round
-      // D; the charter is still the last thing the grammar emits.
+      // Text only since the decision model judges the group; the charter is
+      // still the last thing the grammar emits.
       expect(properties.keys.toList(), [
         'evidence',
-        'coherent',
-        'outliers',
         'title',
         'summary',
         'charter',

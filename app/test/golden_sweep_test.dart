@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart'
-    show GroupingMode, StorylinePolicy, StorylineTuning;
+    show CharterCheck, GroupingMode, StorylinePolicy, StorylineTuning;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/golden_harness.dart';
@@ -504,20 +504,20 @@ void main() {
     test('reports of one set are one cluster, and answered yields to the '
         'verdict', () {
       final verdictFirst = distinctClusters([
-        (threads: [t('k1'), t('k2'), t('k3')], outcome: 'incoherent'),
+        (threads: [t('k1'), t('k2'), t('k3')], outcome: 'charter_model'),
         (threads: [t('k3'), t('k1'), t('k2')], outcome: 'answered'),
       ]);
       // The same three threads, reported in a different order by the second
       // pass, are the same cluster judged once.
       expect(verdictFirst, hasLength(1));
-      expect(verdictFirst.single.outcome, 'incoherent');
+      expect(verdictFirst.single.outcome, 'charter_model');
 
       final answeredFirst = distinctClusters([
         (threads: [t('k3'), t('k1'), t('k2')], outcome: 'answered'),
-        (threads: [t('k1'), t('k2'), t('k3')], outcome: 'incoherent'),
+        (threads: [t('k1'), t('k2'), t('k3')], outcome: 'charter_model'),
       ]);
       expect(answeredFirst, hasLength(1));
-      expect(answeredFirst.single.outcome, 'incoherent');
+      expect(answeredFirst.single.outcome, 'charter_model');
 
       // Only ever answered: the tombstone predates the run and there is no
       // verdict to recover.
@@ -532,11 +532,11 @@ void main() {
     test('two different sets are two clusters', () {
       final distinct = distinctClusters([
         (threads: [t('k1'), t('k2')], outcome: 'formed'),
-        (threads: [t('k3'), t('k4')], outcome: 'incoherent'),
+        (threads: [t('k3'), t('k4')], outcome: 'charter_model'),
       ]);
 
       expect(distinct, hasLength(2));
-      expect(distinct.map((c) => c.outcome), ['formed', 'incoherent']);
+      expect(distinct.map((c) => c.outcome), ['formed', 'charter_model']);
     });
 
     test('purity by outcome averages the clusters that carry gold', () {
@@ -545,7 +545,7 @@ void main() {
       final byOutcome = clusterPurityByOutcome(
         [
           (threads: [t('k1'), t('k2')], outcome: 'formed'),
-          (threads: [t('k1'), t('k2'), t('k3')], outcome: 'incoherent'),
+          (threads: [t('k1'), t('k2'), t('k3')], outcome: 'charter_model'),
           (threads: [t('k4'), t('k5')], outcome: 'lint'),
         ],
         gold,
@@ -555,9 +555,9 @@ void main() {
       expect(byOutcome['formed']!.pureAt70, 1);
       expect(byOutcome['formed']!.pureAt100, 1);
 
-      expect(byOutcome['incoherent']!.mean, closeTo(2 / 3, 1e-9));
-      expect(byOutcome['incoherent']!.pureAt70, 0);
-      expect(byOutcome['incoherent']!.pureAt100, 0);
+      expect(byOutcome['charter_model']!.mean, closeTo(2 / 3, 1e-9));
+      expect(byOutcome['charter_model']!.pureAt70, 0);
+      expect(byOutcome['charter_model']!.pureAt100, 0);
 
       // Nothing to be pure about: counted as a cluster, averaged nowhere.
       expect(byOutcome['lint']!.clusters, 1);
@@ -1047,14 +1047,32 @@ void main() {
     });
 
     test('SWEEP_GROUPING names a mode or fails loudly', () {
-      // Three modes and three experiments: a typo that quietly ran the shipped
-      // one would record a row against a question nobody asked.
+      // Two modes and two experiments: a typo that quietly ran the shipped
+      // one would record a row against a question nobody asked. `model` and
+      // `pool` were retired with the grouping task.
       expect(parseSweepGrouping('cosine'), GroupingMode.cosine);
-      expect(parseSweepGrouping(' MODEL '), GroupingMode.model);
-      expect(parseSweepGrouping('pool'), GroupingMode.pool);
-      for (final raw in ['', 'cosign', 'whole', 'grouping']) {
+      expect(parseSweepGrouping(' DECISION '), GroupingMode.decision);
+      for (final raw in ['', 'cosign', 'model', 'pool', 'grouping']) {
         expect(() => parseSweepGrouping(raw), throwsArgumentError, reason: raw);
       }
+      // The default follows the app.
+      expect(
+        parseSweepGrouping(GoldenDefines.sweepGroupingRaw),
+        StorylineTuning.groupingMode,
+      );
+    });
+
+    test('SWEEP_CHARTER names a check or fails loudly', () {
+      expect(parseSweepCharter('lint'), CharterCheck.lint);
+      expect(parseSweepCharter(' MODEL '), CharterCheck.model);
+      for (final raw in ['', 'regex', 'charter', 'decision']) {
+        expect(() => parseSweepCharter(raw), throwsArgumentError, reason: raw);
+      }
+      // The default follows the app.
+      expect(
+        parseSweepCharter(GoldenDefines.sweepCharterRaw),
+        StorylineTuning.charterCheck,
+      );
     });
 
     test('SWEEP_CARD is the app\'s own variant list, and round-trips', () {
@@ -1114,7 +1132,7 @@ void main() {
           formed: 2,
           tombstoned: 3,
           lintRejected: 5,
-          incoherent: 6,
+          charterModelRejected: 6,
           seriesSeeded: 1,
           seriesExcluded: 8,
           outliersDropped: 3,
@@ -1132,10 +1150,11 @@ void main() {
           unmapped: 4,
           filedNowhere: 11,
           callsByKind: const {'storyline_name': 2, 'decision:member_of': 9},
-          groupingCalls: 4,
-          grouped: 11,
-          groupingFailed: 1,
-          groupingUnfit: 2,
+          pairsScored: 40,
+          pairsCached: 11,
+          pairsDeferred: 1,
+          namerCalls: 2,
+          clustersDeferred: 1,
           callsPerPass: const [7, 4],
           wallPerPassMs: const [1200, 900],
           cosineBins: const [0, 1, 2, 3, 4],
@@ -1178,7 +1197,7 @@ void main() {
     final judgedClusters = clusterPurityByOutcome(
       [
         (threads: [t('k1'), t('k2')], outcome: 'formed'),
-        (threads: [t('k3'), t('k4')], outcome: 'incoherent'),
+        (threads: [t('k3'), t('k4')], outcome: 'charter_model'),
       ],
       {
         t('k1'): 'alpha-effort',
@@ -1243,16 +1262,17 @@ void main() {
       final json = tally().toJson();
 
       expect(json['lint_rejected'], 5);
-      expect(json['incoherent'], 6);
+      expect(json['charter_model_rejected'], 6);
       expect(json['series'], 1);
       expect(json['series_excluded'], 8);
       expect(json['outliers'], 3);
       expect(json['fragments'], 4);
       expect(json['folded'], 6);
-      expect(json['grouping_calls'], 4);
-      expect(json['grouped'], 11);
-      expect(json['grouping_failed'], 1);
-      expect(json['grouping_unfit'], 2);
+      expect(json['pairs_scored'], 40);
+      expect(json['pairs_cached'], 11);
+      expect(json['pairs_deferred'], 1);
+      expect(json['namer_calls'], 2);
+      expect(json['clusters_deferred'], 1);
     });
 
     test('the formable line says how far the row sits from the ceiling', () {
@@ -1270,22 +1290,22 @@ void main() {
       expect(json['items'], 14);
     });
 
-    test('the grouping counts print on the calls line', () {
+    test('the pair and namer counts print on the calls line', () {
       expect(
         tally().table(),
-        contains('grouping calls 4  grouped 11  failed 1  unfit 2'),
+        contains('pairs scored 40  cached 11  deferred 1  namer calls 2'
+            '  clusters deferred 1'),
       );
     });
 
-    test('a cosine row carries the four grouping keys as zeroes', () {
-      // The shipped mode makes no grouping call, and a row that simply left
-      // the keys out would read as a pass that grouped nothing rather than as
-      // one that never grouped — which is the whole comparison.
+    test('a cosine row carries the four pair keys as zeroes', () {
+      // The baseline judges no pair, and a row that simply left the keys out
+      // would read as a pass that judged nothing rather than as one that
+      // never judged — which is the whole comparison.
       final json = SweepTally(
         formed: 0,
         tombstoned: 0,
         lintRejected: 0,
-        incoherent: 0,
         seriesSeeded: 0,
         seriesExcluded: 0,
         outliersDropped: 0,
@@ -1331,10 +1351,11 @@ void main() {
         ),
       ).toJson();
 
-      expect(json['grouping_calls'], 0);
-      expect(json['grouped'], 0);
-      expect(json['grouping_failed'], 0);
-      expect(json['grouping_unfit'], 0);
+      expect(json['pairs_scored'], 0);
+      expect(json['pairs_cached'], 0);
+      expect(json['pairs_deferred'], 0);
+      expect(json['namer_calls'], 0);
+      expect(json['clusters_deferred'], 0);
     });
 
     test('the JSON carries clusters by outcome and the pair bins by name', () {
@@ -1342,7 +1363,7 @@ void main() {
         formed: 1,
         tombstoned: 1,
         lintRejected: 0,
-        incoherent: 1,
+        charterModelRejected: 1,
         seriesSeeded: 0,
         seriesExcluded: 0,
         outliersDropped: 0,
@@ -1393,10 +1414,10 @@ void main() {
       ).toJson();
 
       final clusters = json['clusters']! as Map;
-      expect(clusters.keys, ['formed', 'incoherent', 'declined']);
+      expect(clusters.keys, ['formed', 'charter_model', 'declined']);
       expect((clusters['formed']! as Map)['mean'], closeTo(1.0, 1e-9));
       expect((clusters['formed']! as Map)['pure_at_100'], 1);
-      expect((clusters['incoherent']! as Map)['mean'], closeTo(0.5, 1e-9));
+      expect((clusters['charter_model']! as Map)['mean'], closeTo(0.5, 1e-9));
       expect((clusters['declined']! as Map)['sizes'], [2]);
 
       expect(json['pair_bins'], {
@@ -1514,7 +1535,7 @@ void main() {
       expect(printed, contains('forbidden hits 2 over 1 buckets'));
       expect(printed, contains('0.55-0.60 2'));
       // Counts, which is all the sweep-side line ever carries.
-      expect(printed, contains('lint-rejected 5  incoherent 6'));
+      expect(printed, contains('lint-rejected 5  charter-rejected 6'));
       expect(printed, contains('series  seeded 1  excluded 8'));
       expect(printed, contains('outliers dropped 3'));
       expect(printed, contains('fragments 4'));
@@ -1523,7 +1544,7 @@ void main() {
       expect(
         printed,
         contains(
-            'clusters judged 0  formed 0  incoherent 0  lint 0  thin 0  '
+            'clusters judged 0  formed 0  lint 0  charter 0  thin 0  '
             'answered 0'),
       );
       expect(printed, contains('purity before naming  formed: none'));
@@ -1548,7 +1569,7 @@ void main() {
       expect(
         withClusters,
         contains(
-            'clusters judged 2  formed 1  incoherent 1  lint 0  thin 0  '
+            'clusters judged 2  formed 1  lint 0  charter 1  thin 0  '
             'answered 0'),
       );
       expect(

@@ -28,7 +28,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
-| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
+| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep's grouping, the naming pass, the charter check, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`same_effort`, `charter_specific`, `member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector; `SWEEP_GROUPING` and `SWEEP_CHARTER` pick the grouping and the charter check. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
@@ -77,6 +77,15 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   the durable half with the summary dropped; and `summary`, what the thread is
   about with no subject line. Defaults to `topics`, which is to say to the app.
   Anything else fails loudly rather than defaulting.
+- `SWEEP_GROUPING` — which pass groups the pool on `make golden-sweep`:
+  `decision` (what ships since the decision-questions round: cosine proposes
+  pairs, the decision model's `same_effort` judges them) or `cosine` (the
+  cosine clustering alone, the baseline). `model` and `pool`, the two
+  generative grouping modes, were deleted with their task and are refused.
+  Defaults to `decision`, which is to say to the app.
+- `SWEEP_CHARTER` — which check a named cluster's charter faces: `model` (the
+  decision model's `charter_specific`, what ships) or `lint` (the regex
+  charter lint). Defaults to `model`. Anything else fails loudly.
 - `SWEEP_STAGE` — how much of the sweep test runs: `full`, the whole filing
   path on three servers, or `vector`, which stops after the seeding and reads
   the geometry alone on one. Defaults to `full`; `make golden-vector` passes
@@ -1950,6 +1959,34 @@ reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreeme
 0.45→68, 0.50→67 (fp0 fn9), 0.55→67, 0.60–0.75→66, 0.80→65 of 76. Shipped default 0.30, the low
 end of the 0.30–0.55 plateau (`NeedsYouTuning.defaultThreshold`, the owner's Needs You slider);
 the band and the 27B needs-you call removed.
+
+**The sweep on the decision model** (decision-questions round, Phase 7; NO
+rows yet — the v3 model that answers `same_effort` and `charter_specific` is
+not installed, so a run today parks on the decision pass). When v3 serves,
+the rows to take, each twice from a clean `git archive` copy with the embed,
+decision and prose servers up, and the second kept:
+
+```
+make golden-sweep GOLDEN_RUN=<run>                                        # what ships: decision grouping, model charter check
+make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=cosine                  # the grouping baseline, same charter check
+make golden-sweep GOLDEN_RUN=<run> SWEEP_CHARTER=lint                     # the charter baseline, same grouping
+make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=cosine SWEEP_CHARTER=lint   # the cosine clustering and the lint, a NEW baseline
+```
+
+The last row is NOT the 59/98 configuration. The namer no longer gatekeeps
+(`coherent`/`outliers` are gone), so the cosine grouping with the lint is a
+new baseline, taken on the same day and tree as the others, and every row is
+read against it as well as against the plan's bar (above 59 with at most 1
+forbidden; the roadmap exit is 70). The tally's calls line prints `pairs
+scored`, `cached`, `deferred` and `namer calls`, and the JSON carries
+`clusters_deferred` (counts only). Whether the golden pool of about 71
+threads fits the 400-pair budget in one pass has not been measured: a
+non-zero `pairs_deferred` or `clusters_deferred` on the first pass says it did
+not, and the later passes of the keep-all loop then complete from the cache. `SWEEP_CHARTER=model` ships only if its
+row is at least as good as `lint`'s. `StorylinePolicy.linkTau`,
+`charterSpecificTau`, `pairNeighbours`, `pairRetrievalFloor` and
+`pairBudgetPerPass` are PROVISIONAL until these rows; a move of any of them
+takes a row on each side.
 
 ### Recommendations (decision-model round, 2026-09-28)
 
