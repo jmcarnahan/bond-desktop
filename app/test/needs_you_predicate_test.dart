@@ -154,7 +154,7 @@ void main() {
   });
 
   test('the tuning numbers', () {
-    expect(NeedsYouTuning.defaultThreshold, 0.30);
+    expect(NeedsYouTuning.defaultThreshold, 0.35);
     expect(NeedsYouTuning.minThreshold, 0.05);
     expect(NeedsYouTuning.maxThreshold, 0.95);
     expect(NeedsYouTuning.step, 0.05);

@@ -225,7 +225,7 @@ const String boxDecideId = 'box-decide';
 /// What each remote is asked for when no name was discovered: the 27B the
 /// compiled box serves under `/prose`, and the decision model under `/decide`.
 const String boxProseModel = 'qwen3.8';
-const String boxDecideModel = 'bond-decide-mbl-v2swap';
+const String boxDecideModel = 'bond-decide-mbl-v3';
 
 /// The box address the wizard prefills, compiled in from `.env`'s
 /// `BOND_BOX_URL` through the Makefile's `APP_SECRET_DEFINE`.

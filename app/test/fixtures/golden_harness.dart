@@ -95,9 +95,9 @@ class GoldenDefines {
   static const String sweepStageRaw =
       String.fromEnvironment('SWEEP_STAGE', defaultValue: 'full');
 
-  /// Which pass decides what goes together on a sweep replay: `decision`
-  /// (what ships) or `cosine` (the baseline). Parsed by [parseSweepGrouping],
-  /// which refuses anything else.
+  /// Which pass decides what goes together on a sweep replay: `cosine` (what
+  /// ships) or `decision` (the bench arm, `same_effort` over cosine's
+  /// proposals). Parsed by [parseSweepGrouping], which refuses anything else.
   ///
   /// A define rather than a `sed` of `StorylineTuning.groupingMode`, for the
   /// reason every other knob here is one: a row has to name the mode it was
@@ -105,7 +105,7 @@ class GoldenDefines {
   /// rows from different trees end up in one table. The default follows the
   /// app, so a run nobody passed a mode to measures the mode that ships.
   static const String sweepGroupingRaw =
-      String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'decision');
+      String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'cosine');
 
   /// Which check a named cluster's charter faces on a sweep replay: `model`
   /// (the decision model's `charter_specific`, what ships) or `lint` (the

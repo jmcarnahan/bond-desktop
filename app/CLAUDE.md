@@ -224,23 +224,36 @@ enforce the ones that are commands.
   ONE batch per storyline per lap, and a decision exception propagates and
   parks the lane; no language model is asked about membership (the
   `storyline_membership` stage is gone). Both stayed in the service through
-  the split, because one rule at five sites is not a seam. The
-  `StorylinePolicy` numbers are provisional and move only with a
-  `make golden-storyline` row on each side. Storyline tests script `member_of`
+  the split, because one rule at five sites is not a seam. `acceptActive`
+  0.50, `acceptSuggested` 0.74 and `charterSpecificTau` 0.50 are FITTED on
+  the v3 student (2026-09-30) and move only with a `make golden-storyline`,
+  `golden-declared` or `golden-sweep` row on each side; a test's `member_of`
+  yes must clear 0.74 for a suggested storyline. Storyline tests script `member_of`
   through `scriptedJudge(store, llm)` (`fake_decision_client.dart`): a
   `{'p': …}` step under the `member_of` schema name, one call per thread.
-- The sweep GROUPS on the decision model: `StorylineTuning.groupingMode =
-  GroupingMode.decision` ships, where cosine only proposes candidate pairs
+- The sweep groups by COSINE: `StorylineTuning.groupingMode =
+  GroupingMode.cosine` ships (with the model charter check and `member_of`
+  confirms), and it is the one reader of `clusterLinkThreshold`,
+  `clusterCoherenceFloor` and the split ladder. `GroupingMode.decision` is the
+  BENCH ARM (`SWEEP_GROUPING=decision`; the Makefile and
+  `GoldenDefines.sweepGroupingRaw` both default to cosine): it did not beat
+  cosine on the v3 golden sweep (57/98 at best against 60/98), because
+  `same_effort`'s p on the golden pool is compressed near zero, so its
+  `linkTau` (0.008) and `pairBudgetPerPass` (400) stay PROVISIONAL. A test
+  about it passes `groupingMode: GroupingMode.decision` and writes any p that
+  a MEAN is compared on through `onLinkScale` (`fake_decision_client.dart`,
+  the 0.5-centred scale moved onto `linkTau`'s); a plain no is 0.0, never
+  0.05, which clears a 0.008 bar. Under it cosine only proposes candidate pairs
   (each pool thread's top `StorylinePolicy.pairNeighbours` at
   `pairRetrievalFloor`, plus every pair sharing a series key), the decision
   model's `same_effort` judges them, and `clusterByAverageLinkage` forms the
   clusters at `linkTau` — an optimistic round over the answered pairs, then
   each cluster COMPLETED (its unasked internal pairs asked) and judged again
   on the full matrix, or deferred when the budget cannot complete it — and
-  drops outliers before naming. `GroupingMode.cosine`
-  is kept ONLY as the golden-sweep baseline (`SWEEP_GROUPING=cosine`) and is the
-  one reader of `clusterLinkThreshold`, `clusterCoherenceFloor` and the split
-  ladder. The answers are cached in `pair_decisions` (v23, DERIVED) under both
+  drops outliers before naming. The golden sweep's keep-all loop runs on
+  while a quiet pass deferred clusters (`sweepLoopContinues`, up to
+  `sweepDeferredPassCap` 8), because the golden pool's ~570 candidate pairs
+  overrun one pass's budget. The answers are cached in `pair_decisions` (v23, DERIVED) under both
   thread texts' `cardHash` and, in the `qhash` column, `decidedBy` =
   `'<qhash>|<model identity>'`
   (`DecisionClient.modelIdentity`, so a swapped or re-installed model re-asks;
@@ -257,7 +270,7 @@ enforce the ones that are commands.
   `StorylineJudge.beginPass()` at the sweep's top makes each thread's body
   fetch at most once a pass (it forgets successes only; the five-minute
   failure memo survives passes). Storyline service tests answer `same_effort`
-  through `sweepJudge` (`storyline_service_test.dart`: from the seeded vectors
+  (under the decision arm) through `sweepJudge` (`storyline_service_test.dart`: from the seeded vectors
   at the file's own `sweepJudgeLinkCosine`, unless the test scripts it) or
   `sameEffortAmong`/`sameEffortBy` (`fake_decision_client.dart`), and
   `charter_specific` with `{'p': …}` like `member_of`.
@@ -643,7 +656,7 @@ enforce the ones that are commands.
   golden-prose` for `replyYes`), the `StorylineTuning` rule.
 - Needs You is ONE predicate: `needsYouAt(p, threshold)` / `needsYouAtSql` /
   `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
-  default 0.30) is the only control; every reader goes through it; no
+  default 0.35) is the only control; every reader goes through it; no
   language model is asked about needs-you, and the attention score only
   orders. A THREAD's p is the MAX over its kept inbound messages after its
   last outbound (all kept inbound when it has none), not the newest one's, so
@@ -698,7 +711,7 @@ enforce the ones that are commands.
 - An inbox-level widget test that builds a triage queue overrides
   `decisionClientProvider` with `keepingDecisionClient()`
   (`test/fixtures/fake_decision_client.dart`: keep, needs-you 0.5, over the
-  slider's 0.30 default so a kept message reads as needing the owner). Without
+  slider's 0.35 default so a kept message reads as needing the owner). Without
   it the real client finds no heads
   file under `flutter test` and parks every message, which shows up as rows
   stuck at "triaging" or as RenderFlex overflows, not as a clear failure.

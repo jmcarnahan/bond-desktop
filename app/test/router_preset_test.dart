@@ -42,7 +42,7 @@ pooling = last
 load-on-startup = true
 
 [bond-decide]
-model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf
+model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v3-f16.gguf
 embedding = true
 pooling = mean
 c = 2048

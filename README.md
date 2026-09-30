@@ -236,7 +236,7 @@ The left rail has four sections:
 **Needs You** is what the signed-in user is actually on the hook for. The
 decision model gives every kept inbound message a probability that it needs
 the user, and a thread is in Needs You when its highest unanswered probability
-is at or above the Needs You slider in Settings (30% by default); every row
+is at or above the Needs You slider in Settings (35% by default); every row
 shows its own percentage. An attention score (the thread's state, how recently
 it moved, how often that sender gets answered) only orders the list. The Home
 feed's "Needs you" label follows the slider live too, so moving it relabels

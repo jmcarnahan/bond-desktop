@@ -55,9 +55,9 @@ class GroupingTally {
 /// How a sweep's pool becomes candidate clusters.
 ///
 /// One entry point, [candidates], and behind it the two passes
-/// [GroupingMode] names: the decision grouping that ships, where the cosine
-/// only PROPOSES pairs and the decision model's `same_effort` judges them,
-/// and the cosine clustering kept as the bench baseline. Both answer in
+/// [GroupingMode] names: the cosine clustering that ships, and the decision
+/// grouping kept as the bench arm, where the cosine only PROPOSES pairs and
+/// the decision model's `same_effort` judges them. Both answer in
 /// index lists into the rows they were handed, so nothing above this class
 /// can tell which ran — which is what keeps the namer, the confirms, the
 /// observer and the tombstones identical in either mode.
@@ -86,7 +86,7 @@ class StorylineGrouper {
   final StorylineJudge? _judge;
 
   /// Which pass this grouper groups with. [StorylineTuning.groupingMode] for
-  /// every caller in `lib/`; a test or the bench may pass the cosine baseline
+  /// every caller in `lib/`; a test or the bench may pass the decision arm
   /// without flipping a const the whole suite reads.
   final GroupingMode _mode;
 
@@ -110,7 +110,7 @@ class StorylineGrouper {
           ? await _clusterCandidates(rows, vectors)
           : await _decisionCandidates(rows, vectors, tally);
 
-  /// The clusters the COSINE baseline considers, from whichever
+  /// The clusters the COSINE grouping considers, from whichever
   /// pair-discovery is available.
   ///
   /// The split is deliberate and narrow: measuring the pairs is the part an
@@ -125,7 +125,7 @@ class StorylineGrouper {
       _clusterBy(vectors.length, (await _similaritiesOf(rows, vectors)).get);
 
   /// The one pairwise cosine table a sweep builds, whichever pass reads it:
-  /// the cosine baseline clusters on it whole, and the decision grouping reads
+  /// the cosine grouping clusters on it whole, and the decision arm reads
   /// each row's nearest neighbours off it as candidate pairs.
   Future<PairSimilarities> _similaritiesOf(
     List<Map<String, Object?>> rows,

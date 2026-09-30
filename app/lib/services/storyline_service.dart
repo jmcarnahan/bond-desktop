@@ -43,27 +43,34 @@ export 'storyline_judge.dart' show MembershipAnswer, StorylinePolicy;
 
 /// How [StorylineService.sweep] decides which threads go together.
 ///
-/// [decision] is the shipped pass: cosine only PROPOSES candidate pairs, the
-/// decision model's `same_effort` judges each one, and average linkage over
-/// the judged pairs forms the clusters (`StorylineGrouper`). [cosine] is
-/// [clusterBySimilarity] over the pool at
-/// [StorylineTuning.clusterLinkThreshold], kept ONLY as the golden-sweep
-/// baseline (`make golden-sweep SWEEP_GROUPING=cosine`). Either way what comes
-/// out is a list of index lists, and `_propose` names it, checks its charter,
-/// confirms it and files what the models declined exactly the same.
+/// [cosine] is the shipped pass: [clusterBySimilarity] over the pool at
+/// [StorylineTuning.clusterLinkThreshold], every proposal then named, its
+/// charter checked, and each member confirmed by `member_of`. [decision] is
+/// the bench arm (`make golden-sweep SWEEP_GROUPING=decision`): cosine only
+/// PROPOSES candidate pairs, the decision model's `same_effort` judges each
+/// one, and average linkage over the judged pairs forms the clusters
+/// (`StorylineGrouper`). Either way what comes out is a list of index lists,
+/// and `_propose` names it, checks its charter, confirms it and files what the
+/// models declined exactly the same.
 ///
-/// The reason the cosine pass stopped deciding is a base rate, not a tuning
-/// miss. Over the golden pool there are 1,346 cross-effort pairs to 85
-/// same-effort ones, so a threshold that keeps 70% of the real pairs admits
-/// sixteen wrong pairs for every right one and the clusters it builds are
-/// mixed by construction (Round D, confirmed by Round E Phase 1 across
-/// twenty-four vector configurations). A pair question the model was trained
-/// on reads what a single cosine cannot.
+/// Why [decision] was built: a base rate. Over the golden pool there are 1,346
+/// cross-effort pairs to 85 same-effort ones, so a cosine threshold that keeps
+/// 70% of the real pairs admits sixteen wrong pairs for every right one
+/// (Round D, confirmed by Round E Phase 1 across twenty-four vector
+/// configurations), and a pair question the model was trained on could read
+/// what a single cosine cannot. Why it does not ship: on the ModernBERT v3
+/// student it does not yet beat cosine. `same_effort` over the golden pool
+/// has AUC 0.888, but its p is compressed near zero (5% false links at 50%
+/// recall sits at p 0.01, 13% at 70% recall at p 0.002), and the best
+/// decision row scored 57/98 at 13 correct positives and 5 forbidden hits
+/// against cosine with the model charter check at 60/98, 16 and 3
+/// (2026-09-30, `docs/model-bakeoff.md`). It ships once a `same_effort`
+/// student reaches the plan's bar, at most 5% false links at 70% recall.
 enum GroupingMode {
-  /// The cosine clustering forms the proposals. The bench baseline.
+  /// The cosine clustering forms the proposals. What ships.
   cosine,
 
-  /// Cosine proposes pairs, `same_effort` judges them. What ships.
+  /// Cosine proposes pairs, `same_effort` judges them. The bench arm.
   decision,
 }
 
@@ -124,9 +131,9 @@ class StorylineTuning {
   /// score a candidate against — the only thing holding a cluster together is
   /// how close its members sit to each other.
   ///
-  /// Read only by the [GroupingMode.cosine] baseline, as are
+  /// Read only by [GroupingMode.cosine], the shipped grouping, as are
   /// [clusterCoherenceFloor], [clusterSplitStep] and [clusterSplitCeiling]:
-  /// the decision grouping links on `StorylinePolicy.linkTau` instead.
+  /// the decision bench arm links on `StorylinePolicy.linkTau` instead.
   ///
   /// A link is no longer a join. Reaching this against ONE member of a group
   /// used to be enough to be in it, which is what chained the golden mailbox
@@ -153,10 +160,12 @@ class StorylineTuning {
   /// Phase 2 sweep rows are what confirmed the set.
   ///
   /// And a threshold is as far as arithmetic gets on this mailbox, which is
-  /// what [groupingMode] exists for: the golden pool holds 1,346 cross-effort
-  /// pairs against 85 same-effort ones, so at any cosine that keeps most real
-  /// pairs the links a cluster forms on are mostly wrong ones, and no pairwise
-  /// number can be moved to fix a base rate of sixteen to one.
+  /// what [GroupingMode.decision] was built for: the golden pool holds 1,346
+  /// cross-effort pairs against 85 same-effort ones, so at any cosine that
+  /// keeps most real pairs the links a cluster forms on are mostly wrong ones,
+  /// and no pairwise number can be moved to fix a base rate of sixteen to
+  /// one. Until a `same_effort` student reads it better, the per-member
+  /// `member_of` confirm is what catches the wrong links.
   static const double clusterLinkThreshold = 0.48;
 
   /// A storyline of one is just a thread. This is the SURVIVOR floor, applied
@@ -246,14 +255,22 @@ class StorylineTuning {
 
   /// Which pass decides what goes together. See [GroupingMode].
   ///
-  /// A const and not a setting. [GroupingMode.decision] ships; the golden
-  /// sweep bench flips it per run (`SWEEP_GROUPING`) to take the cosine
-  /// baseline's row beside it, which is the diagnostic idiom every
-  /// `StorylineTuning` number is moved under.
-  static const GroupingMode groupingMode = GroupingMode.decision;
+  /// A const and not a setting. [GroupingMode.cosine] ships; the golden sweep
+  /// bench flips it per run (`SWEEP_GROUPING=decision`) to take the pair
+  /// grouping's row beside it, which is the diagnostic idiom every
+  /// `StorylineTuning` number is moved under. Measured 2026-09-30 on the
+  /// ModernBERT v3 student (id score / correct positives / forbidden hits):
+  /// cosine with the model charter check 60/98, 16, 3; the decision grouping
+  /// at `linkTau` 0.0018 57/98, 13, 5, at 0.004 55/98, 13, 4, at 0.008 51/98,
+  /// 18, 7, and at 0.0135 on one budget-bound pass 50/98, 0, 0. The decision
+  /// grouping stays a bench arm until a better `same_effort` student.
+  static const GroupingMode groupingMode = GroupingMode.cosine;
 
   /// Which check a named cluster's charter faces. See [CharterCheck]. The
-  /// bench flips it per run (`SWEEP_CHARTER`).
+  /// bench flips it per run (`SWEEP_CHARTER`). Measured 2026-09-30 on the
+  /// cosine grouping: the regex lint 54/98 (17 correct positives, 3
+  /// forbidden), the model 59/98 at `acceptSuggested` 0.70 and 60/98 at 0.74
+  /// (16 and 3), refusing 5 of 9 charters.
   static const CharterCheck charterCheck = CharterCheck.model;
 
   /// How many unanswered PROPOSALS the app may have sitting in the rail at
@@ -2262,7 +2279,7 @@ class StorylineService {
     // decision model that cannot answer parks the pass HERE, having asked
     // nothing and written nothing. Only when something is about to be asked
     // — a pool the decision grouping will judge, or a seeded series — so a
-    // quiet sweep asks nothing; the cosine baseline's clusters are checked
+    // quiet sweep asks nothing; the cosine grouping's clusters are checked
     // for below, once it has formed them.
     final judgesPool = _grouper.judgesPairs && poolRows.length >= 2;
     var ready = false;
@@ -2273,7 +2290,7 @@ class StorylineService {
 
     // Pair-discovery and grouping, all of it inside [StorylineGrouper]: the
     // decision model's `same_effort` over cosine-proposed pairs under
-    // [GroupingMode.decision], and the cosine clustering under the baseline.
+    // [GroupingMode.decision], and the cosine clustering that ships.
     // Every path answers in index lists into the pool, so everything from the
     // next statement down is the pass it always was and nothing here knows
     // which ran.
@@ -2357,7 +2374,7 @@ class StorylineService {
           },
     ];
     var overlapsPossible = 0;
-    // The cosine baseline's clusters, checked before their first naming call
+    // The cosine grouping's clusters, checked before their first naming call
     // for the reason the check above is made.
     if (!ready && clusters.isNotEmpty) await _judgeOrThrow().ensureReady();
     for (final (at, cluster) in clusters.indexed) {

@@ -39,19 +39,14 @@ ships it as a model bundle from a registry (JFrog Artifactory; the design is
 `docs/DESIGN-model-bundles.md` in the training project), which retires
 `make decide-install`.
 
-**On this branch the installed model is refused.** `DECIDE_SRC` still points
-at the v2 export (`bond-decide-mbl-v2swap`), whose schema-1 heads file this
-build refuses, so triage parks exactly as if nothing were installed, until
-the v3 decision model is installed. The rail says "The installed decision
-model is an older version that this app no longer reads · N waiting ·
-install the current decision model to resume sorting new mail", and
-Settings, Models says the same sentence under the Decision model with a
-quieter `For developers: make decide-install` line beneath it. The v3 install
-updates `DECIDE_SRC`, the manifest entry, the sha256 pins, and the box's
-served name: `boxDecideModel` in `app/lib/services/llm/model_slots.dart`,
-which `tools/inference.sh` matches by default (`DECIDE_SERVED` is the GGUF's
-name less its `-<quant>.gguf`, so a v3 file serves as `bond-decide-mbl-v3`;
-`--decide-served` overrides it).
+**The installed model must be the current one.** `make decide-install` copies the v3 export
+(`bond-decide-mbl-v3`, a schema-2 heads file with the twelve questions). An older install (the v2
+schema-1 heads) parks triage with the rail sentence "The installed decision model is an older
+version that this app no longer reads · N waiting · install the current decision model to resume
+sorting new mail", and Settings, Models says the same under the Decision model with a quieter
+`For developers: make decide-install` line beneath it. The box serves the decide slot under the
+GGUF's name less its `-<quant>.gguf` (`bond-decide-mbl-v3`, which `boxDecideModel` matches;
+`--decide-served` overrides it), and a served name that does not match the heads' model is refused.
 
 **Decision model on your server.** Settings, Models can point the Decision
 model at **Your server** instead, and what the URL serves decides what this Mac

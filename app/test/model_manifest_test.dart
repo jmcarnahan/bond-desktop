@@ -93,10 +93,10 @@ Map<String, Object?> decideJson() => {
       'source': 'local',
       'displayName': 'Bond decision model',
       'repo': 'local/bond-decide',
-      'file': 'bond-decide-mbl-v2swap-f16.gguf',
+      'file': 'bond-decide-mbl-v3-f16.gguf',
       'sizeBytes': 791461056,
       'sha256':
-          '28c10397e79c202895cbbeb200c1e58be8cfea5b889a8857ce51760d95e0a889',
+          '1c3083e89bb39cf346b4b509ecaf6da1237c4e7b3cde4e92fb7289b816aa4aa5',
       'minRamBytes': 0,
       'license': 'Apache-2.0',
       'licenseUrl': 'https://huggingface.co/answerdotai/ModernBERT-large',
@@ -104,8 +104,8 @@ Map<String, Object?> decideJson() => {
       'heads': {
         'file': 'decide-heads.json',
         'sha256':
-            '468407826614060d95bbf6f073ee62d655f5b1470b8a52d614430867bbaa7b6f',
-        'sizeBytes': 894584,
+            '94b60a0b6ccf2c781f85dcdb0b130f41519924a28ae36df642370176cc37ae95',
+        'sizeBytes': 1032653,
       },
       'serverArgs': {'embedding': 'true', 'pooling': 'mean'},
     };
@@ -140,21 +140,21 @@ void main() {
       expect(decide.source, sourceLocal);
       expect(decide.repo, 'local/bond-decide');
       expect(decide.revision, '');
-      expect(decide.file, 'bond-decide-mbl-v2swap-f16.gguf');
+      expect(decide.file, 'bond-decide-mbl-v3-f16.gguf');
       expect(decide.sizeBytes, 791461056);
       expect(
         decide.sha256,
-        '28c10397e79c202895cbbeb200c1e58be8cfea5b889a8857ce51760d95e0a889',
+        '1c3083e89bb39cf346b4b509ecaf6da1237c4e7b3cde4e92fb7289b816aa4aa5',
       );
       expect(decide.heads!.file, 'decide-heads.json');
-      expect(decide.heads!.sizeBytes, 894584);
+      expect(decide.heads!.sizeBytes, 1032653);
       expect(
         decide.heads!.sha256,
-        '468407826614060d95bbf6f073ee62d655f5b1470b8a52d614430867bbaa7b6f',
+        '94b60a0b6ccf2c781f85dcdb0b130f41519924a28ae36df642370176cc37ae95',
       );
       // The folder `make decide-install` writes into.
       expect(decide.relativePath,
-          'local_bond-decide/bond-decide-mbl-v2swap-f16.gguf');
+          'local_bond-decide/bond-decide-mbl-v3-f16.gguf');
       expect(decide.headsRelativePath, 'local_bond-decide/decide-heads.json');
       // Never downloaded, so it costs no download bytes.
       expect(decide.downloadBytes, 0);
@@ -313,7 +313,7 @@ pooling = last
 load-on-startup = true
 
 [bond-decide]
-model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf
+model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v3-f16.gguf
 embedding = true
 pooling = mean
 c = 2048

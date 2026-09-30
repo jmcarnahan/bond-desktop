@@ -72,10 +72,8 @@ A schema-1 file, meaning the first decision model's nine-field heads, is
 refused under its own park, `decision_older_model`, with a plain sentence and
 no command: "The installed decision model is an older version that this app
 no longer reads. Install the current decision model to resume sorting new
-mail."  **On this branch that is every install:** `DECIDE_SRC` still
-names the v2 export, which is schema 1, so the decision pass parks until
-the v3 decision model is installed (the v3 install updates `make
-decide-install` and its manifest). A stored `message_decisions` row whose `qhash` is not
+mail."  `make decide-install` copies the v3 export (schema 2), so this park
+means an older install left in the models folder. A stored `message_decisions` row whose `qhash` is not
 `decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
 as no decision.
 

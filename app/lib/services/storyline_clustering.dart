@@ -2,10 +2,11 @@ import 'dart:typed_data';
 
 /// The clustering the sweep proposes storylines out of, as pure arithmetic.
 ///
-/// Two rules live here. [clusterByAverageLinkage] is what ships: it groups
-/// over the decision model's `same_effort` answers (see its own doc).
-/// [clusterBySimilarity] is the cosine baseline the golden sweep bench
-/// measures it against, and the rest of this comment is about that one.
+/// Two rules live here. [clusterBySimilarity] is what ships, the cosine
+/// clustering, and the rest of this comment is about that one.
+/// [clusterByAverageLinkage] is the decision bench arm's rule: it groups over
+/// the decision model's `same_effort` answers (see its own doc), and the
+/// golden sweep bench measures it against the cosine rule.
 ///
 /// It lives apart from `storyline_service.dart` because it is the one part of
 /// the sweep with no store, no model and no clock in it: everything it needs

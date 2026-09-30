@@ -94,9 +94,10 @@ void main() {
     expect(StorylineTuning.clusterSplitStep, 0.05);
     expect(StorylineTuning.clusterSplitCeiling, 0.68);
 
-    // And the numbers the decision grouping passes to
-    // `clusterByAverageLinkage`, PROVISIONAL until the v3 model's sweep row.
-    expect(StorylinePolicy.linkTau, 0.50);
+    // And the numbers the decision bench arm passes to
+    // `clusterByAverageLinkage`: linkTau and the budget stay PROVISIONAL, on
+    // the v3 student's scale; the charter cut is fitted.
+    expect(StorylinePolicy.linkTau, 0.008);
     expect(StorylinePolicy.pairNeighbours, 10);
     expect(StorylinePolicy.pairRetrievalFloor, 0.30);
     expect(StorylinePolicy.pairBudgetPerPass, 400);

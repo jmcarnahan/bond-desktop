@@ -389,7 +389,7 @@ void main() {
       expect(localGenerativeId, 'local-generative');
       expect(localDecisionId, 'local-decision');
       expect(boxProseModel, 'qwen3.8');
-      expect(boxDecideModel, 'bond-decide-mbl-v2swap');
+      expect(boxDecideModel, 'bond-decide-mbl-v3');
       expect(localGenerativeName, 'This Mac · generative');
       expect(boxProseName, 'Your server · generative');
       expect(localDecisionName, 'This Mac · decision');

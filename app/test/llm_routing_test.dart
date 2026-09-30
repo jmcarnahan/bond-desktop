@@ -201,11 +201,10 @@ void main() {
 
     test('the sweep names on the primary and judges on the decision model',
         () async {
-      // Five unassigned threads. Cosine proposes the pairs and the decision
-      // model's `same_effort` judges them: c1–c3 are one effort, and any pair
-      // with c4 or c5 is a no, so the three form the one cluster. The namer
-      // only writes; the charter check and each member's `member_of` are the
-      // decision model's again.
+      // Five unassigned threads. The shipped cosine grouping forms c1–c3 into
+      // the one cluster and asks no pair question (`same_effort` is the
+      // decision bench arm's). The namer only writes; the charter check and
+      // each member's `member_of` are the decision model's.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed('c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
@@ -216,15 +215,11 @@ void main() {
         'storyline_name': [nameAnswer()],
       });
       final (:judge, :decision) = yesJudge();
-      decision
-        ..yes(StorylineQuestion.sameEffort, 'kept-c4', 0.05)
-        ..yes(StorylineQuestion.sameEffort, 'kept-c5', 0.05);
 
       await StorylineService(store, primary, judge: judge).sweep();
 
       expect(primary.schemas, ['storyline_name']);
       expect(decision.asks.map((a) => a.question), [
-        StorylineQuestion.sameEffort,
         StorylineQuestion.charterSpecific,
         StorylineQuestion.memberOf,
       ]);

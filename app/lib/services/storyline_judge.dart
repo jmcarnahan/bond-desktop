@@ -11,15 +11,22 @@ import 'decision/storyline_thread_input.dart';
 /// model's `member_of`, `same_effort` and `charter_specific` p(yes), and the
 /// cosine retrieval in front of them.
 ///
-/// PROVISIONAL, every one of them. The membership numbers were set from the
-/// Phase 2 as-is evaluation (Kev v2 put `member_of` at 87/98 at 0.5 on the
-/// confirm bench); the sweep's pair and charter numbers are the neutral 0.5
-/// and the plan's retrieval widths, with no measurement behind them yet. All
-/// are refitted when the v3 model lands, with a `make golden-storyline` or
-/// `make golden-sweep` row on each side, like every `DecisionPolicy` and
-/// `StorylineTuning` number. One file, so a threshold is never spelled twice.
+/// The membership thresholds and the charter threshold are FITTED on the
+/// golden set against the ModernBERT v3 student (2026-09-30); [linkTau] and
+/// [pairBudgetPerPass] are PROVISIONAL, because they are read only by the
+/// decision grouping, which is a bench arm. Every one moves only with a
+/// `make golden-storyline`, `golden-declared` or `golden-sweep` row on each
+/// side, like every `DecisionPolicy` and `StorylineTuning` number. One file,
+/// so a threshold is never spelled twice.
 abstract final class StorylinePolicy {
   /// A thread joins a storyline the owner KEPT at p(member_of = yes) ≥ this.
+  ///
+  /// Fitted 2026-09-30 on v3: the confirm bench (`make golden-storyline`)
+  /// scores 89/98 at 0.50, 40 of 48 must-links, with 6 of 88 forbidden
+  /// accepts (7%), against the box 27B's 84/98 and 8%; the declared bench
+  /// (`make golden-declared`) scores 84/98 at both 0.50 and 0.60, with 39
+  /// correct positives at 0.50 against 35 at 0.60 and 4 forbidden at both,
+  /// so the lower cut keeps four more right answers for no wrong one.
   static const double acceptActive = 0.50;
 
   /// A thread joins a storyline nobody has kept yet — an automatic
@@ -27,7 +34,12 @@ abstract final class StorylinePolicy {
   /// than [acceptActive] for the reason the old rule held such a storyline to
   /// `high`: filing into a group the owner has never looked at is how the
   /// blobs grew.
-  static const double acceptSuggested = 0.70;
+  ///
+  /// Fitted 2026-09-30 on v3 with the shipped cosine grouping and the model
+  /// charter check (`make golden-sweep`): 0.70 scored 59/98 with 14 correct
+  /// positives and 3 forbidden hits, 0.74 scored 60/98 with 16 and 3, in
+  /// line with the training session's own fit of the member_of cut.
+  static const double acceptSuggested = 0.74;
 
   /// The cosine a live storyline must reach against a thread, at its centroid
   /// or at its nearest member, to be asked about it at all — and the
@@ -54,16 +66,34 @@ abstract final class StorylinePolicy {
   /// answers are cached (`pair_decisions`), so a pool larger than this
   /// converges over a few passes, newest threads' pairs first; a pair left
   /// unscored reads as p = 0 in the pass that skipped it.
+  ///
+  /// PROVISIONAL, read only by the decision bench arm. The golden pool of 71
+  /// threads proposes about 570 candidate pairs, so a first pass over it
+  /// defers (2026-09-30: 400 scored, 166 deferred, 5 clusters deferred), and
+  /// the golden sweep bench keeps running passes while clusters are deferred.
   static const int pairBudgetPerPass = 400;
 
   /// Two clusters merge while the mean `same_effort` p between them is at
   /// least this (average linkage), and a member whose mean p to the rest of
   /// its cluster falls under it is an outlier and returns to the pool.
-  static const double linkTau = 0.50;
+  ///
+  /// PROVISIONAL and not shipped: read only by the decision bench arm. The
+  /// scale is the v3 student's, whose `same_effort` p over the golden pool
+  /// is compressed near zero (AUC 0.888; 5% false links at 50% recall sits at
+  /// p 0.01, 13% at 70% recall at p 0.002), so a neutral 0.5 links nothing.
+  /// Golden sweep rows on 2026-09-30 (id score / correct positives /
+  /// forbidden hits / formed): 0.0018 → 57/98, 13, 5, 6; 0.004 → 55/98, 13,
+  /// 4, 8; 0.008 → 51/98, 18, 7, 10; 0.0135 → 50/98, 0, 0 on one
+  /// budget-bound pass. 0.008 is the row with the most correct positives.
+  static const double linkTau = 0.008;
 
   /// A named cluster's title and charter pass the charter check at
   /// p(charter_specific = yes) ≥ this; under it the cluster is filed
-  /// `possible`, as the regex lint files one today.
+  /// `possible`, as the regex lint files one.
+  ///
+  /// Fitted 2026-09-30 on v3 with the cosine grouping (`make golden-sweep`):
+  /// the model check at 0.50 refused 5 of 9 charters and scored 60/98 (16
+  /// correct positives, 3 forbidden) against the regex lint's 54/98 (17, 3).
   static const double charterSpecificTau = 0.50;
 }
 

@@ -346,9 +346,9 @@ void main() {
   });
 
   group('StorylinePolicy', () {
-    test('the provisional numbers the plan set', () {
+    test('the numbers fitted on the golden set', () {
       expect(StorylinePolicy.acceptActive, 0.50);
-      expect(StorylinePolicy.acceptSuggested, 0.70);
+      expect(StorylinePolicy.acceptSuggested, 0.74);
       expect(StorylinePolicy.assignRetrievalFloor, 0.30);
       expect(StorylinePolicy.assignTopK, 3);
       // A storyline nobody kept is held to the higher bar.

@@ -9,7 +9,8 @@ import 'package:bond_inbox/services/decision/decision_input.dart';
 import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
-import 'package:bond_inbox/services/storyline_judge.dart' show StorylineJudge;
+import 'package:bond_inbox/services/storyline_judge.dart'
+    show StorylineJudge, StorylinePolicy;
 import 'package:flutter_riverpod/flutter_riverpod.dart' show Override;
 
 import 'scripted_llm.dart';
@@ -242,7 +243,7 @@ class FakeDecisionClient extends DecisionClient {
 ///
 /// What it answers, and what that means for a screen test:
 /// - gate: keep (p(drop) 0.05), so nothing is learned-gated;
-/// - needs_you: 0.5, above the slider's default (0.30), so a kept message
+/// - needs_you: 0.5, above the slider's default (0.35), so a kept message
 ///   reads as needing the owner and no language model is asked about it;
 /// - needs_action and reply_expected: 0.2, so the triage booleans come from
 ///   THIS fake (no) — a screen test that needs a triaged ask seeds the
@@ -365,6 +366,14 @@ StorylineJudge scriptedJudge(MessageStore store, ScriptedLlm llm) =>
   return (state.substring(a.length, split), state.substring(split + b.length));
 }
 
+/// A `same_effort` p written on the 0.5-centred scale the grouping tests were
+/// laid out on, moved onto [StorylinePolicy.linkTau]'s. Linear, so every mean
+/// the average linkage compares against the bar keeps its side of it: a test
+/// that seats a thread at a mean of 0.525 against 0.5 still does, whatever
+/// the fitted bar is. A plain yes or no needs none of this — 0.9 clears any
+/// bar under it and 0.0 clears none.
+double onLinkScale(double p) => p * StorylinePolicy.linkTau / 0.5;
+
 /// A computed [ScriptedLlm] step for the `same_effort` schema: `{'p': …}`
 /// from [p] over the pair's two thread texts. `askPairs` asks both orders, so
 /// a symmetric [p] answers a pair the same whichever thread is A.
@@ -382,7 +391,7 @@ FutureOr<Map<String, dynamic>> Function(LlmCall) sameEffortBy(
 FutureOr<Map<String, dynamic>> Function(LlmCall) sameEffortAmong(
   List<List<String>> groups, {
   double yes = 0.9,
-  double no = 0.05,
+  double no = 0.0,
 }) {
   bool carries(String text, String marker) =>
       RegExp('(?<![\\w-])${RegExp.escape(marker)}(?![\\w-])').hasMatch(text);

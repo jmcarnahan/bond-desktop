@@ -1964,8 +1964,8 @@ reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreeme
 
 **Needs-you threshold sweep** (2026-09-29, the stored golden decision run, keep-only 76 items,
 `needs_you` scored at each threshold): 0.20→66, 0.25→67, 0.30→69 (fp1 fn6), 0.35→68, 0.40→67,
-0.45→68, 0.50→67 (fp0 fn9), 0.55→67, 0.60–0.75→66, 0.80→65 of 76. Shipped default 0.30, the low
-end of the 0.30–0.55 plateau (`NeedsYouTuning.defaultThreshold`, the owner's Needs You slider);
+0.45→68, 0.50→67 (fp0 fn9), 0.55→67, 0.60–0.75→66, 0.80→65 of 76. Default on v2 0.30 (moved to
+0.35 with v3, below), the low end of the 0.30–0.55 plateau (`NeedsYouTuning.defaultThreshold`, the owner's Needs You slider);
 the band and the 27B needs-you call removed.
 
 **The v2 models as they are, on the new questions** (2026-09-29, decision-questions round Phase 2, no training;
@@ -1985,34 +1985,80 @@ chose the slider as the only Needs You control this round. ModernBERT cannot jud
 Kev is close but accepts too many threads that belong elsewhere. Both are being trained on storyline labels
 (jev-prototype `docs/PLAN-storyline-questions-training.md`); the v3 rows land here.
 
-**The sweep on the decision model** (decision-questions round, Phase 7; NO
-rows yet — the v3 model that answers `same_effort` and `charter_specific` is
-not installed, so a run today parks on the decision pass). When v3 serves,
-the rows to take, each twice from a clean `git archive` copy with the embed,
-decision and prose servers up, and the second kept:
+**ModernBERT v3 (2026-09-30)**, `bond-decide-mbl-v3` on this Mac (`make decide`, heads schema 2,
+twelve questions), embeddings on this Mac, the box 27B (vLLM FP8, `qwen3.8`) as namer, `GOLDEN_RUN` =
+the shipped one-text-call run `golden-run-p6-candidate2-27b-box-20260928-150738.json`. Counts only.
+
+The message fields through the app's Dart path (`make golden-decision`, keep-only 76 items):
+
+| model | gate.verdict | category | urgency | needs_action | reply_expected | needs_you | intent | importance |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v2 (the row of record above) | 94 | 96 | 89 | 86 | 84 | 88 | 83 | 74 |
+| v3 | 94 | 95 | 87 | 87 | 84 | 88 | 83 | 75 |
+
+p50 42 ms, p95 283 ms per item; 16 of 100 states took the truncation path. Every field is within
+two points of v2.
+
+**Needs-you cut sweep on v3** (keep-only 76, correct of 76): 0.20→69 (fp4 fn3), 0.25→67,
+0.30→67 (fp3 fn6), **0.35→70 (fp0 fn6)**, 0.40→69, 0.45→69, 0.50–0.60→67, 0.65–0.80→66. The v2
+sweep above peaked at 0.30→69. The default moved with the model: `NeedsYouTuning.defaultThreshold`
+0.30 → **0.35**, the best cut and the only one with no false yes.
+
+**Storyline questions on v3:**
+
+| bench | reading | against |
+| --- | --- | --- |
+| `make golden-storyline` (member_of confirm, accept 0.50) | 89/98; must 40/48, should 5/15; forbidden 6/88 (7%); extra 1/300; derived gold 44 / none 54 / other 2; 453 calls in 17 s | box 27B confirm 84/98, 8%; the bar was ≥ 88/98 with ≤ 10% forbidden, met |
+| `make golden-pairs` (same_effort, 85 same / 1,346 cross, 71 threads) | AUC 0.888; false links 5% at 50% recall (p 0.01), 13% at 70% (p 0.002), 33% at 90%; 123 s | bar ≤ 5% at 70% recall, missed; Kev v2 as-is 8.0%, app cosine 15% |
+| `make golden-declared` (recruit via member_of), acceptActive 0.50 | 84/98, 39 correct positives, 4 forbidden, recruited 43 of 60 calls | box 27B 86/98, 42, 1 |
+| `make golden-declared`, acceptActive 0.60 | 84/98, 35 correct positives, 4 forbidden | — |
+
+The sweep (`make golden-sweep`; id score / correct positives / forbidden hits / formed / namer calls):
+
+| grouping | charter | knob | storyline.id | correct positives | forbidden hits | formed | namer calls | note | shipped |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cosine | lint | — | 54/98 | 17 | 3 | 7 | 9 | the NEW baseline (the namer no longer gatekeeps), not the old 59/98 configuration | no |
+| cosine | model | acceptSuggested 0.70 | 59/98 | 14 | 3 | 4 | 8 | charter refused 4 of 8 | no |
+| cosine | model | acceptSuggested 0.74 | 60/98 | 16 | 3 | 4 | 9 | charter refused 5 of 9 | **yes** |
+| decision | model | linkTau 0.0135, budget 400 | 50/98 | 0 | 0 | 0 | 0 | first pass hit the budget (400 scored, 166 deferred, 5 clusters deferred) and the loop ended after 1 pass | no |
+| decision | model | linkTau 0.0018, budget 400 | 57/98 | 13 | 5 | 6 | 10 | purity 55%; 828 scored / 2,011 cached over 6 passes | no |
+| decision | model | linkTau 0.004, budget 2000 | 55/98 | 13 | 4 | 8 | 14 | purity 39% | no |
+| decision | model | linkTau 0.008, budget 2000 | 51/98 | 18 | 7 | 10 | 11 | purity 53% | no |
+
+Reading it: the decision grouping does not beat cosine on this set at any `linkTau` taken. Its
+`same_effort` signal on the golden pool is real (AUC 0.888) but weak where it matters, with p
+compressed near zero, so a tau low enough to link real pairs links wrong ones too. What ships is
+the cosine grouping with the model charter check (`CharterCheck.model`: 59 and 60 against the
+lint's 54) and `acceptSuggested` 0.74. `acceptActive` stays 0.50 (storyline 89/98; declared 84 at
+both 0.50 and 0.60, four more correct positives at 0.50 for no more forbidden). `linkTau` sits at
+0.008 as a provisional bench value (the most correct positives), and the golden sweep now keeps
+passing while a quiet pass defers clusters, up to eight passes, so the budget-bound row above would
+converge.
+
+Run files, all under `tmp/bench/`: `golden-decision-golden-decision-20260930-145158.json`
+(with `golden-run-decision-argmax-…` and `golden-run-decision-policy-20260930-145158.json`);
+`golden-storyline-decision-20260930-145352.json`; `golden-pairs-decision-20260930-145633.json`;
+sweep rows in table order `golden-sweep-decision-20260930-145838.json`, `…-150350`, `…-151028`,
+`…-150003`, `…-150223`, `…-150649`, `…-150906`; declared `…-151127` (0.50) and `…-151225` (0.60),
+each with its `golden-run-decision-…` companion at the same stamp.
+
+**The sweep on the decision model.** The rows are taken (the v3 table above). Each command, from a
+clean `git archive` copy with the embed, decision and prose servers up:
 
 ```
-make golden-sweep GOLDEN_RUN=<run>                                        # what ships: decision grouping, model charter check
-make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=cosine                  # the grouping baseline, same charter check
+make golden-sweep GOLDEN_RUN=<run>                                        # what ships: cosine grouping, model charter check
+make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=decision                # the bench arm: same_effort grouping, same charter check
 make golden-sweep GOLDEN_RUN=<run> SWEEP_CHARTER=lint                     # the charter baseline, same grouping
-make golden-sweep GOLDEN_RUN=<run> SWEEP_GROUPING=cosine SWEEP_CHARTER=lint   # the cosine clustering and the lint, a NEW baseline
 make golden-pairs GOLDEN_RUN=<run>                                        # same_effort alone over golden-vector's pool pairs: AUC, p at 70% recall, false links at 50/70/90% (DECIDE_URL=…/v1/systemone benches Kev v3 through the app's wire)
 ```
 
-The last row is NOT the 59/98 configuration. The namer no longer gatekeeps
-(`coherent`/`outliers` are gone), so the cosine grouping with the lint is a
-new baseline, taken on the same day and tree as the others, and every row is
-read against it as well as against the plan's bar (above 59 with at most 1
-forbidden; the roadmap exit is 70). The tally's calls line prints `pairs
-scored`, `cached`, `deferred` and `namer calls`, and the JSON carries
-`clusters_deferred` (counts only). Whether the golden pool of about 71
-threads fits the 400-pair budget in one pass has not been measured: a
-non-zero `pairs_deferred` or `clusters_deferred` on the first pass says it did
-not, and the later passes of the keep-all loop then complete from the cache. `SWEEP_CHARTER=model` ships only if its
-row is at least as good as `lint`'s. `StorylinePolicy.linkTau`,
-`charterSpecificTau`, `pairNeighbours`, `pairRetrievalFloor` and
-`pairBudgetPerPass` are PROVISIONAL until these rows; a move of any of them
-takes a row on each side.
+The shipped configuration is `SWEEP_GROUPING=cosine SWEEP_CHARTER=model` with
+`StorylinePolicy.acceptSuggested` 0.74 and `acceptActive` 0.50. What would change the decision: a
+`same_effort` student with false links at or under 5% at 70% recall on `make golden-pairs`, then a
+`SWEEP_GROUPING=decision` row above 60/98 with no more than 3 forbidden hits, taken on the same day
+and tree as a cosine row. `linkTau` and `pairBudgetPerPass` stay PROVISIONAL until then; the golden
+pool of 71 threads proposes about 570 candidate pairs, so a first pass at 400 defers. A move of any
+`StorylinePolicy` number takes a row on each side.
 
 ### Recommendations (decision-model round, 2026-09-28)
 

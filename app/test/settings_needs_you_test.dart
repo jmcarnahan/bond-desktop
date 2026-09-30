@@ -134,7 +134,7 @@ void main() {
   testWidgets('a drag lands in app_prefs and moves the summary',
       (tester) async {
     await openNeedsYou(tester);
-    expect(find.text('At 30% or more'), findsOneWidget);
+    expect(find.text('At 35% or more'), findsOneWidget);
 
     // All the way right: anything plausible, the lowest threshold.
     final slider = find.byType(Slider);

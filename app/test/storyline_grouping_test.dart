@@ -23,6 +23,9 @@ import 'fixtures/test_db.dart';
 /// `pair_decisions`, and average linkage over the judged pairs forms the
 /// clusters the namer then only writes text for.
 ///
+/// The bench arm since the v3 sweep rows (`StorylineTuning.groupingMode` ships
+/// cosine), so every service here is built with `GroupingMode.decision`.
+///
 /// Every test scripts its `same_effort` answers explicitly — the fake's
 /// default is a no — by the thread each state carries, never by call order:
 /// which pairs are asked, and in what order, is what several tests here pin.
@@ -210,6 +213,7 @@ void main() {
         judge: scriptedJudge(store, llm),
         clusterObserver: (threads, outcome) =>
             seen.add((threads: threads, outcome: outcome)),
+        groupingMode: GroupingMode.decision,
       ).sweep();
 
       expect(askedPairs(llm), hasLength(15));
@@ -234,16 +238,16 @@ void main() {
       // at 0.325 — an outlier, dropped before naming.
       await seedNear(5);
       final p = <(String, String), double>{
-        ('g1', 'g2'): 0.9,
-        ('g1', 'g3'): 0.9,
-        ('g2', 'g3'): 0.9,
-        ('g4', 'g5'): 1.0,
-        ('g1', 'g4'): 0.95,
-        ('g2', 'g4'): 0.95,
-        ('g3', 'g4'): 0.95,
-        ('g1', 'g5'): 0.1,
-        ('g2', 'g5'): 0.1,
-        ('g3', 'g5'): 0.1,
+        ('g1', 'g2'): onLinkScale(0.9),
+        ('g1', 'g3'): onLinkScale(0.9),
+        ('g2', 'g3'): onLinkScale(0.9),
+        ('g4', 'g5'): onLinkScale(1.0),
+        ('g1', 'g4'): onLinkScale(0.95),
+        ('g2', 'g4'): onLinkScale(0.95),
+        ('g3', 'g4'): onLinkScale(0.95),
+        ('g1', 'g5'): onLinkScale(0.1),
+        ('g2', 'g5'): onLinkScale(0.1),
+        ('g3', 'g5'): onLinkScale(0.1),
       };
       final llm = llmWith((LlmCall call) {
         final (a, b) = keysOf(call.user);
@@ -258,6 +262,7 @@ void main() {
           llm,
           judge: scriptedJudge(store, llm),
           activityLog: log,
+          groupingMode: GroupingMode.decision,
         ),
         log,
       );
@@ -284,8 +289,12 @@ void main() {
       await seed('b1', at: 90, lastMessageAt: '2026-08-29T08:00:00Z');
       final llm = llmWith(const {'p': 0.0});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), {('a1', 'a2')});
     });
@@ -309,8 +318,12 @@ void main() {
       }
       final llm = llmWith(const {'p': 0.0});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       final asked = askedPairs(llm);
       expect(asked, hasLength(12 * 11 ~/ 2 - 1));
@@ -332,8 +345,12 @@ void main() {
           lastMessageAt: '2026-08-29T09:00:00Z');
       final llm = llmWith(const {'p': 0.0});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), {('s1', 's2')});
     });
@@ -353,8 +370,12 @@ void main() {
           lastMessageAt: '2026-08-05T10:00:00Z');
       final llm = llmWith(const {'p': 0.0});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), {('f1', 'f2')});
     });
@@ -374,8 +395,12 @@ void main() {
         [marker('t1'), marker('t2'), marker('t3')],
       ]));
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), {('t1', 't2'), ('t2', 't3'), ('t1', 't3')});
       final storyline =
@@ -388,8 +413,9 @@ void main() {
 
     test('a completed pair that says no takes the cluster apart', () async {
       // The same geometry, but the pair nobody proposed is a no: on the full
-      // matrix t1 and t3 average (0.9 + 0.05) / 2 against the rest, and the
-      // trio does not survive to be named.
+      // matrix t1 and t3 average (0.9 + 0.05) / 2 against the rest, under
+      // the bar on its own scale ([onLinkScale]), and the trio does not
+      // survive to be named.
       await seed('t1', at: 0, lastMessageAt: '2026-08-29T10:00:00Z');
       await seed('t2', at: 60, lastMessageAt: '2026-08-29T09:00:00Z');
       await seed('t3', at: 120, lastMessageAt: '2026-08-29T08:00:00Z');
@@ -397,11 +423,15 @@ void main() {
       final llm = llmWith((LlmCall call) {
         final (a, b) = keysOf(call.user);
         final pair = ([a, b]..sort()).join(' ');
-        return {'p': pair == 't1 t3' ? 0.05 : 0.9};
+        return {'p': onLinkScale(pair == 't1 t3' ? 0.05 : 0.9)};
       });
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), contains(('t1', 't3')));
       expect(llm.callsFor('storyline_name'), 0);
@@ -422,8 +452,12 @@ void main() {
         [marker('ea'), marker('eb'), marker('ec'), marker('ed')],
       ]));
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), hasLength(6));
       final storyline =
@@ -458,6 +492,7 @@ void main() {
         llm,
         judge: scriptedJudge(store, llm),
         activityLog: log,
+        groupingMode: GroupingMode.decision,
       );
 
       final first = await sweepDetail(service, log);
@@ -484,7 +519,12 @@ void main() {
       await seedNear(4);
       final decision = FakeDecisionClient.storyline();
       final judge = StorylineJudge(decision: decision, store: store);
-      final service = StorylineService(store, ScriptedLlm(), judge: judge);
+      final service = StorylineService(
+        store,
+        ScriptedLlm(),
+        judge: judge,
+        groupingMode: GroupingMode.decision,
+      );
 
       await service.sweep();
       expect(decision.statesFor(StorylineQuestion.sameEffort), hasLength(12));
@@ -499,8 +539,12 @@ void main() {
         () async {
       await seedNear(4);
       final llm = llmWith(const {'p': 0.0});
-      final service =
-          StorylineService(store, llm, judge: scriptedJudge(store, llm));
+      final service = StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      );
       await service.sweep();
       llm.calls.clear();
 
@@ -535,8 +579,12 @@ void main() {
       ], decidedBy: '$decisionQhash|fake-model');
       final llm = llmWith(const {'p': 0.0});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(llm.callsFor('same_effort'), 0);
       // The cached yeses formed the trio.
@@ -556,8 +604,12 @@ void main() {
       ], decidedBy: 'an-older-qhash|fake-model');
       final llm = llmWith(const {'p': 0.0});
 
-      await StorylineService(store, llm, judge: scriptedJudge(store, llm))
-          .sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(askedPairs(llm), hasLength(3));
       expect(await store.loadStorylines(statuses: ['suggested']), isEmpty);
@@ -572,6 +624,7 @@ void main() {
         store,
         llm,
         judge: StorylineJudge(decision: decision, store: store),
+        groupingMode: GroupingMode.decision,
       );
 
       await service.sweep();
@@ -608,8 +661,12 @@ void main() {
     test('rows older than a month are pruned at the top of a pass', () async {
       await seedNear(3);
       final llm = llmWith(const {'p': 0.0});
-      final service =
-          StorylineService(store, llm, judge: scriptedJudge(store, llm));
+      final service = StorylineService(
+        store,
+        llm,
+        judge: scriptedJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      );
       await service.sweep();
       await store.writePairDecisions(const [
         (a: 'old-a', b: 'old-b', p: 0.9),
@@ -647,6 +704,7 @@ void main() {
         ScriptedLlm(),
         judge: StorylineJudge(decision: decision, store: store),
         activityLog: log,
+        groupingMode: GroupingMode.decision,
       );
 
       final first = await sweepDetail(service, log);
@@ -685,6 +743,7 @@ void main() {
         store,
         ScriptedLlm(),
         judge: StorylineJudge(decision: decision, store: store),
+        groupingMode: GroupingMode.decision,
       );
 
       await expectLater(
@@ -719,6 +778,7 @@ void main() {
             store: store,
             ensureBodies: (_, _, _) async => fetches++,
           ),
+          groupingMode: GroupingMode.decision,
         ).sweep(),
         throwsA(isA<DecisionUnavailableException>()),
       );
@@ -782,6 +842,7 @@ void main() {
           ensureBodies: (_, key, _) async =>
               fetched[key] = (fetched[key] ?? 0) + 1,
         ),
+        groupingMode: GroupingMode.decision,
       );
 
       await service.sweep();
@@ -798,8 +859,12 @@ void main() {
           [marker('g1'), marker('g2'), marker('g4')],
           [marker('g3'), marker('g5'), marker('g6')],
         ]));
-        await StorylineService(into, llm, judge: scriptedJudge(into, llm))
-            .sweep();
+        await StorylineService(
+          into,
+          llm,
+          judge: scriptedJudge(into, llm),
+          groupingMode: GroupingMode.decision,
+        ).sweep();
         return [
           for (final s in await into.loadStorylines(statuses: ['suggested']))
             {for (final m in await into.membersOf(s.id)) m.conversationKey},
@@ -822,7 +887,7 @@ void main() {
       expect(second, first);
     });
 
-    test('the cosine baseline asks no pair question', () async {
+    test('the cosine grouping asks no pair question', () async {
       await seedNear(4);
       final llm = llmWith(const {'p': 0.9});
 
@@ -838,8 +903,9 @@ void main() {
       expect(await store.loadStorylines(statuses: ['suggested']), hasLength(1));
     });
 
-    test('the decision grouping ships', () {
-      expect(StorylineTuning.groupingMode, GroupingMode.decision);
+    test('the cosine grouping ships, the decision grouping is the bench arm',
+        () {
+      expect(StorylineTuning.groupingMode, GroupingMode.cosine);
       expect(StorylineTuning.charterCheck, CharterCheck.model);
     });
   });

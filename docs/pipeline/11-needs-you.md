@@ -15,12 +15,14 @@ for Dart and `needsYouAtSql(column, threshold)` for a query, pinned to agree by
 `needs_you_predicate_test`. NULL is a message not decided yet. It needs nobody in
 either spelling, and it is never shown as a low probability.
 
-**The slider's default is 0.30.** It was fitted on the golden set on
-2026-09-29 from the stored decision run. Keep-only needs_you scored 69/76 at
-0.30 (one false positive, six misses) against 67/76 at 0.50 (none and nine), on
-a plateau from 0.30 to 0.55. The low end of the plateau was chosen because a
-missed ask costs the owner more than one extra row to glance past. The sweep is
-in the bakeoff ledger (`docs/model-bakeoff.md`). The slider runs from 0.05 to
+**The slider's default is 0.35.** It is fitted on the golden set, keep-only
+needs_you of 76, and it moves with the decision model, because a probability's
+scale belongs to the model that gave it. On the v2 model (2026-09-29) the best
+cut was 0.30 at 69/76 (one false positive, six misses) against 67/76 at 0.50.
+On the shipped v3 model (2026-09-30) 0.35 scores 70/76 with no false positive
+and six misses, where 0.30 scores 67/76 (three and six) and 0.20 scores 69/76
+(four and three). Both sweeps are in the bakeoff ledger
+(`docs/model-bakeoff.md`). The slider runs from 0.05 to
 0.95 in 0.05 notches (`NeedsYouTuning`), and a stored value is normalized onto a
 notch, so the number the slider shows is the number the queries bind.
 
@@ -357,7 +359,7 @@ on the thread provider would show an empty panel exactly then.
 message's `needs_you_p` as a rounded whole percentage, which is the unit the
 Settings slider states its threshold in, so the two read as one number. Under
 it come the reason sentence and one line against the reader's own slider: "In
-Needs You: at or above your 30% line." or "Not in Needs You: below your 30%
+Needs You: at or above your 35% line." or "Not in Needs You: below your 35%
 line." NULL reads `Needs you: —` with "The needs-you pass has not reached this
 message." An undecided message is never shown as 0%. Message history says the
 same in its own words ("Needs you: 72% — <reason>", or "Needs you: not

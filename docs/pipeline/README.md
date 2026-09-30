@@ -53,7 +53,7 @@ is always the authority when they disagree.
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
 | 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file, one brief per directory, and one section pick per directory-fed draft | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
-| 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap; every judgement is the decision model's (`member_of`, the sweep's `same_effort` pairs, the `charter_specific` check), the naming and the prose are generative | **yes** (names, refresh, recap) + decision model (membership, grouping, charter check) | [06-storylines.md](06-storylines.md) |
+| 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap; every judgement is the decision model's (`member_of`, the `charter_specific` check; the sweep groups by cosine, with `same_effort` pairs a bench arm), the naming and the prose are generative | **yes** (names, refresh, recap) + decision model (membership, charter check) | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply gate** — the decision model's `reply_expected` probability, read from triage's stored row BEFORE any context is gathered; skipped outright when a person asked — see 07 | no§ | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
@@ -124,7 +124,7 @@ nothing they read has changed.
 from the stored decision, or decides the message again with the decision model
 when it was decided before the owner was known or before the decision model
 existed. A message needs the owner when the probability is at or above their
-Needs You slider (default 0.30), and nothing else decides it. See
+Needs You slider (default 0.35), and nothing else decides it. See
 [11-needs-you.md](11-needs-you.md).
 
 Cross-cutting concerns — which client serves which task, ports and defaults,
@@ -146,7 +146,7 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Directory brief | Generative | `context_brief` | `:8080` |
 | Directory section pick | Generative | `context_select` | `:8080` |
 | Storyline membership (`member_of`) | Decision | `decision` (labelled `decision:member_of`) | `:8083` (`make decide`) |
-| Storyline grouping (`same_effort`) and charter check (`charter_specific`) | Decision | `decision` (labelled `decision:same_effort`, `decision:charter_specific`) | `:8083` (`make decide`) |
+| Storyline charter check (`charter_specific`), and grouping (`same_effort`) under the bench arm only | Decision | `decision` (labelled `decision:same_effort`, `decision:charter_specific`) | `:8083` (`make decide`) |
 | Storyline naming | Generative | `storyline_name` | `:8080` |
 | Storyline refresh | Generative | `storyline_refresh` | `:8080` |
 | Storyline recap | Generative | `storyline_recap` | `:8080` |

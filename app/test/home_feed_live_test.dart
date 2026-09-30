@@ -509,7 +509,7 @@ void main() {
     /// needs-you probability of its kept inbound messages against the slider
     /// — not the message's settled snapshot. `seed` files every message under
     /// its own `c-<id>`, so one of these is one thread. An owed thread's
-    /// message carries a probability well over the slider's 0.30 default; a
+    /// message carries a probability well over the slider's 0.35 default; a
     /// closed one is `done`, which the rule refuses whatever the probability.
     Future<void> thread(String id, {required bool owed}) async {
       await store.upsertConversation({

@@ -25,7 +25,7 @@ import 'fixtures/test_db.dart';
 void main() {
   Future<void> open(
     WidgetTester tester, {
-    double threshold = 0.3,
+    double threshold = 0.35,
     String aboutMe = '',
     required void Function(double) onThresholdChanged,
     required void Function(String) onAboutMeChanged,
@@ -122,7 +122,7 @@ void main() {
     expect(
       tester.widget<Text>(find.byKey(SettingsScreen.needsYouThresholdLineKey))
           .data,
-      'Needs you at 30% or more',
+      'Needs you at 35% or more',
     );
     expect(
       find.text("The decision model's confidence that a message needs you. "

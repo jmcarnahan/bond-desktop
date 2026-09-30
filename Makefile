@@ -137,16 +137,16 @@ FAST_SLOTS   ?= 4
 # port because 8090 is OMLX_PORT, and its own process because the embed server
 # pools `last` and one llama-server serves one pooling mode per model.
 DECIDE_PORT  ?= 8083
-# Where `make decide-install` copies from: the export the decision-model round's
-# Phase 1 writes (GGUF, heads JSON, SHA256SUMS). Never downloaded — the weights
+# Where `make decide-install` copies from: the v3 export of the storyline-questions
+# training round (GGUF, heads JSON schema 2 with the twelve questions). Never downloaded — the weights
 # were trained on the owner's own mail (the plan's D12).
-DECIDE_SRC   ?= $(HOME)/projects/jev-prototype/runs/modernbert-large-v2-swap/export
+DECIDE_SRC   ?= $(HOME)/projects/jev-prototype/runs/modernbert-large-v3/export
 # The app's models folder, where the managed server will look:
 # <models>/<repo with '/' as '_'>/<file> (RouterPreset.modelPath), for the repo
 # `local/bond-decide`. It holds a space, so every recipe quotes it.
 DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/local_bond-decide
 DECIDE_QUANT ?= f16
-DECIDE_FILE  ?= bond-decide-mbl-v2swap-$(DECIDE_QUANT).gguf
+DECIDE_FILE  ?= bond-decide-mbl-v3-$(DECIDE_QUANT).gguf
 DECIDE_HEADS ?= decide-heads.json
 DECIDE_GGUF  ?= $(DECIDE_DIR)/$(DECIDE_FILE)
 # 2048 because the heads were trained on states truncated at 2048 tokens: a
@@ -226,7 +226,7 @@ help:
 	@printf "  make golden        → the golden set through the decision model + needs-you ladder + message text on the bulk slot (needs make decide; GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → member_of for every golden item against the gold registry, on the decision model\n"
-	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled, SWEEP_POSSIBLE_ROOM=0|1, SWEEP_GROUPING=decision|cosine, SWEEP_CHARTER=model|lint)\n"
+	@printf "  make golden-sweep GOLDEN_RUN=<run.json> → the golden set through the app's own sweep, naming, confirms and assign shortlist, scored against the gold registry (SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled, SWEEP_POSSIBLE_ROOM=0|1, SWEEP_GROUPING=cosine|decision, SWEEP_CHARTER=model|lint)\n"
 	@printf "  make golden-vector GOLDEN_RUN=<run.json> → the clustering vector alone: the clusters it would form and the pool pairs by cosine, subject and people; needs only the embed server (SWEEP_CARD=…, SWEEP_EMBED_PREFIX=…, EMBED_URL=…)\n"
 	@printf "  make golden-declared GOLDEN_RUN=<run.json> → every registry storyline declared by hand and then recruited into, on the embed server and the decision model; the ceiling the sweep is read against\n"
 	@printf "  make golden-pairs GOLDEN_RUN=<run.json> → the decision model's same_effort over the pool pairs golden-vector reads by cosine: AUC, p at 70%% recall, false links at 50/70/90%%; embed server + decision model (DECIDE_URL=…/v1/systemone benches Kev)\n"
@@ -924,12 +924,13 @@ SWEEP_CARD ?= topics
 # and needs only the embedding server. One test body serves both, which is what
 # keeps the two readings of one mailbox from drifting apart.
 SWEEP_STAGE ?= full
-# Which pass decides what goes together on that bench: decision (what ships —
-# cosine proposes pairs, the decision model's same_effort judges them) or
-# cosine (the cosine clustering alone, the baseline). A define and not a sed of
-# StorylineTuning.groupingMode, so a row names the mode it was taken under.
-# The default follows the app.
-SWEEP_GROUPING ?= decision
+# Which pass decides what goes together on that bench: cosine (what ships —
+# the cosine clustering, every member then confirmed by member_of) or decision
+# (the bench arm — cosine proposes pairs, the decision model's same_effort
+# judges them, and it waits on a same_effort student that beats cosine on this
+# bench). A define and not a sed of StorylineTuning.groupingMode, so a row
+# names the mode it was taken under. The default follows the app.
+SWEEP_GROUPING ?= cosine
 # Which check a named cluster's charter faces on that bench: model (what ships
 # — the decision model's charter_specific) or lint (the regex charter lint).
 # A define for SWEEP_GROUPING's reason. The default follows the app.
@@ -1375,7 +1376,7 @@ golden-storyline: golden-check _decide-health
 # storyline.id — derived from MEMBERSHIP here, where golden-baseline derives
 # it from the app's stored title.
 golden-sweep: golden-check _decide-health
-	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled SWEEP_POSSIBLE_ROOM=0|1 SWEEP_GROUPING=decision|cosine SWEEP_CHARTER=model|lint DECIDE_URL=… PROSE_URL=…]\n"; exit 1; }
+	@test -n "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) usage: make golden-sweep GOLDEN_RUN=<golden-run-….json from make golden> [SWEEP_CARD=participants|topics|subject|subject_topics|summary|thread|topics_untitled SWEEP_POSSIBLE_ROOM=0|1 SWEEP_GROUPING=cosine|decision SWEEP_CHARTER=model|lint DECIDE_URL=… PROSE_URL=…]\n"; exit 1; }
 	@test -f "$(GOLDEN_RUN)" || { printf "$(RED)✗$(RESET) no run file at $(GOLDEN_RUN)\n"; exit 1; }
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_golden_live_test.dart --run-skipped --plain-name 'sweep' $(BENCH_DEFINES) $(DECISION_DEFINES)

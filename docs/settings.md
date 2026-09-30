@@ -81,7 +81,7 @@ page has the same shape in `settings_models_page.dart`.
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
 | Models | `onUseDecision` wired | where each role runs, then the app's own server's state sentence, joined by ` · `: `Decision on this Mac` / `Decision on your server`, then `Generative on this Mac` / `Generative at <host>` / `Generative on your server` (no address yet), then e.g. `Running` |
 | Cloud drafts | `onUseCloudDrafts` wired (both scopes) | `Off`, or `<model> at <host>` for the target in force |
-| Needs You | always | `At 30% or more` — the slider's threshold as a percentage, `(threshold * 100).round()` |
+| Needs You | always | `At 35% or more` — the slider's threshold as a percentage, `(threshold * 100).round()` |
 | Suggested replies | `onDraftPolicyChanged` wired (both scopes) | `For messages that need you` / `For every reply-worthy message` / `Only when asked` |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
@@ -106,13 +106,13 @@ one moves, move both.
 
 The Needs You slider is the owner's ONE control over what lands in Needs You:
 a threshold on the decision model's needs-you probability (`needs_you_threshold`,
-default **0.30**; see [pipeline/11-needs-you.md](pipeline/11-needs-you.md)). A
+default **0.35**; see [pipeline/11-needs-you.md](pipeline/11-needs-you.md)). A
 message needs you when its probability is at or above it. The slider runs
 **right = more mail**, which is a LOWER threshold, so it is drawn over
 `[0.05, 0.95]` with `value = 0.95 + 0.05 − threshold` and **18 divisions**, one
 per 0.05 notch the stored pref can hold. Its ends read **Only the surest**
 (left) and **Anything plausible** (right). Under it, one line states the number,
-**Needs you at 30% or more** (keyed `settings-needs-you-threshold-line`), and a
+**Needs you at 35% or more** (keyed `settings-needs-you-threshold-line`), and a
 caption says what the number is: *The decision model's confidence that a message
 needs you. Each message shows its own percentage.* The percentage is the same
 one every message shows in its Why panel and history row and every thread shows
@@ -127,7 +127,7 @@ rules text in `needs_you_rules`, the section says so in one quiet caption,
 *Your earlier Needs You rules are no longer used; the slider is the one
 control.* (keyed `settings-old-needs-you-rules`), and never reads the text. The old `attention_threshold`
 setting is not carried over: its scale was the 0..2 attention score, not a
-probability, so the Needs You slider starts at its default of 30% and the old
+probability, so the Needs You slider starts at its default of 35% and the old
 value is simply never read again.
 
 The section's last control is a switch, **Sending a reply marks it done** — *A
@@ -433,9 +433,8 @@ install state and asks the router for the placements' preset, which is how a
 `make decide-install` made while the app runs is picked up. The heads file is
 not re-read by the button: the decision client re-reads it on its next claim
 when the file's mtime has moved. The line reads `Checking…` while it is out.
-Until the v3 decision model is installed, what `make decide-install`
-installs is the v2 model, whose schema-1 heads file this build refuses: the status says `Installed` until triage first claims a message, and
-then the `decision_older_model` park's sentence (below).
+An older (schema-1, v2) install left in the models folder is refused: the status says `Installed` until triage first claims a message, and
+then the `decision_older_model` park's sentence (below). `make decide-install` copies the v3 export.
 
 **Generative model on This Mac** adds a second control,
 `SettingsSegments<String>` keyed `settings-generative-managed`, choosing
@@ -502,7 +501,7 @@ with the first id filled in, the caption says `This server lists several
 models. Choose one and press Connect again.`, and nothing is written until the
 second press. A decision server is never asked to pick: the decision model's
 own name is taken where it is listed (`bond-decide`, the box's served
-`bond-decide-mbl-v2swap`, this build's `DECIDE_MODEL`, or the name already
+`bond-decide-mbl-v3`, this build's `DECIDE_MODEL`, or the name already
 stored), and the first id only when none is, so a router that lists
 `bond-embed` first is not taken at its embedding model. Before it writes, the
 decision Connect asks the server's kind (`/v1/models`: a Kev server must list

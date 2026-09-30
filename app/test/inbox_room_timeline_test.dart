@@ -479,7 +479,7 @@ void main() {
       findsOneWidget,
     );
     // Both threads' messages are decided by `keepingDecisionClient` at a
-    // needs-you probability of 0.5, over the slider's 0.30 default, so both
+    // needs-you probability of 0.5, over the slider's 0.35 default, so both
     // count as needing the owner.
     expect(find.text('2 threads · 1 mail · 1 chat · 2 need you'),
         findsOneWidget);

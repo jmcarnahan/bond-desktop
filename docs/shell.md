@@ -742,7 +742,7 @@ the person room's header `AvatarStack`.
   row is `find.text('DRAFTS & SENT')`, scoped to `AppRail`.
 - A screen test about which rows reach Needs You seeds each row's
   `messages.needs_you_p` at or above the slider (`needsYouThresholdKey`,
-  default 0.30), or builds its triage queue on `keepingDecisionClient()`
+  default 0.35), or builds its triage queue on `keepingDecisionClient()`
   (p 0.5). The attention score only ORDERS the rail; it no longer cuts a row
   out, so there is no score threshold to zero.
 - **The People directory**: `PeopleDirectoryPane.rowKeyFor(roomKey)` is one

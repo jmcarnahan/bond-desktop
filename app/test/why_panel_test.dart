@@ -60,7 +60,7 @@ void main() {
     Conversation? conversation,
     ExtractionResult? extraction,
     Map<String, Object?>? ai,
-    double threshold = 0.3,
+    double threshold = 0.35,
     VoidCallback? onWhatHappened,
     StoredDecision? decision,
   }) async {
@@ -97,7 +97,7 @@ void main() {
       );
 
       expect(find.text('Needs you: 90%'), findsOneWidget);
-      expect(find.text('In Needs You: at or above your 30% line.'),
+      expect(find.text('In Needs You: at or above your 35% line.'),
           findsOneWidget);
       // The stored token is a token; the reader gets the sentence.
       expect(find.text('A direct message to you on Teams.'), findsOneWidget);
@@ -130,7 +130,7 @@ void main() {
       );
 
       expect(find.text('Needs you: 10%'), findsOneWidget);
-      expect(find.text('Not in Needs You: below your 30% line.'),
+      expect(find.text('Not in Needs You: below your 35% line.'),
           findsOneWidget);
       expect(find.text('Asks you a question.'), findsNothing);
     });
@@ -165,12 +165,12 @@ void main() {
       expect(find.text('Needs you: — (earlier model)'), findsOneWidget);
       expect(find.text('Needs you: 100%'), findsNothing);
       // It still counts against the slider.
-      expect(find.text('In Needs You: at or above your 30% line.'),
+      expect(find.text('In Needs You: at or above your 35% line.'),
           findsOneWidget);
 
       await pump(tester, message: msg(needsYouP: 0.0));
       expect(find.text('Needs you: — (earlier model)'), findsOneWidget);
-      expect(find.text('Not in Needs You: below your 30% line.'),
+      expect(find.text('Not in Needs You: below your 35% line.'),
           findsOneWidget);
 
       // Decided under this build's questions, the same number is the model's.

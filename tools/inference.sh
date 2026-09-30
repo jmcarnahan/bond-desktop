@@ -31,7 +31,7 @@
 # nine message fields and the three storyline questions) itself, so the heads file stays on the Mac and is never uploaded. PATH has
 # no default; the usual value is the file `make decide-install` put in
 # "$HOME/Library/Application Support/com.bondinbox.app/models/local_bond-decide/
-# bond-decide-mbl-v2swap-f16.gguf". It is copied up from this machine and its
+# bond-decide-mbl-v3-f16.gguf". It is copied up from this machine and its
 # sha256 checked on the box before the slot starts. It is served under the
 # file's name less its -<quant>.gguf (bond-decide-mbl-v3-f16.gguf serves as
 # bond-decide-mbl-v3), which the app's heads pairing reads against the heads

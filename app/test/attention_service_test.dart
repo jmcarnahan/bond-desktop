@@ -453,7 +453,7 @@ void main() {
 
       await service.recomputeAll(sources: both, now: now);
 
-      // 0.4 needs the owner at the default 0.30, and not at their 0.50.
+      // 0.4 needs the owner at the default 0.35, and not at their 0.50.
       expect(
         (await scoreOf('tc-mid', source: 'teams'))!,
         closeTo(AttentionTuning.waitingBase * decay, 1e-9),

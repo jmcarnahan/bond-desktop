@@ -35,9 +35,9 @@ void main() {
     final ref = await container();
 
     expect(await store.getPref(needsYouThresholdKey), isNull);
-    expect(ref.read(appPrefsProvider).needsYouThreshold, 0.30);
-    expect(const AppPrefs().needsYouThreshold, 0.30);
-    expect(await needsYouThresholdReader(store)(), 0.30);
+    expect(ref.read(appPrefsProvider).needsYouThreshold, 0.35);
+    expect(const AppPrefs().needsYouThreshold, 0.35);
+    expect(await needsYouThresholdReader(store)(), 0.35);
   });
 
   test('a stored value is parsed by the notifier and by the reader', () async {
@@ -52,8 +52,8 @@ void main() {
   test('an unreadable stored value is the default', () async {
     await store.setPref(needsYouThresholdKey, 'lots');
 
-    expect((await AppPrefsNotifier.read(store)).needsYouThreshold, 0.30);
-    expect(await needsYouThresholdReader(store)(), 0.30);
+    expect((await AppPrefsNotifier.read(store)).needsYouThreshold, 0.35);
+    expect(await needsYouThresholdReader(store)(), 0.35);
   });
 
   test('a hand-edited value out of range reads clamped', () async {
@@ -99,7 +99,7 @@ void main() {
   });
 
   test('normalizeNeedsYouThreshold over the edges', () {
-    expect(normalizeNeedsYouThreshold(double.nan), 0.30);
+    expect(normalizeNeedsYouThreshold(double.nan), 0.35);
     expect(normalizeNeedsYouThreshold(-1), 0.05);
     expect(normalizeNeedsYouThreshold(0.95), 0.95);
     expect(normalizeNeedsYouThreshold(0.7), 0.7);

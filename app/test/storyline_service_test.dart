@@ -38,7 +38,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_decision_client.dart'
-    show ScriptedDecisionClient, pairTextsOf, scriptedJudge;
+    show ScriptedDecisionClient, onLinkScale, pairTextsOf, scriptedJudge;
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
@@ -196,11 +196,12 @@ List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 ///
 /// Most tests here were written against the cosine clustering and are about
 /// something past it — the probe, the room, the series pre-pass, the possible
-/// rows, the fragments. Answering each pair from the vectors those tests
-/// already laid out keeps their groups what they were written as, now formed
-/// by the decision grouping; a test about the grouping itself scripts
-/// `same_effort` by thread, and one about the cosine rule passes
-/// `GroupingMode.cosine`.
+/// rows, the fragments — and the cosine clustering is again what ships, so
+/// they build their service with the default mode and no pair is asked.
+/// Answering each pair from the vectors those tests already laid out keeps
+/// their groups what they were written as under the decision bench arm too;
+/// a test about that grouping passes `GroupingMode.decision` and scripts
+/// `same_effort` by thread, on [onLinkScale] where a mean is compared.
 StorylineJudge sweepJudge(MessageStore store, ScriptedLlm llm) {
   if (!llm.isScripted('same_effort')) {
     llm.answer('same_effort', cosineSameEffort(store));
@@ -220,7 +221,7 @@ const double sweepJudgeLinkCosine = 0.48;
 
 /// A `same_effort` step that answers a pair from the two threads' stored
 /// clustering vectors: 0.9 when their cosine reaches
-/// [sweepJudgeLinkCosine], 0.05 otherwise. Each thread is found by its rendered
+/// [sweepJudgeLinkCosine], 0.0 otherwise. Each thread is found by its rendered
 /// text, read back from [store] (re-read whenever a text is new).
 FutureOr<Map<String, dynamic>> Function(LlmCall) cosineSameEffort(
   MessageStore store,
@@ -251,7 +252,7 @@ FutureOr<Map<String, dynamic>> Function(LlmCall) cosineSameEffort(
     final linked = va != null &&
         vb != null &&
         cosine(va, vb) >= sweepJudgeLinkCosine;
-    return {'p': linked ? 0.9 : 0.05};
+    return {'p': linked ? 0.9 : 0.0};
   };
 }
 
@@ -2105,7 +2106,7 @@ void main() {
         'member_of': [
           {'p': 0.91},
           {'p': 0.82},
-          {'p': 0.73},
+          {'p': 0.76},
         ],
       });
 
@@ -2131,7 +2132,7 @@ void main() {
         {
           'c1': evidenceAt(0.91),
           'c2': evidenceAt(0.82),
-          'c3': evidenceAt(0.73),
+          'c3': evidenceAt(0.76),
         },
       );
       // Named once, then every member of the cluster judged against that name.
@@ -2643,8 +2644,13 @@ void main() {
         'charter_specific': [charterNo],
         'member_of': [confirmAnswer()],
       });
-      final service =
-          StorylineService(store, llm, judge: sweepJudge(store, llm), possibleHoldsRoom: false);
+      final service = StorylineService(
+        store,
+        llm,
+        judge: sweepJudge(store, llm),
+        possibleHoldsRoom: false,
+        groupingMode: GroupingMode.decision,
+      );
 
       await service.sweep();
 
@@ -3093,6 +3099,7 @@ void main() {
     Future<Map<String, Object?>> sweepAndRecord(
       ScriptedLlm llm, {
       CharterCheck charterCheck = CharterCheck.model,
+      GroupingMode groupingMode = StorylineTuning.groupingMode,
     }) async {
       final log = ActivityLog(store);
       addTearDown(log.dispose);
@@ -3102,6 +3109,7 @@ void main() {
         judge: sweepJudge(store, llm),
         activityLog: log,
         charterCheck: charterCheck,
+        groupingMode: groupingMode,
       ).sweep();
       await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
       final rows = await store.recentActivity();
@@ -3602,16 +3610,16 @@ void main() {
           vector: vectorAt(0.8),
           lastMessageAt: '2026-08-29T00:30:00Z');
       final p = <String, double>{
-        'q1 q2': 0.9,
-        'q1 q3': 0.9,
-        'q2 q3': 0.9,
-        'q4 q5': 1.0,
-        'q1 q4': 0.95,
-        'q2 q4': 0.95,
-        'q3 q4': 0.95,
-        'q1 q5': 0.1,
-        'q2 q5': 0.1,
-        'q3 q5': 0.1,
+        'q1 q2': onLinkScale(0.9),
+        'q1 q3': onLinkScale(0.9),
+        'q2 q3': onLinkScale(0.9),
+        'q4 q5': onLinkScale(1.0),
+        'q1 q4': onLinkScale(0.95),
+        'q2 q4': onLinkScale(0.95),
+        'q3 q4': onLinkScale(0.95),
+        'q1 q5': onLinkScale(0.1),
+        'q2 q5': onLinkScale(0.1),
+        'q3 q5': onLinkScale(0.1),
       };
       String keyOf(String text) =>
           RegExp(r'kept-(q\d)').firstMatch(text)!.group(1)!;
@@ -3627,7 +3635,8 @@ void main() {
         'member_of': [confirmAnswer()],
       });
 
-      final detail = await sweepAndRecord(llm);
+      final detail =
+          await sweepAndRecord(llm, groupingMode: GroupingMode.decision);
 
       final storyline =
           (await store.loadStorylines(statuses: const ['suggested'])).single;
@@ -3658,12 +3667,13 @@ void main() {
       final llm = fakeLlm({
         'storyline_name': [nameAnswer()],
         'same_effort': [
-          {'p': 0.05},
+          {'p': 0.0},
         ],
         'member_of': [confirmAnswer()],
       });
 
-      final detail = await sweepAndRecord(llm);
+      final detail =
+          await sweepAndRecord(llm, groupingMode: GroupingMode.decision);
 
       expect(llm.callsFor('same_effort'), 6);
       expect(llm.callsFor('storyline_name'), 0);
@@ -3671,7 +3681,12 @@ void main() {
       expect(detail['pairs_scored'], 3);
       expect(detail['proposed'], 0);
 
-      await StorylineService(store, llm, judge: sweepJudge(store, llm)).sweep();
+      await StorylineService(
+        store,
+        llm,
+        judge: sweepJudge(store, llm),
+        groupingMode: GroupingMode.decision,
+      ).sweep();
 
       expect(llm.callsFor('same_effort'), 6);
     });
@@ -3912,7 +3927,7 @@ void main() {
         'member_of': [
           {'p': 0.91},
           {'p': 0.82},
-          {'p': 0.73},
+          {'p': 0.76},
           {'p': 0.74},
         ],
       });
@@ -7867,11 +7882,18 @@ void main() {
     Future<Map<String, Object?>> sweepAndRecord(
       ScriptedLlm llm, {
       MessageStore? into,
+      GroupingMode groupingMode = StorylineTuning.groupingMode,
     }) async {
       final target = into ?? store;
       final log = ActivityLog(target);
       addTearDown(log.dispose);
-      await StorylineService(target, llm, judge: sweepJudge(target, llm), activityLog: log).sweep();
+      await StorylineService(
+        target,
+        llm,
+        judge: sweepJudge(target, llm),
+        activityLog: log,
+        groupingMode: groupingMode,
+      ).sweep();
       await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
       final rows = await target.recentActivity();
       if (rows.isEmpty) return const {};
@@ -8160,6 +8182,7 @@ void main() {
       Future<List<SeenCluster>> sweepAndObserve(
         ScriptedLlm llm, {
         CharterCheck charterCheck = CharterCheck.model,
+        GroupingMode groupingMode = StorylineTuning.groupingMode,
       }) async {
         final log = ActivityLog(store);
         addTearDown(log.dispose);
@@ -8170,6 +8193,7 @@ void main() {
           judge: sweepJudge(store, llm),
           activityLog: log,
           charterCheck: charterCheck,
+          groupingMode: groupingMode,
           clusterObserver: (threads, outcome) =>
               seen.add((threads: threads, outcome: outcome)),
         ).sweep();
@@ -8236,16 +8260,16 @@ void main() {
             vector: vectorAt(0.92),
             lastMessageAt: '2026-08-25T10:00:00Z');
         final p = <String, double>{
-          'a b': 0.9,
-          'a c': 0.9,
-          'b c': 0.9,
-          'd e': 1.0,
-          'a d': 0.95,
-          'b d': 0.95,
-          'c d': 0.95,
-          'a e': 0.1,
-          'b e': 0.1,
-          'c e': 0.1,
+          'a b': onLinkScale(0.9),
+          'a c': onLinkScale(0.9),
+          'b c': onLinkScale(0.9),
+          'd e': onLinkScale(1.0),
+          'a d': onLinkScale(0.95),
+          'b d': onLinkScale(0.95),
+          'c d': onLinkScale(0.95),
+          'a e': onLinkScale(0.1),
+          'b e': onLinkScale(0.1),
+          'c e': onLinkScale(0.1),
         };
         String keyOf(String text) =>
             RegExp(r'kept-([a-e])\b').firstMatch(text)!.group(1)!;
@@ -8261,7 +8285,8 @@ void main() {
           'member_of': [confirmAnswer()],
         });
 
-        final seen = await sweepAndObserve(llm);
+        final seen =
+            await sweepAndObserve(llm, groupingMode: GroupingMode.decision);
 
         // The report is the cluster the grouping PROPOSED: its outlier is
         // already back in the pool, and never named or confirmed.
@@ -8692,7 +8717,8 @@ void main() {
             lastMessageAt: '2026-08-26T10:00:00Z');
         final llm = fakeLlm(const {});
 
-        final detail = await sweepAndRecord(llm);
+        final detail =
+            await sweepAndRecord(llm, groupingMode: GroupingMode.decision);
 
         // One pair judged — the two representatives — and nothing past it.
         expect(llm.callsFor('same_effort'), 2);

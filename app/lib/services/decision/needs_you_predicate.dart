@@ -18,11 +18,13 @@ library;
 
 /// The slider's range and default.
 abstract final class NeedsYouTuning {
-  /// Fitted on the golden set 2026-09-29: keep-only needs_you scored 69/76 at
-  /// 0.30 against 67/76 at 0.50, on a plateau from 0.30 to 0.55. The lower
-  /// end of the plateau was chosen because a missed ask costs the owner more
-  /// than one extra row to glance past.
-  static const double defaultThreshold = 0.30;
+  /// Fitted on the golden set, keep-only needs_you of 76. On the v2 model
+  /// (2026-09-29) the best cut was 0.30 at 69/76 (one false yes, six misses).
+  /// On the shipped v3 model (2026-09-30) 0.35 scores 70/76 with no false yes
+  /// and six misses, where 0.30 scores 67/76 (three and six) and 0.20 scores
+  /// 69/76 (four and three); 0.40 to 0.45 hold 69. The cut moved with the
+  /// model because a probability's scale belongs to the model that gave it.
+  static const double defaultThreshold = 0.35;
 
   /// The slider's ends. Neither reaches 0 or 1: a cut of 0 would put every
   /// decided message in Needs You, and a cut of 1 would empty it.

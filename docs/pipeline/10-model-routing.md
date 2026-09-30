@@ -33,7 +33,8 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 
 There is no storyline-membership or storyline-grouping stage: whether a thread
 belongs to a storyline is the decision model's `member_of`, which threads the
-sweep groups is its `same_effort`, and whether a charter names one specific
+sweep groups is the cosine clustering (the decision model's `same_effort` only
+under the golden sweep's bench arm), and whether a charter names one specific
 effort is its `charter_specific`, all asked through `StorylineJudge` on the
 decision client (the calls are labelled `decision:<question id>`). A decision
 failure parks the storyline lane as it parks triage (see
@@ -107,7 +108,7 @@ Each role's spec resolves in the same order, per call:
 |---|---|---|
 | Your server: id | `box-prose` | `box-decide` |
 | Your server: URL | `box_big_url`, else `$BOND_BOX_URL/prose/v1/chat/completions` | `decision_url`, else `$BOND_BOX_URL/decide/v1/embeddings` |
-| Your server: model | `box_big_model` (discovered), else `qwen3.8` (`boxProseModel`) | `decision_model` (discovered), else `bond-decide-mbl-v2swap` (`boxDecideModel`) |
+| Your server: model | `box_big_model` (discovered), else `qwen3.8` (`boxProseModel`) | `decision_model` (discovered), else `bond-decide-mbl-v3` (`boxDecideModel`) |
 | Your server: width | 4 when the URL follows the build, 1 for a stored address | 1 |
 | Managed: id, URL | `local-generative`, `<router>/v1/chat/completions` | `local-decision`, `<router>/v1/embeddings` |
 | Managed: model | `managedGenerativeIdFor(tier, generative_managed_model)`: `bond-prose` (27B) or `bond-bulk` (4B) | `bond-decide` |
@@ -665,11 +666,10 @@ models folder with the `.downloadable` set.
 
 The decision model is not downloaded this round: `make decide-install` copies
 the GGUF and the heads file from the training export, sha256-pinned, into
-`local_bond-decide/`. Distributing it is an open packaging question. It still
-copies the v2 export, whose schema-1 heads file this build refuses
-(`olderModelText`, park `decision_older_model`) until the v3 decision model
-is installed; the v3 install
-updates the export and its pins ([03-triage.md](03-triage.md)).
+`local_bond-decide/`. Distributing it is an open packaging question. It copies the v3
+export (schema 2, sha256-pinned in the manifest); an older schema-1 install
+is refused (`olderModelText`, park `decision_older_model`;
+[03-triage.md](03-triage.md)).
 
 ### First run
 

@@ -253,6 +253,33 @@ class SweepMembership {
   }
 }
 
+/// The pass through which a pass that DEFERRED clusters keeps the golden
+/// sweep's keep-all loop going when it wrote nothing.
+///
+/// Under `SWEEP_GROUPING=decision` the golden pool of 71 threads proposes
+/// about 570 candidate pairs against a `pairBudgetPerPass` of 400, so the
+/// first pass can form clusters it cannot complete, defer every one of them
+/// and write nothing. Ending there took the 2026-09-30 `linkTau` 0.0135 row
+/// on one budget-bound pass. The cache fills each pass, so a few more
+/// converge; eight bounds a grouping that never would.
+const int sweepDeferredPassCap = 8;
+
+/// Whether the golden sweep's keep-all loop runs another pass after [pass]
+/// (1-based).
+///
+/// A pass that wrote a storyline row ([grew]) always earns another, the rule
+/// the loop has always had. A pass that wrote nothing earns one only while
+/// its grouping deferred clusters for want of pair budget
+/// ([clustersDeferred], this pass's count) and [pass] is under
+/// [sweepDeferredPassCap]. Under `SWEEP_GROUPING=cosine` nothing is ever
+/// deferred, so the loop is the one it was.
+bool sweepLoopContinues({
+  required int pass,
+  required bool grew,
+  required int clustersDeferred,
+}) =>
+    grew || (clustersDeferred > 0 && pass < sweepDeferredPassCap);
+
 /// Reads the memberships back out of the store after a sweep.
 ///
 /// `suggested` AND `active`, which is the set `assignConversation` itself
@@ -1252,7 +1279,7 @@ class SweepTally {
 
   /// Members the decision grouping dropped from a formed cluster because their
   /// mean `same_effort` p to the rest was under the link bar, back to the
-  /// pool before naming. Zero under the cosine baseline.
+  /// pool before naming. Zero under the cosine grouping.
   final int outliersDropped;
 
   /// Pool rows that were fragments of a member's own thread and joined on its

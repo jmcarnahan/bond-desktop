@@ -252,9 +252,9 @@ void main() {
       GoldenNeedsYouOut at(double p, {double? threshold}) => threshold == null
           ? decidedNeedsYouOut(fakeAnswers(needsYou: p))
           : decidedNeedsYouOut(fakeAnswers(needsYou: p), threshold: threshold);
-      // At the shipped default, 0.30.
-      expect(at(0.30).verdict, isTrue);
-      expect(at(0.29).verdict, isFalse);
+      // At the shipped default, 0.35.
+      expect(at(0.35).verdict, isTrue);
+      expect(at(0.34).verdict, isFalse);
       expect(at(0.5).verdict, isTrue);
       expect(at(0.97).confidence, 'high');
       expect(at(0.05).confidence, 'high');
@@ -752,7 +752,7 @@ void main() {
       final a = answers({
         'needs_action': {'yes': 0.5, 'no': 0.5},
         'reply_expected': {'yes': 0.49, 'no': 0.51},
-        'needs_you': {'yes': 0.3, 'no': 0.7},
+        'needs_you': {'yes': 0.35, 'no': 0.65},
         'category': {'work': 1},
         'urgency': {'high': 1},
         'intent': {'question': 1},
@@ -761,14 +761,14 @@ void main() {
       final out = classifierOut(a, rule: DecisionGateRule.policy);
       expect(out.needsAction, isTrue);
       expect(out.replyExpected, isFalse);
-      // The app's own rule: 0.3 is the slider's default, and a message at
+      // The app's own rule: 0.35 is the slider's default, and a message at
       // the line needs you.
       expect(out.needsYouVerdict, isTrue);
       expect(out.needsYouConfidence, 'medium');
       expect(
         classifierOut(
           answers({
-            'needs_you': {'yes': 0.29, 'no': 0.71},
+            'needs_you': {'yes': 0.34, 'no': 0.66},
           }),
           rule: DecisionGateRule.policy,
         ).needsYouVerdict,

@@ -1122,6 +1122,51 @@ void main() {
     });
   });
 
+  group('the keep-all loop', () {
+    test('a pass that wrote a storyline always earns another', () {
+      for (final pass in [1, sweepDeferredPassCap, 19]) {
+        expect(
+          sweepLoopContinues(pass: pass, grew: true, clustersDeferred: 0),
+          isTrue,
+          reason: '$pass',
+        );
+      }
+    });
+
+    test('a quiet pass with nothing deferred ends it', () {
+      expect(
+        sweepLoopContinues(pass: 1, grew: false, clustersDeferred: 0),
+        isFalse,
+      );
+    });
+
+    test('a quiet pass that deferred clusters runs on, up to the cap', () {
+      // The 2026-09-30 linkTau 0.0135 row: the first pass deferred five
+      // clusters, wrote nothing, and the loop used to end right there.
+      expect(
+        sweepLoopContinues(pass: 1, grew: false, clustersDeferred: 5),
+        isTrue,
+      );
+      expect(
+        sweepLoopContinues(
+          pass: sweepDeferredPassCap - 1,
+          grew: false,
+          clustersDeferred: 1,
+        ),
+        isTrue,
+      );
+      expect(
+        sweepLoopContinues(
+          pass: sweepDeferredPassCap,
+          grew: false,
+          clustersDeferred: 1,
+        ),
+        isFalse,
+      );
+      expect(sweepDeferredPassCap, 8);
+    });
+  });
+
   group('the tally', () {
     SweepTally tally({
       Map<String, double?> purity = const {'sl-1': 1.0, 'sl-2': 0.5},
