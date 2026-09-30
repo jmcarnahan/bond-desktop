@@ -81,6 +81,9 @@ import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/restore_service.dart';
+import '../services/sample/sample_backends.dart';
+import '../services/sample/sample_data.dart';
+import '../services/sample/sample_env.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_judge.dart';
 import '../services/storyline_service.dart';
@@ -192,6 +195,14 @@ final mcpStackProvider = Provider<({McpAuthSession auth, BondMcpClient client})>
   },
 );
 
+/// The recorded sample a sandbox build serves (`BOND_SAMPLE_DIR`), parsed
+/// once and shared by the four data backends. Read only in a sandbox build:
+/// every arm that watches it is behind `sampleModeOn`, so a normal build never
+/// starts the parse.
+final sampleDataProvider = Provider<Future<SampleData>>(
+  (ref) => SampleData.load(sampleDirDefine),
+);
+
 /// The three providers the app consumes, and the one switch between the two
 /// backends.
 ///
@@ -201,6 +212,13 @@ final mcpStackProvider = Provider<({McpAuthSession auth, BondMcpClient client})>
 /// here, and every one of them follows. That is the entire mechanism; nothing
 /// invalidates anything by hand.
 final authSessionProvider = Provider<AuthSession>((ref) {
+  // The sample sandbox arm comes FIRST in all five, before the mode is read,
+  // so a sandbox build never watches `mcpStackProvider` and never opens an
+  // MCP connection. Only the manifest is read for the session, so the auth
+  // gate answers before the full parse finishes.
+  if (sampleModeOn) {
+    return SampleAuthSession(SampleOwner.load(sampleDirDefine));
+  }
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? ref.watch(graphAuthProvider)
@@ -735,6 +753,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
 });
 
 final mailBackendProvider = Provider<MailBackend>((ref) {
+  if (sampleModeOn) return SampleMailBackend(ref.watch(sampleDataProvider));
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphMail(ref.watch(graphAuthProvider))
@@ -747,6 +766,7 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
 /// reason: a session pointed at the Bond server must not be searching Graph
 /// directly with a token it does not hold.
 final peopleBackendProvider = Provider<PeopleBackend>((ref) {
+  if (sampleModeOn) return SamplePeopleBackend(ref.watch(sampleDataProvider));
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphPeople(ref.watch(graphAuthProvider))
@@ -775,6 +795,9 @@ final profilePhotosProvider = Provider<ProfilePhotos>((ref) {
 /// `skipped/no_extractor` from Graph. Bytes, inline images and OneDrive
 /// thumbnails are identical on both.
 final attachmentBackendProvider = Provider<AttachmentBackend>((ref) {
+  if (sampleModeOn) {
+    return SampleAttachmentBackend(ref.watch(sampleDataProvider));
+  }
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphAttachmentBackend(ref.watch(graphAuthProvider))
@@ -914,6 +937,7 @@ final Provider<MailSync> syncServiceProvider = Provider<MailSync>(
 );
 
 final teamsBackendProvider = Provider<TeamsBackend>((ref) {
+  if (sampleModeOn) return SampleTeamsBackend(ref.watch(sampleDataProvider));
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphTeams(ref.watch(graphAuthProvider))

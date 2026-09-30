@@ -3,6 +3,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import '../services/sample/sample_env.dart' show sampleModeOn;
 import 'database.dart';
 
 export 'database.dart' show BondDatabase, adoptLegacyDatabase;
@@ -48,13 +49,29 @@ Future<BondDatabase> openAppDb() async {
 ///
 /// It exists so the About section can show the user where their data actually
 /// lives, and so that answer and [openAppDb] can never disagree about the file
-/// name: the literal `bond_inbox.db` is written once, here, and both callers
-/// go through this.
+/// name: the literals this file uses are written once, in [databaseFileName],
+/// and both callers go through this.
 ///
 /// Locating a directory opens no connection, so this is safe to call on its
 /// own — a settings screen asking where the file is must not be a second
 /// database handle.
 Future<String> appDatabasePath() async {
   final dir = await getApplicationSupportDirectory();
-  return p.join(dir.path, 'bond_inbox.db');
+  return p.join(dir.path, databaseFileName(sampleMode: sampleModeOn));
 }
+
+/// The database file's name: `bond_inbox.db`, or `bond_inbox-sample.db` for a
+/// sample sandbox build (`BOND_SAMPLE_DIR`, see `sample_env.dart`).
+///
+/// The sandbox gets a file of its own because nothing else would keep the
+/// two mailboxes apart: the identity guard runs only on a sign-in, and the
+/// sandbox never signs in, so on the shared file the sample's rows would land
+/// beside the real account's. With its own file, dropping the define puts the
+/// owner straight back on the real account with nothing to clean up.
+/// Attachment cache and model folders stay shared: the sandbox fetches no
+/// bytes, so none of the sample reaches the cache.
+///
+/// A pure function of its argument so a test can pin both names; the define
+/// itself is compile-time and cannot be set from a test.
+String databaseFileName({required bool sampleMode}) =>
+    sampleMode ? 'bond_inbox-sample.db' : 'bond_inbox.db';

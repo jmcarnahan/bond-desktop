@@ -166,6 +166,12 @@ whichever lines apply. Nothing else in the repo needs to change:
 # and embeddings on :8081 instead of following the app's router. Read as a
 # value, so `= 0` turns it back off.
 # BOND_DEV_HAND_SERVERS = 1
+# Serves a recorded sample mailbox instead of Microsoft (see "Running against a
+# sample" in step 5). Read-only, on its own database file; set the lookback in
+# Settings -> Sync & data, and pull Teams with Refresh. The path must be
+# ABSOLUTE: a relative path or `~` resolves against the app's working
+# directory. The sample is real mail: nothing from it may be committed.
+# BOND_SAMPLE_DIR = /absolute/path/to/sample-v2
 ```
 
 ## 3. Models and servers
@@ -333,6 +339,38 @@ Rebuild the app after a `git pull`:
 make app-install
 make app-run
 ```
+
+### Running against a sample
+
+`BOND_SAMPLE_DIR = /absolute/path/to/sample-v2` in `local.mk` (step 2), then
+`make app-run`, points the app at a recorded sample directory instead of
+Microsoft. Every stage after the backend runs exactly as it does on a real
+account, so this is how the pipeline is reviewed by hand at a real mailbox's
+size. The path must be absolute: a relative path or `~` resolves against the
+app's working directory.
+
+- It is **read-only**: send, drafts and chat writes refuse with a sentence
+  that says "sandbox", and attachment previews and profile photos are absent.
+- It uses its **own database file**, `bond_inbox-sample.db`, beside the real
+  one. Remove the line and rebuild to go back; there is nothing to clean up.
+- A fresh file means fresh settings: the wizard shows unless
+  `BOND_DEV_SKIP_SETUP = 1` is set too, and the model servers are entered once.
+- The default lookback is one day and a recording ends on a fixed date, so the
+  first sync finds nothing. Set the window in **Settings → Sync & data** to
+  reach back into the sample, turn processing off, press **Forget everything
+  and re-sync** once, and turn processing back on, so the next drain is a first
+  run over the wide window. Widening without it ingests the whole sample as
+  quiet backfill: it is triaged, but no thread's state moves, so every thread
+  reads Waiting. The window caps at 365 days, so the oldest days of a
+  year-long recording are out of reach.
+- Teams is pulled with **Refresh**, as always. Chats never show unread in the
+  sandbox: the recording has no chat read state, so every chat message is
+  stored as read.
+- The first sync of each launch waits while the sample is parsed: about 20
+  seconds for a year-long mailbox.
+- **Sign out** wipes the sandbox database and lands back in an empty inbox,
+  which works as a reset.
+- The sample is real mail. Nothing from it goes into the repo.
 
 ## 6. Troubleshooting
 

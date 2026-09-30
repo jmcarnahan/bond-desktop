@@ -25,6 +25,24 @@ Microsoft data; everything after it runs against local rows.
   `requeueWork` and the doc comments distinguishing them (why storylines need
   the revive path rather than a plain enqueue).
 
+**Sample sandbox.** A build with `BOND_SAMPLE_DIR` set (a `local.mk` line
+the Makefile passes as a `--dart-define`) swaps all five backends for the ones
+in `app/lib/services/sample/`, which serve a recorded sample directory:
+a delta drain over its inbox and sent items, detail fetches that hand over the
+recorded HTML for the app's own converter, and its 1:1, group and meeting
+chats (never channels). Ingest, gates and everything after them run unchanged
+over it. It is read-only and opens its own database file,
+`bond_inbox-sample.db` (`databaseFileName` in `app/lib/data/db.dart`), because
+the identity guard runs only on a sign-in and the sandbox never signs in.
+A recording ends on a fixed date, so the one-day default finds nothing, and
+widening the window after that first pass ingests the sample as quiet
+backfill (triaged, but no thread state moves); **Forget everything and
+re-sync** clears the bootstrap floors so the next drain is a first run over
+the wide window. Chats carry no read state in the recording, so every chat
+message is stored as read and no chat bolds. Graph's `meetingMessageType` is
+not in the recording (its `meeting.type` is the event's kind), so meeting mail
+is recognised by its headers and subject only.
+
 **Windows and caps.** How far back a sync reaches is a preference — **one day**
 by default, set in Settings → Sync & data — and the AI pipeline reads that same
 window: mail inside the lookback is triaged, extracted, judged and embedded,

@@ -1156,6 +1156,16 @@ endif
 ifneq ($(strip $(BOND_DEV_HAND_SERVERS)),)
 APP_LLM_DEFINES += --dart-define=BOND_DEV_HAND_SERVERS='$(BOND_DEV_HAND_SERVERS)'
 endif
+# Read by `sampleDirDefine` (app/lib/services/sample/sample_env.dart): points
+# the app at a recorded sample directory instead of Microsoft, so the whole
+# pipeline can be reviewed by hand over a real-sized mailbox. READ-ONLY (every
+# send, draft and chat write refuses) and on its OWN database file,
+# bond_inbox-sample.db, so the real account's rows are untouched and dropping
+# the line is the whole way back. Set it in local.mk only: the sample holds
+# real mail and nothing from it may ever be committed.
+ifneq ($(strip $(BOND_SAMPLE_DIR)),)
+APP_LLM_DEFINES += --dart-define=BOND_SAMPLE_DIR='$(BOND_SAMPLE_DIR)'
+endif
 
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
