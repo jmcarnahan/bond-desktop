@@ -740,10 +740,11 @@ the person room's header `AvatarStack`.
 - `DraftsPane.draftKeyFor(source, messageId)` / `dismissKeyFor(...)` /
   `sentKeyFor(source, messageId)` reach the Drafts & sent rows. The list column
   row is `find.text('DRAFTS & SENT')`, scoped to `AppRail`.
-- A screen test about which rows reach the rail should write
-  `attentionThresholdKey` to `'0'` before reading prefs. The scoring pass lands
-  a few pumps in, and the default 0.5 slider will cut a quiet row out from under
-  an assertion that was true on the first frame.
+- A screen test about which rows reach Needs You seeds each row's
+  `messages.needs_you_p` at or above the slider (`needsYouThresholdKey`,
+  default 0.30), or builds its triage queue on `keepingDecisionClient()`
+  (p 0.5). The attention score only ORDERS the rail; it no longer cuts a row
+  out, so there is no score threshold to zero.
 - **The People directory**: `PeopleDirectoryPane.rowKeyFor(roomKey)` is one
   person's row (the room key is their lowercased name), `filterPillsKey` the
   pills, `sortKey` / `sortItemKeyFor(sort)` the order menu, and `emptyKey` both

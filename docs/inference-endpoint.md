@@ -137,12 +137,16 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
   only if the file is there; `/opt/bond/serve.sh decide` itself refuses to
   start when the GGUF is not a regular file, so Docker never creates a
   directory in its place.
-- **The heads stay on the Mac.** Only the GGUF travels. The nine heads,
-  temperatures and softmax run in the app, off `decide-heads.json` in the
-  local models folder, so a Mac pointed at a box's decision server still needs
-  `make decide-install`. `--decide-gguf` refuses a `.json`.
+- **The heads stay on the Mac.** Only the GGUF travels. The heads (the nine
+  message fields and the three storyline questions), temperatures and softmax
+  run in the app, off `decide-heads.json` in the local models folder, so a Mac
+  pointed at a box's decision server still needs `make decide-install`.
+  `--decide-gguf` refuses a `.json`.
 - **The name.** Served as `bond-decide-mbl-v2swap` (`--decide-served`), the
-  name the app asks a box for.
+  name the app asks a box for. That is the v2 model, whose schema-1 heads file
+  this build refuses; the v3 install updates the file name and the export, and
+  until then a v2 decide slot parks the app's decision pass the same way a v2
+  install on the Mac does.
 - **Order and memory.** The decide slot starts after the vLLM slots, because
   vLLM measures free GPU memory when it starts. It needs about 1.5 GB: room
   enough beside the 27B alone (92% of the card) and tight beside the 27B and

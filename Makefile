@@ -788,9 +788,11 @@ MS_ENV ?= $(CURDIR)/.env
 # code edit: `make bench BENCH_URL=http://localhost:9000/v1/chat/completions
 # BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b`.
 #
-# BENCH_* is the BULK slot — the message text, the needs-you band, membership,
-# the work the fast server does in the bench shape. Defaults to exactly that, so a bench with no overrides
-# still measures what ships.
+# BENCH_* is the BULK slot — the generative text calls (the message text and
+# the rest), the work the fast server does in the bench shape; needs-you and
+# storyline membership are the decision model's and are not benched here.
+# Defaults to exactly that, so a bench with no overrides still measures what
+# ships.
 BENCH_URL    ?= http://localhost:$(FAST_PORT)/v1/chat/completions
 # Names the run, and lands in the result filename. Name the weights as well as
 # the runtime: two quantizations of one model produce two otherwise identical

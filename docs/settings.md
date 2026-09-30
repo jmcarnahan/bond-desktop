@@ -426,6 +426,9 @@ install state and asks the router for the placements' preset, which is how a
 `make decide-install` made while the app runs is picked up. The heads file is
 not re-read by the button: the decision client re-reads it on its next claim
 when the file's mtime has moved. The line reads `Checking…` while it is out.
+Until the v3 decision model is installed, what `make decide-install`
+installs is the v2 model, whose schema-1 heads file this build refuses: the status says `Installed` until triage first claims a message, and
+then the `decision_misconfigured` park's sentence.
 
 **Generative model on This Mac** adds a second control,
 `SettingsSegments<String>` keyed `settings-generative-managed`, choosing
@@ -683,7 +686,7 @@ real ceiling rather than ten.
 Under the segments is one switch, **Improve drafts for messages that need you
 and are urgent** (`settings-cloud-standing`, stored `cloud_drafts_standing`,
 default off). It is the standing rule: after a local draft is written for a
-message the needs-you pass judged the owner is needed on, with `urgency`
+message at or above the Needs You slider (`needsYouAt`), with `urgency`
 `urgent` or `high`, the same prompt goes again to whichever target the
 **Improve a draft** stage points at, and that answer replaces the draft. It
 needs such a target to be turned on at all — without one the switch is inert
@@ -730,7 +733,7 @@ with it.
 | Action | Keys | What goes | What stays |
 |---|---|---|---|
 | **Stop sending drafts anywhere** | `settings-stop-cloud-drafts{,-confirm,-keep}` | the cloud-drafts target (its address, its model and its `cloud-drafts` key) and then `cloud_drafts_consent`, so both drafting stages resolve to the generative model again | every row, and the Decision and Generative models' own settings and keys |
-| **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the sixteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the sixteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the sign-in and every preference |
+| **Clear AI results** | `settings-clear-ai-results{,-confirm,-keep}` | every triage verdict, summary, storyline, draft, digest and embedding — the eighteen `MessageStore.derivedTables`, the verdict columns on `messages` and `conversations`, and the stage markers on `attachments` and the library; the activity log is one of the eighteen, so today's **Cloud drafts** count starts again at zero, which the caption above the buttons says | mail, Teams messages, attachments, registered directories, the owner's storyline presses logged as labels (`decision_labels`, a kept table), the sign-in and every preference |
 | **Forget everything and re-sync** | `settings-forget-resync{,-confirm,-keep}` | everything above **and** the mailbox itself — `MessageStore.wipeAll(keepIdentity: true)`, cursors and bootstrap floors included | the sign-in, the about-me text, the sender rules, the registered directories and every setting |
 
 **Stop sending drafts anywhere** is the one-button revoke, in the same

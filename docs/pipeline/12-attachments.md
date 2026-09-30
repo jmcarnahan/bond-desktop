@@ -1173,10 +1173,9 @@ a regenerate whose spinner is off screen is not visible feedback.
   for `attachment_text` and `attachment_digest`.
 - `app/lib/services/attachments/attachment_retriever.dart` —
   `AttachmentExcerpt`, `AttachmentRetriever.excerptsFor` and
-  `renderAttachmentExcerpts`;
-  `app/lib/services/attachments/attachment_digest_lines.dart` —
-  `attachmentDigestLines`, the one-line-per-document form (no prompt reads it
-  since the needs-you language-model call was removed).
+  `renderAttachmentExcerpts`. (`attachment_digest_lines.dart`, the
+  one-line-per-document form the needs-you prompt read, was deleted in the
+  decision-questions round with the prompt.)
 - `app/lib/data/message_store.dart` — `messageVectorBlob` (tag-guarded, so a
   vector in an older space sends the caller to re-embed) and `requeueWork`'s
   `payloadJson`, which is overwritten on conflict including with null.

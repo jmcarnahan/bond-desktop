@@ -71,7 +71,10 @@ set, storyline texts included ([06-storylines.md](06-storylines.md#storyline-que
 A schema-1 file, meaning the first decision model's nine-field heads, is
 refused under `decision_misconfigured` with its own sentence: the installed
 decision model is the older version, so install the new one with `make
-decide-install`. A stored `message_decisions` row whose `qhash` is not
+decide-install`. **On this branch that is every install:** `DECIDE_SRC` still
+names the v2 export, which is schema 1, so the decision pass parks until
+the v3 decision model is installed (the v3 install updates `make
+decide-install` and its manifest). A stored `message_decisions` row whose `qhash` is not
 `decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
 as no decision.
 

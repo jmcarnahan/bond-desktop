@@ -640,7 +640,10 @@ models folder with the `.downloadable` set.
 
 The decision model is not downloaded this round: `make decide-install` copies
 the GGUF and the heads file from the training export, sha256-pinned, into
-`local_bond-decide/`. Distributing it is an open packaging question.
+`local_bond-decide/`. Distributing it is an open packaging question. It still
+copies the v2 export, whose schema-1 heads file this build refuses
+(`olderModelText`) until the v3 decision model is installed; the v3 install
+updates the export and its pins ([03-triage.md](03-triage.md)).
 
 ### First run
 

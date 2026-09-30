@@ -640,7 +640,24 @@ enforce the ones that are commands.
 - Needs You is ONE predicate: `needsYouAt(p, threshold)` / `needsYouAtSql` /
   `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
   default 0.30) is the only control; every reader goes through it; no
-  language model is asked about needs-you.
+  language model is asked about needs-you, and the attention score only
+  orders. A THREAD's p is the MAX over its kept inbound messages after its
+  last outbound (all kept inbound when it has none), not the newest one's, so
+  a bystander's reply-all cannot hide an older unanswered ask; that is
+  deliberate, do not "fix" it to the newest. `needs_you_verdict`,
+  `attention_threshold` and `needs_you_rules` are inert.
+- The storyline questions' thread text (`storylineThreadTextFor`,
+  `services/decision/storyline_thread_input.dart`) mirrors jev-prototype
+  `distill/storyline_data/corpus.py`, the code the training threads were
+  built with, not the plan's prose: subject and participants as the
+  `conversations` row derives them (re-derived from the thread's own messages
+  oldest first), shown = outbound plus kept inbound, `who` = `You` / name /
+  address, an empty body takes the decision state's attachment stand-in. Where
+  the rows cannot match it (unfetched bodies render Graph's preview, so
+  `StorylineJudge` fetches `previewIds` first; recipient names; a renamed
+  Teams chat) the file's header lists it. Re-read corpus.py before changing
+  anything here; a change to the bytes is a change to what the model was
+  trained on.
 - `decision_labels` (v22) is KEPT: the owner's storyline presses logged as
   labels for the storyline questions (`member_of`, `charter_specific`), with
   the storyline's title and charter at the press. Written ONLY by
@@ -678,6 +695,11 @@ enforce the ones that are commands.
   it the real client finds no heads
   file under `flutter test` and parks every message, which shows up as rows
   stuck at "triaging" or as RenderFlex overflows, not as a clear failure.
+  `FakeDecisionClient`'s storyline `ask` answers `defaultYes` for any state no
+  `yes(question, contains, p)` script matches, and `defaultYes` is 0.0, so an
+  unscripted `member_of` or `same_effort` files and links NOTHING: a storyline
+  test that expects a filing scripts its yes (or builds
+  `FakeDecisionClient.storyline(defaultYes: …)`).
 - Generated drift schema files (`drift_schemas/bond/drift_schema_vN.json`,
   `test/drift/bond/generated/`) are never deleted or rewritten by hand from a
   session; the hook blocks it. Design around a schema bump you do not need:

@@ -4006,25 +4006,3 @@ String newStorylineId() {
   }
   return buffer.toString();
 }
-
-/// The card for a conversation row enriched with what the AI already knows
-/// about the thread: extracted topics and the newest inbound triage summary.
-/// Degrades to the thin card, subject and people only, when [cardData] is null
-/// or its pieces are missing/corrupt — enrichment is a bonus, never a
-/// requirement.
-String enrichedCardForConversationRow(
-  Map<String, Object?> row,
-  Map<String, Object?>? cardData,
-) {
-  final conversation = Conversation.fromRow(row);
-  return buildConversationCard(
-    subject: stripReFw(conversation.subject),
-    participants: [
-      for (final participant in conversation.participants)
-        if (participant.display.isNotEmpty) participant.display,
-    ],
-    topics: topicsOfExtraction(cardData?['extraction_json']),
-    summary: cardData?['summary'] as String?,
-  );
-}
-

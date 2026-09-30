@@ -6425,23 +6425,6 @@ FROM storylines s''';
     return (byStoryline: byStoryline, total: total);
   }
 
-  /// The threads the OWNER filed into [storylineId] by hand, newest first.
-  ///
-  /// Newest first, unlike [membersOf], because these are read as examples: the
-  /// owner's latest word about what belongs here is the one worth showing a
-  /// model, and the caller takes the first few.
-  Future<List<StorylineMember>> userMembersOf(String storylineId) async {
-    final result = await db
-        .customSelect(
-          'SELECT * FROM storyline_members WHERE storyline_id = ? '
-          "AND added_by = 'user' "
-          'ORDER BY added_at DESC, conversation_key ASC',
-          variables: _args([storylineId]),
-        )
-        .get();
-    return [for (final row in result) StorylineMember.fromRow(row.data)];
-  }
-
   /// The blocks on [storylineId], newest first, optionally only those written
   /// by [blockedBy] — `'user'` for the owner's own removals, `'audit'` for the
   /// re-check pass's.
@@ -10967,27 +10950,6 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
   /// Files every embedded passage the index has not seen. Returns how many
   /// were attempted.
   Future<int> indexPendingChunks() => _chunkIndex.backfill();
-
-  /// How many of one message's documents the model said ask for something.
-  ///
-  /// A LIKE over the encoded JSON rather than a JSON1 extract, and that is a
-  /// deliberate trade for a guarantee the model already gives:
-  /// [AttachmentDigest.toJson] writes all five keys always, and `jsonEncode`
-  /// emits them with no spaces, so `"asks":["` is present exactly when the
-  /// list has an entry. JSON1 would be the same answer through a function this
-  /// build is not obliged to have compiled in. A test pins the encoding.
-  Future<int> attachmentsWithAsks(String source, String messageId) async {
-    final row = await db
-        .customSelect(
-          'SELECT COUNT(*) AS n FROM attachments '
-          "WHERE source = ? AND source_message_id = ? "
-          "  AND digest_status = 'done' AND digest_json IS NOT NULL "
-          """  AND digest_json LIKE '%"asks":["%'""",
-          variables: _args([source, messageId]),
-        )
-        .getSingle();
-    return (row.data['n'] as num?)?.toInt() ?? 0;
-  }
 
   /// Turns ranked chunk ids into passages with their documents attached, back
   /// in the order they were ranked.

@@ -202,28 +202,7 @@ void main() {
     });
   });
 
-  group('what the store LIKEs on', () {
-    test('the encoded digest carries "asks":[" when there is one', () {
-      final digest = task.validate({
-        'evidence': 'A lease addendum sent for signature.',
-        'kind': 'contract',
-        'summary': 'The rent rises to 2,600 in January.',
-        'facts': const ['2,600 from 1 January'],
-        'asks': const ['Sign page four'],
-      });
-
-      // `attachmentsWithAsks` reads this with a LIKE rather than a JSON1
-      // extract, so the key order and the absence of spaces are load-bearing.
-      expect(jsonEncode(digest.toJson()), contains('"asks":["'));
-    });
-
-    test('and "asks":[] when there is not', () {
-      final digest = task.validate({'asks': const []});
-
-      expect(jsonEncode(digest.toJson()), contains('"asks":[]'));
-      expect(jsonEncode(digest.toJson()), isNot(contains('"asks":["')));
-    });
-
+  group('what toJson writes', () {
     test('all five keys are written, whatever the model said', () {
       expect(
         task.validate(const {}).toJson().keys.toList(),

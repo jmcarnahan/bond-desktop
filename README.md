@@ -53,7 +53,10 @@ placed on its own (Settings → Models, or the first-run wizard):
   model runs elsewhere. It is not published yet: `make decide-install` copies
   it, sha256-checked, from the training project's export (`DECIDE_SRC`) into
   the app's models folder, where the app's own server (the managed router)
-  picks it up; `make decide` serves it by hand on `:8083`.
+  picks it up; `make decide` serves it by hand on `:8083`. On this branch it
+  still copies the v2 model, whose nine-field heads file the app now refuses
+  (the heads are schema 2: the nine fields plus three storyline questions),
+  so triage parks until the v3 decision model is installed.
 - **Generative** — ONE chat model for every piece of text: each message's
   summary, action items and deadline, storylines, drafts. Whether a message
   needs you is the decision model's probability against your Needs You slider,
@@ -217,16 +220,20 @@ one place a third-party service may be used, for drafting only.
 
 The left rail has four sections:
 
-**Needs You** ranks what the signed-in user is actually on the hook for. Every open thread
-gets an attention score from its state, how recently it moved, what the model
-found in it, and how often that sender gets answered; a slider in Settings sets
-how high a thread must score to appear. Threads awaiting a reply come first,
-then threads waiting on somebody else, dimmed.
+**Needs You** is what the signed-in user is actually on the hook for. The
+decision model gives every kept inbound message a probability that it needs
+the user, and a thread is in Needs You when its highest unanswered probability
+is at or above the Needs You slider in Settings (30% by default); every row
+shows its own percentage. An attention score (the thread's state, how recently
+it moved, how often that sender gets answered) only orders the list. Threads
+awaiting a reply come first, then threads waiting on somebody else, dimmed.
 
 **Storylines** are groups of threads about the same thing — one project, one
 trip, one event — proposed by the model and kept or dismissed by the user. A
-clustering sweep compares conversation embeddings, a confirmation call decides
-whether a candidate really belongs, and the result opens as a single merged
+clustering sweep uses conversation embeddings only to propose pairs, the
+decision model judges which threads are the same effort and whether a
+candidate really belongs, a chat model only writes the title, summary and
+charter, and the result opens as a single merged
 transcript with a chip at each seam naming the thread it just crossed into.
 Removing a thread by hand blocks it, so the model cannot put it straight back.
 
@@ -236,8 +243,9 @@ a message decides it, a standing per-sender rule overrides that, and an explicit
 person. It is grouped by day and nothing is hidden: the rail shows a count per
 day and one click opens all of it.
 
-**Drafts** are suggested replies. Threads that need an answer and score high
-enough get one written in the background, shown above the reply box with the
+**Drafts** are suggested replies. Messages in Needs You (at or above the
+slider) whose reply the decision model expects get one written in the
+background, shown above the reply box with the
 model's own sentence about what it drew on. Nothing sends on its own: a draft is
 text in a box until somebody presses Send, and what gets sent is what is on
 screen. Depending on what the tenant granted, Send either sends, saves to
@@ -454,8 +462,8 @@ nuance, because the queues treat an HTTP 400 as fatal and drop the message.
 `BENCH_VERIFY=0` skips it.
 
 A bench points wherever you tell it, so trying a candidate runtime is one
-command and no code edit. `BENCH_*` is the bulk slot (the message text,
-membership); `PROSE_*` is the drafting slot `make bench-prose`
+command and no code edit. `BENCH_*` is the bulk slot (the message text);
+`PROSE_*` is the drafting slot `make bench-prose`
 and the A/B use; the decision model is benched by `make golden-decision`
 against `make decide` (`DECIDE_URL`):
 

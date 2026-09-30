@@ -15,8 +15,8 @@ server you have not named:
 
 | Role | Hand-started server | Port | Model | Size |
 |---|---|---|---|---|
-| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
-| **Generative** (message summaries, storylines, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
+| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected; and judges storylines: which threads are one effort, which storyline a thread belongs to, whether a charter is specific) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
+| **Generative** (message summaries, storyline titles, charters and recaps, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
 | **Embeddings** (clustering, search) | `make embed` | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
 
 `make setup` also starts `make fast` on :8082 (Qwen3-4B-Instruct Q8_0,
@@ -31,12 +31,20 @@ app's own server runs the 27B, or the 4B on a smaller Mac.
 sha256-checked, from the export the training project writes (`DECIDE_SRC`),
 so it works only on a machine that has that export. Without it new mail
 parks at triage (the rail and Settings, Models say the decision model is not
-installed): no summary, no needs-you verdict and no suggested draft until it is
-installed, because the text and needs-you work waits behind triage. Sync,
+installed): no summary, no needs-you probability, no storyline filed and no
+suggested draft until it is installed, because the text and needs-you work
+waits behind triage and the storyline lane parks on the same model. Sync,
 reading and search still work. The next round
 ships it as a model bundle from a registry (JFrog Artifactory; the design is
 `docs/DESIGN-model-bundles.md` in the training project), which retires
 `make decide-install`.
+
+**On this branch the installed model is refused.** `DECIDE_SRC` still points
+at the v2 export (`bond-decide-mbl-v2swap`), whose schema-1 heads file this
+build refuses with "the installed decision model is the older version", so
+triage parks exactly as if nothing were installed, until the v3 decision
+model is installed. The v3 install updates `DECIDE_SRC`, the manifest entry
+and the sha256 pins.
 
 You need:
 
@@ -178,7 +186,8 @@ What happens:
   refusing unless both match the export's `SHA256SUMS`. The app reads the
   heads file from there whichever server runs the model, so it is needed on
   the hand-started path too. It fails with a pointer when the export is not on
-  this machine (see step 0).
+  this machine (see step 0). Until the v3 install updates it, it copies
+  the v2 model, which this build refuses (step 0).
 - `make decide` serves the installed model on :8083.
 - `make status` should show `model`, `embed`, `fast` and `decide` as `[up]`
   with a pid. `fast` is up because `make setup` starts it for the benches; the

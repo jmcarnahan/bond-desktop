@@ -1,8 +1,14 @@
 # The model bakeoff
 
-The app runs two model slots: a **bulk** slot that does triage, extraction and
-storyline membership, and a **prose** slot that names storylines, recaps them,
-and drafts replies. Both are served locally, and both are choices rather than
+The app runs two model slots: a **bulk** slot that writes each message's text
+(`message_text`), and a **prose** slot that names storylines, recaps them,
+and drafts replies. Every classification (the gate, the triage fields,
+needs-you, the reply decision) and every storyline judgement (`member_of`,
+`same_effort`, `charter_specific`) is the decision model's, benched by `make
+golden-decision`, `make golden-storyline` and `make golden-sweep`; the slots
+below measure only the generative work. (Before the decision-model and
+decision-questions rounds the bulk slot also did triage, extraction, needs-you
+and membership, which is what the older rows measure.) Both are served locally, and both are choices rather than
 conclusions — a different model or a different runtime could be faster, more
 accurate, or cheaper in RAM, and until it is measured nobody knows which. The
 bakeoff is the apparatus for measuring it: accuracy, throughput (tokens/sec)
@@ -328,12 +334,12 @@ schema 1 like every other bench result, and carries `extra.run_file`,
 quoted from one file and scored from the other.
 
 The replay runs the app's own tasks with the HANDLERS' parameters, not a
-bench's: triage on the defaults, needs-you and extraction at temperature 0,
-and the deterministic needs-you floor applied FIRST — a floor item never calls
-the model at all and its row is marked `floor: true`, so a reader can tell the
-model's recall from the floor's. The owner line comes from `GOLDEN_OWNER_NAME`
+bench's: the message-text call at temperature 0, and needs-you as the slider
+rule with no floor (rows before 2026-09-29 applied the deterministic Teams
+floor first and marked a floor item `floor: true`; the run file keeps the
+field, always false now). The owner line comes from `GOLDEN_OWNER_NAME`
 / `GOLDEN_OWNER_ADDRESS`; a run with neither set says so in its banner, because
-needs-you then judges "does this name the owner" with no owner to name.
+the decision state then carries no owner to name.
 `msgs/min` is items over wall time for the whole run at the `GOLDEN_K` it was
 given, which is the throughput a backlog is felt in. Cost comes from the dated
 Bedrock price table in `app/test/fixtures/golden_prices.dart`: zero for a local
@@ -2656,9 +2662,12 @@ budget is not the cause and neither is the wire. `GroupingMode.pool` ships dark
 behind `StorylineTuning.groupingMode = cosine`, beside `model`. Both dark modes
 now say the same thing: the base rate, 1,346 cross-effort pairs against 85, is
 not a prompt problem and no amount of context shown at once dissolves it.
+(History: both dark modes, `GroupThreadsTask` and the `storyline_group` stage
+were deleted in the decision-questions round, when the sweep moved to the
+decision model's `same_effort`.)
 
 **The 1024-token budgets.** `NameStorylineTask.maxTokens` and
-`GroupThreadsTask.maxTokens` are task constants now rather than the generic 512.
+`GroupThreadsTask.maxTokens` became task constants then, rather than the generic 512.
 
 | pass | namer | storyline.id | correct positives | forbidden | naming calls / failures | wall |
 | --- | --- | --- | --- | --- | --- | --- |
