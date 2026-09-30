@@ -345,6 +345,18 @@ Duration? parseDuration(String text) {
   return found.first.$2;
 }
 
+/// [text] when it is nothing but one length ("an hour", "30 min", "for 20
+/// minutes"), else null: "by an hour" is a shift, "an hour" alone is a
+/// length, and a move reads the two apart with this.
+Duration? wholeDuration(String text) {
+  final t = text.trim();
+  if (t.isEmpty) return null;
+  final found = _durations(t, _Claims(t.length));
+  if (found.length != 1) return null;
+  final (span, d) = found.single;
+  return span.start == 0 && span.end == t.length ? d : null;
+}
+
 List<(WhenSpan, Duration)> _durations(String text, _Claims claims) {
   final out = <(WhenSpan, Duration)>[];
   for (final (re, read) in _durationRules) {

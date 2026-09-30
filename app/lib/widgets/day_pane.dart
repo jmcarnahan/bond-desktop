@@ -8,6 +8,7 @@ import '../services/calendar/day_items.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'clock_tick.dart';
+import 'command_plan_card.dart' show CommandPlanCard;
 import 'day_grid.dart' show GridSpan;
 
 /// Which of the Day stop's two lists the pane is showing.
@@ -63,6 +64,8 @@ class DayPane extends StatelessWidget {
     this.onOpenEvent,
     this.inviteActions,
     this.briefHeadlines = const {},
+    this.commandBar,
+    this.planCard,
   });
 
   /// The key of a meeting row's brief teaser.
@@ -138,6 +141,15 @@ class DayPane extends StatelessWidget {
   /// plain text; the full brief is one tap away in the event panel.
   final Map<String, String> briefHeadlines;
 
+  /// The host-built command bar (`DayCommandBar`), drawn under the title row
+  /// in both the agenda and the grid, so a command typed over one face is
+  /// still there on the other. Null draws none; the invites view has none.
+  final Widget? commandBar;
+
+  /// What the bar's last Enter produced (`CommandPlanCard`), drawn directly
+  /// under the bar and above the list or the grid, where the eye already is.
+  final Widget? planCard;
+
   /// [onOpenEvent] bound to [e], or null when there is nothing to open with.
   VoidCallback? _openEvent(CalendarEvent e) {
     final open = onOpenEvent;
@@ -148,9 +160,13 @@ class DayPane extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: mode == DayPaneMode.invites ? _invitesPane() : _agendaPane(),
+      child: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: mode == DayPaneMode.invites
+              ? _invitesPane()
+              : _agendaPane(constraints.maxHeight),
+        ),
       ),
     );
   }
@@ -159,7 +175,8 @@ class DayPane extends StatelessWidget {
 
   bool get _week => view == DayView.grid && gridSpan == GridSpan.week;
 
-  List<Widget> _agendaPane() {
+  /// [height] is the pane's own, which caps the plan card.
+  List<Widget> _agendaPane(double height) {
     final first = today.addDays(-daysBack);
     final last = today.addDays(daysForward);
     // A week at a time on the week grid, a day everywhere else. A step that
@@ -191,6 +208,19 @@ class DayPane extends StatelessWidget {
           ),
         ],
       ),
+      if (commandBar != null) ...[
+        const SizedBox(height: BondSpacing.s8),
+        commandBar!,
+      ],
+      if (planCard != null) ...[
+        const SizedBox(height: BondSpacing.s8),
+        // A long answer scrolls inside the card; the day stays in view.
+        ConstrainedBox(
+          constraints: BoxConstraints(
+              maxHeight: CommandPlanCard.maxHeightIn(height)),
+          child: planCard!,
+        ),
+      ],
       const SizedBox(height: BondSpacing.s8),
       _modeControl(),
       if (availability == CalendarAvailability.unavailable) ...[

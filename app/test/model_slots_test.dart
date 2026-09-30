@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/draft_policy.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
+import 'package:bond_inbox/services/llm/calendar_intent_task.dart';
 import 'package:bond_inbox/services/llm/context_brief_task.dart';
 import 'package:bond_inbox/services/llm/context_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
@@ -37,6 +38,7 @@ Set<String> taskSchemaNames() => {
       const StorylineRecapTask().schemaName,
       const DraftTask().schemaName,
       const MeetingBriefTask().schemaName,
+      const CalendarIntentTask().schemaName,
     };
 
 void main() {
@@ -110,6 +112,7 @@ void main() {
       'draft_reply',
       'draft_improve',
       'meeting_brief',
+      'calendar_intent',
     });
     expect(idsOn(ModelSlot.decide), {'decision'});
     expect(idsOn(ModelSlot.embed), {'embeddings'});
@@ -195,6 +198,20 @@ void main() {
         "A brief before a meeting with people you've been writing to");
     expect(row.slot, ModelSlot.generative);
     expect(draftStageIds, isNot(contains('meeting_brief')));
+  });
+
+  test('the calendar command is generative, on demand, and never a drafting '
+      'stage', () {
+    // Called from the Day command bar on Enter only, when the rules could not
+    // finish the request. It writes nothing in the owner's name, so Cloud
+    // drafts never sees it.
+    final row = pipelineStages.singleWhere((s) => s.id == 'calendar_intent');
+    expect(row.label, 'Calendar command');
+    expect(row.description,
+        'Reads a calendar command the rules could not finish');
+    expect(row.slot, ModelSlot.generative);
+    expect(draftStageIds, isNot(contains('calendar_intent')));
+    expect(const CalendarIntentTask().schemaName, 'calendar_intent');
   });
 
   test('a third-party host is Bedrock and the three vendors', () {

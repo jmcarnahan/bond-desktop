@@ -30,12 +30,21 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `meeting_brief` | Generative — never cloud drafts |
+| `calendar_intent` | Generative — never cloud drafts; on demand, not a lane |
 | `embeddings` | Embeddings, not routed |
 
 `meeting_brief` (the pre-meeting brief, [14-calendar.md](14-calendar.md#briefs))
 is deliberately NOT in `draftStageIds`: it is written FOR the owner, never in
 their name, so rule 4 below sends it to `generativeSpec` whatever Cloud drafts
 says (the calendar round's D9). `llm_routing_test` pins it.
+
+`calendar_intent` (a Day command the rules could not finish,
+[14-calendar.md](14-calendar.md#commands)) is generative too, and on demand:
+no work kind and no lane — `CommandRouter.submit` calls it on Enter only,
+at most once, and only when the lexicon's confidence is under 0.8 or a slot
+is unresolved with words left over. The live preview never calls it. It is
+not in `draftStageIds` either: it reads the owner's own words and writes
+nothing in their name, so Cloud drafts never sees it.
 
 There is no reply-decision stage: whether a prefetched draft is wanted is the
 decision model's `reply_expected` probability, stored at triage and read by

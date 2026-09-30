@@ -79,6 +79,7 @@ class ActivityLogPanel extends StatefulWidget {
     'sync_teams': 'Teams sync',
     'sync_calendar': 'Calendar sync',
     'calendar_write': 'Calendar',
+    'calendar_command': 'Calendar command',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -502,6 +503,30 @@ class ActivityLogPanel extends StatefulWidget {
                 _ => 'Changed an event',
               };
         return '$label — $phrase$emailed';
+      // One row per Enter in the Day command bar, in enum words only: what
+      // was asked, who read it (the rules, the head, or the model) and what
+      // came back — never the words typed, a name or a subject.
+      case 'calendar_command':
+        final action = detail['action'];
+        final verb = switch (action) {
+          'create' => 'Create',
+          'move' => 'Move',
+          'cancel' => 'Cancel',
+          'rsvp_yes' => 'Yes',
+          'rsvp_no' => 'No',
+          'rsvp_maybe' => 'Maybe',
+          'find_time' => 'Find a time',
+          'ask_free' => 'Am I free',
+          'ask_agenda' => 'Agenda',
+          'ask_person' => 'Meetings with',
+          _ => 'Not understood',
+        };
+        final parts = [
+          verb,
+          for (final key in const ['path', 'outcome'])
+            if (detail[key] case final String word when word.isNotEmpty) word,
+        ];
+        return '$label — ${parts.join(' · ')}';
       // The switch at the top of the rail. Its STATUS is the whole row — `on`
       // or `off`, neither of which any of the status cases above claims — so
       // the sentence is written here rather than left to the bare label.

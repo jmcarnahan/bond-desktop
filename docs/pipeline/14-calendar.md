@@ -8,8 +8,10 @@ person, the messages that carried an invite — reads that mirror, never the
 server, so a slow or failing calendar costs the screen nothing.
 
 No chat model is involved in the mirror: it is `sync_calendar` pages written
-into sqlite. The one model call the calendar makes is the pre-meeting
-[brief](#briefs), on the generative model, off the draft lane.
+into sqlite. The calendar makes two model calls: the pre-meeting
+[brief](#briefs), on the generative model, off the draft lane, and — on Enter
+only, when the rules could not finish — a [command](#commands)'s
+`calendar_intent` read.
 
 > **Live as of schema v21** (calendar round, Phase 2): the table, the sync,
 > the store's reads, the inbox wiring and the mailbox-settings cache. Phase 3
@@ -556,7 +558,7 @@ a click and an Enter in the same frame send once.
 | Move — your own event | nobody | no, acts at once | the move back, with the new change key read at undo time |
 | Cancel meeting (+ a note to everyone) | the attendees | always | none |
 | Delete | an organiser's delete sends cancellations | always | none |
-| Create (service only so far) | whoever it invites | when it invites anyone | delete it, when it invited nobody |
+| Create | whoever it invites | always when it invites anyone — named outright in `needsConfirm`, not left to the dry run's notifies list, because the Day command bar builds invites from typed words | delete it, when it invited nobody |
 
 A create carries a transaction id (32 hex characters from `Random.secure`) made
 once per proposal; a retry reuses the same `CreateEvent`, so a create whose
@@ -825,6 +827,221 @@ worker with the handler's notes: `ok` with `{threads, asks}` → "Meeting brief
 adds "; the last brief stands"; a park keeps the general sentence. Counts
 and enum words only.
 
+## Commands
+
+The Day stop's command bar (Phase 8; the bar itself is part 2) reads short
+requests — "move my 3pm with Dana to tomorrow morning", "what's on Friday",
+"find 30 min with Lee next week" — through an engine in
+`lib/services/calendar/command/`. A calendar command is short text over
+FINITE, KNOWN sets, so reading one is mostly lookup, not generation:
+
+| Slot | Known set, determined ahead of time | Resolver | Model? |
+|---|---|---|---|
+| **action**: `create`, `move`, `cancel`, `rsvp_yes`, `rsvp_no`, `rsvp_maybe`, `find_time`, `ask_free`, `ask_agenda`, `ask_person` | closed enum | the lexicon (`command_lexicon.dart`); Phase 9 puts the decision model's command head in front | only on Enter, below the bar |
+| **when** | the time grammar | `resolveWhen` (`when_resolver.dart`), pure Dart | never |
+| **duration** | "30 min", "an hour", "90m" | the resolver's duration grammar | never |
+| **people** | the People directory: names and addresses from mail | `matchPeople` (`people_matcher.dart`), exact hits; ambiguous → a choice; unknown → `search_people` on Enter | never |
+| **event** | the mirror's meetings in the named day, or the next 14 days | `matchEvents` (`event_matcher.dart`), scored | never |
+| **subject** | the leftover words | the parser (`command_parser.dart`) | never |
+
+**The lexicon.** Verb and phrase rules, case-insensitive on word boundaries:
+schedule / book / set up / block / put in / new meeting → create (add, invite
+are weak cues); move / push / reschedule / shift / bump / postpone → move;
+cancel / drop / delete / call off / remove → cancel; accept / yes to / I'll be
+there → `rsvp_yes`; decline / can't make / turn down → `rsvp_no`; tentative /
+say maybe → `rsvp_maybe` (a bare "maybe" is weak); find (a) time / find 30 min
+/ when can / good time → `find_time` (slot with, free with are weak); am I free
+/ what's free / do I have time → `ask_free`; what's on / what do I have →
+`ask_agenda` (agenda, my day, anything on are weak); when did I last / next
+meeting with / when am I seeing → `ask_person`. A STRONG phrase beats every
+weak cue wherever it sits; among one strength the earliest wins, and at one
+position the longest ("tentatively accept" is a maybe). Confidence is 0.9 for
+a strong phrase that leads (after "please", "can you" and the like), 0.75 for
+one further in, 0.6 for a weak cue, 0.0 for `unknown`.
+`looksLikeCalendarCommand` (for the ⌘K hand-off) is true for one of three
+shapes: a strong verb that LEADS the text beside a day or clock phrase or a
+calendar noun (meeting, call, invite, calendar, sync, standup, 1:1, lunch,
+event, appointment — "move my 3pm to Thursday", "cancel the standup"); an ask
+phrase — free, agenda, a person's meetings, find a time — as a strong phrase
+anywhere ("what's on tomorrow", "find 30 min with Sam next week"); or a day or
+clock phrase beside a calendar noun, verb or none ("tomorrow's meeting",
+"invite Dana Friday"). A verb alone is never enough — "push notifications",
+"cancel subscription", "book club", "delete account" are searches for mail —
+and a needle carrying a Find facet (`label:`, `-label:`, `from:`, `to:`,
+`is:`, `has:`, `in:`, `before:`, `after:`) is a search being built, so it is
+never handed over.
+
+**The parser** (`parseCommand`, SYNCHRONOUS — the live preview runs it per
+keystroke) composes the lexicon, the resolver (in question mode for the three
+asks, booking otherwise), the people match and the event match. **The
+leftover rule:** take away the verb phrase, every when-phrase, every person and
+the filler ("my", "the", "with", "meeting", "please", "in my calendar"…), and
+the words that remain are the subject; quoted text is the subject verbatim
+and is never read as a when or a person. **The move split:** the words before
+the last "to"/"until" followed by a when-phrase say WHICH meeting
+(`eventWhen`); the rest is the target. With no such "to", a when-phrase
+marked as a reference ("my 3pm", "Monday's") is the meeting. A slot is
+**unresolved** when: no action; no day or time for a create, a move's target
+(a shift — "by an hour" — places a move as surely as a time does) or an
+ask-free (an agenda defaults to today and never is); nobody named for a
+find-a-time or an ask-person; no candidate meeting for a move, cancel or
+answer; no subject for a create. `leftoverAfterResolvers` is a slot unresolved
+AND non-filler words nothing consumed — for a create or a find-a-time the
+leftover words ARE the subject, so they count as explained.
+
+**People** match exactly: an address; a full name; a first name one person
+has (several → ambiguous, the planner asks). A capitalised word that matches
+nobody is looked up only where a name is expected — after "with", "invite",
+"meet", "see", "cc", "to", or continuing a list — so "book Design review" does
+not search the directory for "Design". People without a mailbox (Teams-only
+`teams:<id>` rosters) are left out of the directory the bar matches against.
+
+**Events** score 3 for the named clock time as the local start, 2 for the
+named day (1 for today when a time was named with no day), 2 per named person
+attending or organising, 1 per shared subject word. A named clock time is
+also a FILTER: a timed meeting that starts at any other time, and every
+all-day event, is no candidate at all — "cancel my 3pm" with only a 4 PM call
+today finds nothing and says so, rather than cancelling the 4 PM on the
+strength of being today's. Series masters and cancelled meetings are never
+candidates; a tie at the top is a choice, never broken by anything the
+person did not say.
+
+**The planner never invents a time.** A create with no clock time, and a
+move to a PART of a day ("to tomorrow morning"), is a `SlotChoice` of up to
+three real openings: the owner's own free slots
+(`freeSlotsOnDay` / `freeSlotsInRange`, working hours from the cached mailbox
+settings) when nobody else is invited, `find_meeting_times` with the bare
+addresses when somebody is (a personal account's `unsupported_account` falls
+back to the owner's own, and the title says so). With no when at all it looks
+across the next five working days. A time with no day is today's. A moved
+meeting keeps whatever the text leaves out (`resolveNewTime`): a move to a
+DAY keeps its wall time and its length ("move my 3pm to Thursday" is Thursday
+at 3), a time alone keeps its day; only a part of a day gives openings, in
+that window for the meeting's own length. **A move by a duration shifts,
+never stretches** (`moveShiftOf`, `shiftedTime` in `write_rules.dart`): a
+target that names no day, time or part and ends in a length with a direction
+— "by an hour", "forward 15 min", "back 30 min", "earlier by 30 min", "an
+hour later" — moves start AND end by it (back and earlier are negative; "by"
+with no direction is later), keeping the length. A target with no day, time,
+part or shift at all — "move my 3pm", "move my 3pm an hour" — is "Say when it
+moves to — e.g. 'to 4pm' or 'by an hour'.", so `resolveNewTime` is never
+handed a lone length to read as a new length. A bare hour after "to" with no
+am, pm or minutes ("move my 3pm to 4") is "Add am or pm — e.g. 'to 4pm'.":
+daytime-first would read it as 4 PM, and a write that may email people is
+not the place for that guess. Every
+write is dry-run through `CalendarWriter.preview` before it is offered, so a
+`CalendarProposal` already carries who it emails and whether it needs a
+confirm (the Writes policy above). A cancel follows the role: an organiser
+with guests cancels, the owner's own event is deleted, an attendee is offered
+a decline and told why. An answer to a series master says "every meeting in".
+Questions are `Answer`s: a yes or no for a named time ("No — on Fri Oct 16 at
+2:00 PM you have Budget review."), the openings in a window, the day's
+meetings, next and last met.
+
+**The router** (`CommandRouter.submit`, Enter) asks the classifiers in order,
+parses, and calls the generative model (`calendar_intent`,
+`CalendarIntentTask`) ONCE, and only when the best classifier is under the
+bar (0.8) or a required slot is unresolved with leftover words. The model
+names the action when the rules could not and COPIES phrases — when, people,
+event reference, subject, duration — out of the request; it never computes a
+date. Each phrase is checked against the request and dropped when it is not
+in it — as whole words over the whitespace-collapsed text, so "Dan" is not in
+"Danielle" — then goes through the same resolvers as typed text. A slot the
+rules filled keeps its value, with one exception: when the ACTION was the
+model's, its subject replaces the rules' (the rules never read the leftover
+words as a subject then, they only failed to read them). A move's `when` is
+never merged: the planner reads a move's target from the typed words after
+the split, so a merged `when` would be drawn and never used. The outcome's
+`path` is `generative` only when the model's answer changed the action or
+filled a slot; an answer that added nothing leaves `lexicon`. When the model
+is not running the local parse stands, and a request the rules cannot finish
+says "The model isn't running; try a plainer phrasing…".
+
+Names nobody in the mail has are searched in the directory (`search_people`,
+top 5, at most three names). A hit binds by its `mail`, else by a user
+principal name that is an address and not a guest's `#EXT#` placeholder; a
+hit with neither is not bindable. One bindable person binds; several are a
+choice whose every option names the NAME it answers (`CommandBind.answers`),
+so picking "Robert Smith" settles "Bob". None: for a create the words go back
+into the subject ("book lunch with Design team Friday" is a meeting called
+"lunch with Design team", `subjectRestoring`) unless the subject was quoted;
+for a find-a-time or a person question the planner says "I don't know who
+Priya is — name someone from your mail." A create never goes out a guest
+short without saying the same.
+
+**A choice pressed** re-plans the outcome it answered: `submit(binds:,
+resume:)` carries EVERY choice pressed so far for the text plus the outcome
+the latest press answered, and the router lays the binds over that outcome's
+parse with no classifier, no model call and no second search for a name
+already settled — so two ambiguous names are two presses and then a plan.
+
+**Activity.** Kind `calendar_command`, one row per Enter, `detail: {action,
+path: lexicon|head|generative, outcome: proposal|slots|answer|choice|cannot}`.
+Enum words only: never the text, a name or a subject. The activity panel
+reads it as "Calendar command — Move · lexicon · proposal".
+
+### The bar
+
+`DayCommandBar` (`widgets/day_command_bar.dart`) sits under the Day stop's
+title row in the agenda AND the grid (never in the invites view), hint "Ask
+or tell: move my 3pm with Dana to tomorrow morning". It is prop-only: the
+screen binds the clock, the zone, the people (`knownPeopleOfRooms` over the
+People rooms) and the meetings (`upcomingEventsProvider(today)`, the next
+two weeks) into `CommandRouter.preview` and `submit`, through
+`commandRouterProvider` / `commandPlannerProvider`.
+
+- **The live preview.** 150 ms after the text stops moving, the synchronous
+  parse is read back as chips: the action ("Move", "Create", "Yes"…; none for
+  `unknown`), the when on the display zone's clock ("Thu Oct 15 · 2:00 PM",
+  "Thu Oct 15 morning", a range, or the resolver's reason), the people
+  (matched names, "Dana? (2)" for a shared first name, "Sam?" for a name
+  nobody in the mail has — the last two tinted for attention), the meeting
+  (its subject, or "2 matches"), the duration ("45 min"). No model, no
+  network, per keystroke. For a MOVE the when chip is where the meeting
+  goes — read from the target words after the split, a shift as "1 h later"
+  / "30 min earlier" (with no duration chip) — tinted for attention while it
+  cannot be read yet ("to when?", a bare hour); the time the meeting is at
+  now rides on the event chip ("Design sync · 3:00 PM").
+- **Enter** runs the router (the model at most once, above); the field spins
+  and a second Enter does nothing until the plan is back. An answer that
+  lands after a newer Enter, an Escape or leaving the stop is dropped.
+  **Escape** clears the text, the chips and the plan — and only when there
+  is text or a plan; otherwise it is left for the screen. **Editing** the
+  text away from what was submitted drops the plan, so a card never stands
+  under words that did not make it. A reading that throws (the router, or a
+  slot's dry run) still ends the spin, with "Something went wrong reading
+  that."
+- **The plan card** (`CommandPlanCard`, `widgets/command_plan_card.dart`),
+  inline directly under the bar: a `CalendarProposal` is its summary, the
+  overlap line and "This emails: …", and **Do it** (**Send** when it emails
+  anyone) through `CalendarWriteFlow` — the dry run again, then the same
+  inline confirm strip and the same Undo toast as every other calendar write
+  (the Writes policy); the card goes once the write went through. A
+  `SlotChoice` is up to three buttons by date and time, captioned "from your
+  calendar" or "when everyone is free"; a press dry-runs that slot
+  (`CommandPlanner.propose`) into a proposal. A `NeedsChoice` is a button per
+  option; a press adds its bind to the choices pressed so far and re-plans
+  (above). An `Answer` is selectable text with a chip per meeting it names,
+  each opening the event panel. A `CannotDo` is its sentence. The card is
+  capped at 320 px or 40% of the pane, whichever is less, and scrolls inside
+  that, so a week's agenda cannot push the day off the pane.
+- **Availability.** The bar and its card show only where the pane shows the
+  mirror (`calendarShowsMirror`): in SDK mode or with the scope missing there
+  is no calendar to ask, and neither is drawn.
+- **The grid ghost.** While a proposal with a landing time stands, the grid
+  draws it as the `GridProposal` ghost ("Proposed"), placed by its instants
+  on whichever page holds it; a drop in flight wins over it.
+- **Leaving the Day stop** drops the plan, wherever the section is assigned
+  (the `_selectedDay` rule); the text goes with the pane.
+
+**⌘K hand-off.** A plain Find needle of four characters or more that
+`looksLikeCalendarCommand` accepts (the three shapes above, never with a
+Find facet), while the calendar is shown (`calendarShowsMirror`), gets ONE
+dynamic row in Find's strip, "Ask Day: <text> ↵" (`AskDayIntent`). It is not a `findCommands` entry — that
+list stays fixed at eleven. Enter on it clears Find, selects the Day stop
+and hands the text to the bar, which writes it in and submits it a frame
+later.
+
 ## Later phases
 
-- The command bar's calendar verbs.
+- The decision model's command head (Phase 9).

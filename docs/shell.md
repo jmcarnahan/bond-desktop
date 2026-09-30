@@ -49,7 +49,7 @@ transcript's own 420 minimum, with nothing to catch it.
 |---|---|---|---|
 | Inbox (`RailSection.home`) | `bolt` | the whole stack: Needs You · Today · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row; Today only once the calendar has answered | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
-| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda or its time grid (Day or Week, remembered), or the invites owed |
+| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda or its time grid (Day or Week, remembered), or the invites owed; over the agenda and the grid, the command bar (`DayCommandBar`) and the card for its last Enter (`docs/pipeline/14-calendar.md`, Commands) |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person | the directory of everyone, or the open room |
 | Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
@@ -269,6 +269,15 @@ search box the reader clicks into still gets its keystrokes. At narrow widths
 ⌘K opens the rail overlay first, then requests focus in a post-frame callback —
 the field may only exist once that overlay has been laid out. Escape clears, and
 is bound inside `FindField` so it only fires while the box holds focus.
+
+**A calendar question in Find asks the Day stop.** A plain needle (not `>`, four
+characters or more) that `looksLikeCalendarCommand` accepts — "what's on
+tomorrow", "move my 3pm to Thursday" — gets ONE dynamic row in the strip,
+`Ask Day: <text> ↵`, and Enter takes it instead of opening the top row: Find
+clears, the Day stop opens, and the text is submitted to its command bar. The
+row carries the words (`AskDayIntent`), so it is not a `findCommands` entry;
+that list stays the eleven payload-free commands the palette and the cheat
+sheet pin.
 
 **Unread only** is a toggle in the caption row (`Key('unread-toggle')`), not a
 pill under the source chips: a fourth pill on that line would wrap onto a line

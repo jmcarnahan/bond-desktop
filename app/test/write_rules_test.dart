@@ -213,6 +213,58 @@ void main() {
     });
   });
 
+  group('a move by a duration', () {
+    Duration? shift(String text) => moveShiftOf(text, now: now, zone: la);
+
+    test('a length with a direction word is a shift, earlier negative', () {
+      expect(shift('by an hour'), const Duration(hours: 1));
+      expect(shift(' back 30 min'), const Duration(minutes: -30));
+      expect(shift('forward 15 minutes'), const Duration(minutes: 15));
+      expect(shift('earlier by 30 min'), const Duration(minutes: -30));
+      expect(shift('later 45 min'), const Duration(minutes: 45));
+      expect(shift('an hour later'), const Duration(hours: 1));
+      expect(shift('30 min earlier'), const Duration(minutes: -30));
+      expect(shift('push the standup back half an hour'),
+          const Duration(minutes: -30));
+    });
+
+    test('not a shift: no direction, or a day or time named', () {
+      expect(shift(''), isNull);
+      expect(shift('an hour'), isNull);
+      expect(shift('to 4pm for an hour'), isNull);
+      expect(shift('to Thursday'), isNull);
+      expect(shift('back to Friday'), isNull);
+    });
+
+    test('a shift moves start and end together', () {
+      final t = shiftedTime(meeting(), const Duration(minutes: -30), now: now)
+          as NewTimeTimed;
+      expect(t.startUtc, DateTime.utc(2026, 10, 7, 16, 30));
+      expect(t.endUtc, DateTime.utc(2026, 10, 7, 17, 30));
+      expect(
+          (shiftedTime(twoDays, const Duration(hours: 1), now: now)
+                  as NewTimeProblem)
+              .reason,
+          contains('whole days'));
+      expect(
+          (shiftedTime(meeting(), const Duration(days: -3), now: now)
+                  as NewTimeProblem)
+              .reason,
+          'That time has passed.');
+    });
+
+    test('a bare hour after "to" is caught; a marked one is not', () {
+      expect(bareHourAfterTo(' to 4'), isTrue);
+      expect(bareHourAfterTo('to 11 '), isTrue);
+      expect(bareHourAfterTo('to 4pm'), isFalse);
+      expect(bareHourAfterTo('to 4 pm'), isFalse);
+      expect(bareHourAfterTo('to 4:30'), isFalse);
+      expect(bareHourAfterTo('to 16'), isFalse);
+      expect(bareHourAfterTo('to 4 hours'), isFalse);
+      expect(bareHourAfterTo('to Thursday'), isFalse);
+    });
+  });
+
   group('checkDrop', () {
     // The meeting is Wed Oct 7 17:00–18:00Z; now is Mon Oct 5 15:00Z.
     String? refusal(DateTime start, DateTime end) => switch (

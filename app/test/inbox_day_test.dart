@@ -11,6 +11,7 @@ import 'package:bond_inbox/models/calendar_models.dart'
         Attendee,
         BriefPoint,
         BriefThreadRef,
+        CalendarDate,
         CalendarEvent,
         EventBrief,
         MeetingBrief,
@@ -20,20 +21,32 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/day_providers.dart' show dayEventsProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/models/person.dart';
+import 'package:bond_inbox/services/backend/calendar_backend.dart';
+import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/command/command_lexicon.dart';
+import 'package:bond_inbox/services/calendar/command/command_planner.dart';
+import 'package:bond_inbox/services/calendar/command/command_router.dart';
+import 'package:bond_inbox/services/calendar/command/command_types.dart'
+    show KnownPerson;
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/brief_section.dart' show BriefSection;
+import 'package:bond_inbox/widgets/command_plan_card.dart'
+    show CommandPlanCard;
+import 'package:bond_inbox/widgets/day_command_bar.dart' show DayCommandBar;
 import 'package:bond_inbox/widgets/day_grid.dart' show DayGrid;
 import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
 import 'package:bond_inbox/widgets/event_actions.dart' show EventActions;
 import 'package:bond_inbox/widgets/event_panel.dart' show EventPanelBody;
+import 'package:bond_inbox/widgets/find_field.dart' show FindField, askDayLabel;
 import 'package:bond_inbox/widgets/meeting_card.dart' show MeetingCard;
 import 'package:bond_inbox/widgets/person_meeting_line.dart'
     show PersonMeetingLine;
@@ -48,6 +61,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -132,6 +146,48 @@ class _RecordingWriter implements CalendarWriter {
           endUtc: DateTime.utc(2026, 1, 1, 18)),
     );
   }
+}
+
+/// The command bar's backend: nothing in these tests asks for a common
+/// time, so every call is a failure the test would see.
+class _NoMeetingTimes extends Fake implements CalendarBackend {}
+
+/// The directory, for names nobody in the mail has: [hits] per query (none
+/// unless a test scripts some), every query recorded.
+class _NoDirectory extends Fake implements PeopleBackend {
+  final List<String> queries = [];
+  final Map<String, List<Person>> hits = {};
+
+  @override
+  Future<List<Person>> searchPeople(String query, {int top = 10}) async {
+    queries.add(query);
+    return hits[query] ?? const [];
+  }
+}
+
+/// A router whose Enter throws, which the real one never does: the screen's
+/// belt must still end the spin with a sentence.
+class _ThrowingRouter extends CommandRouter {
+  _ThrowingRouter(CommandPlanner planner)
+      : super(
+          classifiers: const [LexiconClassifier()],
+          planner: planner,
+          intentClient: () => throw StateError('no model here'),
+          people: _NoDirectory(),
+        );
+
+  @override
+  Future<CommandOutcome> submit(
+    String text, {
+    required DateTime now,
+    required CalendarZone zone,
+    required CalendarDate today,
+    required List<KnownPerson> people,
+    required List<CalendarEvent> events,
+    List<CommandBind> binds = const [],
+    CommandOutcome? resume,
+  }) async =>
+      throw StateError('the router broke');
 }
 
 const String _readGrant =
@@ -1149,6 +1205,302 @@ void main() {
       expect(find.byType(DayGrid), findsOneWidget);
       expect(find.byKey(DayGrid.tileKeyFor('own-1')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('the command bar in the screen', () {
+    /// An own event (organiser, nobody invited) at noon TOMORROW, so a move
+    /// later that day is in the future whatever time the suite runs.
+    Future<void> seedTomorrow() => CalendarStore(db).upsertEvents([
+          CalendarEvent(
+            id: 'own-1',
+            subject: 'Focus block',
+            isOrganizer: true,
+            organizerAddress: 'owner@contoso.com',
+            startUtc: la
+                .localDateTime(
+                    la.dateOf(DateTime.now().toUtc()).addDays(1), 12, 0)
+                .toUtc(),
+            endUtc: la
+                .localDateTime(
+                    la.dateOf(DateTime.now().toUtc()).addDays(1), 13, 0)
+                .toUtc(),
+            responseStatus: 'organizer',
+            showAs: 'busy',
+          ),
+        ], syncRun: 'run-1');
+
+    late ScriptedLlm llm;
+    late _NoDirectory directory;
+
+    /// The router over the test's store and [writer]: the real lexicon,
+    /// parser and planner, a model nobody should call, a directory nobody
+    /// should search.
+    Override routerOver(CalendarWriter writer) {
+      llm = ScriptedLlm();
+      directory = _NoDirectory();
+      return commandRouterProvider.overrideWithValue(CommandRouter(
+        classifiers: const [LexiconClassifier()],
+        planner: CommandPlanner(
+          calendar: CalendarStore(db),
+          backend: _NoMeetingTimes(),
+          writer: writer,
+          mailbox: () async => null,
+        ),
+        intentClient: () => llm,
+        people: directory,
+      ));
+    }
+
+    Finder bar() => find.byKey(DayCommandBar.fieldKey);
+
+    /// The planner reads the store and dry-runs; a few frames more than the
+    /// usual three.
+    Future<void> settleCommand(WidgetTester tester) async {
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+    }
+
+    Future<void> ask(WidgetTester tester, String text) async {
+      await tester.enterText(bar(), text);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settleCommand(tester);
+    }
+
+    testWidgets("what's on tomorrow, Enter: an answer card naming the meeting",
+        (tester) async {
+      await seedTomorrow();
+      final writer = _RecordingWriter();
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        routerOver(writer),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.text(DayCommandBar.hint), findsOneWidget);
+
+      await ask(tester, "what's on tomorrow");
+
+      final answer = find.byKey(CommandPlanCard.answerKey);
+      expect(answer, findsOneWidget);
+      expect(tester.widget<SelectableText>(answer).data,
+          contains('Focus block'));
+      expect(llm.calls, isEmpty, reason: 'a clear question asks no model');
+      expect(directory.queries, isEmpty);
+
+      await tester.tap(find.byKey(CommandPlanCard.cancelKey));
+      await pumps(tester);
+      expect(find.byKey(CommandPlanCard.answerKey), findsNothing);
+    });
+
+    testWidgets('a move of an own event: the proposal, Do it, the write, the '
+        'toast with Undo, and the card gone', (tester) async {
+      await seedTomorrow();
+      final writer = _RecordingWriter();
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        routerOver(writer),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+
+      await ask(tester, 'move focus block to tomorrow 3pm');
+
+      expect(find.byKey(CommandPlanCard.summaryKey), findsOneWidget);
+      expect(writer.committed, isEmpty, reason: 'nothing before the press');
+      expect(llm.calls, isEmpty);
+
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await settleCommand(tester);
+
+      final moved = writer.committed.single;
+      expect(moved.isUndo, isFalse);
+      final write = moved.write as MoveEvent;
+      expect(write.eventId, 'own-1');
+      final tomorrow = la.dateOf(DateTime.now().toUtc()).addDays(1);
+      expect(la.dateOf(write.startUtc!), tomorrow);
+      expect(la.toLocal(write.startUtc!).hour, 15);
+      expect(find.byKey(CommandPlanCard.summaryKey), findsNothing,
+          reason: 'the card goes once its write went through');
+
+      await tester.pump(const Duration(milliseconds: 750));
+      expect(
+          find.descendant(
+              of: find.byType(SnackBar),
+              matching: find.textContaining('Moved "Focus block"')),
+          findsOneWidget);
+      expect(find.text('Undo'), findsOneWidget);
+    });
+
+    testWidgets('the grid draws the standing proposal as the ghost tile',
+        (tester) async {
+      await seedTomorrow();
+      final writer = _RecordingWriter();
+      await store.setPref(dayViewKey, 'grid');
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        routerOver(writer),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+      expect(find.byType(DayGrid), findsOneWidget);
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
+
+      await ask(tester, 'move focus block to tomorrow 3pm');
+      expect(find.byKey(CommandPlanCard.summaryKey), findsOneWidget);
+      final grid = tester.widget<DayGrid>(find.byType(DayGrid));
+      expect(grid.proposal, isNotNull);
+      expect(la.toLocal(grid.proposal!.startUtc).hour, 15);
+      expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
+
+      await tester.tap(find.byKey(CommandPlanCard.cancelKey));
+      await pumps(tester);
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('⌘K: a calendar question in Find offers Ask Day, and Enter '
+        'lands on the Day stop with the answer', (tester) async {
+      // The providers as the app wires them, the writer aside: this is the
+      // test that the real router is reachable from the screen.
+      await seedTomorrow();
+      final writer = _RecordingWriter();
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+
+      await tester.enterText(
+          find.byKey(FindField.fieldKey), "what's on tomorrow");
+      await pumps(tester);
+      expect(
+          find.byKey(FindField.commandKeyFor(
+              askDayLabel("what's on tomorrow"))),
+          findsOneWidget);
+
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await settleCommand(tester);
+
+      final today = la.dateOf(DateTime.now().toUtc());
+      expect(find.text(dayTitle(today, today)), findsOneWidget);
+      expect(tester.widget<TextField>(bar()).controller!.text,
+          "what's on tomorrow");
+      final answer = find.byKey(CommandPlanCard.answerKey);
+      expect(answer, findsOneWidget);
+      expect(tester.widget<SelectableText>(answer).data,
+          contains('Focus block'));
+      // The Find box gave the words up.
+      expect(
+          tester
+              .widget<TextField>(find.byKey(FindField.fieldKey))
+              .controller!
+              .text,
+          isEmpty);
+    });
+
+    testWidgets('two ambiguous names, two presses: the choices add up to a '
+        'proposal, and the model is never asked', (tester) async {
+      final writer = _RecordingWriter();
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        routerOver(writer),
+      ]);
+      directory.hits['Sam'] = const [
+        Person(id: 'u1', displayName: 'Sam Ortiz', mail: 'sam@contoso.com'),
+        Person(id: 'u2', displayName: 'Sam Lee', mail: 'slee@fabrikam.com'),
+      ];
+      directory.hits['Bob'] = const [
+        Person(id: 'u3', displayName: 'Robert Smith', mail: 'rsmith@contoso.com'),
+        Person(id: 'u4', displayName: 'Bob Jones', mail: 'bjones@contoso.com'),
+      ];
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+
+      await ask(tester, 'book planning with Sam and Bob tomorrow 3pm');
+      expect(find.text('Which Sam?'), findsOneWidget);
+      await tester.tap(find.byKey(CommandPlanCard.optionKeyFor(1)));
+      await settleCommand(tester);
+      expect(find.text('Which Bob?'), findsOneWidget);
+      await tester.tap(find.byKey(CommandPlanCard.optionKeyFor(0)));
+      await settleCommand(tester);
+
+      expect(find.byKey(CommandPlanCard.summaryKey), findsOneWidget);
+      final create = writer.previewed.single as CreateEvent;
+      expect(create.attendees, ['slee@fabrikam.com', 'rsmith@contoso.com']);
+      expect(directory.queries, ['Sam', 'Bob']);
+      expect(llm.calls, isEmpty);
+    });
+
+    testWidgets('a router that throws still ends the spin with a sentence',
+        (tester) async {
+      final writer = _RecordingWriter();
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        commandRouterProvider.overrideWithValue(_ThrowingRouter(CommandPlanner(
+          calendar: CalendarStore(db),
+          backend: _NoMeetingTimes(),
+          writer: writer,
+          mailbox: () async => null,
+        ))),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+
+      await ask(tester, "what's on tomorrow");
+      final reason =
+          tester.widget<Text>(find.byKey(CommandPlanCard.reasonKey));
+      expect(reason.data, 'Something went wrong reading that.');
+      expect(find.byKey(DayCommandBar.busyKey), findsNothing);
+    });
+
+    testWidgets('where the calendar is not shown (SDK mode) there is no bar, '
+        'and ⌘K offers no Ask Day', (tester) async {
+      await pumpScreen(tester, overrides: [
+        calendarAvailabilityProvider
+            .overrideWith((ref) => CalendarAvailability.sdkMode),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byType(DayPane), findsOneWidget);
+      expect(bar(), findsNothing);
+
+      await tester.enterText(
+          find.byKey(FindField.fieldKey), "what's on tomorrow");
+      await pumps(tester);
+      expect(
+          find.byKey(FindField.commandKeyFor(
+              askDayLabel("what's on tomorrow"))),
+          findsNothing);
+    });
+
+    testWidgets("the screen's letter keys stay out of the bar", (tester) async {
+      await seedTomorrow();
+      final writer = _RecordingWriter();
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        routerOver(writer),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      final today = la.dateOf(DateTime.now().toUtc());
+
+      await tester.tap(bar());
+      await pumps(tester);
+      // `e` dismisses a thread and `z` undoes on this screen; typed into
+      // the bar they are letters and nothing else.
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.enterText(bar(), 'ez');
+      await pumps(tester);
+
+      expect(tester.widget<TextField>(bar()).controller!.text, 'ez');
+      expect(find.text(dayTitle(today, today)), findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(writer.committed, isEmpty);
     });
   });
 }

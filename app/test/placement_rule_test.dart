@@ -74,10 +74,11 @@ void main() {
         expect(spec.url, 'http://127.0.0.1:8080/v1/chat/completions');
         expect(spec.model, routerProseId, reason: id);
       }
-      // Fourteen (triage and extraction became message_text, the reply
+      // Fifteen (triage and extraction became message_text, the reply
       // decision became the decision model's, and the calendar round added
-      // meeting_brief), so the list has not quietly shrunk.
-      expect(generativeStages, hasLength(14));
+      // meeting_brief and calendar_intent), so the list has not quietly
+      // shrunk.
+      expect(generativeStages, hasLength(15));
     });
 
     test('managed on the inbox tier: the 4B', () {

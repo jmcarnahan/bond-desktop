@@ -250,12 +250,17 @@ abstract interface class CalendarWriter {
 ///
 /// An RSVP is named outright rather than left to [p]: every answer here is
 /// sent, so every answer emails the organiser, and whether the confirm shows
-/// must not hinge on the dry run happening to list them.
+/// must not hinge on the dry run happening to list them. A create with
+/// anyone on it is named outright for the same reason: an invite sends mail
+/// the moment it is written, and one read out of typed words (the Day
+/// command bar) must never go out on the strength of the server's notifies
+/// list alone.
 bool needsConfirm(CalendarWrite w, WritePreview p) =>
     p.notifies.isNotEmpty ||
     w is DeleteEvent ||
     w is CancelMeeting ||
-    w is RespondToEvent;
+    w is RespondToEvent ||
+    (w is CreateEvent && w.attendees.isNotEmpty);
 
 /// One failure, mapped: the sentence, the activity log's word, and whether
 /// the same write may be tried again.

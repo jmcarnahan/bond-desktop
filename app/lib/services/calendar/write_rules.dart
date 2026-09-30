@@ -175,6 +175,114 @@ NewTime resolveNewTime(
   return NewTimeTimed(start, end);
 }
 
+// ── a move by a duration ───────────────────────────────────────────────
+
+/// The words that make a length a SHIFT, and which way: "back 30 min" is
+/// earlier, "by an hour" (no direction said) is later.
+const Map<String, int> _shiftWords = {
+  'by': 1,
+  'forward': 1,
+  'later': 1,
+  'ahead': 1,
+  'out': 1,
+  'back': -1,
+  'backward': -1,
+  'backwards': -1,
+  'earlier': -1,
+};
+
+final RegExp _shiftWord = RegExp(
+    r'\b(by|forward|later|ahead|out|back|backwards?|earlier)\b',
+    caseSensitive: false);
+
+/// How far a move's target words SHIFT the meeting — "by an hour", "back
+/// 30 min", "an hour later", "earlier by 15 minutes" — or null when they
+/// are not a shift.
+///
+/// Only a target that names no day, time or part of day can be a shift:
+/// "to 4pm for an hour" is a new time with a new length, and the length is
+/// [resolveNewTime]'s. The shift is the LAST thing in the words, so "push
+/// the standup back 30 min" reads the same as "push my 3pm back 30 min".
+/// A shift keeps the meeting's length, always; a length said with no
+/// direction word at all ("move my 3pm an hour") is not a shift and not a
+/// time, and the planner asks when it moves to instead of stretching it.
+Duration? moveShiftOf(
+  String target, {
+  required DateTime now,
+  required CalendarZone zone,
+}) {
+  final t = target.trim().replaceFirst(RegExp(r'[.!?]+$'), '').trim();
+  if (t.isEmpty) return null;
+  final r = resolveWhen(t, now: now, zone: zone, mode: WhenMode.booking);
+  if (r.day != null || r.time != null || r.part != null) return null;
+  if (r.unresolvedReason != null) return null;
+
+  // "<direction> [by] <length>" at the end.
+  for (final m in _shiftWord.allMatches(t)) {
+    var rest = t.substring(m.end).trim();
+    final sign = _shiftWords[m.group(1)!.toLowerCase()]!;
+    rest = rest.replaceFirst(RegExp(r'^by\s+', caseSensitive: false), '');
+    final d = wholeDuration(rest);
+    if (d != null) return sign < 0 ? -d : d;
+  }
+  // "[by] <length> <direction>" at the end.
+  final tail = RegExp(
+          r'\s(later|earlier|forward|back|backwards?|ahead|out)$',
+          caseSensitive: false)
+      .firstMatch(t);
+  if (tail != null) {
+    final before = t.substring(0, tail.start);
+    final sign = _shiftWords[tail.group(1)!.toLowerCase()]!;
+    // The longest length that ends where the direction word begins.
+    for (final w in RegExp(r'(?:^|\s)(?=\S)').allMatches(before)) {
+      var rest = before.substring(w.end);
+      rest = rest.replaceFirst(RegExp(r'^by\s+', caseSensitive: false), '');
+      final d = wholeDuration(rest);
+      if (d != null) return sign < 0 ? -d : d;
+    }
+  }
+  return null;
+}
+
+/// A move's target that gives a bare hour after "to" — "move my 3pm to 4" —
+/// with no am, pm or minutes. Daytime-first would read it as 4 PM, and a
+/// write that emails people is not the place for a guess.
+bool bareHourAfterTo(String target) {
+  for (final m in RegExp(
+          r'\bto\s+(\d{1,2})(?![\d:./])(?!\s*(?:a\.?m\b|p\.?m\b|am|pm|a\b|p\b|'
+          r"o['’]?\s*clock|h\b|hrs?\b|hours?\b|m\b|mins?\b|minutes?\b))",
+          caseSensitive: false)
+      .allMatches(target)) {
+    final n = int.parse(m.group(1)!);
+    if (n >= 1 && n <= 12) return true;
+  }
+  return false;
+}
+
+/// [shown] moved by [by], start AND end, so its length stays what it was.
+/// An all-day event moves by whole days only.
+NewTime shiftedTime(
+  CalendarEvent shown,
+  Duration by, {
+  required DateTime now,
+}) {
+  if (shown.isAllDay) {
+    return const NewTimeProblem(
+        'Name a day — an all-day event moves by whole days.');
+  }
+  final s = shown.startUtc;
+  final e = shown.endUtc;
+  if (s == null || e == null) {
+    return const NewTimeProblem("This event's times couldn't be read.");
+  }
+  final start = s.add(by);
+  final end = e.add(by);
+  if (start.isBefore(now.toUtc())) {
+    return const NewTimeProblem('That time has passed.');
+  }
+  return NewTimeTimed(start, end);
+}
+
 /// A drop on the grid read as a new time for [shown]: the typed move's own
 /// refusals, in the typed move's own words, so a drag cannot send what the
 /// "Move to…" field would have refused.

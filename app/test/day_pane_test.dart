@@ -2,13 +2,31 @@ import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart'
     show CalendarAvailability;
+import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/command/command_planner.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
+import 'package:bond_inbox/widgets/command_plan_card.dart';
 import 'package:bond_inbox/widgets/day_grid.dart' show GridSpan;
 import 'package:bond_inbox/widgets/day_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// A writer the long-answer card never reaches: an [Answer] writes nothing.
+class _NoWriter implements CalendarWriter {
+  @override
+  Future<PreviewResult> preview(CalendarWrite write) =>
+      throw UnimplementedError();
+
+  @override
+  Future<WriteOutcome> commit(
+    CalendarWrite write, {
+    WritePreview? preview,
+    bool isUndo = false,
+  }) =>
+      throw UnimplementedError();
+}
 
 /// The Day stop's pane, prop-only: a pinned clock, a named zone, and rows by
 /// their text. Bare pumps only — the countdowns hold a periodic timer.
@@ -72,6 +90,8 @@ void main() {
     void Function(GridSpan)? onGridSpanChanged,
     Widget? grid,
     Map<String, String> briefHeadlines = const {},
+    Widget? commandBar,
+    Widget? planCard,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -100,6 +120,8 @@ void main() {
           onGridSpanChanged: onGridSpanChanged ?? (_) {},
           grid: grid,
           briefHeadlines: briefHeadlines,
+          commandBar: commandBar,
+          planCard: planCard,
         ),
       ),
     ));
@@ -380,6 +402,89 @@ void main() {
       final next = tester.widget<IconButton>(
           find.widgetWithIcon(IconButton, Icons.chevron_right));
       expect(next.onPressed, isNull);
+    });
+  });
+
+  group('the command bar', () {
+    const bar = SizedBox(key: ValueKey('bar'), height: 20);
+    const card = SizedBox(key: ValueKey('card'), height: 20);
+
+    testWidgets('the bar and its card sit under the title in the agenda and '
+        'the grid, the card below the bar', (tester) async {
+      for (final view in DayView.values) {
+        await pumpPane(
+          tester,
+          view: view,
+          grid: const SizedBox(key: ValueKey('grid')),
+          commandBar: bar,
+          planCard: card,
+        );
+        expect(find.byKey(const ValueKey('bar')), findsOneWidget,
+            reason: view.name);
+        expect(find.byKey(const ValueKey('card')), findsOneWidget,
+            reason: view.name);
+        final title = tester.getTopLeft(find.text(dayTitle(today, today))).dy;
+        final barTop = tester.getTopLeft(find.byKey(const ValueKey('bar'))).dy;
+        final cardTop =
+            tester.getTopLeft(find.byKey(const ValueKey('card'))).dy;
+        final pills = tester.getTopLeft(find.byKey(DayPane.agendaKey)).dy;
+        expect(title < barTop && barTop < cardTop && cardTop < pills, isTrue,
+            reason: view.name);
+      }
+    });
+
+    testWidgets('a long answer is capped and scrolls inside its card, and '
+        'nothing overflows', (tester) async {
+      final long = [
+        for (var i = 0; i < 60; i++)
+          'Thu Oct ${i % 28 + 1} 9:00–9:30 AM Fictional sync number $i',
+      ].join(' · ');
+      await pumpPane(
+        tester,
+        commandBar: bar,
+        planCard: CommandPlanCard(
+          plan: Answer(long),
+          zone: CalendarZone.tryNamed('America/Los_Angeles')!,
+          today: today,
+          writer: _NoWriter(),
+          onDone: (_, _) {},
+          onDismiss: () {},
+          onPickSlot: (_, _) async {},
+          onChoose: (_) async {},
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      final card = tester.getSize(find.byType(CommandPlanCard));
+      // 40% of the pane's 852 px is 340.8, so the 320 px cap holds.
+      expect(card.height, lessThanOrEqualTo(CommandPlanCard.maxHeight));
+      expect(
+          find.descendant(
+              of: find.byType(CommandPlanCard),
+              matching: find.byType(SingleChildScrollView)),
+          findsOneWidget);
+      // The day is still there under it.
+      expect(find.byKey(DayPane.agendaKey), findsOneWidget);
+    });
+
+    test('the cap is 40% of a short pane, and 320 px of a tall one', () {
+      expect(CommandPlanCard.maxHeightIn(500), 200);
+      expect(CommandPlanCard.maxHeightIn(2000), 320);
+      expect(CommandPlanCard.maxHeightIn(double.infinity), 320);
+    });
+
+    testWidgets('null draws neither, and the invites view has neither',
+        (tester) async {
+      await pumpPane(tester);
+      expect(find.byKey(const ValueKey('bar')), findsNothing);
+
+      await pumpPane(
+        tester,
+        mode: DayPaneMode.invites,
+        commandBar: bar,
+        planCard: card,
+      );
+      expect(find.byKey(const ValueKey('bar')), findsNothing);
+      expect(find.byKey(const ValueKey('card')), findsNothing);
     });
   });
 

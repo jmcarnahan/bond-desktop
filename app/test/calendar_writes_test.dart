@@ -316,6 +316,25 @@ void main() {
           isTrue);
     });
 
+    test('a create with anyone on it confirms, even one whose dry run '
+        'lists nobody; a private create does not', () {
+      // An invite is mail; the confirm must not hinge on the server
+      // listing the invitees (a command bar's create is built from words).
+      final invite = CreateEvent(
+          subject: 'Design sync',
+          startUtc: t0,
+          endUtc: t0.add(const Duration(minutes: 30)),
+          attendees: const [dana],
+          transactionId: 'tx-1');
+      expect(needsConfirm(invite, privately), isTrue);
+      final alone = CreateEvent(
+          subject: 'Focus',
+          startUtc: t0,
+          endUtc: t0.add(const Duration(minutes: 30)),
+          transactionId: 'tx-2');
+      expect(needsConfirm(alone, privately), isFalse);
+    });
+
     test('a preview is a dry run and changes nothing', () async {
       await calendar.upsertEvents([timed('e1')], syncRun: run);
       await writes.preview(const DeleteEvent('e1'));

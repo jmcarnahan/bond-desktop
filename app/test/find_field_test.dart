@@ -31,6 +31,7 @@ void main() {
     VoidCallback? onClear,
     List<String> labelNames = const [],
     ValueChanged<Intent>? onCommand,
+    bool Function(String text)? asksDay,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -44,6 +45,7 @@ void main() {
             onClear: onClear ?? () {},
             labelNames: labelNames,
             onCommand: onCommand,
+            asksDay: asksDay,
           ),
         ),
       ),
@@ -569,6 +571,76 @@ void main() {
       await tester.pump();
 
       expect(cleared, 1);
+    });
+  });
+  group('the Ask Day row', () {
+    Future<void> type(WidgetTester tester, String text) async {
+      await tester.enterText(find.byKey(FindField.fieldKey), text);
+      await tester.pump();
+    }
+
+    // The host's real predicate is the lexicon's; a stand-in keeps this
+    // file about the row, not the rules.
+    bool calendarish(String text) => text.contains('tomorrow');
+
+    testWidgets('a needle the host reads as a calendar question gets the one '
+        'dynamic row', (tester) async {
+      await pumpField(tester, onCommand: (_) {}, asksDay: calendarish);
+
+      await type(tester, "what's on tomorrow");
+
+      expect(find.byKey(FindField.commandsKey), findsOneWidget);
+      final label = askDayLabel("what's on tomorrow");
+      expect(label, "Ask Day: what's on tomorrow ↵");
+      expect(find.byKey(FindField.commandKeyFor(label)), findsOneWidget);
+      // Not one of the fixed commands, and none of them tag along.
+      expect(findCommands.where((c) => c.label == label), isEmpty);
+      expect(find.byKey(FindField.commandKeyFor('Mark done')), findsNothing);
+    });
+
+    testWidgets('not for a > needle, a short one, or one the host declines',
+        (tester) async {
+      await pumpField(tester, onCommand: (_) {}, asksDay: calendarish);
+
+      await type(tester, '>later');
+      expect(find.byKey(FindField.commandKeyFor('Later')), findsOneWidget);
+      expect(find.textContaining('Ask Day'), findsNothing);
+
+      await type(tester, 'invoice');
+      expect(find.byKey(FindField.commandsKey), findsNothing);
+    });
+
+    testWidgets('not while the host passes no predicate', (tester) async {
+      await pumpField(tester, onCommand: (_) {});
+      await type(tester, "what's on tomorrow");
+      expect(find.byKey(FindField.commandsKey), findsNothing);
+    });
+
+    testWidgets('not while no host listens for a command', (tester) async {
+      await pumpField(tester, asksDay: calendarish);
+      await type(tester, "what's on tomorrow");
+      expect(find.byKey(FindField.commandsKey), findsNothing);
+    });
+
+    testWidgets('Enter hands up the words as an AskDayIntent, and the box '
+        'gives them up', (tester) async {
+      final invoked = <Intent>[];
+      String? submitted;
+      await pumpField(
+        tester,
+        onCommand: invoked.add,
+        onClear: controller.clear,
+        onSubmit: (value) => submitted = value,
+        asksDay: calendarish,
+      );
+
+      await type(tester, "  what's on tomorrow ");
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+
+      expect(invoked.single, const AskDayIntent("what's on tomorrow"));
+      expect(submitted, isNull, reason: 'the row took Enter, not the list');
+      expect(controller.text, isEmpty);
     });
   });
 }

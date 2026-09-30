@@ -53,9 +53,18 @@ import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
 import '../services/calendar/calendar_writes.dart'
     show CalendarWrite, MoveEvent;
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
+import '../services/calendar/command/command_lexicon.dart'
+    show looksLikeCalendarCommand;
+import '../services/calendar/command/command_parser.dart' show parseCommand;
+import '../services/calendar/command/command_planner.dart';
+import '../services/calendar/command/command_router.dart' show CommandOutcome;
+import '../services/calendar/command/command_types.dart'
+    show CommandGuess, CommandPath, KnownPerson, ParsedCommand;
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
-import '../services/calendar/overlaps.dart' show Overlaps, overlapsForEvent;
+import '../services/calendar/overlaps.dart'
+    show FreeSlot, Overlaps, overlapsForEvent;
+import '../services/calendar/when_resolver.dart' show WhenResolution;
 import '../services/calendar/write_rules.dart'
     show
         NewTimeProblem,
@@ -85,6 +94,8 @@ import '../widgets/context_file_panel.dart';
 import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/calendar_write_flow.dart';
+import '../widgets/command_plan_card.dart';
+import '../widgets/day_command_bar.dart';
 import '../widgets/day_grid.dart';
 import '../widgets/brief_section.dart';
 import '../widgets/day_pane.dart';
@@ -456,6 +467,33 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// where the store has it. Cleared by the flow's `onIdle`; drawn only while
   /// the flow says busy, so a flow that went away mid-write leaves no ghost.
   ({String id, DateTime startUtc, DateTime endUtc})? _gridMove;
+
+  /// What the Day command bar's last Enter produced, and the text that
+  /// produced it (a pressed choice submits the same text again with the
+  /// choice bound). Cleared by Escape, Cancel, a write that went through, and
+  /// leaving the Day stop — wherever [_section] is assigned to another stop,
+  /// the [_selectedDay] rule.
+  CommandOutcome? _commandOutcome;
+  String _commandText = '';
+
+  /// Every choice pressed on the card for [_commandText], in press order:
+  /// two ambiguous names are two presses, and the second must not forget
+  /// the first. Handed to the router whole on each press; reset by a new
+  /// Enter, Escape and leaving the stop ([_forgetCommand]).
+  List<CommandBind> _commandBinds = const [];
+
+  /// A submitted command is still being read; the bar ignores Enter.
+  bool _commandBusy = false;
+
+  /// Bumped on every submit, so an answer that arrives after a newer Enter,
+  /// an Escape or a trip off the stop is dropped rather than drawn.
+  int _commandSerial = 0;
+
+  /// Words ⌘K's "Ask Day" row handed over, waiting for the bar to take them.
+  /// One-shot: the bar submits them a frame after it sees them, and the
+  /// submit clears this, so the next build hands the bar null and the same
+  /// words can be asked again later.
+  String? _pendingCommandText;
 
   /// Which pile Archive is showing. Kept here rather than in the pane so the
   /// tab survives every rebuild the sixty-second poll causes.
@@ -1751,6 +1789,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _section = section;
       _selectedDay = null;
       _showingInvites = false;
+      if (section != RailSection.day) _forgetCommand();
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -1776,6 +1815,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _section = RailSection.people;
       _selectedDay = null;
       _showingInvites = false;
+      _forgetCommand();
       _selectedRoomKey = key;
       _selectedId = null;
       _selectedSource = null;
@@ -1795,6 +1835,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _section = RailSection.archive;
       _selectedDay = null;
       _showingInvites = false;
+      _forgetCommand();
       _archiveTab = ArchiveTab.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
@@ -2746,6 +2787,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// [_triageScope], deliberately not over the rail, and an invoke from the
   /// field's context would find nothing above it.
   void _runCommand(Intent intent) {
+    // The one palette row that is not a triage act: it leaves the list for
+    // the Day stop, so it is answered here rather than by the list's map.
+    if (intent is AskDayIntent) {
+      _askDay(intent.text);
+      return;
+    }
     final ctx = _triageFocus.context;
     if (ctx != null) Actions.maybeInvoke(ctx, intent);
   }
@@ -3314,6 +3361,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _section = sectionForLabelFind(_section);
       _selectedDay = null;
       _showingInvites = false;
+      if (_section != RailSection.day) _forgetCommand();
     });
     _focusFind(selectAll: false);
   }
@@ -4205,6 +4253,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             onSubmit: (_) => _submitFind(),
             onClear: _clearFind,
             onCommand: _runCommand,
+            // A needle that reads as a calendar question gets the one
+            // "Ask Day" row; the lexicon's rules only, no model.
+            asksDay: (text) =>
+                calendarShowsMirror(ref.read(calendarAvailabilityProvider)) &&
+                looksLikeCalendarCommand(text),
             // Names only: the autocomplete completes `label:` terms, and the
             // matching itself is find_filter's, which reads the rows.
             labelNames: [
@@ -4912,6 +4965,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       gridSpan: _gridSpan,
       onGridSpanChanged: (s) => _setDayView(span: s),
       grid: grid,
+      // The bar reads and writes the calendar this session shows; where the
+      // mirror is hidden (SDK mode, a missing scope) there is none to ask.
+      commandBar: shows ? _commandBar(zone, today) : null,
+      planCard: shows ? _commandCard(zone, today) : null,
       briefHeadlines: shows
           ? ref.watch(briefHeadlinesProvider(day)).valueOrNull ??
               const <String, String>{}
@@ -4986,6 +5043,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       zone: zone,
     );
     final pending = _gridMove;
+    // A standing command proposal is the ghost too, whenever no drop is
+    // pending — the drag the person is making wins over the sentence they
+    // typed. Placed by its instants, so it shows on whichever page holds it.
+    final plan = _commandOutcome?.plan;
+    final commandGhost = plan is CalendarProposal &&
+            plan.startUtc != null &&
+            plan.endUtc != null
+        ? GridProposal(
+            startUtc: plan.startUtc!,
+            endUtc: plan.endUtc!,
+            label: 'Proposed',
+          )
+        : null;
     return CalendarWriteFlow(
       key: const ValueKey('grid-move'),
       fill: true,
@@ -5008,7 +5078,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 endUtc: pending.endUtc,
                 label: 'Moving here…',
               )
-            : null,
+            : commandGhost,
         locked: busy,
         zone: zone,
         clock: DateTime.now,
@@ -5082,6 +5152,208 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         busy: busy,
         compact: true,
       ),
+    );
+  }
+
+  // ── the Day command bar ──────────────────────────────────────────────
+
+  /// ⌘K's "Ask Day" row: the Day stop, and [text] handed to its bar, which
+  /// submits it a frame later ([_pendingCommandText]).
+  void _askDay(String text) {
+    _selectSection(RailSection.day);
+    setState(() => _pendingCommandText = text);
+  }
+
+  /// Drops the plan and anything in flight, as a bare field write for a
+  /// caller already inside a setState.
+  void _forgetCommand() {
+    _commandOutcome = null;
+    _commandText = '';
+    _commandBinds = const [];
+    _commandBusy = false;
+    _commandSerial += 1;
+    _pendingCommandText = null;
+  }
+
+  void _clearCommand() {
+    if (!mounted) return;
+    setState(_forgetCommand);
+  }
+
+  /// The people the bar matches names against: every room's people with a
+  /// mailbox ([knownPeopleOfRooms]), from the rooms [_body] last grouped.
+  List<KnownPerson> _commandPeople() => knownPeopleOfRooms(_rooms);
+
+  /// The meetings the bar matches against: the mirror's next two weeks.
+  /// Family arg computed here from the clock, the day providers' rule.
+  List<CalendarEvent> _commandEvents(CalendarDate today) =>
+      ref.watch(upcomingEventsProvider(today)).valueOrNull ??
+      const <CalendarEvent>[];
+
+  /// Enter in the bar ([choice] null), or a choice pressed on its card.
+  ///
+  /// A press adds its bind to [_commandBinds] and re-plans the outcome it
+  /// answered (`resume`), so the model is not asked twice and a name
+  /// settled by an earlier press stays settled. A fresh Enter starts over.
+  ///
+  /// The router never throws; the catch is a belt, because an exception here
+  /// would leave the bar spinning with no card to say why.
+  Future<void> _submitCommand(
+    String text, {
+    required CalendarZone zone,
+    CommandOption? choice,
+  }) async {
+    final serial = _commandSerial + 1;
+    final resume = choice == null ? null : _commandOutcome;
+    final binds = choice == null
+        ? const <CommandBind>[]
+        : [..._commandBinds, choice.bind];
+    setState(() {
+      _commandSerial = serial;
+      _commandBusy = true;
+      _commandText = text;
+      _commandBinds = binds;
+      _pendingCommandText = null;
+    });
+    CommandOutcome outcome;
+    final now = DateTime.now();
+    var people = const <KnownPerson>[];
+    var events = const <CalendarEvent>[];
+    try {
+      final today = zone.dateOf(now.toUtc());
+      people = _commandPeople();
+      events = ref.read(upcomingEventsProvider(today)).valueOrNull ??
+          const <CalendarEvent>[];
+      outcome = await ref.read(commandRouterProvider).submit(
+            text,
+            now: now,
+            zone: zone,
+            today: today,
+            people: people,
+            events: events,
+            binds: binds,
+            resume: resume,
+          );
+    } on Object catch (e) {
+      debugPrint('calendar command: submit failed: ${e.runtimeType}');
+      outcome = _commandFailed(text, now: now, zone: zone, people: people,
+          events: events);
+    }
+    if (!mounted || serial != _commandSerial) return;
+    setState(() {
+      _commandOutcome = outcome;
+      _commandBusy = false;
+    });
+  }
+
+  /// The card for a command whose reading threw: the one sentence, over the
+  /// pure parse (the router may be what threw). A parse that throws too
+  /// still leaves a card, over an empty one.
+  CommandOutcome _commandFailed(
+    String text, {
+    required DateTime now,
+    required CalendarZone zone,
+    required List<KnownPerson> people,
+    required List<CalendarEvent> events,
+  }) {
+    const plan = CannotDo('Something went wrong reading that.');
+    ParsedCommand parsed;
+    try {
+      parsed = parseCommand(text,
+          now: now, zone: zone, people: people, events: events);
+    } on Object {
+      final today = zone.dateOf(now.toUtc());
+      parsed = ParsedCommand(
+        text: text,
+        guess: CommandGuess.none,
+        when: WhenResolution(today: today, zone: zone),
+        eventWhen: WhenResolution(today: today, zone: zone),
+      );
+    }
+    return CommandOutcome(plan: plan, path: CommandPath.lexicon, parsed: parsed);
+  }
+
+  /// A slot pressed on a [SlotChoice]: its write's dry run, as the proposal
+  /// the card draws next.
+  Future<void> _pickCommandSlot(
+    SlotChoice choice,
+    FreeSlot slot, {
+    required CalendarZone zone,
+    required CalendarDate today,
+  }) async {
+    final serial = _commandSerial + 1;
+    final previous = _commandOutcome;
+    setState(() {
+      _commandSerial = serial;
+      _commandBusy = true;
+    });
+    CommandPlan plan;
+    try {
+      plan = await ref.read(commandPlannerProvider).propose(
+            choice.buildWrite(slot),
+            target: choice.targetEvent,
+            zone: zone,
+            today: today,
+          );
+    } on Object catch (e) {
+      // `propose` says its failures as plans; a throw is a belt, so the bar
+      // can never be left spinning.
+      debugPrint('calendar command: slot proposal failed: ${e.runtimeType}');
+      plan = const CannotDo('Something went wrong reading that.');
+    }
+    if (!mounted || serial != _commandSerial) return;
+    setState(() {
+      _commandBusy = false;
+      if (previous != null) {
+        _commandOutcome = CommandOutcome(
+            plan: plan, path: previous.path, parsed: previous.parsed);
+      }
+    });
+  }
+
+  /// The bar, bound to this screen's clock, zone, people and meetings.
+  Widget _commandBar(CalendarZone zone, CalendarDate today) {
+    final people = _commandPeople();
+    final events = _commandEvents(today);
+    return DayCommandBar(
+      key: const ValueKey('day-command-bar'),
+      preview: (text) => ref.read(commandRouterProvider).preview(
+            text,
+            now: DateTime.now(),
+            zone: zone,
+            people: people,
+            events: events,
+          ),
+      submit: (text) => _submitCommand(text, zone: zone),
+      zone: zone,
+      clock: DateTime.now,
+      initialText: _pendingCommandText,
+      onCleared: _clearCommand,
+      busy: _commandBusy,
+      planStands: _commandOutcome != null,
+    );
+  }
+
+  /// The card for the bar's last Enter, or null when there is none.
+  Widget? _commandCard(CalendarZone zone, CalendarDate today) {
+    final outcome = _commandOutcome;
+    if (outcome == null) return null;
+    return CommandPlanCard(
+      key: ValueKey('command-plan-$_commandSerial'),
+      plan: outcome.plan,
+      zone: zone,
+      today: today,
+      writer: ref.read(calendarWritesProvider),
+      onDone: (message, undo) {
+        _calendarWriteDone(message, undo);
+        _clearCommand();
+      },
+      onDismiss: _clearCommand,
+      onPickSlot: (choice, slot) =>
+          _pickCommandSlot(choice, slot, zone: zone, today: today),
+      onChoose: (option) =>
+          _submitCommand(_commandText, zone: zone, choice: option),
+      onOpenEvent: _openEvent,
     );
   }
 

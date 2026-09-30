@@ -40,6 +40,9 @@ import '../services/calendar/brief_planner.dart';
 import '../services/calendar/calendar_sync.dart';
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/command/command_lexicon.dart';
+import '../services/calendar/command/command_planner.dart';
+import '../services/calendar/command/command_router.dart';
 import '../services/calendar/meeting_brief_handler.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
@@ -1004,6 +1007,33 @@ final calendarWritesProvider = Provider<CalendarWriter>((ref) => CalendarWrites(
       ref.watch(messageStoreProvider),
       activityLog: ref.watch(activityLogProvider),
       onChanged: () => ref.read(calendarRevisionProvider.notifier).state++,
+    ));
+
+/// The Day command bar's planner (Phase 8): the mirror to read, the backend
+/// for `find_meeting_times` only, and the same [calendarWritesProvider] every
+/// other calendar write goes through, so a command's dry run is the Day
+/// stop's own.
+final commandPlannerProvider = Provider<CommandPlanner>((ref) {
+  final store = ref.watch(messageStoreProvider);
+  return CommandPlanner(
+    calendar: ref.watch(calendarStoreProvider),
+    backend: ref.watch(calendarBackendProvider),
+    writer: ref.watch(calendarWritesProvider),
+    mailbox: () => CalendarSync.readMailboxSettings(store),
+  );
+});
+
+/// The Day command bar's router. Typed as the class so a screen test can
+/// override it with one built over fakes.
+///
+/// The intent client is resolved at Enter, never held: a Settings change to
+/// the generative role reaches the next command without rebuilding this.
+final commandRouterProvider = Provider<CommandRouter>((ref) => CommandRouter(
+      classifiers: const [LexiconClassifier()],
+      planner: ref.watch(commandPlannerProvider),
+      intentClient: () => ref.read(stageLlmClientProvider('calendar_intent')),
+      people: ref.watch(peopleBackendProvider),
+      activityLog: ref.watch(activityLogProvider),
     ));
 
 /// What the Day stop and the Today section show about the calendar as a

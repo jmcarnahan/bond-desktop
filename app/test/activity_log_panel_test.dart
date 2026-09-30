@@ -787,6 +787,25 @@ void main() {
       );
     });
 
+    test('a calendar command says what was asked, who read it and what came '
+        'back, in enum words', () {
+      String command(String action, String path, String outcome) =>
+          ActivityLogPanel.describe(_event(
+            kind: 'calendar_command',
+            detail: {'action': action, 'path': path, 'outcome': outcome},
+          ));
+      expect(command('move', 'lexicon', 'proposal'),
+          'Calendar command — Move · lexicon · proposal');
+      expect(command('ask_agenda', 'lexicon', 'answer'),
+          'Calendar command — Agenda · lexicon · answer');
+      expect(command('create', 'generative', 'slots'),
+          'Calendar command — Create · generative · slots');
+      expect(command('unknown', 'generative', 'cannot'),
+          'Calendar command — Not understood · generative · cannot');
+      expect(ActivityLogPanel.kindLabel('calendar_command'),
+          'Calendar command');
+    });
+
     test('a calendar write says what it did and how many it emailed', () {
       String write(String action,
               {String status = 'ok',

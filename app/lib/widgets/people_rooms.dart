@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart' show immutable;
 
 import '../models/message_models.dart';
 import '../providers/conversations_provider.dart' show ThreadTarget;
+import '../services/calendar/command/command_types.dart'
+    show KnownPerson, knownPeopleFrom;
 import 'app_rail.dart' show isNeedsYou;
 
 /// The signed-in account, as much of it as the grouping needs.
@@ -110,6 +112,12 @@ class PersonRoom {
   /// numbers are taken over, offered so a caller can say so.
   int get liveCount => threads.where(isLiveThread).length;
 }
+
+/// The Day command bar's people: every room's people with a mailbox, one per
+/// address ([knownPeopleFrom], which lives in `services/` and so cannot see
+/// this class).
+List<KnownPerson> knownPeopleOfRooms(List<PersonRoom> rooms) =>
+    knownPeopleFrom([for (final r in rooms) (key: r.key, people: r.people)]);
 
 /// What a participant is called: their name when they have one, their address
 /// when they do not.

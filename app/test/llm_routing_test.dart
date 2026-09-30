@@ -516,6 +516,9 @@ void main() {
       // stays on the generative model whatever Cloud drafts says (D9).
       expect(container.read(stageLlmClientProvider('meeting_brief')).baseUrl,
           generativeUrl);
+      // So is a calendar command: the owner's own words, read for them.
+      expect(container.read(stageLlmClientProvider('calendar_intent')).baseUrl,
+          generativeUrl);
     });
 
     test('pointing a stage elsewhere rebuilds no worker', () async {
