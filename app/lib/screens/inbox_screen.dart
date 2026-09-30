@@ -47,6 +47,7 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
+import '../services/calendar/calendar_writes.dart' show CalendarWrite;
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
@@ -72,8 +73,10 @@ import '../widgets/composer.dart';
 import '../widgets/context_file_panel.dart';
 import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
+import '../widgets/calendar_write_flow.dart';
 import '../widgets/day_pane.dart';
 import '../widgets/drafts_pane.dart';
+import '../widgets/event_actions.dart';
 import '../widgets/event_panel.dart';
 import '../widgets/files_pane.dart';
 import '../widgets/find_field.dart';
@@ -4761,7 +4764,70 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenLink: (url) => unawaited(_launchExternal(url)),
       onOpenSettings: _openSettings,
       onOpenEvent: _openEvent,
+      inviteActions: (entry) => CalendarWriteFlow(
+        key: ValueKey('invite-write-${entry.event.id}'),
+        writer: ref.read(calendarWritesProvider),
+        onDone: _calendarWriteDone,
+        builder: (context, start, busy) => EventActions(
+          key: ValueKey(entry.event.id),
+          target: entry.event,
+          shown: entry.event,
+          // A row folded from a series answers the series, through its
+          // master's id; a single invite answers itself.
+          respondId: entry.isSeries && entry.event.seriesMasterId.isNotEmpty
+              ? entry.event.seriesMasterId
+              : null,
+          zone: zone,
+          clock: DateTime.now,
+          today: today,
+          start: start,
+          busy: busy,
+          compact: true,
+        ),
+      ),
     );
+  }
+
+  /// A meeting card's Yes / Maybe / No. [target] is the id the card looked
+  /// up — the master, for a recurring invite — so an answer there answers
+  /// the series, and the summary says so.
+  Widget? _cardActions(CalendarEvent target, CalendarEvent shown) {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) return null;
+    final now = DateTime.now();
+    return CalendarWriteFlow(
+      key: ValueKey('card-write-${target.id}'),
+      writer: ref.read(calendarWritesProvider),
+      onDone: _calendarWriteDone,
+      builder: (context, start, busy) => EventActions(
+        key: ValueKey(shown.id),
+        target: target,
+        shown: shown,
+        zone: zone,
+        clock: DateTime.now,
+        today: zone.dateOf(now.toUtc()),
+        start: start,
+        busy: busy,
+        compact: true,
+      ),
+    );
+  }
+
+  /// Every calendar write says what it did through the one toast, and an
+  /// undoable write (a private change that emailed nobody) offers its Undo
+  /// there and on `z`. `cleared: 0`: a calendar write takes no row off the
+  /// pile.
+  void _calendarWriteDone(String message, CalendarWrite? undo) => _toast(
+        message,
+        onUndo: undo == null ? null : () => unawaited(_undoCalendarWrite(undo)),
+        cleared: 0,
+      );
+
+  Future<void> _undoCalendarWrite(CalendarWrite undo) async {
+    final outcome =
+        await ref.read(calendarWritesProvider).commit(undo, isUndo: true);
+    if (!mounted) return;
+    _toast(outcome.ok ? 'Undone.' : outcome.message);
   }
 
   /// Every suggestion still waiting, and everything already sent.
@@ -5632,6 +5698,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               message: m,
               onOpenEvent: (id) => _openEvent(id, push: inSidePanel),
               onOpenLink: (url) => unawaited(_launchExternal(url)),
+              actionsFor: (target, shown) => _cardActions(target, shown),
             )
           : null,
       // The same path `e` takes, named on this panel's own thread: one dismiss
@@ -5906,13 +5973,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         const <EventLink>[];
 
     Overlaps? overlaps;
-    if (found && zoneRead != null) {
-      final shown = displayOccurrence(
-        lookup.event!,
-        lookup.occurrences,
-        now.toUtc(),
-        zone,
-      );
+    // The occurrence the panel shows: a series master's next meeting. Moves
+    // and proposals act on it; answers and cancels go to the master.
+    final shown = found
+        ? displayOccurrence(
+            lookup.event!,
+            lookup.occurrences,
+            now.toUtc(),
+            zone,
+          )
+        : null;
+    if (shown != null && zoneRead != null) {
       final start = shown.startUtc;
       if (shown.isTimed && !shown.isCancelled && start != null) {
         final events =
@@ -5953,6 +6024,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             _openThreadBeside(source, key, push: true),
         onOpenStoryline: _selectStoryline,
         onOpenSettings: _openSettings,
+        actions: shown == null || zoneRead == null
+            ? null
+            : CalendarWriteFlow(
+                key: ValueKey('event-write-${side.eventId}'),
+                writer: ref.read(calendarWritesProvider),
+                onDone: _calendarWriteDone,
+                builder: (context, start, busy) => EventActions(
+                  // Keyed by the occurrence on display, so an open field
+                  // typed against one occurrence never stands over the next.
+                  key: ValueKey(shown.id),
+                  target: lookup!.event!,
+                  shown: shown,
+                  zone: zone,
+                  clock: DateTime.now,
+                  today: today,
+                  start: start,
+                  busy: busy,
+                ),
+              ),
         // Unreachable is a kept value, not an error, so it stands until the
         // calendar next changes unless the reader asks again.
         onRetry: () {

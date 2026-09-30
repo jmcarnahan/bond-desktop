@@ -168,7 +168,7 @@ innermost of a stack:
 | `ContextPanel` | which directories a room reads when a reply is drafted | the room header's **Context** on a thread and on a storyline |
 | `ContextFilePanel` | one file out of one of those directories — its words, the passage a citation named, its `AI` summary, and **Consult for the reply** | a provenance chip under the composer's caption, a `Files ›` row on the Context panel, a tile in the search's **In your directories** list |
 | `CheatSheetPanel` | the keyboard shortcuts | `?` |
-| `EventPanel` | one calendar event — when, where, who organised it, your answer, Join and **Open in Outlook**, the attendees with their answers and a tally, the overlap line, the conversations that carried the invite (and the Teams meeting chat), and the invite's own text as plain words | a Day agenda, all-day or invite row; a Today-section meeting row; **Open event** on an invite card in a thread (pushed when the thread is the one beside); a person room's next / last meeting line |
+| `EventPanel` | one calendar event — when, where, who organised it, your answer, Join and **Open in Outlook**, the attendees with their answers and a tally, the overlap line, the conversations that carried the invite (and the Teams meeting chat), the invite's own text as plain words, and the calendar writes the owner's role allows (answer, propose, move, cancel, delete — `docs/pipeline/14-calendar.md`, Writes) | a Day agenda, all-day or invite row; a Today-section meeting row; **Open event** on an invite card in a thread (pushed when the thread is the one beside); a person room's next / last meeting line |
 
 The side is a STACK (`_sideStack`; `_side` is the innermost panel). A panel
 opened from INSIDE the one beside — a file, a Why or a history asked for from

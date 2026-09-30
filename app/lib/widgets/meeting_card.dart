@@ -64,8 +64,8 @@ class MeetingCard extends StatelessWidget {
   final void Function(String eventId) onOpenEvent;
   final void Function(String url) onOpenLink;
 
-  /// Accept / Maybe / Decline — a later phase's. Drawn under the tally only
-  /// when given.
+  /// Yes / Maybe / No for the meeting. Drawn under the tally only when
+  /// given, and never on a cancellation card, which is one line.
   final Widget? actions;
 
   static final TextStyle _muted =

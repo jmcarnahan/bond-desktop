@@ -711,6 +711,49 @@ void main() {
       );
     });
 
+    test('a calendar write says what it did and how many it emailed', () {
+      String write(String action,
+              {String status = 'ok',
+              String outcome = 'ok',
+              int notified = 0,
+              bool undo = false}) =>
+          ActivityLogPanel.describe(_event(
+            kind: 'calendar_write',
+            status: status,
+            detail: {
+              'action': action,
+              'outcome': outcome,
+              'notified': notified,
+              if (undo) 'undo': true,
+            },
+          ));
+      expect(write('accept', notified: 1),
+          'Calendar — Accepted a meeting · emailed 1');
+      expect(write('tentative', notified: 1),
+          'Calendar — Said maybe to a meeting · emailed 1');
+      expect(write('decline', notified: 1),
+          'Calendar — Declined a meeting · emailed 1');
+      expect(write('propose', notified: 1),
+          'Calendar — Proposed a new time · emailed 1');
+      expect(write('move'), 'Calendar — Moved an event');
+      expect(write('cancel', notified: 4),
+          'Calendar — Cancelled a meeting · emailed 4');
+      expect(write('delete'), 'Calendar — Deleted an event');
+      expect(write('create'), 'Calendar — Created an event');
+      expect(write('move', undo: true), 'Calendar — Undid a change');
+      expect(write('move', status: 'failed', outcome: 'changed'),
+          "Calendar — couldn't move an event (changed)");
+      // Every answer fails as an answer, whichever it was going to be.
+      expect(write('accept', status: 'failed', outcome: 'transient'),
+          "Calendar — couldn't answer a meeting (transient)");
+      expect(write('tentative', status: 'failed', outcome: 'refused'),
+          "Calendar — couldn't answer a meeting (refused)");
+      expect(write('decline', status: 'failed', outcome: 'transient'),
+          "Calendar — couldn't answer a meeting (transient)");
+      expect(write('create', status: 'failed', outcome: 'scope_missing'),
+          "Calendar — couldn't create an event (scope_missing)");
+    });
+
     test('one changed file reads as one file', () {
       expect(
         ActivityLogPanel.describe(_event(

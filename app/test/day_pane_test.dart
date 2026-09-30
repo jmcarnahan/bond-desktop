@@ -63,6 +63,7 @@ void main() {
     void Function(String)? onOpenLink,
     VoidCallback? onOpenSettings,
     void Function(String)? onOpenEvent,
+    Widget Function(InviteEntry entry)? inviteActions,
     DateTime? at,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -85,6 +86,7 @@ void main() {
           onOpenLink: onOpenLink ?? (_) {},
           onOpenSettings: onOpenSettings ?? () {},
           onOpenEvent: onOpenEvent,
+          inviteActions: inviteActions,
         ),
       ),
     ));
@@ -394,6 +396,35 @@ void main() {
       await tester.tap(find.text('Budget review'));
       await tester.pump();
       expect(opened, ['inv-1']);
+    });
+
+    testWidgets('each invite row carries its actions, and a press on one is '
+        'not an open', (tester) async {
+      final opened = <String>[];
+      final pressed = <String>[];
+      await pumpPane(
+        tester,
+        mode: DayPaneMode.invites,
+        onOpenEvent: opened.add,
+        inviteActions: (entry) => TextButton(
+          key: ValueKey('yes-${entry.event.id}'),
+          onPressed: () => pressed.add(entry.event.id),
+          child: const Text('Yes'),
+        ),
+        invites: [
+          InviteEntry(timed('inv-1', 'Budget review',
+              DateTime.utc(2026, 10, 1, 17),
+              responseStatus: 'none')),
+          InviteEntry(timed('inv-2', 'Fabrikam sync',
+              DateTime.utc(2026, 10, 2, 17),
+              responseStatus: 'none')),
+        ],
+      );
+      expect(find.text('Yes'), findsNWidgets(2));
+      await tester.tap(find.byKey(const ValueKey('yes-inv-2')));
+      await tester.pump();
+      expect(pressed, ['inv-2']);
+      expect(opened, isEmpty);
     });
 
     testWidgets('without a handler the rows stay inert', (tester) async {

@@ -145,6 +145,54 @@ class CalendarStore {
     );
   }
 
+  /// Sets the owner's own RSVP on [id] and, when [id] is a series master, on
+  /// every occurrence the mirror holds of it: answering a series answers each
+  /// meeting in it, and the Day stop and the invites list read the
+  /// occurrences, not the master. Returns the ids it touched, which the write
+  /// guard notes so a page read before the answer cannot put "none" back.
+  Future<List<String>> setResponseStatus(String id, String status) {
+    return db.transaction(() async {
+      final ids = await _idsWithOccurrences(id);
+      if (ids.isEmpty) return ids;
+      await db.customUpdate(
+        'UPDATE calendar_events SET response_status = ? '
+        'WHERE id = ? OR series_master_id = ?',
+        variables: _args([status, id, id]),
+      );
+      return ids;
+    });
+  }
+
+  /// Deletes [id] and, for a series master, every occurrence stored under
+  /// it: a cancelled or deleted series leaves nothing on the calendar, and
+  /// the next sync would take the occurrences anyway — this only makes the
+  /// Day stop agree at once. Returns the ids deleted.
+  Future<List<String>> deleteWithOccurrences(String id) {
+    return db.transaction(() async {
+      final ids = await _idsWithOccurrences(id);
+      if (ids.isEmpty) return ids;
+      await db.customUpdate(
+        'DELETE FROM calendar_events WHERE id = ? OR series_master_id = ?',
+        variables: _args([id, id]),
+      );
+      return ids;
+    });
+  }
+
+  /// [id] and the ids stored under it as a series master, as they stand.
+  /// An empty id names nothing: an unset `series_master_id` is `''`, and
+  /// matching it would take every single event with it.
+  Future<List<String>> _idsWithOccurrences(String id) async {
+    if (id.isEmpty) return const [];
+    final rows = await db
+        .customSelect(
+          'SELECT id FROM calendar_events WHERE id = ? OR series_master_id = ?',
+          variables: _args([id, id]),
+        )
+        .get();
+    return [for (final r in rows) r.data['id'] as String];
+  }
+
   // ── reads ────────────────────────────────────────────────────────────
 
   Future<CalendarEvent?> event(String id) async {

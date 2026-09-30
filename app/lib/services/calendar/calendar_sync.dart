@@ -323,6 +323,22 @@ class CalendarSync {
     _writes.add((eventId, now));
   }
 
+  /// Stores an event this app just wrote, as the server answered it: notes the
+  /// write (the guard) and tags the row with the CURRENT run, so neither a page
+  /// read before the write nor the next sweep undoes it (gotcha 36).
+  ///
+  /// The tag matters as much as the note: the note lapses after
+  /// [writeGuardSpan], and a row tagged with anything but the run the next
+  /// completed read sweeps under would be deleted by that sweep as something
+  /// the calendar no longer holds. With no run stored yet (nothing has synced)
+  /// the row carries an empty tag, and the first run's own read re-marks it.
+  Future<void> storeWritten(CalendarEvent event) async {
+    noteWrite(event.id);
+    final run =
+        _RunState.tryParse(await _store.getPref(calendarRunKey))?.run ?? '';
+    await _calendar.upsertEvents([event], syncRun: run);
+  }
+
   void _prune(DateTime now) {
     final floor = now.subtract(writeGuardSpan);
     _writes.removeWhere((w) => w.$2.isBefore(floor));

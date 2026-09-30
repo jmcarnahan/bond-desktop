@@ -755,6 +755,29 @@ void main() {
       expect((await calendar.event('mine'))!.changeKey, 'after-write');
     });
 
+    test('a stored write carries the current run and survives its sweep',
+        () async {
+      // A run in flight: read, not yet complete.
+      backend.steps
+        ..add(page(ids: ['other'], cursor: 'c1', complete: false))
+        ..add(page(cursor: 'c1', complete: false));
+      final sync = build();
+      await sync.syncNow();
+      final run = await storedRun();
+
+      await sync.storeWritten(event('mine', changeKey: 'written'));
+      expect(await syncRunOf('mine'), run);
+      expect((await calendar.event('mine'))!.changeKey, 'written');
+
+      // Past the guard's span, so only the tag can keep it from the sweep.
+      clock = clock.add(const Duration(minutes: 11));
+      backend.steps.add(page(cursor: 'd1'));
+      final second = await sync.syncNow();
+      expect(second.complete, isTrue);
+      expect(second.swept, 0);
+      expect(await storedIds(), ['mine', 'other']);
+    });
+
     test('a write older than the tick does not block the page', () async {
       await calendar.upsertEvents([event('mine', changeKey: 'after-write')],
           syncRun: 'old-run');

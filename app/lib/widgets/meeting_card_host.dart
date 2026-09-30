@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/calendar_models.dart' show CalendarEvent;
 import '../models/message_models.dart' show Message;
 import '../providers/app_providers.dart' show calendarZoneProvider;
 import '../providers/day_providers.dart' show dayEventsProvider;
@@ -26,11 +27,19 @@ class MeetingCardHost extends ConsumerWidget {
     required this.message,
     required this.onOpenEvent,
     required this.onOpenLink,
+    this.actionsFor,
   });
 
   final Message message;
   final void Function(String eventId) onOpenEvent;
   final void Function(String url) onOpenLink;
+
+  /// The card's RSVP row for a found meeting: [target] is the LOOKED-UP
+  /// event (a series master answers the whole series), [shown] the
+  /// occurrence on display. Built by the host screen, which holds the
+  /// writer; null draws none, and a cancellation never asks.
+  final Widget? Function(CalendarEvent target, CalendarEvent shown)?
+      actionsFor;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,10 +54,12 @@ class MeetingCardHost extends ConsumerWidget {
     final cancellation = isCancellationCard(message);
 
     Overlaps? overlaps;
+    Widget? actions;
     final event = lookup.event;
     if (lookup.isFound && event != null && !cancellation) {
       final shown =
           displayOccurrence(event, lookup.occurrences, now.toUtc(), zone);
+      actions = actionsFor?.call(event, shown);
       final start = shown.startUtc;
       if (shown.isTimed && !shown.isCancelled && start != null) {
         final events =
@@ -68,6 +79,7 @@ class MeetingCardHost extends ConsumerWidget {
       overlaps: overlaps,
       onOpenEvent: onOpenEvent,
       onOpenLink: onOpenLink,
+      actions: actions,
     );
   }
 }

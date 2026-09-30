@@ -156,6 +156,52 @@ void main() {
       expect(await calendar.event('mine'), isNotNull);
       expect(await calendar.event('theirs'), isNull);
     });
+
+    CalendarEvent occurrence(String id, String master) => CalendarEvent(
+          id: id,
+          seriesMasterId: master,
+          eventType: 'occurrence',
+          startUtc: inHours(24),
+          endUtc: inHours(25),
+        );
+
+    test('an answer to a master answers its occurrences', () async {
+      await calendar.upsertEvents([
+        occurrence('occ-1', 'master'),
+        occurrence('occ-2', 'master'),
+        timed('single', start: inHours(3)),
+        timed('other', start: inHours(4)),
+      ], syncRun: 'run-a');
+
+      final series = await calendar.setResponseStatus('master', 'accepted');
+      expect(series..sort(), ['occ-1', 'occ-2']);
+      final one = await calendar.setResponseStatus('single', 'declined');
+      expect(one, ['single']);
+      expect(await calendar.setResponseStatus('never-seen', 'declined'),
+          isEmpty);
+      expect(await calendar.setResponseStatus('', 'declined'), isEmpty);
+
+      expect((await calendar.event('occ-1'))!.responseStatus, 'accepted');
+      expect((await calendar.event('occ-2'))!.responseStatus, 'accepted');
+      expect((await calendar.event('single'))!.responseStatus, 'declined');
+      expect((await calendar.event('other'))!.responseStatus, 'none');
+    });
+
+    test('a delete takes a master\'s occurrences with it', () async {
+      await calendar.upsertEvents([
+        occurrence('occ-1', 'master'),
+        occurrence('occ-2', 'master'),
+        timed('single', start: inHours(3)),
+      ], syncRun: 'run-a');
+
+      // An empty id names nothing — not every row whose master is unset.
+      expect(await calendar.deleteWithOccurrences(''), isEmpty);
+      expect(await count(), 3);
+      final gone = await calendar.deleteWithOccurrences('master');
+      expect(gone..sort(), ['occ-1', 'occ-2']);
+      expect(await calendar.deleteWithOccurrences('single'), ['single']);
+      expect(await count(), 0);
+    });
   });
 
   group('eventsBetween', () {

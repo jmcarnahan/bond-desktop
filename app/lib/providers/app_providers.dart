@@ -36,6 +36,7 @@ import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/backend/unavailable_calendar_backend.dart';
 import '../services/calendar/calendar_sync.dart';
+import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
@@ -985,10 +986,22 @@ final calendarSyncProvider = Provider<CalendarSync>((ref) {
   );
 });
 
-/// Bumped after every sync that changed rows (and, from Phase 5, every
-/// write). Readers of the mirror watch it, which is how a Day stop left open
-/// follows the calendar without polling the table.
+/// Bumped after every sync that changed rows and after every calendar write.
+/// Readers of the mirror watch it, which is how a Day stop left open follows
+/// the calendar without polling the table.
 final calendarRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// Calendar writes (Phase 5). Typed as the [CalendarWriter] seam so a screen
+/// test overrides it with a fake; the real one bumps the revision after every
+/// write so readers follow without waiting for a sync.
+final calendarWritesProvider = Provider<CalendarWriter>((ref) => CalendarWrites(
+      ref.watch(calendarBackendProvider),
+      ref.watch(calendarStoreProvider),
+      ref.watch(calendarSyncProvider),
+      ref.watch(messageStoreProvider),
+      activityLog: ref.watch(activityLogProvider),
+      onChanged: () => ref.read(calendarRevisionProvider.notifier).state++,
+    ));
 
 /// What the Day stop and the Today section show about the calendar as a
 /// whole; written by the inbox after each sync. SDK mode is known without

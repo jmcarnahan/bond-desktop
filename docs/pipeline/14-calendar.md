@@ -198,8 +198,8 @@ when rows changed or the tick wrote the mailbox-settings cache
 
 ### The write guard
 
-A write this app makes (Phase 5) calls `noteWrite(eventId)` and stores the
-server's answer itself. A page requested before the write landed would put the
+A write this app makes calls `noteWrite(eventId)` and stores the server's
+answer itself (`storeWritten`, see Writes). A page requested before the write landed would put the
 old version back, so the sync stamps the instant **immediately before each
 `syncPage` request**, and ids noted at or after that stamp are not upserted
 from that page; a write noted before the request is already in the answer and
@@ -233,6 +233,13 @@ detail `{removed, swept, pages, run: new|delta}`. The one error row is
 TRANSITION into that state, not every tick. `failed`, `unavailable` and SDK
 mode write no row. Counts and enum words only — never a subject, a name or an
 address.
+
+Kind `calendar_write`, labelled **Calendar**: one row per write the owner
+made, `detail: {action, outcome, notified}` plus `undo: true` on an Undo's own
+write — `Calendar — Accepted a meeting · emailed 1`, `Calendar — couldn't move
+an event (changed)`; a failed accept, maybe or decline all read `couldn't
+answer a meeting`, since it gave none of them. The same rule: no subject, no
+address, no event id.
 
 ## The two prefs and a wipe
 
@@ -358,8 +365,9 @@ its series master, through `messagesForEvent` — has a stored decision with
 urgency `high` or `urgent`, or importance `high`. Pinned entries come first,
 then soonest first. A decision read that throws costs that invite its pin,
 never the list. Overlaps for all invites come from ONE `eventsBetween` over
-the span they cover, capped at 121 days. The list is read-only this phase;
-RSVP arrives with Phase 5.
+the span they cover, capped at 121 days. Each row carries Yes / Maybe / No
+(see Writes); a row folded from a series answers the series, through its
+master's id.
 
 ### The list column and the Today section
 
@@ -437,7 +445,8 @@ so ✕ comes back to it.
 carries a card under its body (`MeetingCardHost` → `MeetingCard`). No id, no
 card — nothing is matched by subject. Responses never get one; the gates have
 already kept them out of the list. A request card shows the when line, the
-overlap line, the tally, Join and **Open event**; a cancellation, or a request
+overlap line, the tally, Yes / Maybe / No (see Writes), Join and **Open
+event**; a cancellation, or a request
 whose event has since been cancelled, is one line — `Cancelled: Design review
 · Thursday, Oct 2 · 10:00–10:30 AM`. An event the calendar no longer has says
 so in one line. A message with a request card never starts folded in the transcript; a
@@ -448,9 +457,108 @@ ago`, from `nextMeetingWith` / `lastMetWith` over every address in the room
 (`personMeetingsProvider`, keyed by the addresses and the host's quarter-hour
 "as of" instant). "Days ago" counts display-zone dates, not 24-hour spans.
 
+## Writes
+
+Answering, proposing, moving, cancelling, deleting and creating, through
+`CalendarWrites` (`app/lib/services/calendar/calendar_writes.dart`, behind the
+`CalendarWriter` seam, `calendarWritesProvider`). The rules a UI needs — which
+writes an event offers, how a typed time becomes one, every sentence — are
+pure, in `write_rules.dart`.
+
+**Autonomy by risk (D5).** Every write runs as a dry run first, and the dry
+run's `notifies` — the addresses the real write would email — decides what
+happens next: a write that emails anybody, and every answer, cancel or delete,
+waits on an inline confirm (`WriteConfirmStrip`: the summary, "This emails:
+…", Send / Cancel, Enter and Esc); anything else goes at once and offers an
+**Undo** through the app's one toast (and `z`). Every answer confirms by its
+kind, not by the dry run's list: each one is sent and emails the organiser,
+whatever the server happened to name. An Undo exists only for a write whose
+DRY RUN emailed nobody — a commit made without a preview never offers one —
+because an answer, once sent, can be followed by another but not taken back.
+One send per confirm: the flow moves to committing before its first await, so
+a click and an Enter in the same frame send once.
+
+| Write | Who is emailed | Confirm | Undo |
+|---|---|---|---|
+| Accept / Maybe / Decline (+ a note, + a proposed time) | the organiser | always | none |
+| Move — organiser with guests | the attendees | yes | none |
+| Move — your own event | nobody | no, acts at once | the move back, with the new change key read at undo time |
+| Cancel meeting (+ a note to everyone) | the attendees | always | none |
+| Delete | an organiser's delete sends cancellations | always | none |
+| Create (service only so far) | whoever it invites | when it invites anyone | delete it, when it invited nobody |
+
+A create carries a transaction id (32 hex characters from `Random.secure`) made
+once per proposal; a retry reuses the same `CreateEvent`, so a create whose
+answer was lost cannot land twice.
+
+**The local effect.** A real write makes the mirror agree at once, then forces
+a sync (`syncNow(force: true)`, unawaited) for what the server did beyond the
+one row it answered:
+
+- a move or a create that answered a row → `CalendarSync.storeWritten`: the
+  write guard noted and the row tagged with the CURRENT run, so neither a page
+  read before the write nor the next sweep undoes it (gotcha 36); a create
+  with no placeable row only notes its id and waits for the sync;
+- an answer → `CalendarStore.setResponseStatus` on the id and, for a master,
+  every mirrored occurrence, each id noted;
+- a cancel or a delete → `CalendarStore.deleteWithOccurrences`, each id noted.
+
+Then `calendarRevisionProvider` is bumped, so the Day stop, the panel and the
+cards follow without waiting.
+
+**After it goes through**, the side effects — the local apply, the revision
+bump, the forced sync, the activity row, the Undo — each run on their own
+guard OUTSIDE the failure mapping: a throw there is logged by type and the
+write is still a success, because the server has it and a Try again would
+send it twice. The toast says a series-wide answer, cancel or delete as
+"Accepted every meeting in …", as the confirm did. The buttons are rebuilt
+fresh, so a "Move to…" field typed for the old time is gone, and the keyboard
+stays in the panel, so `z` reaches the Undo without a click.
+
+**When it fails**, the sentence stands under the buttons that caused it,
+never in a toast:
+
+| Failure | Sentence | Also |
+|---|---|---|
+| `event_changed` | "This event changed in Outlook — check it and try again." | re-read and stored |
+| `not_organizer` | "Only the organiser can change this meeting." | |
+| scope missing | "Calendar write permission missing — reconnect in Settings." | |
+| `not_found` | "This event no longer exists." | dropped from the mirror |
+| any other refusal | the first sentence of the server's reason | |
+| reconsent / signed out | "Reconnect Microsoft in Settings, then try again. Nothing was changed." | |
+| transient, dry run | "Couldn't reach the calendar. Nothing was changed." | **Try again** re-runs the same write |
+| transient, real write | "Couldn't confirm the calendar got this — check it before trying again." | it may have landed: a forced sync; **Try again** only for a create (its transaction id) and a move (its `if_match` turns a landed first try into `event_changed`), never for an answer, a cancel or a delete, which would email everyone twice |
+
+**Where they appear, by role** (`eventRoleOf`). An attendee gets Yes / Maybe /
+No (the current answer shown chosen), **Add note** and **Propose new time**; an
+organiser with guests gets **Move to…** and **Cancel meeting** with an
+optional note; an event of the owner's own — organised by them with no
+guests, where a room or the organiser listed on their own invite is not a
+guest — gets **Move to…** and **Delete**. Whose event it is comes first
+(`isOrganizer`, or the response `organizer`): an attendee's copy of an invite
+whose organiser hid the list names nobody and is still answered, never moved
+or deleted. An attendee's cancelled meeting gets **Remove from
+calendar**. Attendees never see Move (only the organiser may move a meeting,
+gotcha 6); Propose is hidden when the organiser set
+`allowNewTimeProposals: false`, and on all-day events. For a series, an
+answer or a cancel goes to the MASTER and so to every meeting in it — the
+summary says "every meeting in …" — while a move or a proposal acts on the
+occurrence on display: moving a whole series is recurrence editing, which is
+not done here. The event panel shows the full set; the meeting card and each
+Invites row show Yes / Maybe / No only.
+
+**No pickers.** The new time is typed — "Thu 3pm", "tomorrow 10–10:30" — and
+read by the date resolver (booking mode), with the absolute result shown under
+the field before anything is sent, against the clock at that moment (read
+again at the send, so a panel left open cannot send a time that has since
+passed); Escape in the field closes it, not the panel. What the text leaves
+out is kept from the meeting, never invented: a day alone keeps the wall time, a time alone keeps
+the day, no length keeps the length. A part of the day with no time ("tomorrow
+morning"), a week, a past time and the time it already has are refused in a
+sentence. An all-day event moves by whole days, keeps its span, and sends the
+mailbox's zone (`allDayZone`, from the cached settings, else a live read).
+
 ## Later phases
 
-- Writes (`respond`, `update`, `cancel`, `delete`, `create`) and their
-  `noteWrite` calls.
 - Pre-meeting briefs into `event_briefs`.
 - The command bar's calendar verbs.

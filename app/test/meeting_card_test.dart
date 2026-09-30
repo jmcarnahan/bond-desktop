@@ -55,6 +55,7 @@ void main() {
     Overlaps? overlaps,
     void Function(String)? onOpenEvent,
     void Function(String)? onOpenLink,
+    Widget? actions,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -71,6 +72,7 @@ void main() {
             overlaps: overlaps,
             onOpenEvent: onOpenEvent ?? (_) {},
             onOpenLink: onOpenLink ?? (_) {},
+            actions: actions,
           ),
         ),
       ),
@@ -167,6 +169,21 @@ void main() {
     await pumpCard(tester, EventLookup.found(meeting(isCancelled: true)));
     expect(find.byKey(MeetingCard.cancelledKey), findsOneWidget);
     expect(find.byKey(MeetingCard.openEventKey), findsNothing);
+  });
+
+  testWidgets('a request card draws its actions; a cancellation does not',
+      (tester) async {
+    const actions = Text('RSVP row', key: ValueKey('rsvp'));
+    await pumpCard(tester, EventLookup.found(meeting()), actions: actions);
+    expect(find.byKey(const ValueKey('rsvp')), findsOneWidget);
+
+    await pumpCard(tester, EventLookup.found(meeting()),
+        cancellation: true, actions: actions);
+    expect(find.byKey(const ValueKey('rsvp')), findsNothing);
+
+    await pumpCard(tester, EventLookup.found(meeting(isCancelled: true)),
+        actions: actions);
+    expect(find.byKey(const ValueKey('rsvp')), findsNothing);
   });
 
   testWidgets('gone says so, in the message kind\'s words', (tester) async {

@@ -6,24 +6,29 @@ import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
-    show Attendee, CalendarEvent;
+    show Attendee, CalendarEvent, WritePreview;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
+import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/event_actions.dart' show EventActions;
 import 'package:bond_inbox/widgets/event_panel.dart' show EventPanelBody;
 import 'package:bond_inbox/widgets/meeting_card.dart' show MeetingCard;
 import 'package:bond_inbox/widgets/person_meeting_line.dart'
     show PersonMeetingLine;
 import 'package:bond_inbox/widgets/side_panel.dart' show SidePanelHost;
+import 'package:bond_inbox/widgets/write_confirm_strip.dart'
+    show WriteConfirmStrip;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -82,6 +87,40 @@ class _RecordingCalendarSync extends CalendarSync {
   }
 }
 
+/// A calendar writer that answers every preview with [notifies] and every
+/// commit with success, recording what it was asked.
+class _RecordingWriter implements CalendarWriter {
+  _RecordingWriter({this.notifies = const []});
+
+  final List<String> notifies;
+  final List<CalendarWrite> previewed = [];
+  final List<({CalendarWrite write, bool isUndo})> committed = [];
+
+  @override
+  Future<PreviewResult> preview(CalendarWrite write) async {
+    previewed.add(write);
+    final p = WritePreview(method: 'PATCH', path: '/x', notifies: notifies);
+    return PreviewReady(p, needsConfirm: needsConfirm(write, p));
+  }
+
+  @override
+  Future<WriteOutcome> commit(
+    CalendarWrite write, {
+    WritePreview? preview,
+    bool isUndo = false,
+  }) async {
+    committed.add((write: write, isUndo: isUndo));
+    if (isUndo || write is! MoveEvent) return const WriteOutcome.ok();
+    // The move back to where it was, as the real writer offers it.
+    return WriteOutcome.ok(
+      eventId: write.eventId,
+      undo: MoveEvent.timed(write.eventId,
+          startUtc: DateTime.utc(2026, 1, 1, 17),
+          endUtc: DateTime.utc(2026, 1, 1, 18)),
+    );
+  }
+}
+
 const String _readGrant =
     'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read';
 
@@ -107,7 +146,10 @@ void main() {
     await tester.pump();
   }
 
-  Future<void> pumpScreen(WidgetTester tester) async {
+  Future<void> pumpScreen(
+    WidgetTester tester, {
+    List<Override> overrides = const [],
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     // Built inside the test body, not in setUp: a completer made outside the
@@ -140,6 +182,7 @@ void main() {
         calendarAvailabilityProvider
             .overrideWith((ref) => CalendarAvailability.available),
         calendarZoneProvider.overrideWith((ref) async => la),
+        ...overrides,
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -538,6 +581,243 @@ void main() {
       await tester.tap(next);
       await pumps(tester);
       expect(inSide(find.text('Fabrikam sync')), findsOneWidget);
+    });
+  });
+
+  group('calendar writes in the screen', () {
+    Finder inSide(Finder f) =>
+        find.descendant(of: find.byType(SidePanelHost), matching: f);
+
+    /// An event of the owner's own at noon today: Move and Delete, and a
+    /// move that emails nobody.
+    Future<void> seedOwnEvent() => CalendarStore(db).upsertEvents([
+          CalendarEvent(
+            id: 'own-1',
+            subject: 'Focus block',
+            isOrganizer: true,
+            startUtc: la
+                .localDateTime(la.dateOf(DateTime.now().toUtc()), 12, 0)
+                .toUtc(),
+            endUtc: la
+                .localDateTime(la.dateOf(DateTime.now().toUtc()), 12, 30)
+                .toUtc(),
+            responseStatus: 'organizer',
+            showAs: 'busy',
+          ),
+        ], syncRun: 'run-1');
+
+    Future<_RecordingWriter> openOwnEvent(WidgetTester tester) async {
+      await seedOwnEvent();
+      final writer = _RecordingWriter();
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.text('Focus block'));
+      await pumps(tester);
+      expect(find.byType(SidePanelHost), findsOneWidget);
+      return writer;
+    }
+
+    /// Moves the own event privately, Enter in the when field.
+    Future<void> movePrivately(WidgetTester tester) async {
+      await tester.tap(inSide(find.byKey(EventActions.moveKey)));
+      await pumps(tester);
+      await tester.enterText(
+          inSide(find.byKey(EventActions.whenFieldKey)), 'tomorrow 3pm');
+      await pumps(tester);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await pumps(tester);
+    }
+
+    testWidgets("the screen's letter keys stay out of the when field, and "
+        'Escape there closes the field, not the panel', (tester) async {
+      final writer = await openOwnEvent(tester);
+      await tester.tap(inSide(find.byKey(EventActions.moveKey)));
+      await pumps(tester);
+      final field = inSide(find.byKey(EventActions.whenFieldKey));
+      await tester.tap(field);
+      await pumps(tester);
+      // `e` dismisses a thread and `z` undoes on this screen; typed into
+      // the field they are letters and nothing else.
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyE);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.enterText(field, 'e z tuesday');
+      await pumps(tester);
+
+      expect(tester.widget<TextField>(field).controller!.text,
+          contains('e z tuesday'));
+      expect(find.byType(SidePanelHost), findsOneWidget);
+      expect(writer.committed, isEmpty);
+      expect(writer.committed.where((c) => c.isUndo), isEmpty);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await pumps(tester);
+      expect(inSide(find.byKey(EventActions.whenFieldKey)), findsNothing);
+      expect(find.byType(SidePanelHost), findsOneWidget,
+          reason: "Escape in the field is the field's, not the panel's");
+      expect(writer.committed, isEmpty);
+    });
+
+    testWidgets('after a private move, `z` outside a field takes it back',
+        (tester) async {
+      final writer = await openOwnEvent(tester);
+      await movePrivately(tester);
+      expect(writer.committed.single.isUndo, isFalse);
+
+      // No click first: the field that held the keyboard is gone, and the
+      // write flow keeps it inside the panel, under the screen's keys, and
+      // in no box.
+      expect(inSide(find.byKey(EventActions.whenFieldKey)), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await pumps(tester);
+
+      expect(writer.committed, hasLength(2));
+      expect(writer.committed.last.isUndo, isTrue);
+      expect(writer.committed.last.write, isA<MoveEvent>());
+    });
+
+    testWidgets("Escape on an RSVP's strip drops the strip and keeps the panel",
+        (tester) async {
+      final today = la.dateOf(DateTime.now().toUtc());
+      final start = la.localDateTime(today, 12, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'inv-1',
+          subject: 'Fabrikam roadmap',
+          organizerName: 'Dana Contoso',
+          organizerAddress: 'dana@contoso.com',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'notResponded',
+          responseRequested: true,
+          showAs: 'tentative',
+          attendees: const [
+            Attendee(name: 'Dana Contoso', address: 'dana@contoso.com'),
+            Attendee(name: 'Sam Fabrikam', address: 'sam@fabrikam.com'),
+          ],
+        ),
+      ], syncRun: 'run-1');
+      // A dry run that lists nobody: the answer still confirms.
+      final writer = _RecordingWriter();
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.text('Fabrikam roadmap'));
+      await pumps(tester);
+      expect(find.byType(SidePanelHost), findsOneWidget);
+
+      await tester.tap(inSide(find.byKey(EventActions.yesKey)));
+      await pumps(tester);
+      expect(inSide(find.byType(WriteConfirmStrip)), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await pumps(tester);
+      expect(find.byType(WriteConfirmStrip), findsNothing);
+      expect(find.byType(SidePanelHost), findsOneWidget);
+      expect(inSide(find.text('Fabrikam roadmap')), findsWidgets);
+      expect(writer.committed, isEmpty);
+    });
+
+    testWidgets('a private move acts at once, toasts, and Undo moves it back',
+        (tester) async {
+      final today = la.dateOf(DateTime.now().toUtc());
+      final start = la.localDateTime(today, 12, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'own-1',
+          subject: 'Focus block',
+          isOrganizer: true,
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'organizer',
+          showAs: 'busy',
+        ),
+      ], syncRun: 'run-1');
+      final writer = _RecordingWriter();
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.text('Focus block'));
+      await pumps(tester);
+
+      await tester.tap(inSide(find.byKey(EventActions.moveKey)));
+      await pumps(tester);
+      await tester.enterText(
+          inSide(find.byKey(EventActions.whenFieldKey)), 'tomorrow 3pm');
+      await pumps(tester);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await pumps(tester);
+
+      expect(find.byType(WriteConfirmStrip), findsNothing);
+      // The write went through, so the field typed for it is gone rather
+      // than standing ready to send the same move again.
+      expect(inSide(find.byKey(EventActions.whenFieldKey)), findsNothing);
+      final moved = writer.committed.single;
+      expect(moved.isUndo, isFalse);
+      final write = moved.write as MoveEvent;
+      expect(write.eventId, 'own-1');
+      expect(la.dateOf(write.startUtc!), today.addDays(1));
+      expect(la.toLocal(write.startUtc!).hour, 15);
+
+      await tester.pump(const Duration(milliseconds: 750));
+      expect(find.byType(SnackBar), findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byType(SnackBar),
+              matching: find.textContaining('Moved "Focus block"')),
+          findsOneWidget);
+      await tester.tap(find.text('Undo'));
+      await pumps(tester);
+
+      expect(writer.committed, hasLength(2));
+      expect(writer.committed.last.isUndo, isTrue);
+      expect(writer.committed.last.write, isA<MoveEvent>());
+    });
+
+    testWidgets('an invite answered from the Invites view waits on the strip',
+        (tester) async {
+      final start = DateTime.now().toUtc().add(const Duration(days: 3));
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'inv-1',
+          subject: 'Fabrikam roadmap',
+          organizerName: 'Dana Contoso',
+          organizerAddress: 'dana@contoso.com',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'notResponded',
+          responseRequested: true,
+          showAs: 'tentative',
+          attendees: const [
+            Attendee(name: 'Dana Contoso', address: 'dana@contoso.com'),
+            Attendee(name: 'Sam Fabrikam', address: 'sam@fabrikam.com'),
+          ],
+        ),
+      ], syncRun: 'run-1');
+      final writer = _RecordingWriter(notifies: const ['dana@contoso.com']);
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.text('Invites · 1'));
+      await pumps(tester);
+
+      await tester.tap(find.byKey(EventActions.yesKey));
+      await pumps(tester);
+      expect(writer.previewed.single, isA<RespondToEvent>());
+      expect(find.byType(WriteConfirmStrip), findsOneWidget);
+      expect(find.text('This emails: dana@contoso.com'), findsOneWidget);
+      expect(writer.committed, isEmpty);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await pumps(tester);
+      expect(writer.committed, hasLength(1));
+      final answer = writer.committed.single.write as RespondToEvent;
+      expect(answer.eventId, 'inv-1');
+      expect(answer.response, RsvpResponse.accept);
     });
   });
 }

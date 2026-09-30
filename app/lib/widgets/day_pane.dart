@@ -47,6 +47,7 @@ class DayPane extends StatelessWidget {
     required this.onOpenLink,
     required this.onOpenSettings,
     this.onOpenEvent,
+    this.inviteActions,
   });
 
   /// How far back and forward the arrows go: the mirror's window. A day
@@ -92,6 +93,11 @@ class DayPane extends StatelessWidget {
   /// Opens one event beside the pane, by its Graph id. Null leaves the event
   /// rows inert.
   final void Function(String eventId)? onOpenEvent;
+
+  /// Yes / Maybe / No for one invite row, drawn under its text. The host
+  /// builds it (the writes need the app's writer); null draws none. A press
+  /// on a button inside the row is the button's, never the row's open.
+  final Widget Function(InviteEntry entry)? inviteActions;
 
   /// [onOpenEvent] bound to [e], or null when there is nothing to open with.
   VoidCallback? _openEvent(CalendarEvent e) {
@@ -512,6 +518,7 @@ class DayPane extends StatelessWidget {
         ? e.organizerName.trim()
         : e.organizerAddress.trim();
     final overlap = overlapLine(entry.overlaps);
+    final actions = inviteActions?.call(entry);
     return _row(
       when: _when(when),
       onTap: _openEvent(e),
@@ -537,6 +544,10 @@ class DayPane extends StatelessWidget {
                     style:
                         BondType.caption.copyWith(color: BondColors.attention),
                   ),
+                if (actions != null) ...[
+                  const SizedBox(height: BondSpacing.s4),
+                  actions,
+                ],
               ],
             ),
           ),

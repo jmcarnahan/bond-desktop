@@ -78,6 +78,7 @@ class ActivityLogPanel extends StatefulWidget {
     'sync_mail': 'Mail sync',
     'sync_teams': 'Teams sync',
     'sync_calendar': 'Calendar sync',
+    'calendar_write': 'Calendar',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -420,6 +421,48 @@ class ActivityLogPanel extends StatefulWidget {
         return parts.isEmpty
             ? '$label — up to date$run'
             : '$label — ${parts.join(', ')}$run';
+      // One row per write the owner made, in counts and enum words only: the
+      // action, the outcome and how many people it emailed — never whom, and
+      // never the meeting's subject.
+      case 'calendar_write':
+        final action = detail['action'];
+        final notified = detail['notified'];
+        final emailed = notified is num && notified > 0
+            ? ' · emailed ${notified.toInt()}'
+            : '';
+        if (e.status == 'failed') {
+          // One verb for every answer: a failed answer did not accept,
+          // decline or say maybe, so naming which would claim one it never
+          // gave. Each names its object, as the success lines do.
+          final verb = switch (action) {
+            'accept' || 'tentative' || 'decline' => 'answer a meeting',
+            'propose' => 'propose a new time',
+            'move' => 'move an event',
+            'cancel' => 'cancel a meeting',
+            'delete' => 'delete an event',
+            'create' => 'create an event',
+            _ => 'change an event',
+          };
+          final outcome = detail['outcome'];
+          final why = outcome is String && outcome.isNotEmpty
+              ? ' ($outcome)'
+              : '';
+          return "$label — couldn't $verb$why";
+        }
+        final phrase = detail['undo'] == true
+            ? 'Undid a change'
+            : switch (action) {
+                'accept' => 'Accepted a meeting',
+                'tentative' => 'Said maybe to a meeting',
+                'decline' => 'Declined a meeting',
+                'propose' => 'Proposed a new time',
+                'move' => 'Moved an event',
+                'cancel' => 'Cancelled a meeting',
+                'delete' => 'Deleted an event',
+                'create' => 'Created an event',
+                _ => 'Changed an event',
+              };
+        return '$label — $phrase$emailed';
       // The switch at the top of the rail. Its STATUS is the whole row — `on`
       // or `off`, neither of which any of the status cases above claims — so
       // the sentence is written here rather than left to the bare label.
@@ -946,13 +989,13 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   ///
   /// A park and a retry share the attention colour on purpose: both mean the
   /// work is still owed, and neither is something the user did wrong. Only
-  /// `error` is red.
+  /// `error` and a calendar write that `failed` are red.
   Widget _dot(String status) {
     final color = switch (status) {
       'ok' => BondColors.success,
       'skipped' => BondColors.inkMuted,
       'retry' || 'parked' => BondColors.attention,
-      'error' => BondColors.error,
+      'error' || 'failed' => BondColors.error,
       _ => BondColors.inkMuted,
     };
     return Container(
