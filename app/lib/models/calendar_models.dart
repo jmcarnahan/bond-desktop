@@ -672,6 +672,230 @@ final class EventWriteAck extends CalendarWriteResult {
   const EventWriteAck({required this.id, this.event});
 }
 
+// ── pre-meeting briefs ───────────────────────────────────────────────────
+
+/// One thread a brief can point at, stored INSIDE the brief so the panel can
+/// link a point to its thread without gathering the inputs again.
+///
+/// [subject] is the sender's text and is shown as plain text only.
+@immutable
+class BriefThreadRef {
+  final String source;
+  final String conversationKey;
+  final String subject;
+
+  const BriefThreadRef({
+    required this.source,
+    required this.conversationKey,
+    required this.subject,
+  });
+
+  Map<String, Object?> toJson() => {
+        'source': source,
+        'conversation_key': conversationKey,
+        'subject': subject,
+      };
+
+  static BriefThreadRef? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final key = raw['conversation_key'];
+    if (key is! String || key.isEmpty) return null;
+    return BriefThreadRef(
+      source: _str(raw['source'], fallback: 'email'),
+      conversationKey: key,
+      subject: _str(raw['subject']),
+    );
+  }
+}
+
+/// One line of a brief. [thread] is a 0-based index into
+/// [MeetingBrief.threads], or -1 when the line names no thread.
+@immutable
+class BriefPoint {
+  final String text;
+  final int thread;
+
+  const BriefPoint({required this.text, this.thread = -1});
+
+  Map<String, Object?> toJson() => {'text': text, 'thread': thread};
+}
+
+/// Something an attendee asked the owner that is still open. [thread] is
+/// 0-based, or -1.
+@immutable
+class BriefAskOut {
+  final String person;
+  final String ask;
+  final int thread;
+
+  const BriefAskOut({required this.person, required this.ask, this.thread = -1});
+
+  Map<String, Object?> toJson() => {
+        'person': person,
+        'ask': ask,
+        'thread': thread,
+      };
+}
+
+/// A written pre-meeting brief: what the generative model said, validated,
+/// plus the thread list its indices point into.
+///
+/// Lives with the calendar models rather than beside its task because the
+/// stored row decodes into it ([EventBrief.brief]) and models may not import
+/// upward into `services/`. The task file builds it; everything that draws it
+/// reads it from here.
+@immutable
+class MeetingBrief {
+  final String headline;
+  final List<BriefPoint> points;
+  final List<BriefAskOut> openAsks;
+  final List<String> prep;
+
+  /// The numbered threads the model was shown, in the order it was shown
+  /// them. Empty on what the task returns; the handler attaches the list
+  /// before storing, because only it holds the gathered input.
+  final List<BriefThreadRef> threads;
+
+  const MeetingBrief({
+    required this.headline,
+    this.points = const [],
+    this.openAsks = const [],
+    this.prep = const [],
+    this.threads = const [],
+  });
+
+  MeetingBrief withThreads(List<BriefThreadRef> threads) => MeetingBrief(
+        headline: headline,
+        points: points,
+        openAsks: openAsks,
+        prep: prep,
+        threads: threads,
+      );
+
+  /// The thread [index] names, or null for -1 or an index the stored list
+  /// does not hold (a row written by an older build).
+  BriefThreadRef? threadAt(int index) =>
+      index >= 0 && index < threads.length ? threads[index] : null;
+
+  Map<String, Object?> toJson() => {
+        'headline': headline,
+        'points': [for (final p in points) p.toJson()],
+        'open_asks': [for (final a in openAsks) a.toJson()],
+        'prep': prep,
+        'threads': [for (final t in threads) t.toJson()],
+      };
+
+  /// Tolerant: a stored blob is this app's own writing, but a row from an
+  /// older build or a hand-edited database must still draw something rather
+  /// than throw inside a panel.
+  factory MeetingBrief.fromJson(Map<String, dynamic> json) {
+    int index(Object? raw) => raw is int ? raw : (raw is num ? raw.toInt() : -1);
+    return MeetingBrief(
+      headline: _str(json['headline']),
+      points: [
+        for (final p in json['points'] is List ? json['points'] as List : const [])
+          if (p is Map && _str(p['text']).isNotEmpty)
+            BriefPoint(text: _str(p['text']), thread: index(p['thread'])),
+      ],
+      openAsks: [
+        for (final a
+            in json['open_asks'] is List ? json['open_asks'] as List : const [])
+          if (a is Map && _str(a['ask']).isNotEmpty)
+            BriefAskOut(
+              person: _str(a['person']),
+              ask: _str(a['ask']),
+              thread: index(a['thread']),
+            ),
+      ],
+      prep: _strings(json['prep']),
+      threads: [
+        for (final t
+            in json['threads'] is List ? json['threads'] as List : const [])
+          ?BriefThreadRef.fromJson(t),
+      ],
+    );
+  }
+
+  static MeetingBrief? tryDecode(String? raw) {
+    final decoded = _decodeJson(raw);
+    if (decoded is! Map) return null;
+    return MeetingBrief.fromJson(Map<String, dynamic>.from(decoded));
+  }
+}
+
+/// One `event_briefs` row: the brief for one event (an occurrence id, never a
+/// series master's), or why there is none.
+///
+/// [status] is `ready`, `failed` or `skipped`. A skipped row's [inputsHash] is
+/// `ineligible:<why>` ([skipReason]), so the panel can say which rule kept the
+/// meeting out without gathering again. A DERIVED table: Clear AI results
+/// empties it and the next calendar sync plans the briefs again.
+@immutable
+class EventBrief {
+  static const String ready = 'ready';
+  static const String failed = 'failed';
+  static const String skipped = 'skipped';
+
+  /// The prefix a skipped row's hash carries before the reason word.
+  static const String ineligiblePrefix = 'ineligible:';
+
+  final String eventId;
+  final String inputsHash;
+  final String status;
+  final String? briefJson;
+  final String model;
+
+  /// A [calendarStamp].
+  final String generatedAt;
+
+  const EventBrief({
+    required this.eventId,
+    required this.inputsHash,
+    required this.status,
+    this.briefJson,
+    this.model = '',
+    required this.generatedAt,
+  });
+
+  factory EventBrief.fromDbRow(Map<String, Object?> row) => EventBrief(
+        eventId: _str(row['event_id']),
+        inputsHash: _str(row['inputs_hash']),
+        status: _str(row['status']),
+        briefJson: row['brief_json'] as String?,
+        model: _str(row['model']),
+        generatedAt: _str(row['generated_at']),
+      );
+
+  bool get isReady => status == ready;
+
+  /// The decoded brief, for a ready row only.
+  MeetingBrief? get brief => isReady ? MeetingBrief.tryDecode(briefJson) : null;
+
+  DateTime? get generatedAtUtc => _stampOrNull(generatedAt);
+
+  /// The reason word of a skipped row (`no_mail`, `no_others`, …), else null.
+  String? get skipReason => status == skipped &&
+          inputsHash.startsWith(ineligiblePrefix)
+      ? inputsHash.substring(ineligiblePrefix.length)
+      : null;
+}
+
+/// What the event panel's Brief section draws from: the stored row (null when
+/// none), whether a brief is queued or being written, and whether the
+/// processing switch is on.
+@immutable
+class EventBriefView {
+  final EventBrief? brief;
+  final bool queued;
+  final bool processingOn;
+
+  const EventBriefView({
+    this.brief,
+    this.queued = false,
+    this.processingOn = true,
+  });
+}
+
 // ── tolerant readers ─────────────────────────────────────────────────────
 
 String _str(Object? raw, {String fallback = ''}) =>

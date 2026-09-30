@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/calendar_models.dart' show EventBriefView;
 import '../services/backend/calendar_errors.dart';
 import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
 import '../services/calendar/day_items.dart' show calendarShowsMirror;
@@ -198,4 +199,35 @@ final personMeetingsProvider = FutureProvider.autoDispose
     next: await store.nextMeetingWith(list, nowUtc: nowUtc),
     last: await store.lastMetWith(list, nowUtc: nowUtc),
   );
+});
+
+/// The Brief section of one event's panel: the stored `event_briefs` row for
+/// the family's id (the SHOWN occurrence's — briefs are keyed by
+/// occurrence), whether a brief for it is queued or being written, and
+/// whether processing is on.
+///
+/// Re-reads on a calendar change, on every brief the handler stores or a
+/// Regenerate asks for ([briefRevisionProvider]), and when the draft lane
+/// reports on `meeting_brief` work ([briefWorkTickProvider]). A failed read
+/// is an empty view, never an error: the section then says a brief is coming.
+final eventBriefProvider =
+    FutureProvider.autoDispose.family<EventBriefView, String>((ref, id) async {
+  ref.watch(calendarRevisionProvider);
+  ref.watch(briefRevisionProvider);
+  ref.watch(briefWorkTickProvider);
+  final processingOn = ref.watch(processingProvider);
+  try {
+    final brief = await ref.watch(calendarStoreProvider).brief(id);
+    final status = await ref
+        .watch(messageStoreProvider)
+        .workStatusOf('meeting_brief', 'calendar', id);
+    return EventBriefView(
+      brief: brief,
+      queued: status == 'pending' || status == 'processing',
+      processingOn: processingOn,
+    );
+  } on Object catch (e) {
+    debugPrint('a brief could not be read: ${e.runtimeType}');
+    return EventBriefView(processingOn: processingOn);
+  }
 });

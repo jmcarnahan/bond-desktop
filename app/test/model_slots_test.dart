@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -35,6 +36,7 @@ Set<String> taskSchemaNames() => {
       const RefineStorylineTask().schemaName,
       const StorylineRecapTask().schemaName,
       const DraftTask().schemaName,
+      const MeetingBriefTask().schemaName,
     };
 
 void main() {
@@ -107,6 +109,7 @@ void main() {
       'storyline_recap',
       'draft_reply',
       'draft_improve',
+      'meeting_brief',
     });
     expect(idsOn(ModelSlot.decide), {'decision'});
     expect(idsOn(ModelSlot.embed), {'embeddings'});
@@ -181,6 +184,17 @@ void main() {
       expect(pipelineStages.map((s) => s.id), contains(id));
       expect(stageSlot(id), ModelSlot.generative);
     }
+  });
+
+  test('the meeting brief is generative and never a drafting stage', () {
+    // Written FOR the owner, not in their name: Cloud drafts never sees it,
+    // whatever Settings says (the calendar round's D9).
+    final row = pipelineStages.singleWhere((s) => s.id == 'meeting_brief');
+    expect(row.label, 'Meeting brief');
+    expect(row.description,
+        "A brief before a meeting with people you've been writing to");
+    expect(row.slot, ModelSlot.generative);
+    expect(draftStageIds, isNot(contains('meeting_brief')));
   });
 
   test('a third-party host is Bedrock and the three vendors', () {

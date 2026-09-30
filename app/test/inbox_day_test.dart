@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 // `show`: drift generates row classes named Message/Conversation from the
 // tables, and this file means the app's own models.
@@ -6,7 +7,15 @@ import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
-    show Attendee, CalendarEvent, WritePreview;
+    show
+        Attendee,
+        BriefPoint,
+        BriefThreadRef,
+        CalendarEvent,
+        EventBrief,
+        MeetingBrief,
+        WritePreview,
+        calendarStamp;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/day_providers.dart' show dayEventsProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -20,6 +29,7 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/brief_section.dart' show BriefSection;
 import 'package:bond_inbox/widgets/day_grid.dart' show DayGrid;
 import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
 import 'package:bond_inbox/widgets/event_actions.dart' show EventActions;
@@ -584,6 +594,81 @@ void main() {
       await tester.tap(next);
       await pumps(tester);
       expect(inSide(find.text('Fabrikam sync')), findsOneWidget);
+    });
+
+    testWidgets('a stored brief: teased on the Day row, drawn in the panel, '
+        'its chip pushes the thread, and Regenerate requeues it',
+        (tester) async {
+      await seedMeetingAndInvite();
+      // Under way now, so it is on today's pane at any hour and the panel
+      // still draws its Brief section.
+      final start =
+          DateTime.now().toUtc().subtract(const Duration(minutes: 10));
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-brief',
+          subject: 'Fabrikam sync',
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 2)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          attendees: const [
+            Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+          ],
+        ),
+      ], syncRun: 'run-2');
+      const brief = MeetingBrief(
+        headline: 'Dana is waiting on the plan.',
+        points: [BriefPoint(text: 'The planning invite is open.', thread: 0)],
+        threads: [
+          BriefThreadRef(
+            source: 'email',
+            conversationKey: 'c-inv',
+            subject: invite,
+          ),
+        ],
+      );
+      await CalendarStore(db).putBrief(
+        eventId: 'evt-brief',
+        inputsHash: 'h',
+        status: EventBrief.ready,
+        briefJson: jsonEncode(brief.toJson()),
+        generatedAt: calendarStamp(DateTime.now()),
+      );
+      await pumpScreen(tester);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('evt-brief')), findsOneWidget);
+
+      await tester.tap(find.text('Fabrikam sync'));
+      await pumps(tester);
+      expect(inSide(find.byKey(BriefSection.headlineKey)), findsOneWidget);
+      expect(inSide(find.text('Dana is waiting on the plan.')), findsOneWidget);
+
+      await tester.tap(find.byKey(BriefSection.regenerateKey));
+      await pumps(tester);
+      expect(
+        await tester.runAsync(() =>
+            store.workStatusOf('meeting_brief', 'calendar', 'evt-brief')),
+        'pending',
+      );
+      // Marked asked, so the handler rewrites it even over unchanged inputs.
+      final queued = await tester.runAsync(() => db
+          .customSelect('SELECT payload_json FROM work_items '
+              "WHERE task_kind = 'meeting_brief' AND entity_id = 'evt-brief'")
+          .getSingle());
+      expect(queued!.data['payload_json'], '{"asked":true}');
+
+      await tester.tap(find.byKey(BriefSection.pointThreadKeyFor(0)));
+      await pumps(tester);
+      expect(
+        find.descendant(
+          of: find.byKey(SidePanelHost.backKey),
+          matching: find.text('Back to the meeting'),
+        ),
+        findsOneWidget,
+      );
     });
   });
 

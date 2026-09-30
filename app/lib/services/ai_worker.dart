@@ -158,7 +158,13 @@ class AiWorker {
   /// prefetch cap in `ExtractHandler` counts work rows over exactly the sources
   /// that will drain them, and a second literal of this list would be a cap
   /// that stopped seeing a connector the day one was added.
-  static const List<String> sources = ['email', 'teams', 'local'];
+  ///
+  /// `calendar` is not a connector's mail either: a work row's source is the
+  /// ROW's origin, and a meeting brief's origin is the calendar, so its
+  /// `meeting_brief` rows sit under it. Every other reader of this list counts
+  /// by kind (`draft`, `extract`, `embed`, `triage`), which no calendar row
+  /// carries, so widening it changed none of their numbers.
+  static const List<String> sources = ['email', 'teams', 'local', 'calendar'];
 
   /// How many urgent refs one pass carries at most.
   ///

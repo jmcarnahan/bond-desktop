@@ -1,0 +1,232 @@
+import 'package:flutter/material.dart';
+
+import '../models/calendar_models.dart';
+import '../theme/tokens.dart';
+import 'time_format.dart';
+
+/// The Brief section of the event panel: what is open with the people in a
+/// meeting, written before it starts — or the one sentence that says why
+/// there is no brief yet.
+///
+/// Prop-only. The host reads [view] through `eventBriefProvider` and passes
+/// `now`, so a test pins both. Every string in a brief is model output over
+/// other people's mail, so it is plain [Text]: nothing in it is a link, and
+/// the only things that open anything are the thread chips, which open a
+/// thread this app stored, by its key.
+///
+/// The states, in the order they win:
+/// 1. a ready brief — shown even while a new one is being written, because
+///    the old one is still the best answer until the new one lands;
+/// 2. queued, with processing on — "Writing the brief…";
+/// 3. processing off — the switch is why nothing is coming;
+/// 4. skipped — the rule that kept the meeting out;
+/// 5. failed — with Regenerate;
+/// 6. known ineligible ([eligible] false) with nothing stored, in the words
+///    of [ineligibleReason] when it has some;
+/// 7. otherwise — a brief comes after the next calendar sync.
+class BriefSection extends StatelessWidget {
+  const BriefSection({
+    super.key,
+    required this.view,
+    required this.now,
+    required this.onOpenThread,
+    required this.onRegenerate,
+    this.eligible,
+    this.ineligibleReason,
+  });
+
+  static const Key headlineKey = ValueKey('brief-headline');
+  static const Key statusKey = ValueKey('brief-status');
+  static const Key regenerateKey = ValueKey('brief-regenerate');
+  static Key pointKeyFor(int i) => ValueKey('brief-point-$i');
+  static Key askKeyFor(int i) => ValueKey('brief-ask-$i');
+  static Key pointThreadKeyFor(int i) => ValueKey('brief-point-thread-$i');
+  static Key askThreadKeyFor(int i) => ValueKey('brief-ask-thread-$i');
+
+  static const String writingText = 'Writing the brief…';
+  static const String rewritingText = 'Rewriting…';
+  static const String pausedText =
+      'Briefs are paused while processing is off.';
+  static const String noMailText =
+      'No brief — no recent mail with these people.';
+  static const String noOthersText = 'No brief — nobody else is invited.';
+  static const String tooManyText = 'No brief — too many people for a brief.';
+  static const String tooFarText =
+      'A brief is written in the 36 hours before the meeting.';
+  static const String startedText = 'No brief — this meeting has started.';
+  static const String ineligibleText = 'No brief for this meeting.';
+  static const String failedText = "The brief couldn't be written.";
+  static const String comingText =
+      'Brief coming after the next calendar sync.';
+
+  /// Null while the read is in flight, which draws nothing rather than a
+  /// sentence that may be about to be wrong.
+  final EventBriefView? view;
+
+  /// Whether the meeting passes the rules that need no store read (the host
+  /// asks `briefQuickCheck`): false says so when nothing is stored; null is
+  /// not known.
+  final bool? eligible;
+
+  /// The wire word of the quick check that said no (`too_far`, `no_others`,
+  /// …), for the sentence under [eligible] false; null says it generically.
+  final String? ineligibleReason;
+
+  final DateTime now;
+  final void Function(String source, String conversationKey) onOpenThread;
+  final VoidCallback onRegenerate;
+
+  static final TextStyle _muted =
+      BondType.small.copyWith(color: BondColors.inkMuted);
+
+  @override
+  Widget build(BuildContext context) {
+    final v = view;
+    if (v == null) return const SizedBox.shrink();
+    final stored = v.brief;
+    final brief = stored?.brief;
+    if (stored != null && brief != null && brief.headline.isNotEmpty) {
+      return _ready(stored, brief, v);
+    }
+    if (v.queued && v.processingOn) return _status(writingText);
+    if (!v.processingOn) return _status(pausedText);
+    if (stored?.status == EventBrief.skipped) {
+      return _status(reasonText(stored!.skipReason));
+    }
+    if (stored?.status == EventBrief.failed) {
+      return Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(failedText, key: statusKey, style: _muted),
+          _regenerate(),
+        ],
+      );
+    }
+    if (eligible == false) return _status(reasonText(ineligibleReason));
+    return _status(comingText);
+  }
+
+  /// The sentence for an ineligibility wire word; a word with none of its
+  /// own (cancelled, declined, gone, or null) says it generically.
+  static String reasonText(String? reason) => switch (reason) {
+        'no_mail' => noMailText,
+        'no_others' => noOthersText,
+        'too_many' => tooManyText,
+        'too_far' => tooFarText,
+        'past' => startedText,
+        _ => ineligibleText,
+      };
+
+  Widget _status(String text) => Text(text, key: statusKey, style: _muted);
+
+  Widget _regenerate() => TextButton(
+        key: regenerateKey,
+        onPressed: onRegenerate,
+        child: const Text('Regenerate'),
+      );
+
+  Widget _ready(EventBrief stored, MeetingBrief brief, EventBriefView v) {
+    final age = relativeTime(stored.generatedAt, now);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          brief.headline,
+          key: headlineKey,
+          style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+        ),
+        for (var i = 0; i < brief.points.length; i++)
+          _line(
+            key: pointKeyFor(i),
+            text: '• ${brief.points[i].text}',
+            thread: brief.threadAt(brief.points[i].thread),
+            chipKey: pointThreadKeyFor(i),
+          ),
+        if (brief.openAsks.isNotEmpty) ...[
+          const SizedBox(height: BondSpacing.s8),
+          Text('Open asks', style: BondType.label),
+          for (var i = 0; i < brief.openAsks.length; i++)
+            _line(
+              key: askKeyFor(i),
+              text: brief.openAsks[i].person.isEmpty
+                  ? brief.openAsks[i].ask
+                  : '${brief.openAsks[i].person}: ${brief.openAsks[i].ask}',
+              thread: brief.threadAt(brief.openAsks[i].thread),
+              chipKey: askThreadKeyFor(i),
+            ),
+        ],
+        if (brief.prep.isNotEmpty) ...[
+          const SizedBox(height: BondSpacing.s8),
+          Text('Prep', style: BondType.label),
+          for (final p in brief.prep)
+            Padding(
+              padding: const EdgeInsets.only(top: BondSpacing.s4),
+              child: Text('• $p', style: BondType.small),
+            ),
+        ],
+        const SizedBox(height: BondSpacing.s4),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              age == null ? 'Generated' : 'Generated $age',
+              key: statusKey,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
+            Text(' · ',
+                style: BondType.caption.copyWith(color: BondColors.inkMuted)),
+            // Offered with processing off too: the request waits in the
+            // queue and runs when the switch comes back, like any other.
+            if (v.queued)
+              Text(v.processingOn ? rewritingText : pausedText,
+                  style: BondType.caption.copyWith(color: BondColors.inkMuted))
+            else
+              _regenerate(),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// One point or ask, with a chip naming its thread when it has one. The
+  /// chip's label is the thread's subject as stored with the brief.
+  Widget _line({
+    required Key key,
+    required String text,
+    required BriefThreadRef? thread,
+    required Key chipKey,
+  }) {
+    return Padding(
+      key: key,
+      padding: const EdgeInsets.only(top: BondSpacing.s4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: Text(text, style: BondType.small)),
+          if (thread != null) ...[
+            const SizedBox(width: BondSpacing.s8),
+            Flexible(
+              child: Tooltip(
+                message: 'Open the thread',
+                child: InkWell(
+                  key: chipKey,
+                  onTap: () => onOpenThread(thread.source, thread.conversationKey),
+                  borderRadius: BondRadii.smAll,
+                  child: Text(
+                    thread.subject.isEmpty ? '(no subject)' : thread.subject,
+                    style: BondType.caption.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: BondColors.primary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}

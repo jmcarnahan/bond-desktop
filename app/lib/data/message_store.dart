@@ -1086,6 +1086,43 @@ WHERE source = ? AND conversation_key = ?
     return [for (final row in result) Conversation.fromRow(row.data)];
   }
 
+  /// The conversations, of every source, that any of [addresses] took part
+  /// in and that moved at or after [sinceIso], newest first — what a
+  /// pre-meeting brief reads about the people in a meeting.
+  ///
+  /// Matched on `participants_json`'s `email`, lowercased on both sides, and
+  /// the plain row only: none of [loadConversations]' joins, because the
+  /// brief reads each thread itself. `json_each` is handed `'[]'` for a
+  /// malformed blob, so one bad row cannot fail the statement.
+  Future<List<Conversation>> conversationsWithAddresses(
+    Set<String> addresses, {
+    required String sinceIso,
+    int limit = 40,
+  }) async {
+    final wanted = {
+      for (final a in addresses)
+        if (a.trim().isNotEmpty) a.trim().toLowerCase(),
+    }.toList();
+    if (wanted.isEmpty) return const [];
+    final result = await db
+        .customSelect(
+          'SELECT c.* FROM conversations c '
+          'WHERE c.last_message_at >= ? '
+          'AND EXISTS (SELECT 1 FROM json_each('
+          '  CASE WHEN json_valid(c.participants_json) '
+          "  THEN c.participants_json ELSE '[]' END) j "
+          // Inside a CASE on the element's type: `json_extract` on a bare
+          // string element would parse it as JSON and fail the statement.
+          "  WHERE (CASE WHEN j.type = 'object' "
+          "  THEN lower(json_extract(j.value, '\$.email')) END) "
+          '  IN (${_placeholders(wanted.length)})) '
+          'ORDER BY c.last_message_at DESC, c.conversation_key ASC LIMIT ?',
+          variables: _args([sinceIso, ...wanted, limit]),
+        )
+        .get();
+    return [for (final row in result) Conversation.fromRow(row.data)];
+  }
+
   /// How many rows each half of [recentPeople] reads before merging.
   ///
   /// A bound rather than a page: what the caller wants is the handful of

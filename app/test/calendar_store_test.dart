@@ -475,4 +475,167 @@ void main() {
       expect([for (final e in list) e.id], ['a', 'b']);
     });
   });
+
+  group('briefs', () {
+    test('put, read back, replace, and decode a ready brief', () async {
+      expect(await calendar.brief('evt-1'), isNull);
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h1',
+        status: EventBrief.failed,
+        generatedAt: calendarStamp(now),
+      );
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.failed);
+      expect((await calendar.brief('evt-1'))!.brief, isNull);
+
+      const brief = MeetingBrief(
+        headline: 'Dana is waiting on the quote.',
+        points: [BriefPoint(text: 'Quote owed.', thread: 0)],
+        threads: [
+          BriefThreadRef(
+            source: 'email',
+            conversationKey: 'c-1',
+            subject: 'Fabrikam renewal',
+          ),
+        ],
+      );
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h2',
+        status: EventBrief.ready,
+        briefJson: jsonEncode(brief.toJson()),
+        model: 'bond-prose',
+        generatedAt: calendarStamp(now),
+      );
+      final row = (await calendar.brief('evt-1'))!;
+      expect(row.inputsHash, 'h2');
+      expect(row.model, 'bond-prose');
+      expect(row.generatedAtUtc!.difference(now).inSeconds.abs(), lessThan(1));
+      expect(row.brief!.headline, 'Dana is waiting on the quote.');
+      expect(row.brief!.threadAt(0)!.subject, 'Fabrikam renewal');
+    });
+
+    test('a skipped row says which rule kept the meeting out', () async {
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: '${EventBrief.ineligiblePrefix}no_mail',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+      expect((await calendar.brief('evt-1'))!.skipReason, 'no_mail');
+    });
+
+    test('touchBrief moves the stamp (and a given hash) and nothing else',
+        () async {
+      expect(
+          await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now)),
+          isFalse,
+          reason: 'no row, nothing written');
+      final old = calendarStamp(now.subtract(const Duration(hours: 3)));
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h1',
+        status: EventBrief.ready,
+        briefJson: '{"headline":"Kept."}',
+        model: 'm',
+        generatedAt: old,
+      );
+      expect(
+          await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now)),
+          isTrue);
+      var row = (await calendar.brief('evt-1'))!;
+      expect((row.status, row.briefJson, row.inputsHash, row.model),
+          (EventBrief.ready, '{"headline":"Kept."}', 'h1', 'm'));
+      expect(row.generatedAt, calendarStamp(now));
+
+      await calendar.touchBrief('evt-1',
+          generatedAt: calendarStamp(now), inputsHash: 'h2');
+      row = (await calendar.brief('evt-1'))!;
+      expect((row.status, row.inputsHash), (EventBrief.ready, 'h2'));
+    });
+
+    test('briefsFor reads many; deleteBriefsExcept keeps only the named',
+        () async {
+      for (final id in ['a', 'b', 'c']) {
+        await calendar.putBrief(
+          eventId: id,
+          inputsHash: 'h',
+          status: EventBrief.skipped,
+          generatedAt: calendarStamp(now),
+        );
+      }
+      expect((await calendar.briefsFor(['a', 'c', 'nope'])).keys.toSet(),
+          {'a', 'c'});
+      expect(await calendar.deleteBriefsExcept(['b']), 2);
+      expect((await calendar.briefsFor(['a', 'b', 'c'])).keys, ['b']);
+      expect(await calendar.deleteBriefsExcept(const []), 1);
+    });
+  });
+
+  group('conversationsWithAddresses', () {
+    Future<void> conversation(
+      String key,
+      Object participants, {
+      required DateTime last,
+      String source = 'email',
+    }) =>
+        store.upsertConversation({
+          'source': source,
+          'conversation_key': key,
+          'subject': 'Thread $key',
+          'participants_json':
+              participants is String ? participants : jsonEncode(participants),
+          'state': 'waiting',
+          'last_message_at': MessageStore.isoStamp(last),
+        });
+
+    test('matches a participant address case-insensitively, inside the '
+        'window, newest first', () async {
+      await conversation('c-old', [
+        {'name': 'Dana', 'email': 'dana@fabrikam.com'},
+      ], last: inHours(-24 * 40));
+      await conversation('c-mid', [
+        {'name': 'Dana', 'email': 'Dana@Fabrikam.com'},
+      ], last: inHours(-48));
+      await conversation('c-new', [
+        {'name': 'Dana', 'email': 'dana@fabrikam.com'},
+      ], last: inHours(-1));
+      // A Teams chat stores its people as `teams:<id>`, never an address, so
+      // Dana's chat is NOT matched by her address: briefs are mail only
+      // until the people directory maps the two.
+      await conversation('c-chat', [
+        {'name': 'Dana', 'email': 'teams:3f1c-dana'},
+      ], last: inHours(-1), source: 'teams');
+      await conversation('c-other', [
+        {'name': 'Sam', 'email': 'sam@fabrikam.com'},
+      ], last: inHours(-1));
+      // A malformed blob and a bare string element cannot fail the query.
+      await conversation('c-bad', 'not json', last: inHours(-1));
+      await conversation('c-str', ['dana@fabrikam.com'], last: inHours(-1));
+
+      final found = await store.conversationsWithAddresses(
+        {'DANA@fabrikam.com'},
+        sinceIso: MessageStore.isoStamp(inHours(-24 * 30)),
+      );
+      expect([for (final c in found) c.id], ['c-new', 'c-mid']);
+      expect([for (final c in found) c.source], everyElement('email'));
+    });
+
+    test('an empty address set reads nothing; the limit holds', () async {
+      for (var i = 0; i < 5; i++) {
+        await conversation('c-$i', [
+          {'name': 'Dana', 'email': 'dana@fabrikam.com'},
+        ], last: inHours(-i - 1));
+      }
+      final since = MessageStore.isoStamp(inHours(-24 * 30));
+      expect(await store.conversationsWithAddresses({}, sinceIso: since),
+          isEmpty);
+      final two = await store.conversationsWithAddresses(
+        {'dana@fabrikam.com'},
+        sinceIso: since,
+        limit: 2,
+      );
+      expect([for (final c in two) c.id], ['c-0', 'c-1']);
+    });
+  });
 }

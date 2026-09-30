@@ -29,7 +29,13 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | `needs_you`, `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
 | `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
+| `meeting_brief` | Generative — never cloud drafts |
 | `embeddings` | Embeddings, not routed |
+
+`meeting_brief` (the pre-meeting brief, [14-calendar.md](14-calendar.md#briefs))
+is deliberately NOT in `draftStageIds`: it is written FOR the owner, never in
+their name, so rule 4 below sends it to `generativeSpec` whatever Cloud drafts
+says (the calendar round's D9). `llm_routing_test` pins it.
 
 There is no reply-decision stage: whether a prefetched draft is wanted is the
 decision model's `reply_expected` probability, stored at triage and read by
@@ -656,13 +662,18 @@ behind a recap and a new message never waits behind either:
 |---|---|---|---|---|
 | Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
 | Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative | `storylineDrainGateProvider` | `storylineWorkerProvider` |
-| Draft | `draft` | generative, or cloud drafts | `draftDrainGateProvider` | `draftWorkerProvider` |
+| Draft | `draft`, `meeting_brief` | generative, or cloud drafts (`draft` only) | `draftDrainGateProvider` | `draftWorkerProvider` |
 
 The lanes were cut when the fast lane had a 4B of its own. With one generative
 server they are still the right cut for ORDER (the storyline six mutate shared
 membership in an order that is an argument, see
 [06-storylines.md](06-storylines.md); the draft is the one kind a person
-waits for), but they now contend at one server, which queues them. On a
+waits for), but they now contend at one server, which queues them. The
+meeting brief rides the draft lane AFTER `draft`: it is the other piece of
+prose a person reads rather than a stage another stage reads, so behind the
+storyline passes it would wait on a sweep, and ahead of the draft it would
+hold up a reply somebody is waiting on for a meeting hours away. It runs one
+at a time, whatever the draft width. On a
 managed full-tier Mac that server is the 27B with one slot, so today every
 lane's calls take turns there; that is the cost the decision pass (Phase 5)
 began to remove and the one-call-per-message task (Phase 6) finishes.

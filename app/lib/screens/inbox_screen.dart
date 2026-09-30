@@ -47,6 +47,9 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
+import '../services/calendar/brief_gatherer.dart' show briefQuickCheck;
+import '../services/calendar/meeting_brief_handler.dart' show BriefRequest;
+import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
 import '../services/calendar/calendar_writes.dart'
     show CalendarWrite, MoveEvent;
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
@@ -83,6 +86,7 @@ import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/calendar_write_flow.dart';
 import '../widgets/day_grid.dart';
+import '../widgets/brief_section.dart';
 import '../widgets/day_pane.dart';
 import '../widgets/drafts_pane.dart';
 import '../widgets/event_actions.dart';
@@ -1266,10 +1270,55 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (outcome.changed || outcome.settingsRefreshed) {
           ref.read(calendarRevisionProvider.notifier).state++;
         }
+        // Briefs are planned only off a sync that completed, and only while
+        // the models may run; the plan itself is store reads, and its pump
+        // is the draft lane's, so nothing here waits on a model.
+        if (outcome.status == CalendarSyncStatus.synced &&
+            ref.read(processingProvider)) {
+          unawaited(_planBriefs());
+        }
       } on Object catch (e) {
         debugPrint('calendar sync was not run: $e');
       }
     }());
+  }
+
+  /// Queues the briefs the calendar now makes due and wakes the draft lane
+  /// when it queued any. Fire-and-forget off [_syncCalendar]; a failure is a
+  /// trace and never reaches the mail.
+  Future<void> _planBriefs() async {
+    try {
+      final zone =
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc();
+      final queued = await ref
+          .read(briefPlannerProvider)
+          .plan(now: DateTime.now(), zone: zone);
+      if (!mounted || queued == 0) return;
+      ref.read(briefRevisionProvider.notifier).state++;
+      unawaited(ref.read(draftWorkerProvider).pump());
+    } on Object catch (e) {
+      debugPrint('briefs were not planned: ${e.runtimeType}');
+    }
+  }
+
+  /// Regenerate on a brief: to the front of the draft lane, because a person
+  /// asked for it now, and marked asked so the handler writes a new brief
+  /// even when nothing it is written from has changed.
+  Future<void> _regenerateBrief(String eventId) async {
+    try {
+      await ref.read(messageStoreProvider).requeueWork(
+            'meeting_brief',
+            'calendar',
+            eventId,
+            payloadJson: const BriefRequest(asked: true).encode(),
+            refreshCreatedAt: true,
+          );
+      if (!mounted) return;
+      ref.read(briefRevisionProvider.notifier).state++;
+      unawaited(ref.read(draftWorkerProvider).pump());
+    } on Object catch (e) {
+      debugPrint('a brief was not requeued: ${e.runtimeType}');
+    }
   }
 
   /// The Storylines pane's Sync: [_refreshAll] and nothing else.
@@ -4863,6 +4912,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       gridSpan: _gridSpan,
       onGridSpanChanged: (s) => _setDayView(span: s),
       grid: grid,
+      briefHeadlines: shows
+          ? ref.watch(briefHeadlinesProvider(day)).valueOrNull ??
+              const <String, String>{}
+          : const <String, String>{},
       inviteActions: (entry) => CalendarWriteFlow(
         key: ValueKey('invite-write-${entry.event.id}'),
         writer: ref.read(calendarWritesProvider),
@@ -6243,6 +6296,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             _openThreadBeside(source, key, push: true),
         onOpenStoryline: _selectStoryline,
         onOpenSettings: _openSettings,
+        brief: _briefFor(shown, zone: zoneRead, now: now),
         actions: shown == null || zoneRead == null
             ? null
             : CalendarWriteFlow(
@@ -6269,6 +6323,43 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.invalidate(eventLinksProvider(side.eventId));
         },
       ),
+    );
+  }
+
+  /// The event panel's Brief section for the occurrence on display, or null
+  /// when there is nothing to brief: no event yet, no zone yet, or a meeting
+  /// that is over. A meeting under way keeps its section — the brief is
+  /// still worth a glance while it runs.
+  ///
+  /// Keyed by the SHOWN occurrence's id, because briefs are: a series opened
+  /// by its master reads the next meeting's brief.
+  Widget? _briefFor(
+    CalendarEvent? shown, {
+    required CalendarZone? zone,
+    required DateTime now,
+  }) {
+    if (shown == null || zone == null) return null;
+    final nowUtc = now.toUtc();
+    final end = shown.isAllDay
+        ? (shown.endDate == null
+            ? null
+            : zone.localDateTime(shown.endDate!, 0, 0).toUtc())
+        : shown.endUtc;
+    if (end == null || !end.isAfter(nowUtc)) return null;
+    // The rules that need no store read, with the owner unknown here: a
+    // "no" from them is said, by its reason, when nothing is stored, and a
+    // pass is left as "not known" for the planner, which knows the owner, to
+    // settle (it records no_mail, no_others and too_many on the row).
+    final quick =
+        briefQuickCheck(shown, owner: null, now: nowUtc, zone: zone);
+    return BriefSection(
+      view: ref.watch(eventBriefProvider(shown.id)).valueOrNull,
+      eligible: quick == null ? null : false,
+      ineligibleReason: quick?.wire,
+      now: now,
+      onOpenThread: (source, key) =>
+          _openThreadBeside(source, key, push: true),
+      onRegenerate: () => unawaited(_regenerateBrief(shown.id)),
     );
   }
 

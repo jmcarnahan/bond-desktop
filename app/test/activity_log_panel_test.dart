@@ -549,6 +549,82 @@ void main() {
   });
 
   group('describe', () {
+    test('a meeting brief: written from how many threads, skipped with its '
+        'reason in words, or failed', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 3, 'asks': 1},
+        )),
+        'Meeting brief — written from 3 threads',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 1},
+        )),
+        'Meeting brief — written from 1 thread',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'no_mail'},
+        )),
+        'Meeting brief — skipped (no recent mail with these people)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'unchanged'},
+        )),
+        'Meeting brief — skipped (nothing new since the last one)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'error',
+          detail: const {'error': 'not JSON'},
+        )),
+        'Meeting brief — failed',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'too_many'},
+        )),
+        'Meeting brief — skipped (too many people)',
+      );
+      // Over a ready brief the old one stands, and the sentence says so.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'past', 'kept': 'ready'},
+        )),
+        'Meeting brief — skipped (already started); the last brief stands',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'error',
+          detail: const {'error': 'not JSON', 'kept': 'ready'},
+        )),
+        'Meeting brief — failed; the last brief stands',
+      );
+      // A park is the pipeline's news, in the general sentence.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'parked',
+          detail: const {'reason': 'model_unavailable'},
+        )),
+        'Meeting brief parked — model server off',
+      );
+    });
+
     test('a mail sync reports what it brought in', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_mail', count: 4)),

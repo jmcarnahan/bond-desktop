@@ -35,9 +35,12 @@ import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/backend/unavailable_calendar_backend.dart';
+import '../services/calendar/brief_gatherer.dart';
+import '../services/calendar/brief_planner.dart';
 import '../services/calendar/calendar_sync.dart';
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/meeting_brief_handler.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
@@ -1722,8 +1725,8 @@ final cloudDraftLedgerProvider = Provider<CloudDraftLedger>(
 /// `appPrefsProvider`. That omission is the whole of why pointing a stage
 /// somewhere else rebuilds no worker and aborts no drain.
 final draftHandlerProvider = Provider<DraftHandler>((ref) {
-  // The only handler on its lane, and the only one of the fourteen a person
-  // sits and waits for. A draft is prose they send under their own name — the
+  // First on its lane (the meeting brief follows it), and the only handler
+  // of the fourteen a person sits and waits for. A draft is prose they send under their own name — the
   // one place the bigger model earns its seconds.
   //
   // It still reads the storyline summary as background, which used to be
@@ -1780,20 +1783,91 @@ final draftHandlerProvider = Provider<DraftHandler>((ref) {
   );
 });
 
-/// The DRAFT lane's worker: one handler, on the 27B, at the width the prose
-/// server was started with.
+/// The DRAFT lane's worker: the draft handler, on the 27B, at the width the
+/// prose server was started with, and the meeting brief behind it.
 ///
 /// Alone on its gate because of what a draft IS — the one piece of work in
 /// this app a person sits and waits for. Behind the old single drain it waited
 /// for everything: a sweep of confirms, twenty recaps, the whole pass coming
 /// round. Here the worst case is one prose call already at the server.
+///
+/// The brief rides here, AFTER the draft, because it is the other piece of
+/// prose a person reads rather than a stage another stage reads: behind the
+/// storyline passes it would wait on a sweep, and ahead of the draft it would
+/// hold up a reply somebody is waiting on for a meeting hours away.
 final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
   return _lane(
     ref,
-    handlers: [ref.watch(draftHandlerProvider)],
+    handlers: [
+      ref.watch(draftHandlerProvider),
+      ref.watch(meetingBriefHandlerProvider),
+    ],
     gate: draftDrainGateProvider,
   );
 });
+
+/// Bumped after every brief the handler stores and after a Regenerate, so an
+/// open event panel and the Day agenda's teasers re-read `event_briefs`.
+final briefRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// Ticks each time the draft lane reports on `meeting_brief` work — after
+/// the worker has written the work row, which [briefRevisionProvider]'s bump
+/// (made from inside the handler, before that write) cannot see. A reader
+/// that shows "Writing the brief…" watches both, so the sentence goes the
+/// moment the row is done rather than at the next unrelated rebuild.
+final briefWorkTickProvider = StreamProvider.autoDispose<int>((ref) {
+  var tick = 0;
+  return ref
+      .watch(draftWorkerProvider)
+      .progress
+      .where((p) => p.kind == 'meeting_brief')
+      .map((_) => ++tick);
+});
+
+/// What a pre-meeting brief is written from. The owner's address is the
+/// sync's own lookup (`storedAccount`, `mail` then `userPrincipalName`); the
+/// zone is the calendar's display zone as last resolved, UTC until it has
+/// been. Both `read` inside closures, never `watch`: a zone or account change
+/// must not rebuild the draft lane mid-drain.
+final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
+      ref.watch(messageStoreProvider),
+      ref.watch(calendarStoreProvider),
+      ownerAddress: () => ref.read(authSessionProvider).storedAccount.then(
+            (account) => account?.mail ?? account?.userPrincipalName,
+          ),
+      zone: () {
+        try {
+          return ref.read(calendarZoneProvider).valueOrNull ??
+              CalendarZone.utc();
+        } catch (_) {
+          return CalendarZone.utc();
+        }
+      },
+    ));
+
+/// The `meeting_brief` handler, on the draft lane. Its client is the stage's
+/// own ([stageLlmClientProvider]), which resolves to the generative model and
+/// never to Cloud drafts: `meeting_brief` is not in `draftStageIds` (D9).
+final meetingBriefHandlerProvider = Provider<MeetingBriefHandler>((ref) {
+  final client = ref.watch(stageLlmClientProvider('meeting_brief'));
+  return MeetingBriefHandler(
+    ref.watch(calendarStoreProvider),
+    ref.watch(briefGathererProvider),
+    client: () => client,
+    activityLog: ref.watch(activityLogProvider),
+    // `read` inside the closure, on the pumps' rule: the call lands mid-drain
+    // and against a container that may already be gone.
+    onStored: () => ref.read(briefRevisionProvider.notifier).state++,
+  );
+});
+
+/// Queues the briefs a calendar sync makes due; the inbox calls it after a
+/// sync that completed while processing is on, and pumps the draft lane.
+final briefPlannerProvider = Provider<BriefPlanner>((ref) => BriefPlanner(
+      ref.watch(messageStoreProvider),
+      ref.watch(calendarStoreProvider),
+      ref.watch(briefGathererProvider),
+    ));
 
 /// Who the owner is, from the account the sync signed in with.
 ///

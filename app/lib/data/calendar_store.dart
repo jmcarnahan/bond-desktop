@@ -387,4 +387,116 @@ class CalendarStore {
         ),
     ];
   }
+
+  // ── briefs ───────────────────────────────────────────────────────────
+  //
+  // `event_briefs` is DERIVED (it sits in `MessageStore.derivedTables`), so
+  // Clear AI results empties it with the rest of the model's output and the
+  // next calendar sync plans the briefs again. Keyed by the event id the
+  // planner targets, which is always an occurrence's, never a master's.
+
+  /// The stored brief for [eventId], or null.
+  Future<EventBrief?> brief(String eventId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM event_briefs WHERE event_id = ?',
+          variables: _args([eventId]),
+        )
+        .get();
+    return rows.isEmpty ? null : EventBrief.fromDbRow(rows.first.data);
+  }
+
+  /// Writes the brief for [eventId], replacing whatever was there: one row
+  /// per event, and the newest answer is the only one worth keeping.
+  Future<void> putBrief({
+    required String eventId,
+    required String inputsHash,
+    required String status,
+    String? briefJson,
+    String model = '',
+    required String generatedAt,
+  }) async {
+    await db.customUpdate(
+      'INSERT INTO event_briefs '
+      '(event_id, inputs_hash, status, brief_json, model, generated_at) '
+      'VALUES (?, ?, ?, ?, ?, ?) '
+      'ON CONFLICT(event_id) DO UPDATE SET '
+      'inputs_hash = excluded.inputs_hash, status = excluded.status, '
+      'brief_json = excluded.brief_json, model = excluded.model, '
+      'generated_at = excluded.generated_at',
+      variables:
+          _args([eventId, inputsHash, status, briefJson, model, generatedAt]),
+    );
+  }
+
+  /// Moves a stored brief's `generated_at` (and its hash, when given) and
+  /// nothing else, and returns whether a row was there to move.
+  ///
+  /// The one write a failed or skipped run makes over a READY brief: the
+  /// brief it already has is still the best answer, so its text and status
+  /// stand, but the new stamp is what lets the planner's two-hour rule
+  /// throttle the retries instead of asking the model again every sync.
+  Future<bool> touchBrief(
+    String eventId, {
+    required String generatedAt,
+    String? inputsHash,
+  }) async {
+    final changed = await db.customUpdate(
+      'UPDATE event_briefs SET generated_at = ?, '
+      'inputs_hash = COALESCE(?, inputs_hash) WHERE event_id = ?',
+      variables: _args([generatedAt, inputsHash, eventId]),
+    );
+    return changed > 0;
+  }
+
+  /// The stored briefs of [eventIds], keyed by event id; an id with none is
+  /// simply absent. Chunked as [deleteEvents] is.
+  Future<Map<String, EventBrief>> briefsFor(Iterable<String> eventIds) async {
+    final list = eventIds.toSet().toList();
+    final out = <String, EventBrief>{};
+    for (var i = 0; i < list.length; i += 500) {
+      final end = i + 500 > list.length ? list.length : i + 500;
+      final chunk = list.sublist(i, end);
+      final rows = await db
+          .customSelect(
+            'SELECT * FROM event_briefs '
+            'WHERE event_id IN (${_placeholders(chunk.length)})',
+            variables: _args(chunk),
+          )
+          .get();
+      for (final r in rows) {
+        final brief = EventBrief.fromDbRow(r.data);
+        out[brief.eventId] = brief;
+      }
+    }
+    return out;
+  }
+
+  /// Deletes every brief whose event is not in [keepIds] — the planner's
+  /// housekeeping, so the briefs of meetings that are over, moved out of the
+  /// window or gone from the mirror do not pile up. Returns rows deleted.
+  ///
+  /// Read-then-delete rather than one `NOT IN`: a chunked NOT IN would let
+  /// each chunk delete what another chunk keeps, and the table is small
+  /// enough that reading its ids costs nothing.
+  Future<int> deleteBriefsExcept(Iterable<String> keepIds) async {
+    final keep = keepIds.toSet();
+    final rows =
+        await db.customSelect('SELECT event_id FROM event_briefs').get();
+    final doomed = [
+      for (final r in rows)
+        if (!keep.contains(r.data['event_id'])) r.data['event_id'] as String,
+    ];
+    var deleted = 0;
+    for (var i = 0; i < doomed.length; i += 500) {
+      final end = i + 500 > doomed.length ? doomed.length : i + 500;
+      final chunk = doomed.sublist(i, end);
+      deleted += await db.customUpdate(
+        'DELETE FROM event_briefs '
+        'WHERE event_id IN (${_placeholders(chunk.length)})',
+        variables: _args(chunk),
+      );
+    }
+    return deleted;
+  }
 }

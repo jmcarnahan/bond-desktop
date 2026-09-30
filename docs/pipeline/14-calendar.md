@@ -7,8 +7,9 @@ a day, the invites still owed an answer, the meeting before and after a
 person, the messages that carried an invite — reads that mirror, never the
 server, so a slow or failing calendar costs the screen nothing.
 
-No chat model is involved. The mirror is `sync_calendar` pages written into
-sqlite.
+No chat model is involved in the mirror: it is `sync_calendar` pages written
+into sqlite. The one model call the calendar makes is the pre-meeting
+[brief](#briefs), on the generative model, off the draft lane.
 
 > **Live as of schema v21** (calendar round, Phase 2): the table, the sync,
 > the store's reads, the inbox wiring and the mailbox-settings cache. Phase 3
@@ -34,13 +35,13 @@ Two tables (`app/lib/data/schema.drift`, schema v21).
 | Table | Holds | Class | Written by |
 |---|---|---|---|
 | `calendar_events` | one row per event id, as `sync_calendar` last reported it | **synced** | `CalendarSync` via `CalendarStore.upsertEvents` / `deleteEvents` / `sweepRun` |
-| `event_briefs` | one pre-meeting brief per event (Phase 7) | **derived** | nothing yet |
+| `event_briefs` | one pre-meeting brief per event occurrence ([Briefs](#briefs)) | **derived** | `MeetingBriefHandler` via `CalendarStore.putBrief`; `BriefPlanner` deletes out-of-window rows |
 
 `calendar_events` is in `MessageStore.syncedTables`: it is mailbox data, so
 **Clear AI results** leaves it and a mailbox wipe (`wipeAll`, sign-out,
 **Forget everything and re-sync**) empties it. `event_briefs` is in
-`derivedTables`: Clear AI results empties it, and a brief is written again on
-demand.
+`derivedTables`: Clear AI results empties it, and the next calendar sync plans
+the briefs again.
 
 The time rules (D13) hold in the columns:
 
@@ -628,7 +629,202 @@ morning"), a week, a past time and the time it already has are refused in a
 sentence. An all-day event moves by whole days, keeps its span, and sends the
 mailbox's zone (`allDayZone`, from the cached settings, else a live read).
 
+## Briefs
+
+A short brief before a meeting with people the owner has been writing to:
+what is open with them, what they asked, what the owner is waiting on. Stage
+`meeting_brief` (generative, [10-model-routing.md](10-model-routing.md)),
+stored per event in `event_briefs` (`event_id` PK, `inputs_hash`, `status`
+`ready|failed|skipped`, `brief_json`, `model`, `generated_at`), drawn in the
+event panel's **Brief** section and teased on the Day agenda.
+
+**Eligibility (D6)** — `briefQuickCheck` for the rules that need no read, then
+the mail rule in `BriefGatherer.gather`; each failure is an enum word
+(`BriefIneligibility.wire`) that a skipped row carries as
+`inputs_hash = ineligible:<word>`:
+
+| Rule | Word |
+|---|---|
+| not cancelled | `cancelled` |
+| the owner's own response is not `declined` | `declined` |
+| starts after now (an all-day event at its local midnight) | `past` |
+| starts within the next 36 hours (`briefHorizon`; exactly 36 h is in, a minute past is not) | `too_far` |
+| at least one other person: an attendee whose address is not the owner's (case-insensitive) and whose type is not `resource`, or an organiser who is not the owner — an attendee's copy with a hidden guest list names only the organiser, and is still a meeting with someone | `no_others` |
+| at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast | `too_many` |
+| at least one conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
+| (handler only) the event is no longer in the mirror | `gone` |
+
+**Mail only for now.** Teams participants are stored as `teams:<id>`, not
+addresses, so the address match never finds a chat; mapping them through the
+people directory is a follow-up. And `participants_json` holds at most 8
+people per conversation, so an attendee beyond the 8th in a busy thread is
+not matched by that thread.
+
+The owner's address is the sync's own lookup (`storedAccount`, `mail` then
+`userPrincipalName`); unknown, an event the owner organised still leaves its
+organiser out, and the planner does not run at all (below). Briefs are keyed
+by the OCCURRENCE: the planner reads the mirror's rows, never a series
+master, and a master that reaches the handler anyway is briefed as its
+`displayOccurrence` and stored under THAT occurrence's id, which is the id
+the panel reads.
+
+**What is gathered** (`lib/services/calendar/brief_gatherer.dart`, store
+reads only, no model):
+
+- **Threads** — up to 20 candidate conversations are read; ranked first by the
+  decision on each one's newest inbound message (`urgency ∈ {high, urgent}` or
+  `importance = high`, the invite-pinning rule), then by `last_message_at`,
+  then key; the top 6 are kept, each with its subject, state, last stamp and
+  its last two messages' text (attachment markers and link targets stripped,
+  whitespace collapsed, capped at 600, fenced).
+- **Open asks** (§1.1 point 1) — in a kept thread whose state is
+  `needs_reply`, an inbound message from an attendee that came AFTER the
+  owner's last message there (an ask before a reply is taken as answered),
+  whose stored decision has `needs_you_p ≥ DecisionPolicy.needsYouYes` (0.65)
+  or `reply_expected_p ≥ DecisionPolicy.replyYes` (0.50), and whose `intent`
+  is `question`, `request` or `approval` (`scheduling` is left out: the
+  meeting is usually its answer). The newest such message per thread, at most
+  4, capped at 300 and fenced.
+- **Waiting on them** — kept threads in state `waiting` whose newest message
+  is the owner's, at most 3.
+- **Storylines** — the live storylines of the kept threads, at most 2: the
+  title, and the recap (else the summary) capped at 400 and fenced.
+- **Files** — attachment names from the attendees' messages in the kept
+  threads (not inline, not a quoted message or a card), at most 8.
+- **Last met** — `lastMetWith` → `lastMetLabel`.
+- **The invite's `body_preview`**, capped at 600 and fenced.
+
+The fencing rule: every free-text body arrives from the gatherer inside
+`wrapUntrusted`; the short labels (subjects, names, titles, file names) stay
+raw because the panel's links and the hash read them, and the task fences
+each as it lays the message out.
+
+**Tally honesty.** Nobody's response is read anywhere in a brief. Only the
+organiser's copy tracks answers; on an attendee's copy `none` means "not
+known", never "hasn't answered", so the brief says nothing about who is
+coming (the prompt also forbids it) rather than risk saying something false.
+
+**The inputs hash** is sha256 over the event's id, `change_key` and times,
+the owner's address, each kept thread's `source|key|last_message_at|
+message_count`, each ask's message id, each storyline id and each file name.
+A new message moves its thread's stamp and count, so it moves the hash; an
+edit to an existing message's text alone does not. The hash never reads the
+clock.
+
+**The task** (`MeetingBriefTask`, `lib/services/llm/meeting_brief_task.dart`):
+a const system prompt ending in `untrustedDataClause`, with the rule "Never
+write today, tomorrow or yesterday; name the day." (a brief is read for up to
+a day and a half after it is written); the user message opens with `Now:
+<absolute local time>` and the meeting line, both absolute (`briefWhenLine`:
+"Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All day · Wed 7 Oct 2026"), then the
+numbered threads, each with its last message as an age from `now`
+(`briefAgo`: "3 hours ago", "2 days ago"), and each section; temperature 0.2,
+700 tokens. The schema is flat — `headline` (string), `points` (`{text,
+thread}`), `open_asks` (`{person, ask, thread}`), `prep` (strings, `maxItems`
+3) — all required, `additionalProperties: false`, and no `maxItems` on the two
+object arrays and no `maxLength` anywhere, because the grammar converter
+refuses them. `validate` holds every ceiling instead: headline 140, at most 5
+points of 200, 4 asks of 200 (person 80), 3 prep lines of 120, empty strings
+dropped; thread numbers are 1-based in the message and the answer, and are
+turned 0-based, with anything outside the numbered list (or ≤ 0) becoming -1,
+so a line can never link to a thread that is not there.
+
+**The handler** (`MeetingBriefHandler`, kind `meeting_brief`, source
+`calendar`, entity = event id) re-reads the event (missing → skipped
+`gone`), gathers (ineligible → skipped with its word, no call), and returns
+without a call when the stored brief is `ready` with the same hash — unless
+the row's payload is `{"asked":true}` (`BriefRequest`, Regenerate's), which
+always writes. Otherwise
+it runs the task and stores `ready` with the brief JSON — plus a `threads`
+list of `{source, conversation_key, subject}` in the order the model was
+shown them, so the panel links a point to its thread without gathering again
+— and the resolved model name. An empty headline is an `LlmFormatException`.
+A dead server (`LlmUnavailableException` and its subclasses) propagates and
+PARKS the kind like a draft, writing nothing; any other failure writes
+`failed` and rethrows, so the worker's retry-once-then-error policy applies.
+**A ready brief is never destroyed** by a later run: over one, a failure or a
+skip keeps `brief_json` and `status = ready` and moves only `generated_at`
+(`CalendarStore.touchBrief`), so the two-hour rule throttles the retries; the
+activity note says `kept: ready`.
+
+`AiWorker.sources` carries `calendar` for these rows: a work row's source is
+the row's origin, and a brief's is the calendar.
+
+**The lane.** The draft lane, after `draft` — see
+[10-model-routing.md](10-model-routing.md#three-drains) for why.
+
+**Planning** (`BriefPlanner.plan`). After each calendar sync whose outcome is
+`synced`, and only while processing is on, `InboxScreen._syncCalendar` fires
+the planner (never awaited by the mail load; every failure a trace) and pumps
+the draft lane when it queued anything. It returns 0 at once while the
+owner's address is unknown (the keychain has not answered): without it the
+owner counts among every meeting's people. Otherwise it reads every event
+touching the next 36 hours, deletes the briefs of every other event
+(`deleteBriefsExcept`, so the table holds only the window, a meeting under
+way included), and walks the meetings soonest first, timed before all-day:
+
+- on `briefQuickCheck`, skips it — writing a `skipped` row for `no_others`
+  or `too_many` (below);
+- leaves a stored brief alone for **2 hours** after it was written, whatever
+  changed — a busy thread the morning of a meeting would otherwise buy a
+  model call per sync;
+- does not gather again an event it gathered less than **15 minutes** ago
+  (`BriefPlanner.recheck`, in memory) whose stored row has not moved since;
+  an event with NO stored row is never throttled, so after Clear AI results
+  the next synced tick plans it at once;
+- past that, gathers the fresh hash and marks the meeting due when there is
+  no brief, the brief `failed`, or the hash moved;
+- when the gather says `no_mail`, `no_others` or `too_many`, writes
+  `skipped` with `inputs_hash = ineligible:<word>` (no model call) unless the
+  row already says so or holds a ready brief, which stands; once the reason
+  goes away the hash differs and the meeting is queued like any other after
+  the 2 hours;
+- skips a row already `pending` or `processing` without counting it;
+- stops at **6** due, then queues them in REVERSE with
+  `requeueWork(refreshCreatedAt: true)`, so the soonest meeting carries the
+  newest `created_at` and drains first (the lane claims one kind at a time,
+  so the stamps order briefs only among themselves). Planner rows carry no
+  payload.
+
+**Regenerate** in the panel is `requeueWork('meeting_brief', 'calendar', id,
+payloadJson: '{"asked":true}', refreshCreatedAt: true)` — a person asked, so
+it goes to the front and is rewritten even when nothing changed — then a
+draft-lane pump. It is offered with processing off too; the request waits and
+runs when the switch comes back.
+
+**Clear AI results** empties `event_briefs` (a derived table) and the next
+sync plans the briefs again. Briefs are per meeting, not per message, so
+nothing is added to `clearDerived`'s per-message loop.
+
+**The panel.** `BriefSection` (prop-only, `lib/widgets/brief_section.dart`)
+over `eventBriefProvider(<shown occurrence id>)`, drawn while the meeting has
+not ended. In order of precedence: a ready brief (headline, points with a chip
+naming the thread, Open asks, Prep, "Generated 2h ago · Regenerate" — or
+"Rewriting…" while a new one is queued; the old brief stands until the new one
+lands); "Writing the brief…"; "Briefs are paused while processing is off.";
+a skipped row's reason ("No brief — no recent mail with these people.",
+"No brief — nobody else is invited.", "No brief — too many people for a
+brief.", "No brief — this meeting has started.", else "No brief for this
+meeting."); "The brief couldn't be written." with Regenerate; when the
+no-read rules already say no, the same sentence for their word ("A brief is
+written in the 36 hours before the meeting." for `too_far`); else "Brief
+coming after the next calendar sync." The view
+re-reads on the calendar revision, `briefRevisionProvider` (bumped by the
+handler's `onStored` and by Regenerate) and `briefWorkTickProvider` (the draft
+lane's progress for this kind, which lands after the work row is written).
+
+**The agenda teaser.** `briefHeadlinesProvider(day)` → `DayPane
+.briefHeadlines`: a ready brief's headline as a muted one-line line under the
+meeting's subject; none on a cancelled meeting.
+
+**Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
+worker with the handler's notes: `ok` with `{threads, asks}` → "Meeting brief
+— written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word, or
+`unchanged`) → "Meeting brief — skipped (no recent mail with these people)";
+`error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)
+adds "; the last brief stands"; a park keeps the general sentence. Counts
+and enum words only.
+
 ## Later phases
 
-- Pre-meeting briefs into `event_briefs`.
 - The command bar's calendar verbs.

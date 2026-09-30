@@ -71,6 +71,7 @@ void main() {
     GridSpan gridSpan = GridSpan.day,
     void Function(GridSpan)? onGridSpanChanged,
     Widget? grid,
+    Map<String, String> briefHeadlines = const {},
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -98,6 +99,7 @@ void main() {
           gridSpan: gridSpan,
           onGridSpanChanged: onGridSpanChanged ?? (_) {},
           grid: grid,
+          briefHeadlines: briefHeadlines,
         ),
       ),
     ));
@@ -105,6 +107,30 @@ void main() {
   }
 
   group('agenda', () {
+    testWidgets('a written brief is a one-line teaser under its meeting, '
+        'and a cancelled meeting shows none', (tester) async {
+      await pumpPane(
+        tester,
+        events: [
+          timed('briefed', 'Fabrikam sync', DateTime.utc(2026, 9, 29, 20)),
+          timed('plain', 'Contoso standup', DateTime.utc(2026, 9, 29, 21)),
+          timed('off', 'Fabrikam retro', DateTime.utc(2026, 9, 29, 22),
+              isCancelled: true),
+        ],
+        briefHeadlines: const {
+          'briefed': 'Dana is waiting on the quote.',
+          'off': 'Should not show.',
+        },
+      );
+
+      final teaser = find.byKey(DayPane.briefTeaserKeyFor('briefed'));
+      expect(teaser, findsOneWidget);
+      expect(tester.widget<Text>(teaser).data, 'Dana is waiting on the quote.');
+      expect(tester.widget<Text>(teaser).maxLines, 1);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('plain')), findsNothing);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('off')), findsNothing);
+    });
+
     testWidgets('meetings by subject, with their time, place and marks',
         (tester) async {
       final links = <String>[];

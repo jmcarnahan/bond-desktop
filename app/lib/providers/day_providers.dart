@@ -41,6 +41,24 @@ final dayEventsProvider = FutureProvider.autoDispose
   return _between(store, zone, day, day.addDays(1));
 });
 
+/// The day's written brief headlines, by event id — the one-line teaser the
+/// agenda draws under a meeting. Ready briefs only: a skipped or failed row
+/// has nothing to tease, and the panel is where those say why.
+final briefHeadlinesProvider = FutureProvider.autoDispose
+    .family<Map<String, String>, CalendarDate>((ref, day) async {
+  ref.watch(briefRevisionProvider);
+  ref.watch(briefWorkTickProvider);
+  final events = await ref.watch(dayEventsProvider(day).future);
+  if (events.isEmpty) return const {};
+  final briefs = await ref
+      .watch(calendarStoreProvider)
+      .briefsFor([for (final e in events) e.id]);
+  return {
+    for (final MapEntry(:key, :value) in briefs.entries)
+      if ((value.brief?.headline ?? '').isNotEmpty) key: value.brief!.headline,
+  };
+});
+
 /// The seven days from `monday` (the family argument — the host passes
 /// [mondayOf] the day it shows, so every day of one week shares one read):
 /// the week grid's events, timed and all-day, cancelled included.

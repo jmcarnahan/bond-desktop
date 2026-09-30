@@ -49,6 +49,7 @@ is always the authority when they disagree.
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply gate** — the decision model's `reply_expected` probability, read from triage's stored row BEFORE any context is gathered; skipped outright when a person asked — see 07 | no§ | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
+| 13b | **Pre-meeting briefs** (`meeting_brief`) — per MEETING, not per message: planned after each calendar sync for meetings in the next 36 h with people the owner has mail with, written on the draft lane after `draft` | **yes** | [14-calendar.md](14-calendar.md#briefs) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 15 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
 
@@ -153,6 +154,7 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Storyline recap | Generative | `storyline_recap` | `:8080` |
 | Draft generation | Generative, or Cloud drafts when set and consented | `draft_reply` | `:8080` |
 | Improve a draft | Generative, or Cloud drafts when set and consented | `draft_improve` | `:8080` |
+| Pre-meeting brief | Generative (never Cloud drafts) | `meeting_brief` | `:8080` |
 | Embeddings | Embeddings (not routed) | `embeddings` | `:8081` (`make embed`) |
 
 The routing is a RULE, not stored rows: `AppPrefs.specForStage` sends

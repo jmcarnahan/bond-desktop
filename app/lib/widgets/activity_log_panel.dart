@@ -106,7 +106,23 @@ class ActivityLogPanel extends StatefulWidget {
     'embed_message': 'Embed message',
     'storyline_refresh': 'Storyline refresh',
     'storyline_recap': 'Storyline recap',
+    'meeting_brief': 'Meeting brief',
     'processing': 'Processing',
+  };
+
+  /// Why a brief was skipped, in words. The row carries only the enum word
+  /// (`BriefIneligibility.wire`, or `unchanged`), never anything about the
+  /// meeting.
+  static const Map<String, String> _briefSkips = {
+    'past': 'already started',
+    'too_far': 'more than 36 hours away',
+    'no_others': 'nobody else invited',
+    'cancelled': 'cancelled',
+    'declined': 'declined',
+    'no_mail': 'no recent mail with these people',
+    'too_many': 'too many people',
+    'gone': 'no longer on the calendar',
+    'unchanged': 'nothing new since the last one',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -194,6 +210,29 @@ class ActivityLogPanel extends StatefulWidget {
         e.status == 'error' &&
         detail['outcome'] == 'scope_missing') {
       return '$label — the calendar permission is missing';
+    }
+
+    // A brief's three outcomes read as what happened to the brief. A park or
+    // a retry is the pipeline's news and keeps the general sentences below.
+    if (e.kind == 'meeting_brief') {
+      // A run that failed or was skipped over a ready brief left it standing
+      // (`kept: ready`), and the sentence says so rather than implying the
+      // panel lost its brief.
+      final kept = detail['kept'] == 'ready' ? '; the last brief stands' : '';
+      switch (e.status) {
+        case 'ok':
+          final threads = detail['threads'];
+          final n = threads is num ? threads.toInt() : 0;
+          return '$label — written from $n ${n == 1 ? 'thread' : 'threads'}';
+        case 'skipped':
+          final why = detail['reason'];
+          final words = why is String ? (_briefSkips[why] ?? _reason(why)) : '';
+          return words.isEmpty
+              ? '$label — skipped$kept'
+              : '$label — skipped ($words)$kept';
+        case 'error':
+          return '$label — failed$kept';
+      }
     }
 
     switch (e.status) {

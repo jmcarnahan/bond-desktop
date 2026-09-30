@@ -62,7 +62,12 @@ class DayPane extends StatelessWidget {
     this.grid,
     this.onOpenEvent,
     this.inviteActions,
+    this.briefHeadlines = const {},
   });
+
+  /// The key of a meeting row's brief teaser.
+  static Key briefTeaserKeyFor(String eventId) =>
+      ValueKey('day-brief-teaser-$eventId');
 
   /// How far back and forward the arrows go: the mirror's window. A day
   /// outside it would read as empty when it is merely not synced.
@@ -127,6 +132,11 @@ class DayPane extends StatelessWidget {
   /// builds it (the writes need the app's writer); null draws none. A press
   /// on a button inside the row is the button's, never the row's open.
   final Widget Function(InviteEntry entry)? inviteActions;
+
+  /// Written brief headlines by event id, drawn as a muted one-line teaser
+  /// under a meeting's subject. Model output over other people's mail, so
+  /// plain text; the full brief is one tap away in the event panel.
+  final Map<String, String> briefHeadlines;
 
   /// [onOpenEvent] bound to [e], or null when there is nothing to open with.
   VoidCallback? _openEvent(CalendarEvent e) {
@@ -407,6 +417,14 @@ class DayPane extends StatelessWidget {
             ],
           ],
         ),
+        if (!cancelled && (briefHeadlines[e.id] ?? '').isNotEmpty)
+          Text(
+            briefHeadlines[e.id]!,
+            key: briefTeaserKeyFor(e.id),
+            style: _muted,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         if (e.location.trim().isNotEmpty)
           Text(e.location.trim(), style: _muted, maxLines: 1,
               overflow: TextOverflow.ellipsis),
