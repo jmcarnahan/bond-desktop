@@ -49,7 +49,7 @@ transcript's own 420 minimum, with nothing to catch it.
 |---|---|---|---|
 | Inbox (`RailSection.home`) | `bolt` | the whole stack: Needs You · Today · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row; Today only once the calendar has answered | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
-| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda, or the invites owed |
+| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda or its time grid (Day or Week, remembered), or the invites owed |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person | the directory of everyone, or the open room |
 | Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
@@ -207,7 +207,7 @@ alone, and only the setters that move `_section` clear it.
 
 | From | Opens |
 |---|---|
-| the Day stop, or a day row in its column | `DayPane`'s agenda for that day (`_selectDay`); the stop's arrival forces a calendar sync tick |
+| the Day stop, or a day row in its column | `DayPane`'s agenda or grid for that day (`_selectDay`; paging the grid lands here too); the stop's arrival forces a calendar sync tick |
 | `Invites · N` (in the Day column or the Inbox stack's Today section) | `DayPane` in invites mode (`_openInvites`); `‹ Day` returns to the day it left |
 | a Due or Back-from-Later row on the agenda | that thread, in main (`_select`) |
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |

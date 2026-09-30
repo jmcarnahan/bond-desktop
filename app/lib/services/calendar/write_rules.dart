@@ -175,6 +175,42 @@ NewTime resolveNewTime(
   return NewTimeTimed(start, end);
 }
 
+/// A drop on the grid read as a new time for [shown]: the typed move's own
+/// refusals, in the typed move's own words, so a drag cannot send what the
+/// "Move to…" field would have refused.
+///
+/// The grid has already snapped the instants, so there is nothing to
+/// resolve — only to check: the same times, a start in the past, an end not
+/// after the start.
+NewTime checkDrop({
+  required CalendarEvent shown,
+  required DateTime startUtc,
+  required DateTime endUtc,
+  required DateTime now,
+}) {
+  // Plain UTC stamps, compared as instants: a zoned stamp (the grid's
+  // package hands back `TZDateTime`s) is never `==` to a plain one.
+  DateTime utc(DateTime t) =>
+      DateTime.fromMicrosecondsSinceEpoch(t.microsecondsSinceEpoch, isUtc: true);
+  final start = utc(startUtc);
+  final end = utc(endUtc);
+  final s = shown.startUtc;
+  final e = shown.endUtc;
+  if (s != null &&
+      e != null &&
+      start.isAtSameMomentAs(s) &&
+      end.isAtSameMomentAs(e)) {
+    return const NewTimeProblem("That's when it already is.");
+  }
+  if (start.isBefore(now.toUtc())) {
+    return const NewTimeProblem('That time has passed.');
+  }
+  if (!end.isAfter(start)) {
+    return const NewTimeProblem('A meeting needs to end after it starts.');
+  }
+  return NewTimeTimed(start, end);
+}
+
 /// "Thu Oct 8 · 3:00–4:00 PM", "Fri Oct 9 · All day", "Fri Oct 9 – Sat Oct 10
 /// · All day" — or the problem's own sentence.
 String newTimeLabel(NewTime t, {required CalendarZone zone}) => switch (t) {

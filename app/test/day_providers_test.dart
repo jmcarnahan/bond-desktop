@@ -119,6 +119,67 @@ void main() {
     });
   });
 
+  group('weekEventsProvider', () {
+    // Monday Oct 12 2026; the week runs to Sunday Oct 18 inclusive.
+    const monday = CalendarDate(2026, 10, 12);
+
+    test('covers the seven local days from Monday, and a Sunday-night '
+        'meeting that is Monday in UTC stays in its own week', () async {
+      await calendar.upsertEvents([
+        timed('mon', la.localDateTime(monday, 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('sun', la.localDateTime(monday.addDays(6), 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+        // Sunday Oct 18, 9:00 PM PDT = Monday Oct 19, 04:00Z.
+        timed('sun-night', la.localDateTime(monday.addDays(6), 21, 0).toUtc(),
+            responseStatus: 'accepted'),
+        // Sunday Oct 11, 9:00 PM PDT = Monday Oct 12, 04:00Z: last week.
+        timed('last-sun-night',
+            la.localDateTime(monday.addDays(-1), 21, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('next-mon', la.localDateTime(monday.addDays(7), 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+        const CalendarEvent(
+          id: 'banner',
+          subject: 'Fabrikam offsite',
+          isAllDay: true,
+          startDate: CalendarDate(2026, 10, 14),
+          endDate: CalendarDate(2026, 10, 15),
+        ),
+      ], syncRun: 'run-1');
+      expect(
+          la
+              .localDateTime(monday.addDays(6), 21, 0)
+              .isAtSameMomentAs(DateTime.utc(2026, 10, 19, 4)),
+          isTrue);
+
+      final events = await readFuture(
+        containerFor(CalendarAvailability.available),
+        weekEventsProvider(monday).future,
+      );
+      expect({for (final e in events) e.id},
+          {'mon', 'sun', 'sun-night', 'banner'});
+
+      final next = await readFuture(
+        containerFor(CalendarAvailability.available),
+        weekEventsProvider(monday.addDays(7)).future,
+      );
+      expect({for (final e in next) e.id}, {'next-mon'});
+    });
+
+    test('answers nothing in SDK mode', () async {
+      await calendar.upsertEvents([
+        timed('mon', la.localDateTime(monday, 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+      ], syncRun: 'run-1');
+      final events = await readFuture(
+        containerFor(CalendarAvailability.sdkMode),
+        weekEventsProvider(monday).future,
+      );
+      expect(events, isEmpty);
+    });
+  });
+
   group('invitesOwedProvider', () {
     test('folds a series, pins what the mail says is pressing, and finds '
         'overlaps', () async {

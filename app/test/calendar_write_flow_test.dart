@@ -54,12 +54,14 @@ void main() {
       method: 'POST', path: '/me/events/e1/accept', notifies: ['dana@contoso.com']);
   const private = WritePreview(method: 'PATCH', path: '/me/events/e1');
 
-  Future<void> pump(WidgetTester tester, {CalendarWrite write = accept}) =>
+  Future<void> pump(WidgetTester tester,
+          {CalendarWrite write = accept, VoidCallback? onIdle}) =>
       tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: CalendarWriteFlow(
             writer: writer,
             onDone: (message, undo) => done.add((message, undo)),
+            onIdle: onIdle,
             builder: (context, start, busy) => TextButton(
               key: const ValueKey('go'),
               onPressed: busy
@@ -220,6 +222,73 @@ void main() {
     expect(find.text('closed'), findsOneWidget);
   });
 
+  testWidgets('resetOnSuccess: false keeps the child and its state across a '
+      'write, as the grid needs', (tester) async {
+    writer.previews.add(const PreviewReady(private, needsConfirm: false));
+    writer.commits.add(const WriteOutcome.ok(eventId: 'e1'));
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: CalendarWriteFlow(
+          writer: writer,
+          resetOnSuccess: false,
+          onDone: (message, undo) => done.add((message, undo)),
+          builder: (context, start, busy) => _Stateful(
+            onGo: () => start(accept,
+                summary: 'Accept "Design review"',
+                doneMessage: 'Accepted "Design review".'),
+          ),
+        ),
+      ),
+    ));
+    await tester.tap(find.byKey(const ValueKey('open')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('go')));
+    await settle(tester);
+    expect(done, hasLength(1));
+    expect(find.text('open'), findsOneWidget);
+  });
+
+  testWidgets('onIdle: once per write, when it went through, failed or was '
+      'dismissed — never while it waits', (tester) async {
+    var idle = 0;
+    writer.previews
+      ..add(const PreviewReady(toDana, needsConfirm: true)) // dismissed
+      ..add(const PreviewReady(private, needsConfirm: false)) // goes through
+      ..add(const PreviewFailed('Nothing was changed.')) // dry run fails
+      ..add(const PreviewReady(toDana, needsConfirm: true)); // commit fails
+    writer.commits
+      ..add(const WriteOutcome.ok(eventId: 'e1'))
+      ..add(const WriteOutcome.failed('Try again later.'));
+    await pump(tester, onIdle: () => idle++);
+
+    await tester.tap(find.byKey(const ValueKey('go')));
+    await settle(tester);
+    expect(idle, 0, reason: 'waiting on the strip is busy, not idle');
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await settle(tester);
+    expect(idle, 1);
+
+    await tester.tap(find.byKey(const ValueKey('go')));
+    await settle(tester);
+    expect(done, hasLength(1));
+    expect(idle, 2);
+
+    await tester.tap(find.byKey(const ValueKey('go')));
+    await settle(tester);
+    expect(find.byKey(CalendarWriteFlow.errorKey), findsOneWidget);
+    expect(idle, 3);
+    await tester.tap(find.byKey(CalendarWriteFlow.dismissErrorKey));
+    await settle(tester);
+    expect(idle, 4);
+
+    await tester.tap(find.byKey(const ValueKey('go')));
+    await settle(tester);
+    await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+    await settle(tester);
+    expect(find.text('Try again later.'), findsOneWidget);
+    expect(idle, 5);
+  });
+
   testWidgets('dismissing the strip sends nothing', (tester) async {
     writer.previews.add(const PreviewReady(toDana, needsConfirm: true));
     await pump(tester);
@@ -231,6 +300,45 @@ void main() {
     expect(find.byType(WriteConfirmStrip), findsNothing);
     expect(writer.committed, isEmpty);
     expect(find.text('Go'), findsOneWidget);
+  });
+
+  testWidgets('fill: the strip stands above the child, which fills the rest',
+      (tester) async {
+    writer.previews.add(const PreviewReady(toDana, needsConfirm: true));
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SizedBox(
+          height: 600,
+          child: CalendarWriteFlow(
+            fill: true,
+            writer: writer,
+            onDone: (message, undo) => done.add((message, undo)),
+            builder: (context, start, busy) => GestureDetector(
+              key: const ValueKey('surface'),
+              onTap: busy
+                  ? null
+                  : () => start(accept,
+                      summary: 'Accept "Design review"',
+                      doneMessage: 'Accepted "Design review".'),
+              child: const ColoredBox(color: Colors.white),
+            ),
+          ),
+        ),
+      ),
+    ));
+    final surface = find.byKey(const ValueKey('surface'));
+    // Nothing pending: the child has the whole height.
+    expect(tester.getSize(surface).height, 600);
+
+    await tester.tap(surface);
+    await settle(tester);
+
+    final strip = find.byType(WriteConfirmStrip);
+    expect(strip, findsOneWidget);
+    expect(tester.getTopLeft(strip).dy,
+        lessThan(tester.getTopLeft(surface).dy));
+    expect(tester.getBottomLeft(surface).dy, 600);
+    expect(tester.getSize(surface).height, lessThan(600));
   });
 }
 

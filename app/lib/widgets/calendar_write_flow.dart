@@ -34,6 +34,9 @@ class CalendarWriteFlow extends StatefulWidget {
     required this.writer,
     required this.onDone,
     required this.builder,
+    this.fill = false,
+    this.resetOnSuccess = true,
+    this.onIdle,
   });
 
   static const Key errorKey = ValueKey('calendar-write-error');
@@ -56,6 +59,28 @@ class CalendarWriteFlow extends StatefulWidget {
   /// again over an event that has already moved.
   final Widget Function(BuildContext context, WriteStarter start, bool busy)
       builder;
+
+  /// Lays the flow out to fill the height it is given: the strip or the
+  /// error line ABOVE, and what [builder] draws below in the rest. For a
+  /// surface that is itself the whole pane — the Day grid, where a drop is
+  /// the press — which needs bounded height, and whose confirm belongs over
+  /// it rather than under seven columns of hours nobody scrolls past. False
+  /// keeps the buttons-then-strip layout every row and panel uses.
+  final bool fill;
+
+  /// Whether a successful write remounts what [builder] draws, so an open
+  /// field and its text are gone once the write they fed has happened. The
+  /// buttons and fields want that; the grid does not — remounting it would
+  /// rebuild its controllers and scroll the day back to the morning after
+  /// every drop.
+  final bool resetOnSuccess;
+
+  /// Called each time the flow stops being busy while it is still mounted:
+  /// the write went through, failed, or was dismissed. A host that draws
+  /// something for the write in flight — the grid's ghost of where a drop
+  /// would land — takes it down here. Not called from dispose: a host that
+  /// outlives the flow reads `busy` from the next one instead.
+  final VoidCallback? onIdle;
 
   @override
   State<CalendarWriteFlow> createState() => _CalendarWriteFlowState();
@@ -132,6 +157,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
           _error = message;
           _retry = retry;
         });
+        widget.onIdle?.call();
       case PreviewReady(:final preview, :final needsConfirm):
         if (needsConfirm) {
           setState(() {
@@ -170,6 +196,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
           _reset();
           _generation += 1;
         });
+        widget.onIdle?.call();
       }
       return;
     }
@@ -179,6 +206,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
       _error = outcome.message;
       _retry = outcome.retry;
     });
+    widget.onIdle?.call();
   }
 
   void _reset() {
@@ -189,65 +217,85 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
     _retry = null;
   }
 
-  void _dismiss() => _settle(_reset);
+  void _dismiss() {
+    _settle(_reset);
+    widget.onIdle?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
     final write = _write;
     final preview = _preview;
     final retry = _retry;
+    final child = KeyedSubtree(
+      key: ValueKey(widget.resetOnSuccess ? _generation : 0),
+      child: widget.builder(context, _start, _busy),
+    );
+    final strip = <Widget>[
+      if (_phase == _Phase.confirming || _phase == _Phase.committing)
+        if (write != null && preview != null)
+          WriteConfirmStrip(
+            summary: _summary,
+            notifies: preview.notifies,
+            confirmLabel: confirmLabelFor(write),
+            dismissLabel: dismissLabelFor(write),
+            busy: _phase == _Phase.committing,
+            onConfirm: () => _commit(),
+            onDismiss: _dismiss,
+          ),
+    ];
+    final error = <Widget>[
+      if (_phase == _Phase.failed)
+        Row(
+          children: [
+            Flexible(
+              child: Text(
+                _error,
+                key: CalendarWriteFlow.errorKey,
+                style: BondType.small.copyWith(color: BondColors.error),
+              ),
+            ),
+            if (retry != null)
+              TextButton(
+                key: CalendarWriteFlow.retryKey,
+                onPressed: () => _start(retry,
+                    summary: _summary, doneMessage: _doneMessage),
+                child: const Text('Try again'),
+              ),
+            IconButton(
+              key: CalendarWriteFlow.dismissErrorKey,
+              tooltip: 'Dismiss',
+              iconSize: 16,
+              visualDensity: VisualDensity.compact,
+              onPressed: _dismiss,
+              icon: const Icon(Icons.close),
+            ),
+          ],
+        ),
+    ];
+    if (widget.fill) {
+      return Focus(
+        focusNode: _focus,
+        child: Column(
+          mainAxisSize: MainAxisSize.max,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final w in strip) ...[w, const SizedBox(height: BondSpacing.s8)],
+            for (final w in error) ...[w, const SizedBox(height: BondSpacing.s4)],
+            Expanded(child: child),
+          ],
+        ),
+      );
+    }
     return Focus(
       focusNode: _focus,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          KeyedSubtree(
-            key: ValueKey(_generation),
-            child: widget.builder(context, _start, _busy),
-          ),
-          if (_phase == _Phase.confirming || _phase == _Phase.committing)
-            if (write != null && preview != null) ...[
-              const SizedBox(height: BondSpacing.s8),
-              WriteConfirmStrip(
-                summary: _summary,
-                notifies: preview.notifies,
-                confirmLabel: confirmLabelFor(write),
-                dismissLabel: dismissLabelFor(write),
-                busy: _phase == _Phase.committing,
-                onConfirm: () => _commit(),
-                onDismiss: _dismiss,
-              ),
-            ],
-          if (_phase == _Phase.failed) ...[
-            const SizedBox(height: BondSpacing.s4),
-            Row(
-              children: [
-                Flexible(
-                  child: Text(
-                    _error,
-                    key: CalendarWriteFlow.errorKey,
-                    style: BondType.small.copyWith(color: BondColors.error),
-                  ),
-                ),
-                if (retry != null)
-                  TextButton(
-                    key: CalendarWriteFlow.retryKey,
-                    onPressed: () => _start(retry,
-                        summary: _summary, doneMessage: _doneMessage),
-                    child: const Text('Try again'),
-                  ),
-                IconButton(
-                  key: CalendarWriteFlow.dismissErrorKey,
-                  tooltip: 'Dismiss',
-                  iconSize: 16,
-                  visualDensity: VisualDensity.compact,
-                  onPressed: _dismiss,
-                  icon: const Icon(Icons.close),
-                ),
-              ],
-            ),
-          ],
+          child,
+          for (final w in strip) ...[const SizedBox(height: BondSpacing.s8), w],
+          for (final w in error) ...[const SizedBox(height: BondSpacing.s4), w],
         ],
       ),
     );

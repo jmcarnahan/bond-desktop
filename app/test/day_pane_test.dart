@@ -5,6 +5,7 @@ import 'package:bond_inbox/services/calendar/calendar_sync.dart'
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
+import 'package:bond_inbox/widgets/day_grid.dart' show GridSpan;
 import 'package:bond_inbox/widgets/day_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -65,6 +66,11 @@ void main() {
     void Function(String)? onOpenEvent,
     Widget Function(InviteEntry entry)? inviteActions,
     DateTime? at,
+    DayView view = DayView.agenda,
+    void Function(DayView)? onViewChanged,
+    GridSpan gridSpan = GridSpan.day,
+    void Function(GridSpan)? onGridSpanChanged,
+    Widget? grid,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -87,6 +93,11 @@ void main() {
           onOpenSettings: onOpenSettings ?? () {},
           onOpenEvent: onOpenEvent,
           inviteActions: inviteActions,
+          view: view,
+          onViewChanged: onViewChanged ?? (_) {},
+          gridSpan: gridSpan,
+          onGridSpanChanged: onGridSpanChanged ?? (_) {},
+          grid: grid,
         ),
       ),
     ));
@@ -234,11 +245,88 @@ void main() {
       expect(opened, [('teams', 'conv-7')]);
     });
 
-    testWidgets('Agenda | Grid, with Grid not here yet', (tester) async {
-      await pumpPane(tester);
+    testWidgets('Agenda | Grid switches the view, and Day | Week shows only '
+        'on the grid', (tester) async {
+      final views = <DayView>[];
+      await pumpPane(tester, onViewChanged: views.add);
       expect(find.text('Agenda'), findsOneWidget);
       expect(find.text('Grid'), findsOneWidget);
-      expect(find.text('Grid arrives in a later phase'), findsOneWidget);
+      expect(find.byKey(DayPane.spanDayKey), findsNothing);
+      expect(find.byKey(DayPane.spanWeekKey), findsNothing);
+
+      await tester.tap(find.byKey(DayPane.gridKey));
+      expect(views, [DayView.grid]);
+      // Agenda is what is showing, so pressing it asks for nothing.
+      await tester.tap(find.byKey(DayPane.agendaKey));
+      expect(views, [DayView.grid]);
+
+      final spans = <GridSpan>[];
+      await pumpPane(
+        tester,
+        view: DayView.grid,
+        onViewChanged: views.add,
+        onGridSpanChanged: spans.add,
+        grid: const SizedBox(key: ValueKey('the-grid')),
+        events: [timed('x', 'Agenda only row', DateTime.utc(2026, 9, 29, 20))],
+      );
+      expect(find.byKey(const ValueKey('the-grid')), findsOneWidget);
+      expect(find.text('Agenda only row'), findsNothing);
+      expect(find.byKey(DayPane.spanDayKey), findsOneWidget);
+      await tester.tap(find.byKey(DayPane.spanWeekKey));
+      expect(spans, [GridSpan.week]);
+      await tester.tap(find.byKey(DayPane.agendaKey));
+      expect(views, [DayView.grid, DayView.agenda]);
+    });
+
+    testWidgets('the grid view says Reading until the grid is built, and the '
+        'availability sentences stand over it', (tester) async {
+      await pumpPane(tester, view: DayView.grid);
+      expect(find.text(DayPane.readingText), findsOneWidget);
+
+      await pumpPane(
+        tester,
+        view: DayView.grid,
+        availability: CalendarAvailability.sdkMode,
+        grid: const SizedBox(key: ValueKey('the-grid')),
+      );
+      expect(find.text(DayPane.sdkModeText), findsOneWidget);
+      expect(find.byKey(const ValueKey('the-grid')), findsNothing);
+
+      await pumpPane(
+        tester,
+        view: DayView.grid,
+        availability: CalendarAvailability.unavailable,
+        grid: const SizedBox(key: ValueKey('the-grid')),
+      );
+      expect(find.text(DayPane.offlineText), findsOneWidget);
+      expect(find.byKey(const ValueKey('the-grid')), findsOneWidget);
+    });
+
+    testWidgets('on the week grid the arrows step a week', (tester) async {
+      final picked = <CalendarDate>[];
+      await pumpPane(
+        tester,
+        view: DayView.grid,
+        gridSpan: GridSpan.week,
+        grid: const SizedBox(),
+        onSelectDay: picked.add,
+      );
+
+      await tester.tap(find.byTooltip('Next week'));
+      await tester.tap(find.byTooltip('Previous week'));
+      expect(picked, [today.addDays(7), today.addDays(-7)]);
+
+      // Six days from the window's edge, a week back would leave it.
+      await pumpPane(
+        tester,
+        day: today.addDays(-DayPane.daysBack + 6),
+        view: DayView.grid,
+        gridSpan: GridSpan.week,
+        grid: const SizedBox(),
+      );
+      final prev = tester.widget<IconButton>(
+          find.widgetWithIcon(IconButton, Icons.chevron_left));
+      expect(prev.onPressed, isNull);
     });
 
     testWidgets('the arrows stop at the mirror window and Today at today',

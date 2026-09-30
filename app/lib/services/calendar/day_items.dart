@@ -60,7 +60,12 @@ final class DeadlineItem extends DayItem {
   /// The deadline in the sender's own words, as [showableDeadline] passes it.
   final String deadline;
 
-  const DeadlineItem(this.conversation, this.deadline);
+  /// The day it falls on, as [buildDayItems] matched it. The sender's words
+  /// are no date, and a week of markers (the grid's header) needs one per
+  /// tile; null only where a caller built the item by hand.
+  final CalendarDate? day;
+
+  const DeadlineItem(this.conversation, this.deadline, {this.day});
 }
 
 /// A thread snoozed into Later that comes back at [atUtc] on this day.
@@ -215,12 +220,17 @@ List<DayItem> buildDayItems({
   ];
 
   final deadlines = <DayItem>[];
-  final claimed = <String>{};
-  for (final c in conversations) {
-    final due = _deadlineOf(c, now);
-    if (due == null || due.$1 != day) continue;
-    claimed.add('${c.source}\u0000${c.id}');
-    deadlines.add(DeadlineItem(c, due.$2));
+  final returns = <ReturnItem>[];
+  for (final (on, item) in _markers(conversations, now, zone)) {
+    if (on != day) continue;
+    switch (item) {
+      case DeadlineItem():
+        deadlines.add(item);
+      case ReturnItem():
+        returns.add(item);
+      default:
+        break;
+    }
   }
 
   // (instant, rank, input order, item): rank puts the Now marker ahead of
@@ -236,11 +246,8 @@ List<DayItem> buildDayItems({
       MeetingItem(e, overlaps: overlapsForEvent(e, dayEvents, zone: zone)),
     ));
   }
-  for (final c in conversations) {
-    if (claimed.contains('${c.source}\u0000${c.id}')) continue;
-    final at = _returnAt(c);
-    if (at == null || zone.dateOf(at) != day) continue;
-    timed.add((at, 1, order++, ReturnItem(c, at)));
+  for (final r in returns) {
+    timed.add((r.atUtc, 1, order++, r));
   }
   if (zone.dateOf(nowUtc) == day) {
     timed.add((nowUtc, -1, order++, NowMarker(nowUtc)));
@@ -258,6 +265,71 @@ List<DayItem> buildDayItems({
     ...deadlines,
     for (final t in timed) t.$4,
   ];
+}
+
+/// Every thread's deadline and return, each with the local date it falls
+/// on, in [conversations] order: the one place the agenda's rows and the
+/// grid's header markers are decided, so [buildDayItems] and [rangeMarkers]
+/// cannot drift apart.
+///
+/// A thread contributes one marker per day: a deadline claims its day, so a
+/// return on that same day is dropped, and a return on any other day still
+/// stands.
+Iterable<(CalendarDate, DayItem)> _markers(
+  List<Conversation> conversations,
+  DateTime now,
+  CalendarZone zone,
+) sync* {
+  for (final c in conversations) {
+    final due = _deadlineOf(c, now);
+    if (due != null) yield (due.$1, DeadlineItem(c, due.$2, day: due.$1));
+    final at = _returnAt(c);
+    if (at == null) continue;
+    final on = zone.dateOf(at);
+    if (due != null && due.$1 == on) continue;
+    yield (on, ReturnItem(c, at));
+  }
+}
+
+/// The deadlines and returns of every day in `[from, toExclusive)`, day by
+/// day, in the order [buildDayItems] lists them on each — deadlines first,
+/// then returns by their instant — and nothing else.
+///
+/// The grid's header wants only these, and a week of [buildDayItems] would
+/// run the overlap maths seven times over events the header never reads.
+List<DayItem> rangeMarkers({
+  required CalendarDate from,
+  required CalendarDate toExclusive,
+  required List<Conversation> conversations,
+  required DateTime now,
+  required CalendarZone zone,
+}) {
+  final deadlines = <CalendarDate, List<DayItem>>{};
+  final returns = <CalendarDate, List<ReturnItem>>{};
+  for (final (on, item) in _markers(conversations, now, zone)) {
+    if (on.isBefore(from) || !on.isBefore(toExclusive)) continue;
+    switch (item) {
+      case DeadlineItem():
+        (deadlines[on] ??= []).add(item);
+      case ReturnItem():
+        (returns[on] ??= []).add(item);
+      default:
+        break;
+    }
+  }
+  final out = <DayItem>[];
+  for (var d = from; d.isBefore(toExclusive); d = d.addDays(1)) {
+    out.addAll(deadlines[d] ?? const <DayItem>[]);
+    // By instant, ties in input order: [buildDayItems]' own sort, which
+    // List.sort alone would not promise (it is not stable).
+    final back = [...?returns[d]].indexed.toList()
+      ..sort((a, b) {
+        final byAt = a.$2.atUtc.compareTo(b.$2.atUtc);
+        return byAt != 0 ? byAt : a.$1.compareTo(b.$1);
+      });
+    out.addAll([for (final (_, r) in back) r]);
+  }
+  return out;
 }
 
 // ── invites ────────────────────────────────────────────────────────────
@@ -653,6 +725,10 @@ bool joinable(CalendarEvent e, DateTime nowUtc) {
   return !now.isBefore(s.subtract(const Duration(minutes: 15))) &&
       now.isBefore(end);
 }
+
+/// The Monday of [day]'s week: the grid's week starts Monday, and the week
+/// read is keyed by it so every day of one week shares one read.
+CalendarDate mondayOf(CalendarDate day) => day.addDays(1 - day.weekday);
 
 /// The Day pane's title: "Today · Tuesday, Sep 29", "Tomorrow · …",
 /// "Yesterday · …", or just "Thursday, Oct 2".

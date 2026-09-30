@@ -369,6 +369,99 @@ void main() {
     });
   });
 
+  test('mondayOf is the Monday of the week, Monday itself included', () {
+    // Mon Oct 5 … Sun Oct 11 2026.
+    for (var d = 5; d <= 11; d++) {
+      expect(mondayOf(CalendarDate(2026, 10, d)), const CalendarDate(2026, 10, 5),
+          reason: 'Oct $d');
+    }
+    expect(mondayOf(const CalendarDate(2026, 10, 12)),
+        const CalendarDate(2026, 10, 12));
+    // Across a month and a year.
+    expect(mondayOf(const CalendarDate(2027, 1, 1)),
+        const CalendarDate(2026, 12, 28));
+    // Across spring-forward: dates, not instants, so no hour is lost.
+    expect(mondayOf(const CalendarDate(2026, 3, 8)),
+        const CalendarDate(2026, 3, 2));
+  });
+
+  test('a deadline item carries the day it was matched to', () {
+    final items = buildDayItems(
+      day: const CalendarDate(2026, 10, 1),
+      now: now,
+      zone: la,
+      events: const [],
+      conversations: const [
+        Conversation(id: 'yes', latestDeadline: '2026-10-01'),
+      ],
+    );
+    expect(items.whereType<DeadlineItem>().single.day,
+        const CalendarDate(2026, 10, 1));
+  });
+
+  test('rangeMarkers is the deadlines and returns buildDayItems gives, day '
+      'by day, and nothing else', () {
+    const conversations = [
+      Conversation(id: 'due-thu', subject: 'Contoso quote',
+          latestDeadline: '2026-10-01'),
+      // Two returns on one day, given out of order: the instant sorts them.
+      Conversation(id: 'back-late', bucket: 'later',
+          snoozedUntil: '2026-09-30T22:00:00.000000Z'),
+      Conversation(id: 'back-early', bucket: 'later',
+          snoozedUntil: '2026-09-30T17:00:00.000000Z'),
+      // A deadline and a return on one day: the deadline claims it.
+      Conversation(id: 'both', bucket: 'later',
+          latestDeadline: '2026-10-02',
+          snoozedUntil: '2026-10-02T17:00:00.000000Z'),
+      // A deadline on one day and a return on another: both stand.
+      Conversation(id: 'split', bucket: 'later',
+          latestDeadline: '2026-10-01',
+          snoozedUntil: '2026-10-03T17:00:00.000000Z'),
+      // Outside the range on both sides.
+      Conversation(id: 'before', latestDeadline: '2026-09-27'),
+      Conversation(id: 'after', latestDeadline: '2026-10-06'),
+    ];
+    final events = [
+      timed('m1', DateTime.utc(2026, 9, 30, 17), subject: 'Fabrikam sync'),
+    ];
+    const monday = CalendarDate(2026, 9, 28);
+
+    String sig(DayItem i) => switch (i) {
+          DeadlineItem(:final conversation, :final deadline, :final day) =>
+            'due:${conversation.id}:$deadline:${day?.toIso()}',
+          ReturnItem(:final conversation, :final atUtc) =>
+            'back:${conversation.id}:${atUtc.toIso8601String()}',
+          _ => 'other',
+        };
+    final expected = [
+      for (var i = 0; i < 7; i++)
+        for (final item in buildDayItems(
+          day: monday.addDays(i),
+          events: events,
+          conversations: conversations,
+          now: now,
+          zone: la,
+        ))
+          if (item is DeadlineItem || item is ReturnItem) sig(item),
+    ];
+    final got = rangeMarkers(
+      from: monday,
+      toExclusive: monday.addDays(7),
+      conversations: conversations,
+      now: now,
+      zone: la,
+    );
+    expect(got.map(sig).toList(), expected);
+    expect(describe(got), [
+      'back:back-early',
+      'back:back-late',
+      'due:due-thu',
+      'due:split',
+      'due:both',
+      'back:split',
+    ]);
+  });
+
   test('invitesAsOf floors to the quarter hour, in UTC', () {
     expect(invitesAsOf(DateTime.utc(2026, 9, 29, 16, 44, 59, 999, 999)),
         DateTime.utc(2026, 9, 29, 16, 30));

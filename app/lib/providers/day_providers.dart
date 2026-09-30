@@ -41,6 +41,22 @@ final dayEventsProvider = FutureProvider.autoDispose
   return _between(store, zone, day, day.addDays(1));
 });
 
+/// The seven days from `monday` (the family argument — the host passes
+/// [mondayOf] the day it shows, so every day of one week shares one read):
+/// the week grid's events, timed and all-day, cancelled included.
+///
+/// The local midnights bound it, so a Sunday-night meeting that is already
+/// Monday in UTC stays in the week whose Sunday it is on.
+final weekEventsProvider = FutureProvider.autoDispose
+    .family<List<CalendarEvent>, CalendarDate>((ref, monday) async {
+  ref.watch(calendarRevisionProvider);
+  final availability = ref.watch(calendarAvailabilityProvider);
+  final store = ref.watch(calendarStoreProvider);
+  if (!calendarShowsMirror(availability)) return const [];
+  final zone = await ref.watch(calendarZoneProvider.future);
+  return _between(store, zone, monday, monday.addDays(7));
+});
+
 /// Fifteen days from `today` (the family argument) — the list column's
 /// horizon plus today, and what the Today section picks its meetings from.
 final upcomingEventsProvider = FutureProvider.autoDispose

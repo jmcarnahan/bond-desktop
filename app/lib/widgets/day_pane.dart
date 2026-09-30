@@ -8,9 +8,13 @@ import '../services/calendar/day_items.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'clock_tick.dart';
+import 'day_grid.dart' show GridSpan;
 
 /// Which of the Day stop's two lists the pane is showing.
 enum DayPaneMode { agenda, invites }
+
+/// How the day is drawn: the agenda list, or the time grid.
+enum DayView { agenda, grid }
 
 /// The Day stop's main pane: one day's agenda, or the invites still owed an
 /// answer.
@@ -24,6 +28,11 @@ enum DayPaneMode { agenda, invites }
 /// they are plain [Text] — never a link, never markup. The one link on a row
 /// is the join URL, behind a button, through [onOpenLink] and the screen's
 /// guarded launcher.
+///
+/// The day has two faces, Agenda and Grid ([view]); the grid itself is the
+/// host's to build ([grid]), because its drops run writes and the writer is
+/// the app's. The pane only places it, and says the same availability
+/// sentences over it that it says over the agenda.
 ///
 /// Meeting, all-day and invite rows open the event panel beside the pane
 /// through [onOpenEvent]. Without it they stay inert — no ink, no hover —
@@ -46,6 +55,11 @@ class DayPane extends StatelessWidget {
     required this.onOpenConversation,
     required this.onOpenLink,
     required this.onOpenSettings,
+    required this.view,
+    required this.onViewChanged,
+    required this.gridSpan,
+    required this.onGridSpanChanged,
+    this.grid,
     this.onOpenEvent,
     this.inviteActions,
   });
@@ -65,7 +79,11 @@ class DayPane extends StatelessWidget {
       "Can't reach the calendar right now — showing what was saved.";
   static const String emptyText = 'Nothing on your calendar.';
   static const String readingText = 'Reading your calendar…';
-  static const String gridCaption = 'Grid arrives in a later phase';
+
+  static const Key agendaKey = ValueKey('day-view-agenda');
+  static const Key gridKey = ValueKey('day-view-grid');
+  static const Key spanDayKey = ValueKey('day-grid-span-day');
+  static const Key spanWeekKey = ValueKey('day-grid-span-week');
 
   final DayPaneMode mode;
   final CalendarDate day;
@@ -89,6 +107,17 @@ class DayPane extends StatelessWidget {
   final void Function(String source, String conversationKey) onOpenConversation;
   final void Function(String url) onOpenLink;
   final VoidCallback onOpenSettings;
+
+  final DayView view;
+  final void Function(DayView view) onViewChanged;
+
+  /// Day or Week, while [view] is the grid; the arrows step by it.
+  final GridSpan gridSpan;
+  final void Function(GridSpan span) onGridSpanChanged;
+
+  /// The host-built grid, drawn in grid view. Null while it cannot be built
+  /// yet (the read in flight), which says [readingText].
+  final Widget? grid;
 
   /// Opens one event beside the pane, by its Graph id. Null leaves the event
   /// rows inert.
@@ -118,28 +147,37 @@ class DayPane extends StatelessWidget {
 
   // ── agenda ───────────────────────────────────────────────────────────
 
+  bool get _week => view == DayView.grid && gridSpan == GridSpan.week;
+
   List<Widget> _agendaPane() {
     final first = today.addDays(-daysBack);
     final last = today.addDays(daysForward);
+    // A week at a time on the week grid, a day everywhere else. A step that
+    // would leave the mirror's window is refused, not clamped: landing short
+    // of where the arrow said would be its own surprise.
+    final step = _week ? 7 : 1;
+    final unit = _week ? 'week' : 'day';
     return [
       Row(
         children: [
           Expanded(child: Text(dayTitle(day, today), style: BondType.title)),
           IconButton(
-            tooltip: 'Previous day',
+            tooltip: 'Previous $unit',
             icon: const Icon(Icons.chevron_left),
-            onPressed:
-                day.isAfter(first) ? () => onSelectDay(day.addDays(-1)) : null,
+            onPressed: !day.addDays(-step).isBefore(first)
+                ? () => onSelectDay(day.addDays(-step))
+                : null,
           ),
           TextButton(
             onPressed: day == today ? null : () => onSelectDay(today),
             child: const Text('Today'),
           ),
           IconButton(
-            tooltip: 'Next day',
+            tooltip: 'Next $unit',
             icon: const Icon(Icons.chevron_right),
-            onPressed:
-                day.isBefore(last) ? () => onSelectDay(day.addDays(1)) : null,
+            onPressed: !day.addDays(step).isAfter(last)
+                ? () => onSelectDay(day.addDays(step))
+                : null,
           ),
         ],
       ),
@@ -153,31 +191,65 @@ class DayPane extends StatelessWidget {
         ),
       ],
       const SizedBox(height: BondSpacing.s16),
-      Expanded(child: _agendaBody()),
+      Expanded(
+        child: view == DayView.grid ? _gridBody() : _agendaBody(),
+      ),
     ];
   }
 
-  /// Agenda | Grid. Only Agenda exists this phase; Grid is drawn, disabled,
-  /// and says so in words next to it rather than in a tooltip alone.
+  /// Agenda | Grid, and beside Grid its Day | Week. The selected pill takes
+  /// no tap: pressing what is already showing would only rewrite the pref.
   Widget _modeControl() {
+    final grid = view == DayView.grid;
     return Row(
       children: [
-        const BondFilterPill(label: 'Agenda', selected: true, onTap: null),
+        BondFilterPill(
+          key: agendaKey,
+          label: 'Agenda',
+          selected: !grid,
+          onTap: grid ? () => onViewChanged(DayView.agenda) : null,
+        ),
         const SizedBox(width: BondSpacing.s8),
-        const Tooltip(
-          message: gridCaption,
-          child: BondFilterPill(label: 'Grid', onTap: null),
+        BondFilterPill(
+          key: gridKey,
+          label: 'Grid',
+          selected: grid,
+          onTap: grid ? null : () => onViewChanged(DayView.grid),
         ),
-        const SizedBox(width: BondSpacing.s12),
-        Flexible(
-          child: Text(
-            gridCaption,
-            style: BondType.caption.copyWith(color: BondColors.inkMuted),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+        if (grid) ...[
+          const SizedBox(width: BondSpacing.s24),
+          BondFilterPill(
+            key: spanDayKey,
+            label: 'Day',
+            selected: gridSpan == GridSpan.day,
+            onTap: gridSpan == GridSpan.day
+                ? null
+                : () => onGridSpanChanged(GridSpan.day),
           ),
-        ),
+          const SizedBox(width: BondSpacing.s8),
+          BondFilterPill(
+            key: spanWeekKey,
+            label: 'Week',
+            selected: gridSpan == GridSpan.week,
+            onTap: gridSpan == GridSpan.week
+                ? null
+                : () => onGridSpanChanged(GridSpan.week),
+          ),
+        ],
       ],
+    );
+  }
+
+  /// The host's grid, under the same availability rules as the agenda: the
+  /// calendar that is not this session's to show is a sentence here too.
+  Widget _gridBody() {
+    final blocked = _blocked();
+    if (blocked != null) return blocked;
+    final built = grid;
+    if (built != null) return built;
+    return Align(
+      alignment: Alignment.topLeft,
+      child: Text(readingText, style: _muted),
     );
   }
 

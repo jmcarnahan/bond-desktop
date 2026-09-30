@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/date_symbol_data_local.dart';
 
 import 'data/app_paths.dart';
 import 'data/db.dart';
@@ -29,6 +30,12 @@ Future<void> main() async {
   // what day it is. Synchronous work over embedded data: no platform channel,
   // nothing to fail on a fresh machine.
   await initCalendarZones();
+  // Every locale's day and month names. Not needed today: the app formats in
+  // en_US (no flutter_localizations, no Intl.defaultLocale), which intl
+  // compiles in. It is forward-proofing — the day the app takes a locale,
+  // the Day grid's headers would throw in any other one without it — and it
+  // is cheap: in-memory data, no platform channel.
+  await initializeDateFormatting();
 
   // pdfium is loaded here so the first PDF anybody opens does not pay the
   // init on the UI thread. Called through the wrapper next to the renderer so

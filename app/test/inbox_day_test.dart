@@ -8,6 +8,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
     show Attendee, CalendarEvent, WritePreview;
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/day_providers.dart' show dayEventsProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
@@ -19,6 +20,8 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/day_grid.dart' show DayGrid;
+import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
 import 'package:bond_inbox/widgets/event_actions.dart' show EventActions;
 import 'package:bond_inbox/widgets/event_panel.dart' show EventPanelBody;
 import 'package:bond_inbox/widgets/meeting_card.dart' show MeetingCard;
@@ -818,6 +821,249 @@ void main() {
       final answer = writer.committed.single.write as RespondToEvent;
       expect(answer.eventId, 'inv-1');
       expect(answer.response, RsvpResponse.accept);
+    });
+  });
+
+  group('the grid in the screen', () {
+    /// An own event (organiser, [guests] invited) at noon TOMORROW: a drop an
+    /// hour down must land in the future whatever time the suite runs, or
+    /// the drop's own check refuses it as passed. [openTomorrow] goes there.
+    Future<DateTime> seedAtNoon({List<Attendee> guests = const []}) async {
+      // A plain UTC stamp, as the store and the move hold it: a TZDateTime is
+      // never `==` to one.
+      final start = DateTime.fromMicrosecondsSinceEpoch(
+          la
+              .localDateTime(la.dateOf(DateTime.now().toUtc()).addDays(1), 12, 0)
+              .microsecondsSinceEpoch,
+          isUtc: true);
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'own-1',
+          subject: 'Focus block',
+          isOrganizer: true,
+          organizerAddress: 'owner@contoso.com',
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 1)),
+          responseStatus: 'organizer',
+          showAs: 'busy',
+          attendees: guests,
+        ),
+      ], syncRun: 'run-1');
+      return start;
+    }
+
+    /// The Day stop, then the next-day arrow, and time for the grid's page
+    /// to finish scrolling to the morning: a drag that starts while the
+    /// hours are still moving under it lands wherever they stopped.
+    Future<void> openTomorrow(WidgetTester tester) async {
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+    }
+
+    /// The spike's drag, an hour down at the default 42 px an hour.
+    Future<void> dragHourDown(WidgetTester tester, Finder f) async {
+      final gesture = await tester.startGesture(tester.getCenter(f));
+      await tester.pump(const Duration(milliseconds: 600));
+      await gesture.moveBy(const Offset(0, 20));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(const Offset(0, 22));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+      await pumps(tester);
+    }
+
+    testWidgets('Grid is remembered: the pref is written, and the next launch '
+        'opens on the grid', (tester) async {
+      await seedAtNoon();
+      await pumpScreen(tester);
+      await openTomorrow(tester);
+      expect(find.byType(DayGrid), findsNothing);
+      expect(find.text('Focus block'), findsOneWidget);
+
+      await tester.tap(find.byKey(DayPane.gridKey));
+      await pumps(tester);
+      expect(find.byType(DayGrid), findsOneWidget);
+      expect(find.byKey(DayGrid.tileKeyFor('own-1')), findsOneWidget);
+      expect(await store.getPref(dayViewKey), 'grid');
+
+      await tester.tap(find.byKey(DayPane.spanWeekKey));
+      await pumps(tester);
+      expect(await store.getPref(dayGridSpanKey), 'week');
+      expect(find.byKey(DayGrid.tileKeyFor('own-1')), findsOneWidget);
+
+      // A fresh screen over the same store.
+      await tester.pumpWidget(const SizedBox());
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byType(DayGrid), findsOneWidget);
+      final grid = tester.widget<DayGrid>(find.byType(DayGrid));
+      expect(grid.span.name, 'week');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a drop on an own event moves it at once with Undo, and the '
+        'tile waits for the store', (tester) async {
+      final start = await seedAtNoon();
+      await store.setPref(dayViewKey, 'grid');
+      final writer = _RecordingWriter();
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await openTomorrow(tester);
+      final tile = find.byKey(DayGrid.tileKeyFor('own-1'));
+      expect(tile, findsOneWidget);
+      final before = tester.getTopLeft(tile);
+
+      await dragHourDown(tester, tile);
+
+      expect(writer.previewed.single, isA<MoveEvent>());
+      expect(find.byType(WriteConfirmStrip), findsNothing);
+      final moved = writer.committed.single;
+      expect(moved.isUndo, isFalse);
+      final write = moved.write as MoveEvent;
+      expect(write.eventId, 'own-1');
+      expect(write.startUtc, start.add(const Duration(hours: 1)));
+      expect(write.endUtc, start.add(const Duration(hours: 2)));
+      // The recording writer changed no row, so the tile is where it was.
+      expect(tester.getTopLeft(find.byKey(DayGrid.tileKeyFor('own-1'))),
+          before);
+
+      await tester.pump(const Duration(milliseconds: 750));
+      expect(
+          find.descendant(
+              of: find.byType(SnackBar),
+              matching: find.textContaining('Moved "Focus block"')),
+          findsOneWidget);
+      expect(find.text('Undo'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a drop on a meeting with guests waits on the strip over the '
+        'grid, naming who is emailed', (tester) async {
+      await seedAtNoon(guests: const [
+        Attendee(name: 'Dana Contoso', address: 'dana@contoso.com'),
+      ]);
+      await store.setPref(dayViewKey, 'grid');
+      final writer = _RecordingWriter(notifies: const ['dana@contoso.com']);
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await openTomorrow(tester);
+      final tile = find.byKey(DayGrid.tileKeyFor('own-1'));
+
+      await dragHourDown(tester, tile);
+
+      expect(writer.previewed.single, isA<MoveEvent>());
+      expect(writer.committed, isEmpty);
+      final strip = find.byType(WriteConfirmStrip);
+      expect(strip, findsOneWidget);
+      expect(find.text('This emails: dana@contoso.com'), findsOneWidget);
+      expect(tester.getTopLeft(strip).dy,
+          lessThan(tester.getTopLeft(find.byType(DayGrid)).dy));
+
+      // Where it would land, drawn beside the tile that has not moved.
+      expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
+      expect(find.text('Moving here…'), findsOneWidget);
+      expect(tester.widget<DayGrid>(find.byType(DayGrid)).locked, isTrue);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await pumps(tester);
+      expect(find.byType(WriteConfirmStrip), findsNothing);
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
+      expect(tester.widget<DayGrid>(find.byType(DayGrid)).locked, isFalse);
+      expect(writer.committed, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a drop into the past says so and writes nothing',
+        (tester) async {
+      // Noon YESTERDAY, dragged an hour down: past whenever the suite runs.
+      final yesterday = la.dateOf(DateTime.now().toUtc()).addDays(-1);
+      final start = la.localDateTime(yesterday, 12, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'own-1',
+          subject: 'Focus block',
+          isOrganizer: true,
+          organizerAddress: 'owner@contoso.com',
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 1)),
+          responseStatus: 'organizer',
+          showAs: 'busy',
+        ),
+      ], syncRun: 'run-1');
+      await store.setPref(dayViewKey, 'grid');
+      final writer = _RecordingWriter();
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Previous day'));
+      await pumps(tester);
+      final tile = find.byKey(DayGrid.tileKeyFor('own-1'));
+      expect(tile, findsOneWidget);
+
+      await dragHourDown(tester, tile);
+      await tester.pump(const Duration(milliseconds: 750));
+
+      expect(
+          find.descendant(
+              of: find.byType(SnackBar),
+              matching: find.text('That time has passed.')),
+          findsOneWidget);
+      expect(writer.previewed, isEmpty);
+      expect(writer.committed, isEmpty);
+      expect(find.byType(WriteConfirmStrip), findsNothing);
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the next day read in flight keeps the grid on screen',
+        (tester) async {
+      final today = la.dateOf(DateTime.now().toUtc());
+      final tomorrow = today.addDays(1);
+      final start = la.localDateTime(tomorrow, 12, 0).toUtc();
+      // Tomorrow's read is held until the test lets it go; every other day
+      // answers at once with nothing.
+      final held = Completer<List<CalendarEvent>>();
+      await store.setPref(dayViewKey, 'grid');
+      await pumpScreen(tester, overrides: [
+        dayEventsProvider.overrideWith((ref, day) =>
+            day == tomorrow ? held.future : const <CalendarEvent>[]),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byType(DayGrid), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Next day'));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+        expect(find.byType(DayGrid), findsOneWidget);
+        expect(find.text(DayPane.readingText), findsNothing);
+      }
+      expect(tester.widget<DayGrid>(find.byType(DayGrid)).day, tomorrow);
+
+      held.complete([
+        CalendarEvent(
+          id: 'own-1',
+          subject: 'Focus block',
+          isOrganizer: true,
+          organizerAddress: 'owner@contoso.com',
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 1)),
+          responseStatus: 'organizer',
+          showAs: 'busy',
+        ),
+      ]);
+      await pumps(tester);
+      expect(find.byType(DayGrid), findsOneWidget);
+      expect(find.byKey(DayGrid.tileKeyFor('own-1')), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
     });
   });
 }

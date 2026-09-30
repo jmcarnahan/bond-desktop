@@ -213,6 +213,42 @@ void main() {
     });
   });
 
+  group('checkDrop', () {
+    // The meeting is Wed Oct 7 17:00–18:00Z; now is Mon Oct 5 15:00Z.
+    String? refusal(DateTime start, DateTime end) => switch (
+          checkDrop(shown: meeting(), startUtc: start, endUtc: end, now: now)) {
+        NewTimeProblem(:final reason) => reason,
+        _ => null,
+      };
+
+    test('a drop where it already is is refused', () {
+      expect(refusal(DateTime.utc(2026, 10, 7, 17), DateTime.utc(2026, 10, 7, 18)),
+          "That's when it already is.");
+    });
+
+    test('a drop into the past is refused', () {
+      expect(refusal(DateTime.utc(2026, 10, 5, 14), DateTime.utc(2026, 10, 5, 15)),
+          'That time has passed.');
+    });
+
+    test('a drop that ends before it starts is refused', () {
+      expect(refusal(DateTime.utc(2026, 10, 7, 19), DateTime.utc(2026, 10, 7, 19)),
+          'A meeting needs to end after it starts.');
+    });
+
+    test('any other drop is the new time, in UTC', () {
+      final t = checkDrop(
+        shown: meeting(),
+        startUtc: la.localDateTime(const CalendarDate(2026, 10, 7), 11, 0),
+        endUtc: la.localDateTime(const CalendarDate(2026, 10, 7), 12, 0),
+        now: now,
+      ) as NewTimeTimed;
+      expect(t.startUtc, DateTime.utc(2026, 10, 7, 18));
+      expect(t.endUtc, DateTime.utc(2026, 10, 7, 19));
+      expect(t.startUtc.isUtc, isTrue);
+    });
+  });
+
   group('sentences', () {
     test('RSVP summaries: one meeting, a series, a proposal, a note', () {
       final shown = meeting();

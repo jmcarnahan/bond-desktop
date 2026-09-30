@@ -102,6 +102,9 @@ dependencies:
   # is the only file allowed to import `flutter_timezone`.
   timezone: ^0.11.1
   flutter_timezone: ^5.1.0
+  # The Day stop's grid (day and week columns, drag to move). Pre-1.0, so
+  # pinned EXACTLY: a minor bump renames its controllers and callbacks.
+  kalender: 0.32.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

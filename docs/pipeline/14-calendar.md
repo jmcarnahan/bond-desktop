@@ -387,6 +387,76 @@ meetings still ahead today — not cancelled, not declined, not ended
 only while the calendar is `available` or `unavailable`, so a launch does not
 grow the section and then lose it.
 
+### The grid
+
+The pane's **Agenda | Grid** control switches the day between the list above
+and a time grid (`app/lib/widgets/day_grid.dart`, `DayGrid`); beside Grid,
+**Day | Week** picks one column or seven. Both choices are remembered in
+`app_prefs` as `day_view` (`agenda` | `grid`) and `day_grid_span` (`day` |
+`week`), read once when the inbox starts and written on each press; a press
+on one control before that read lands keeps the press and still restores the
+other's stored value. The week starts on **Monday** (`mondayOf`), and its
+events come from `weekEventsProvider(monday)` — the seven local days
+`[monday, monday+7)`, so a Sunday-night meeting that is already Monday in UTC
+stays in its own week. The arrows step a week on the week grid and a day
+everywhere else; paging the grid itself moves the pane's day the same way, and
+both stop at the mirror's window (`DayPane.daysBack` / `daysForward`, the
+grid's `displayRange`). The availability table above holds for the grid
+exactly as for the agenda.
+
+While the next day's or week's read is in flight the grid keeps drawing the
+last list it had (`_lastGridEvents` on the inbox, dropped on a zone change)
+rather than unmounting for "Reading…", which would rebuild the view and
+scroll it back to the morning on every arrow. Tiles are placed by their own
+instants, so the old list draws nothing on a page it does not touch. "Reading
+your calendar…" shows only before the first list.
+
+The grid is drawn by **`kalender` 0.32.0, pinned exactly**: the package is
+pre-1.0 and its minor releases rename controllers and callbacks, so a caret
+range would break the build on a routine `pub upgrade`. The app calls
+`initializeDateFormatting()` before `runApp`. Today it cannot be needed — the
+app formats in en_US (no `flutter_localizations`, no `Intl.defaultLocale`),
+which intl compiles in — so it is forward-proofing for the day the app takes
+a locale, when the grid's day names would throw in any other; it is cheap and
+in-memory.
+
+- **Tiles.** A timed event is a tile at its instants on the display zone's
+  clock, titled by its subject (plain text) with its range when there is
+  room. Tentative is a lighter fill with a fainter bar, declined is faded and
+  struck through, cancelled is grey and struck through, and a hard overlap
+  turns the tile's left bar to the attention colour.
+- **The all-day header** holds all-day events, the day's **deadlines** (`Due ·
+  subject · the sender's words`) and **returns** (`Back: subject`), taken by
+  `rangeMarkers(from, toExclusive)`, which shares its one private rule with
+  `buildDayItems` (a deadline claims its day from a return on the same day),
+  so the two views cannot disagree about what falls when — without running
+  the day's overlap maths seven times for a week. A deadline or return opens
+  its thread; an event tile opens the event beside. Marker tiles are keyed
+  `DayGrid.markerKeyFor(source, id, kind: 'due' | 'back')`.
+- **The Now line** follows the clock through the package's own indicator, fed
+  the display zone's wall time, so "today" is the display zone's today.
+- **Drag and resize** are offered only on a timed event that `canMove` allows
+  (the organiser's own, not cancelled, not a series master), snapping to
+  fifteen minutes and never to the Now line. A drop is a PROPOSAL, not a
+  change. A drop where the tile already was (a click that wobbled, which the
+  package snaps back and still reports) stops in the grid and costs nothing.
+  Any other drop goes to the host, which runs `checkDrop` — the typed move's
+  own refusals in its words: "That's when it already is.", "That time has
+  passed.", "A meeting needs to end after it starts." — and a refusal is a
+  toast with nothing written. A drop that passes runs `MoveEvent.timed`
+  through the same `CalendarWriteFlow` as every other write — an own event
+  moves at once and offers Undo, a meeting with guests waits on the confirm
+  strip, drawn over the grid, naming who is emailed. While that write is in
+  flight the grid is `locked` (every tile undraggable) and shows where the
+  move would land as a ghost tile, "Moving here…", which the flow's `onIdle`
+  takes down when the write goes through, fails or is dismissed. The grid
+  never moves the tile itself: it renders from the store, so a refused,
+  failed or dismissed move leaves the tile where it was, and a move that went
+  through moves it when the mirror does.
+- **The ghost tile.** `DayGrid.proposal` draws a translucent, outlined,
+  undraggable tile for a time that is not on the calendar: the pending
+  drop's "Moving here…" today, and Phase 8's hook for a proposed slot.
+
 ## Events, invite cards and people
 
 A meeting opens as the ninth side panel, `EventPanel(eventId)`

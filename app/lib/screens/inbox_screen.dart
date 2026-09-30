@@ -47,11 +47,19 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
-import '../services/calendar/calendar_writes.dart' show CalendarWrite;
+import '../services/calendar/calendar_writes.dart'
+    show CalendarWrite, MoveEvent;
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
 import '../services/calendar/overlaps.dart' show Overlaps, overlapsForEvent;
+import '../services/calendar/write_rules.dart'
+    show
+        NewTimeProblem,
+        NewTimeTimed,
+        checkDrop,
+        writeDoneMessage,
+        writeSummary;
 import '../services/external_sender.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
@@ -74,6 +82,7 @@ import '../widgets/context_file_panel.dart';
 import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/calendar_write_flow.dart';
+import '../widgets/day_grid.dart';
 import '../widgets/day_pane.dart';
 import '../widgets/drafts_pane.dart';
 import '../widgets/event_actions.dart';
@@ -413,6 +422,36 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Whether the Day stop is showing the invites owed rather than a day.
   bool _showingInvites = false;
+
+  /// The Day stop's face and the grid's span, remembered across launches
+  /// ([dayViewKey], [dayGridSpanKey]). Unlike [_selectedDay] they are NOT
+  /// cleared with the section: they are how the reader likes the day drawn,
+  /// not where they were.
+  DayView _dayView = DayView.agenda;
+  GridSpan _gridSpan = GridSpan.day;
+
+  /// Set by the first press on each control, so the startup read — which may
+  /// land after it — never puts back what the reader just changed. One flag
+  /// per pref: a press on Agenda | Grid before the read says nothing about
+  /// Day | Week, whose stored value the read still restores.
+  bool _dayViewTouched = false;
+  bool _gridSpanTouched = false;
+
+  /// The last events list the grid drew, and the zone it was read in. While
+  /// the next day's or week's read is in flight the grid keeps drawing this
+  /// rather than unmounting for "Reading…", which would rebuild its
+  /// controllers and scroll the day back to the morning on every arrow.
+  /// Tiles are placed by their own instants, so an old list draws nothing
+  /// on a page it does not touch. A cache written in build, never a reason
+  /// to rebuild.
+  List<CalendarEvent>? _lastGridEvents;
+  CalendarZone? _lastGridZone;
+
+  /// The move a grid drop asked for, while its write is in flight: the grid
+  /// draws it as the ghost tile, "Moving here…", beside the tile that stays
+  /// where the store has it. Cleared by the flow's `onIdle`; drawn only while
+  /// the flow says busy, so a flow that went away mid-write leaves no ghost.
+  ({String id, DateTime startUtc, DateTime endUtc})? _gridMove;
 
   /// Which pile Archive is showing. Kept here rather than in the pane so the
   /// tab survives every rebuild the sixty-second poll causes.
@@ -982,6 +1021,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (!mounted) return;
       setState(() => _owner = account);
     }());
+    unawaited(_loadDayView());
     _poll = Timer.periodic(_pollInterval, (_) => _refresh());
     // Asked for now and honoured when the region arrives: the list is where a
     // reader who has clicked nothing yet is standing, and it is where the
@@ -1739,6 +1779,56 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _selectedRoomKey = null;
     });
+  }
+
+  /// Reads the Day stop's remembered face once, at startup. A value this
+  /// build did not write (or a failed read) leaves the default, the agenda.
+  Future<void> _loadDayView() async {
+    final String? view;
+    final String? span;
+    try {
+      final store = ref.read(messageStoreProvider);
+      view = await store.getPref(dayViewKey);
+      span = await store.getPref(dayGridSpanKey);
+    } on Object catch (e) {
+      debugPrint('the day view preference could not be read: $e');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      if (!_dayViewTouched) {
+        _dayView =
+            DayView.values.where((v) => v.name == view).firstOrNull ?? _dayView;
+      }
+      if (!_gridSpanTouched) {
+        _gridSpan = GridSpan.values.where((v) => v.name == span).firstOrNull ??
+            _gridSpan;
+      }
+    });
+  }
+
+  /// Agenda | Grid, and Day | Week: drawn at once, written behind. A write
+  /// that fails costs only the memory of the choice, never the choice.
+  void _setDayView({DayView? view, GridSpan? span}) {
+    setState(() {
+      if (view != null) {
+        _dayViewTouched = true;
+        _dayView = view;
+      }
+      if (span != null) {
+        _gridSpanTouched = true;
+        _gridSpan = span;
+      }
+    });
+    final key = view != null ? dayViewKey : dayGridSpanKey;
+    final value = view?.name ?? span!.name;
+    unawaited(() async {
+      try {
+        await ref.read(messageStoreProvider).setPref(key, value);
+      } on Object catch (e) {
+        debugPrint('the day view preference could not be saved: $e');
+      }
+    }());
   }
 
   /// Opens the invites owed on the Day stop. The day stays what it was, so
@@ -4748,6 +4838,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final invites = shows
         ? ref.watch(invitesOwedProvider(invitesAsOf(now))).valueOrNull
         : const <InviteEntry>[];
+    final grid = _dayView == DayView.grid
+        ? _dayGrid(conversations, zone: zone, day: day, today: today,
+            now: now, shows: shows, dayEvents: events)
+        : null;
     return DayPane(
       mode: _showingInvites ? DayPaneMode.invites : DayPaneMode.agenda,
       day: day,
@@ -4764,6 +4858,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenLink: (url) => unawaited(_launchExternal(url)),
       onOpenSettings: _openSettings,
       onOpenEvent: _openEvent,
+      view: _dayView,
+      onViewChanged: (v) => _setDayView(view: v),
+      gridSpan: _gridSpan,
+      onGridSpanChanged: (s) => _setDayView(span: s),
+      grid: grid,
       inviteActions: (entry) => CalendarWriteFlow(
         key: ValueKey('invite-write-${entry.event.id}'),
         writer: ref.read(calendarWritesProvider),
@@ -4784,6 +4883,126 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           busy: busy,
           compact: true,
         ),
+      ),
+    );
+  }
+
+  /// The Day stop's grid, or null until its first read lands. A later read in
+  /// flight (the next day, the next week) keeps the last list on screen; see
+  /// [_lastGridEvents].
+  ///
+  /// It sits inside a filling [CalendarWriteFlow], so a drop is a press like
+  /// any other: an own event moves at once and offers Undo, a meeting with
+  /// guests waits on the strip over the grid naming who is emailed, and a
+  /// refused or failed move leaves the tile where the store has it.
+  Widget? _dayGrid(
+    List<Conversation> conversations, {
+    required CalendarZone zone,
+    required CalendarDate day,
+    required CalendarDate today,
+    required DateTime now,
+    required bool shows,
+    required List<CalendarEvent>? dayEvents,
+  }) {
+    final week = _gridSpan == GridSpan.week;
+    final monday = mondayOf(day);
+    final List<CalendarEvent>? read;
+    if (!week) {
+      read = dayEvents;
+    } else {
+      read = shows
+          ? ref.watch(weekEventsProvider(monday)).valueOrNull
+          : const <CalendarEvent>[];
+    }
+    // A list read in another zone placed its all-day tiles by that zone's
+    // midnights, so it is not kept across a zone change.
+    if (_lastGridZone != zone) _lastGridEvents = null;
+    _lastGridZone = zone;
+    if (read != null) _lastGridEvents = read;
+    final events = read ?? _lastGridEvents;
+    if (events == null) return null;
+    final shown = events;
+    // Deadlines and returns by the agenda's own rule ([rangeMarkers] shares
+    // it with [buildDayItems]), so the header and the list can never
+    // disagree about what falls when.
+    final markers = rangeMarkers(
+      from: week ? monday : day,
+      toExclusive: week ? monday.addDays(7) : day.addDays(1),
+      conversations: conversations,
+      now: now,
+      zone: zone,
+    );
+    final pending = _gridMove;
+    return CalendarWriteFlow(
+      key: const ValueKey('grid-move'),
+      fill: true,
+      // The tile the store answers with is the reset; a remount would scroll
+      // the day back to the morning.
+      resetOnSuccess: false,
+      writer: ref.read(calendarWritesProvider),
+      onDone: _calendarWriteDone,
+      onIdle: () {
+        if (mounted && _gridMove != null) setState(() => _gridMove = null);
+      },
+      builder: (context, start, busy) => DayGrid(
+        day: day,
+        span: _gridSpan,
+        events: shown,
+        markers: markers,
+        proposal: busy && pending != null
+            ? GridProposal(
+                startUtc: pending.startUtc,
+                endUtc: pending.endUtc,
+                label: 'Moving here…',
+              )
+            : null,
+        locked: busy,
+        zone: zone,
+        clock: DateTime.now,
+        onOpenEvent: _openEvent,
+        onOpenItem: (item) {
+          switch (item) {
+            case DeadlineItem(:final conversation):
+            case ReturnItem(:final conversation):
+              _select(conversation.id, source: conversation.source);
+            default:
+              break;
+          }
+        },
+        onMoveRequested: busy
+            ? null
+            : (id, startUtc, endUtc) {
+                final event = shown.where((e) => e.id == id).firstOrNull;
+                if (event == null) return;
+                // The typed move's refusals, in its words: a drop into the
+                // past says so and writes nothing.
+                final checked = checkDrop(
+                  shown: event,
+                  startUtc: startUtc,
+                  endUtc: endUtc,
+                  now: DateTime.now(),
+                );
+                if (checked is NewTimeProblem) {
+                  _toast(checked.reason, cleared: 0);
+                  return;
+                }
+                if (checked is! NewTimeTimed) return;
+                final write = MoveEvent.timed(id,
+                    startUtc: checked.startUtc, endUtc: checked.endUtc);
+                setState(() => _gridMove = (
+                      id: id,
+                      startUtc: checked.startUtc,
+                      endUtc: checked.endUtc,
+                    ));
+                start(
+                  write,
+                  summary: writeSummary(write,
+                      shown: event, series: false, zone: zone, today: today),
+                  doneMessage: writeDoneMessage(write,
+                      shown: event, series: false, zone: zone),
+                );
+              },
+        onVisibleDayChanged: _selectDay,
       ),
     );
   }
