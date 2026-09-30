@@ -142,6 +142,9 @@ class _EventActionsState extends State<EventActions> {
           today: widget.today),
       doneMessage: writeDoneMessage(w,
           shown: _shown, series: series, zone: widget.zone),
+      // The event the write is aimed at: the organiser an answer goes to,
+      // the guests a cancel reaches.
+      mayEmail: mayEmailFor(w, event: widget.target),
     );
   }
 

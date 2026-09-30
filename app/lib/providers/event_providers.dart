@@ -29,8 +29,23 @@ import 'app_providers.dart';
 /// Every failure is an answer rather than an error, because each one is
 /// something the panel draws: gone, blocked, or unreachable. What is logged
 /// is the error's TYPE only — an exception's sentence can carry a subject.
+///
+/// A live re-read that cannot reach the server after an earlier one FOUND
+/// the event keeps that answer rather than turning an open panel into
+/// "can't reach" on a revision bump: every sync that moved a row re-runs
+/// this, and a master the mirror never holds is read live each time. Only
+/// an unreachable answer is softened so; gone and blocked are news.
 final eventByIdProvider = FutureProvider.autoDispose
     .family<EventLookup, String>((ref, id) async {
+  // Before the first await: on a rebuild the state is the loading value
+  // carrying the previous answer, which is what an unreachable re-read
+  // falls back to.
+  EventLookup? previous;
+  try {
+    previous = ref.state.valueOrNull;
+  } on Object {
+    previous = null;
+  }
   ref.watch(calendarRevisionProvider);
   final availability = ref.watch(calendarAvailabilityProvider);
   if (!calendarShowsMirror(availability)) {
@@ -55,6 +70,20 @@ final eventByIdProvider = FutureProvider.autoDispose
     debugPrint('an event could not be read from the mirror: ${e.runtimeType}');
     return EventLookup.unreachable(availability: availability);
   }
+  EventLookup unreachable() {
+    final kept = previous;
+    final event = kept?.event;
+    if (kept != null && kept.isFound && event != null) {
+      return EventLookup.found(
+        event,
+        occurrences: kept.occurrences,
+        fromMirror: kept.fromMirror,
+        availability: availability,
+      );
+    }
+    return EventLookup.unreachable(availability: availability);
+  }
+
   try {
     final live = await ref.read(calendarBackendProvider).getEvent(id);
     // The mirror is built from calendarView, which holds a series'
@@ -77,10 +106,10 @@ final eventByIdProvider = FutureProvider.autoDispose
     // server that could not answer, which is worth trying again.
     return availability == CalendarAvailability.sdkMode
         ? const EventLookup.blocked(CalendarAvailability.sdkMode)
-        : EventLookup.unreachable(availability: availability);
+        : unreachable();
   } on Object catch (e) {
     debugPrint('an event could not be read live: ${e.runtimeType}');
-    return EventLookup.unreachable(availability: availability);
+    return unreachable();
   }
 });
 

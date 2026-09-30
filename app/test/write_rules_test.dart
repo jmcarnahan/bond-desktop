@@ -420,10 +420,71 @@ void main() {
           emailedLine(six),
           'This emails: p1@fabrikam.com, p2@fabrikam.com, p3@fabrikam.com, '
           'p4@fabrikam.com, p5@fabrikam.com and 1 more');
+      // Where the mail goes, not that it went: the list is a preview.
       expect(emailedSuffix(const []), '');
       expect(emailedSuffix(const ['dana@contoso.com']),
-          ' Emailed dana@contoso.com.');
-      expect(emailedSuffix(six), ' Emailed 6 people.');
+          ' Emails go to dana@contoso.com.');
+      expect(emailedSuffix(six), ' Emails go to 6 people.');
+    });
+
+    test('a write that confirms anyway, over a dry run naming nobody, says '
+        'who it may email', () {
+      // The server's list wins whenever it has anyone on it.
+      expect(
+          emailedLine(const ['dana@contoso.com'],
+              mayEmail: const ['sam@fabrikam.com']),
+          'This emails: dana@contoso.com');
+      expect(emailedLine(const [], mayEmail: const ['dana@contoso.com']),
+          'This may email: dana@contoso.com');
+      expect(emailedLine(const [], mayEmail: const []), isNull);
+      expect(emailedSuffix(const [], mayEmail: const ['dana@contoso.com']),
+          ' Emails go to dana@contoso.com.');
+      expect(
+          emailedSuffix(const [],
+              mayEmail: const ['a@contoso.com', 'b@contoso.com']),
+          ' Emails go to 2 people.');
+    });
+
+    test('mayEmailFor: the organiser for an answer, the guests for a create '
+        'and a cancel, nobody for a move', () {
+      final invite = CalendarEvent(
+        id: 'e1',
+        subject: 'Design review',
+        organizerAddress: 'Dana@Contoso.com',
+        attendees: const [
+          Attendee(name: 'Dana', address: 'dana@contoso.com'),
+          Attendee(name: 'Me', address: 'owner@contoso.com'),
+          Attendee(
+              name: 'Room 4', address: 'room4@contoso.com', type: 'resource'),
+          Attendee(name: 'Sam', address: 'Sam@Fabrikam.com'),
+        ],
+      );
+      expect(
+          mayEmailFor(const RespondToEvent('e1', RsvpResponse.accept),
+              event: invite),
+          ['dana@contoso.com']);
+      expect(mayEmailFor(const CancelMeeting('e1'), event: invite),
+          ['owner@contoso.com', 'sam@fabrikam.com'],
+          reason: 'not the room, not the organiser');
+      expect(mayEmailFor(const DeleteEvent('e1'), event: invite),
+          ['owner@contoso.com', 'sam@fabrikam.com']);
+      expect(mayEmailFor(const DeleteEvent('e1')), isEmpty);
+      expect(
+          mayEmailFor(CreateEvent(
+            subject: 'Kickoff',
+            startUtc: DateTime.utc(2026, 10, 8, 17),
+            endUtc: DateTime.utc(2026, 10, 8, 18),
+            attendees: const ['Dana@Contoso.com', 'dana@contoso.com'],
+            transactionId: 'tx',
+          )),
+          ['dana@contoso.com']);
+      expect(
+          mayEmailFor(
+              MoveEvent.timed('e1',
+                  startUtc: DateTime.utc(2026, 10, 8, 17),
+                  endUtc: DateTime.utc(2026, 10, 8, 18)),
+              event: invite),
+          isEmpty);
     });
 
     test('button labels', () {

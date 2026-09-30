@@ -240,6 +240,7 @@ class CalendarSync {
     ActivityLog? activityLog,
     DateTime Function()? clock,
     this._precheck,
+    this.onOutcome,
   })  : _activity = activityLog ?? ActivityLog.disabled(),
         _clock = clock ?? DateTime.now;
 
@@ -252,6 +253,13 @@ class CalendarSync {
   /// Answers a status before any backend call when there is no calendar to
   /// ask (SDK mode, a grant without the scope), so those cost no request.
   final Future<CalendarSyncStatus?> Function()? _precheck;
+
+  /// Told what every tick that reached an answer found, after [lastOutcome]
+  /// and [availability] hold it; never for a `skipped` one. This is how a
+  /// tick nobody on screen awaited — the forced read after a write — still
+  /// reaches the mirror's readers. A throw from it is traced and dropped: the
+  /// sync never throws.
+  final void Function(CalendarSyncOutcome outcome)? onOutcome;
 
   /// The unforced minimum between two syncs. The inbox's poll is 60 s; the
   /// calendar moves far less than mail and every tick is a Graph call.
@@ -458,6 +466,13 @@ class CalendarSync {
         status: 'error',
         detail: const {'outcome': 'scope_missing'},
       );
+    }
+    if (outcome.status != CalendarSyncStatus.skipped) {
+      try {
+        onOutcome?.call(outcome);
+      } on Object catch (e) {
+        debugPrint('calendar: an outcome was not published: ${e.runtimeType}');
+      }
     }
     return outcome;
   }

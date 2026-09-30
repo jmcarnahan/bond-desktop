@@ -363,9 +363,11 @@ class DayPane extends StatelessWidget {
         final asks = _schedulingAsks();
         if (!hasRows) {
           final empty = Text(
-            availability == CalendarAvailability.unknown
-                ? readingText
-                : emptyText,
+            switch (availability) {
+              CalendarAvailability.unknown => readingText,
+              CalendarAvailability.unavailable => nothingSavedText,
+              _ => emptyText,
+            },
             style: _muted,
           );
           if (asks == null) {

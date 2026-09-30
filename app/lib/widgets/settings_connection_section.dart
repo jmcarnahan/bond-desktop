@@ -24,7 +24,7 @@ const List<(String, String, bool)> microsoftPermissions = [
   ('Send mail', 'mail.send', true),
   ('Save drafts', 'mail.readwrite', true),
   ('Teams chats', 'chat.read', false),
-  ('Calendar', 'calendars.readwrite', false),
+  ('Calendar (read and write)', 'calendars.readwrite', false),
 ];
 
 /// Which backend the app talks through, where, who is signed in to it, and

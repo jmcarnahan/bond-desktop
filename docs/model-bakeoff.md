@@ -1986,6 +1986,10 @@ against the installed heads at every call; the qhash names only the question set
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-30 | pending owner run (qhash `6eba387492208260`; GGUF `bond-decide-mbl-v2swap-f16.gguf`) | pending owner run | pending owner run | pending owner run | pending owner run | pending owner run | pending | pending | serverless, the lexicon reads 0.710 (n=100) held-out and 0.140 (n=50) hard on this set; it read 0.830 held-out before fifteen template-sharing held-out and hard lines were rephrased |
 
+To fill the pending cells, run `make calendar-heads` with the decision server live. Copy its
+four accuracies and its `adoption: go | no-go (…)` line into a new dated row, and run
+`make calendar-heads-adopt` only when that line says `go`.
+
 ### Recommendations (decision-model round, 2026-09-28)
 
 What the round ships, and the rows that justify each. All numbers are keep-only

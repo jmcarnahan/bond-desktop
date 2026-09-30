@@ -177,9 +177,10 @@ class McpCalendarBackend implements CalendarBackend {
         if (dryRun) 'dry_run': true,
       }),
     });
-    // Update answers an event row read under Prefer UTC, so its legacy
-    // start/end are UTC too.
-    return _writeResult(result, id, withEvent: true, legacyIsUtc: true);
+    // Placed by its `start_utc`/`end_utc` alone, as every row is; an ack
+    // whose UTC pair is empty is unplaced, the write notes the id, and the
+    // forced sync brings the moved row.
+    return _writeResult(result, id, withEvent: true);
   }
 
   @override
@@ -236,10 +237,10 @@ class McpCalendarBackend implements CalendarBackend {
         if (dryRun) 'dry_run': true,
       }),
     });
-    // The create ack's legacy start/end echo the REQUEST zone, so only its
-    // `start_utc`/`end_utc` place it; when the UTC re-read failed those are
-    // "" and the event arrives with the next sync instead.
-    return _writeResult(result, '', withEvent: true, legacyIsUtc: false);
+    // Only its `start_utc`/`end_utc` place it (the legacy start/end echo the
+    // REQUEST zone); when the UTC re-read failed those are "" and the event
+    // arrives with the next sync instead.
+    return _writeResult(result, '', withEvent: true);
   }
 
   @override
@@ -321,7 +322,6 @@ class McpCalendarBackend implements CalendarBackend {
     Map<String, dynamic> result,
     String id, {
     required bool withEvent,
-    bool legacyIsUtc = true,
   }) {
     if (result['dry_run'] == true) {
       final payload = result['payload'];
@@ -345,24 +345,14 @@ class McpCalendarBackend implements CalendarBackend {
     }
     return EventWriteAck(
       id: ackId,
-      event: withEvent ? _placeable(result, legacyIsUtc: legacyIsUtc) : null,
+      event: withEvent ? _placeable(result) : null,
     );
   }
 
   /// The event row inside a write's answer, when it can be put on a day: an
-  /// all-day row with both dates, or a timed row with both instants. With
-  /// [legacyIsUtc] false, only `start_utc`/`end_utc` count.
-  static CalendarEvent? _placeable(
-    Map<String, dynamic> result, {
-    required bool legacyIsUtc,
-  }) {
-    final allDay = result['is_all_day'] == true;
-    if (!legacyIsUtc && !allDay) {
-      if (_str(result['start_utc']).isEmpty ||
-          _str(result['end_utc']).isEmpty) {
-        return null;
-      }
-    }
+  /// all-day row with both dates, or a timed row with both `start_utc` and
+  /// `end_utc` (the only instants [CalendarEvent.fromToolRow] reads).
+  static CalendarEvent? _placeable(Map<String, dynamic> result) {
     final CalendarEvent event;
     try {
       event = CalendarEvent.fromToolRow(result);

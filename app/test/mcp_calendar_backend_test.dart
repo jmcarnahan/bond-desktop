@@ -305,6 +305,23 @@ void main() {
       expect(ack.event!.changeKey, 'ck-3');
     });
 
+    test('an ack with no UTC pair is unplaced, like a create\'s: the legacy '
+        'start/end are never read', () async {
+      final mcp = _FakeMcp({
+        'manage_event': [_row(startUtc: '', endUtc: '', changeKey: 'ck-3')],
+      });
+      final result = await McpCalendarBackend(mcp).update(
+        'evt-1',
+        ifMatch: 'ck-2',
+        startUtc: DateTime.utc(2026, 10, 1, 18),
+        endUtc: DateTime.utc(2026, 10, 1, 19),
+      );
+      final ack = result as EventWriteAck;
+      expect(ack.id, 'evt-1');
+      expect(ack.event, isNull,
+          reason: 'the write notes the id and the forced sync brings the row');
+    });
+
     test('an all-day move sends dates and the zone on both sides', () async {
       final mcp = _FakeMcp({
         'manage_event': [

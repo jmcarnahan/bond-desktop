@@ -5,8 +5,8 @@ import 'calendar_zone.dart';
 
 /// Does this slot clash, and when is the person actually free?
 ///
-/// A port of sbel-crm's `calendar_assistant/overlaps.py`, whose rules were
-/// each paid for by a shipped bug there.
+/// A port of the reference overlap rules from an earlier calendar assistant,
+/// each of which was paid for by a shipped bug there.
 ///
 /// The word is deliberately "overlap" and never "conflict": in this app
 /// "conflict" already means an etag rejection (`CalendarEventChanged`, the
@@ -107,12 +107,13 @@ String _showAs(CalendarEvent event) => event.showAs.trim().toLowerCase();
 /// [ignoreEventId] is the event being MOVED: an event always overlaps its own
 /// old slot, and reporting that would make every reschedule look blocked.
 ///
-/// All-day events: sbel-crm noted every all-day event it was handed, because
-/// its callers only ever handed it one day's events. This app's callers may
+/// All-day events: the reference rules noted every all-day event they were
+/// handed, because their callers only ever handed them one day's events.
+/// This app's callers may
 /// hand over the whole mirror, so when [zone] is given an all-day event is
 /// noted only if its dates cover a local date the slot touches in that zone.
 /// Without [zone] there is no way to say which local dates the slot touches,
-/// so every all-day event is noted (sbel-crm's behaviour) and the caller is
+/// so every all-day event is noted (the reference behaviour) and the caller is
 /// expected to have filtered to the day.
 ///
 /// A timed event whose instants could not be read (both null — see
@@ -246,12 +247,12 @@ class FreeSlot {
 ///
 /// **What blocks.** Timed events that are not cancelled, not declined, and
 /// not `free`/`workingElsewhere`. `tentative` BLOCKS by default, unlike
-/// sbel-crm's `free_slots` (which offers a slot whenever
-/// `find_overlaps(...).hard` is empty): a slot offered here may be sent to
+/// the reference rules' free-slot walk (which offers a slot whenever no
+/// HARD overlap was found): a slot offered here may be sent to
 /// other people as an invite, and offering a time the owner has tentatively
 /// promised elsewhere is the worse mistake. A proposed slot that lands on a
 /// tentative hold is still only a SOFT overlap in [findOverlaps]. Pass
-/// [tentativeBlocks] false for sbel-crm's behaviour. All-day events never
+/// [tentativeBlocks] false for the reference behaviour. All-day events never
 /// block.
 ///
 /// **[windowStartUtc] and [windowEndUtc] narrow the search** (either may be

@@ -135,7 +135,8 @@ final invitesOwedProvider = FutureProvider.autoDispose
       ];
       pins.add(invitePinned(decisions));
     } on Object catch (err) {
-      debugPrint('an invite\'s decisions could not be read: $err');
+      debugPrint(
+          'an invite\'s decisions could not be read: ${err.runtimeType}');
       pins.add(false);
     }
   }
@@ -205,7 +206,7 @@ final schedulingAsksProvider =
   try {
     return await schedulingAskKeys(ref.watch(messageStoreProvider));
   } on Object catch (err) {
-    debugPrint('scheduling asks could not be read: $err');
+    debugPrint('scheduling asks could not be read: ${err.runtimeType}');
     return const {};
   }
 });

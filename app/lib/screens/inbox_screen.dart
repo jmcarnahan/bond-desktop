@@ -1294,28 +1294,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await mail;
   }
 
-  /// One calendar sync tick, fire-and-forget, and what it found published to
-  /// the two providers the calendar's readers watch.
+  /// One calendar sync tick, fire-and-forget. What it found reaches the
+  /// calendar's readers through the sync's own publisher
+  /// ([calendarOutcomePublisher]), as a write's forced read does; this only
+  /// plans briefs off it.
   ///
   /// Never awaited by [_refresh] and never on `ConversationsNotifier.load`:
   /// a slow or failing calendar must not hold up or break the mail. The sync
-  /// itself never throws; the catch is for the provider read and the writes,
-  /// and it is silent beyond a trace for the same reason.
+  /// itself never throws; the catch is for the provider reads, and it is
+  /// silent beyond a trace for the same reason.
   void _syncCalendar({bool force = false}) {
     unawaited(() async {
       try {
         final sync = ref.read(calendarSyncProvider);
         final outcome = await sync.syncNow(force: force);
         if (!mounted) return;
-        final availability = ref.read(calendarAvailabilityProvider.notifier);
-        if (availability.state != sync.availability) {
-          availability.state = sync.availability;
-        }
-        // A first mailbox-settings fetch is news to the zone's readers even
-        // on a tick that moved no rows; they watch this same revision.
-        if (outcome.changed || outcome.settingsRefreshed) {
-          ref.read(calendarRevisionProvider.notifier).state++;
-        }
         // Briefs are planned only off a sync that completed, and only while
         // the models may run; the plan itself is store reads, and its pump
         // is the draft lane's, so nothing here waits on a model.
@@ -5001,15 +4994,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         key: ValueKey('invite-write-${entry.event.id}'),
         writer: ref.read(calendarWritesProvider),
         onDone: _calendarWriteDone,
+        onFailed: _calendarWriteFailed,
         builder: (context, start, busy) => EventActions(
           key: ValueKey(entry.event.id),
           target: entry.event,
           shown: entry.event,
-          // A row folded from a series answers the series, through its
-          // master's id; a single invite answers itself.
-          respondId: entry.isSeries && entry.event.seriesMasterId.isNotEmpty
-              ? entry.event.seriesMasterId
-              : null,
+          // A row folded from several owed occurrences answers the series,
+          // through its master's id; a single invite, and a lone owed
+          // exception, answers itself (InviteEntry.answersSeries).
+          respondId: entry.answersSeries ? entry.respondId : null,
           zone: zone,
           clock: DateTime.now,
           today: today,
@@ -5088,6 +5081,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       resetOnSuccess: false,
       writer: ref.read(calendarWritesProvider),
       onDone: _calendarWriteDone,
+      onFailed: _calendarWriteFailed,
       onIdle: () {
         if (mounted && _gridMove != null) setState(() => _gridMove = null);
       },
@@ -5165,6 +5159,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       key: ValueKey('card-write-${target.id}'),
       writer: ref.read(calendarWritesProvider),
       onDone: _calendarWriteDone,
+      onFailed: _calendarWriteFailed,
       builder: (context, start, busy) => EventActions(
         key: ValueKey(shown.id),
         target: target,
@@ -5367,16 +5362,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Widget? _commandCard(CalendarZone zone, CalendarDate today) {
     final outcome = _commandOutcome;
     if (outcome == null) return null;
+    final serial = _commandSerial;
     return CommandPlanCard(
-      key: ValueKey('command-plan-$_commandSerial'),
+      key: ValueKey('command-plan-$serial'),
       plan: outcome.plan,
+      availability: ref.watch(calendarAvailabilityProvider),
       zone: zone,
       today: today,
       writer: ref.read(calendarWritesProvider),
       onDone: (message, undo) {
         _calendarWriteDone(message, undo);
-        _clearCommand();
+        // Only the card this write came from: a new Enter while it was in
+        // flight put up another card, and that one stands.
+        if (serial == _commandSerial) _clearCommand();
       },
+      onFailed: _calendarWriteFailed,
       onDismiss: _clearCommand,
       onPickSlot: (choice, slot) =>
           _pickCommandSlot(choice, slot, zone: zone, today: today),
@@ -5395,6 +5395,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onUndo: undo == null ? null : () => unawaited(_undoCalendarWrite(undo)),
         cleared: 0,
       );
+
+  /// A calendar write that failed after the place it started had gone (the
+  /// panel closed, a new command replaced its card): said here, because the
+  /// inline error line had nowhere left to stand.
+  void _calendarWriteFailed(String message) => _toast(message, cleared: 0);
 
   Future<void> _undoCalendarWrite(CalendarWrite undo) async {
     final outcome =
@@ -5685,6 +5690,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: FindTimePane(
         key: ValueKey('find-time-${thread.source}|${thread.id}'),
+        availability: ref.watch(calendarAvailabilityProvider),
         subject: thread.subject,
         participants: people,
         zone: zone,
@@ -5712,6 +5718,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               }));
           if (mounted) back();
         },
+        onFailed: _calendarWriteFailed,
         onBack: back,
         onHome: () => _selectSection(RailSection.home),
       ),
@@ -6731,6 +6738,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       child: EventPanelBody(
         // A found event with no zone yet reads as still loading.
         lookup: found && zoneRead == null ? null : lookup,
+        availability: ref.watch(calendarAvailabilityProvider),
         zone: zone,
         now: now,
         today: today,
@@ -6758,6 +6766,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 key: ValueKey('event-write-${side.eventId}'),
                 writer: ref.read(calendarWritesProvider),
                 onDone: _calendarWriteDone,
+                onFailed: _calendarWriteFailed,
                 builder: (context, start, busy) => EventActions(
                   // Keyed by the occurrence on display, so an open field
                   // typed against one occurrence never stands over the next.

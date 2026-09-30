@@ -841,11 +841,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
       state = state.copyWith(generating: false, error: refusal);
       return;
     }
+    final String messageId;
     try {
       final newest =
           await _store.newestInboundMessage(_source, conversationKey);
-      final messageId = newest?['source_message_id'] as String?;
-      if (messageId == null || messageId.isEmpty) {
+      final newestId = newest?['source_message_id'] as String?;
+      if (newestId == null || newestId.isEmpty) {
         // A thread of the user's own sent mail, or one whose messages are not
         // stored. There is nothing to answer, which is a sentence rather than
         // a spinner that never stops.
@@ -855,6 +856,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
         );
         return;
       }
+      messageId = newestId;
       await _store.deleteDraftForMessage(_source, messageId);
       await _store.requeueWork(
         'draft',
@@ -886,7 +888,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
     _streamingId = null;
     state = state.copyWith(draft: null, streaming: null);
 
-    final pump = _worker?.pump();
+    // Named as a priority ref, not just pumped: the lane also drains
+    // `meeting_brief`, and a walk half way through a backlog of briefs would
+    // otherwise finish them all before claiming this. Named, it is served at
+    // the next claim boundary — after at most the one brief already at the
+    // model.
+    final pump = _worker?.pump(first: [(source: _source, id: messageId)]);
     if (pump == null) {
       state = state.copyWith(generating: false);
       return;

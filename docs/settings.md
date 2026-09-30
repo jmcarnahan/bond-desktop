@@ -230,11 +230,13 @@ which server they belong to. Which source answers follows the mode the screen is
 
 The rows are `microsoftPermissions` in `settings_connection_section.dart`, in
 this order: **Send mail** (`mail.send`), **Save drafts** (`mail.readwrite`),
-**Teams chats** (`chat.read`, satisfied by `Chat.ReadWrite`) and **Calendar**
-(`calendars.readwrite`). Only the first two count toward the **Sign in again to
-enable** offer: Teams and Calendar arrive through a platform-side Microsoft
-reconnect in MCP mode, which this app's sign-in cannot deliver, so a cross on
-either is reported and never offered. The section's `_subsumedBy` copy
+**Teams chats** (`chat.read`, satisfied by `Chat.ReadWrite`) and **Calendar
+(read and write)** (`calendars.readwrite`: the app answers, moves, cancels and
+creates meetings, so the row names both halves of the grant). Only the first
+two count toward the **Sign in again to enable** offer: Teams and Calendar
+arrive through a platform-side Microsoft reconnect in MCP mode, which this
+app's sign-in cannot deliver, so a cross on either is reported and never
+offered. The section's `_subsumedBy` copy
 (`calendars.read` ← `calendars.readwrite` among them) must agree with
 `McpAuthSession._subsumedBy`.
 

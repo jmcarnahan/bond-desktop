@@ -729,6 +729,12 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     final workers = ref.read(aiWorkersProvider);
     final store = ref.read(messageStoreProvider);
     final drafts = ref.read(draftHandlerProvider);
+    // The calendar's readers watch these two rather than any table, and a
+    // DELETE fires neither: without the bumps an open event panel or the Day
+    // agenda keeps showing a brief the reset just took. Read here with the
+    // rest, so a pane closed mid-reset still gets them.
+    final calendarRevision = ref.read(calendarRevisionProvider.notifier);
+    final briefRevision = ref.read(briefRevisionProvider.notifier);
 
     await widget.waitForPullsToSettle();
     await triage.quiesce();
@@ -742,6 +748,8 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     await drafts.quiesce();
     await apply(store);
     await store.resetInterruptedWork();
+    calendarRevision.state++;
+    briefRevision.state++;
     if (!mounted) return;
     // The sign-out's drops, and the rest a reset needs because the screen
     // stays open over them. Counted by the list below rather than in a
@@ -766,6 +774,10 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       contextDirectoriesProvider,
       homeMetricsProvider,
       pipelinePulseProvider,
+      // A fresh sync: the old one's throttle would hold the re-read of a
+      // wiped mirror back two minutes, and its write guard would keep ids
+      // from a calendar the Forget just emptied.
+      calendarSyncProvider,
     ]) {
       ref.invalidate(provider);
     }

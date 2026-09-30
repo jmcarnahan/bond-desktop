@@ -653,6 +653,50 @@ void main() {
       expect(entries.last.isSeries, isFalse);
     });
 
+    test('a row answers its series only when several plain occurrences are '
+        'owed', () {
+      final five = collapseInvites([
+        for (var i = 4; i >= 0; i--)
+          timed('occ-$i', DateTime.utc(2026, 10, 1 + 7 * i, 17),
+              seriesMasterId: 'ser-1'),
+      ]).single;
+      expect(five.occurrences, 5);
+      expect(five.answersSeries, isTrue);
+      expect(five.respondId, 'ser-1');
+
+      // A moved meeting of a series answered already: owed alone, answered
+      // alone, though the row still says it belongs to a series.
+      final exception = InviteEntry(CalendarEvent(
+        id: 'exc-1',
+        subject: 'Weekly sync',
+        seriesMasterId: 'ser-2',
+        eventType: 'exception',
+        startUtc: DateTime.utc(2026, 10, 2, 17),
+        endUtc: DateTime.utc(2026, 10, 2, 18),
+      ));
+      expect(exception.isSeries, isTrue);
+      expect(exception.answersSeries, isFalse);
+      expect(exception.respondId, 'exc-1');
+
+      // Several owed with an exception shown: still itself.
+      final shownException = InviteEntry(
+        CalendarEvent(
+          id: 'exc-2',
+          seriesMasterId: 'ser-3',
+          eventType: 'exception',
+          startUtc: DateTime.utc(2026, 10, 2, 17),
+          endUtc: DateTime.utc(2026, 10, 2, 18),
+        ),
+        occurrences: 3,
+      );
+      expect(shownException.answersSeries, isFalse);
+      expect(shownException.respondId, 'exc-2');
+
+      final solo = InviteEntry(timed('solo', DateTime.utc(2026, 10, 3, 17)));
+      expect(solo.answersSeries, isFalse);
+      expect(solo.respondId, 'solo');
+    });
+
     StoredDecision decision(Map<String, String> choices) => StoredDecision(
           model: 'fictional-heads',
           answers: DecisionAnswers({

@@ -357,7 +357,23 @@ class InviteEntry {
     this.overlaps = const Overlaps(),
   });
 
+  /// Whether the row belongs to a series at all — what "· series" on the
+  /// row says. Not what an answer on it answers: see [answersSeries].
   bool get isSeries => occurrences > 1 || event.seriesMasterId.isNotEmpty;
+
+  /// Whether an answer on this row answers the whole series, through its
+  /// master ([respondId]). Only when more than one occurrence is owed and
+  /// the one shown is a plain occurrence: a lone owed exception (a moved
+  /// meeting of a series already answered) is answered by itself, and an
+  /// answer to the master would re-answer every meeting in it.
+  bool get answersSeries =>
+      occurrences > 1 &&
+      event.eventType != 'exception' &&
+      event.seriesMasterId.isNotEmpty;
+
+  /// The id an answer on this row goes to: the master when it
+  /// [answersSeries], else the occurrence shown.
+  String get respondId => answersSeries ? event.seriesMasterId : event.id;
 
   InviteEntry withContext({bool? pinned, Overlaps? overlaps}) => InviteEntry(
         event,
@@ -634,6 +650,17 @@ List<CalendarEvent> remainingToday({
 }
 
 // ── where the calendar shows ──────────────────────────────────────────
+
+/// The one-line caption a surface drawn from the mirror adds while the
+/// calendar cannot be reached ([CalendarAvailability.unavailable]): the plan
+/// card, the event panel and Find a time. What they show is still the best
+/// answer there is; this says where it came from.
+const String offlineCaption =
+    "From the saved calendar — can't reach Outlook right now.";
+
+/// An empty day while offline: "nothing on your calendar" would claim a
+/// fact the app could not check.
+const String nothingSavedText = 'Nothing saved for this day.';
 
 /// Whether the Day stop draws the mirror's rows at all.
 ///

@@ -231,6 +231,52 @@ void main() {
     });
   });
 
+  group('the draft lane', () {
+    test('an asked draft named as a ref waits behind at most one brief, not '
+        'the backlog of them', () async {
+      // The draft lane's own shape: `draft` then `meeting_brief`. Three briefs
+      // are queued, the walk is inside them, and then a person asks for a
+      // draft — which the walk alone would reach only on its next pass.
+      for (final id in ['ev1', 'ev2', 'ev3']) {
+        await store.enqueueWork('meeting_brief', 'calendar', id);
+      }
+      final order = <String>[];
+      final atModel = Completer<void>();
+      final release = Completer<void>();
+      final worker = AiWorker(
+        store,
+        handlers: [
+          ScriptedHandler('draft', order),
+          ScriptedHandler(
+            'meeting_brief',
+            order,
+            onRun: (item) async {
+              if (atModel.isCompleted) return;
+              atModel.complete();
+              await release.future;
+            },
+          ),
+        ],
+      );
+      addTearDown(worker.dispose);
+
+      final drain = worker.pump();
+      await atModel.future;
+      await seed('asked', kinds: const ['draft']);
+      unawaited(worker.pump(first: const [(source: 'email', id: 'asked')]));
+      release.complete();
+      await drain;
+      await pumpEventQueue();
+
+      expect(order, hasLength(4));
+      expect(order.first, startsWith('meeting_brief:'),
+          reason: 'the brief already at the model is never abandoned');
+      expect(order[1], 'draft:asked',
+          reason: 'served at the next claim boundary');
+      expect(await statusOf('draft', 'asked'), 'done');
+    });
+  });
+
   group('the priority pass', () {
     test('runs a named message through every handler ahead of the backlog',
         () async {

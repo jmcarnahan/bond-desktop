@@ -986,14 +986,40 @@ final calendarBackendProvider = Provider<CalendarBackend>((ref) {
 final calendarSyncProvider = Provider<CalendarSync>((ref) {
   final auth = ref.watch(authSessionProvider);
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
-  return CalendarSync(
+  late final CalendarSync sync;
+  sync = CalendarSync(
     ref.watch(calendarBackendProvider),
     ref.watch(messageStoreProvider),
     ref.watch(calendarStoreProvider),
     activityLog: ref.watch(activityLogProvider),
     precheck: () => calendarPrecheck(mode == backendModeSdk, auth.hasScope),
+    onOutcome: calendarOutcomePublisher(ref, () => sync.availability),
   );
+  return sync;
 });
+
+/// What a sync tick publishes to the mirror's readers, whoever started it —
+/// the inbox's poll or the forced read after a write: the availability the
+/// Day stop and the Today section show, and a [calendarRevisionProvider] bump
+/// when rows moved. A first mailbox-settings fetch is news to the zone's
+/// readers even on a tick that moved no rows; they watch the same revision.
+///
+/// The notifiers are read once, here, and the closure keeps them: a read
+/// inside it lands long after the build, where a debug outdated-ref assert
+/// would drop the bump. Public so a test's recording sync publishes through
+/// the same wiring.
+void Function(CalendarSyncOutcome outcome) calendarOutcomePublisher(
+  Ref ref,
+  CalendarAvailability Function() availability,
+) {
+  final revision = ref.read(calendarRevisionProvider.notifier);
+  final shown = ref.read(calendarAvailabilityProvider.notifier);
+  return (outcome) {
+    final now = availability();
+    if (shown.state != now) shown.state = now;
+    if (outcome.changed || outcome.settingsRefreshed) revision.state++;
+  };
+}
 
 /// Bumped after every sync that changed rows and after every calendar write.
 /// Readers of the mirror watch it, which is how a Day stop left open follows
@@ -1003,14 +1029,19 @@ final calendarRevisionProvider = StateProvider<int>((ref) => 0);
 /// Calendar writes (Phase 5). Typed as the [CalendarWriter] seam so a screen
 /// test overrides it with a fake; the real one bumps the revision after every
 /// write so readers follow without waiting for a sync.
-final calendarWritesProvider = Provider<CalendarWriter>((ref) => CalendarWrites(
-      ref.watch(calendarBackendProvider),
-      ref.watch(calendarStoreProvider),
-      ref.watch(calendarSyncProvider),
-      ref.watch(messageStoreProvider),
-      activityLog: ref.watch(activityLogProvider),
-      onChanged: () => ref.read(calendarRevisionProvider.notifier).state++,
-    ));
+final calendarWritesProvider = Provider<CalendarWriter>((ref) {
+  // Read once at build and kept by the closure: the call lands after the
+  // write, where a debug outdated-ref assert would drop the bump.
+  final revision = ref.read(calendarRevisionProvider.notifier);
+  return CalendarWrites(
+    ref.watch(calendarBackendProvider),
+    ref.watch(calendarStoreProvider),
+    ref.watch(calendarSyncProvider),
+    ref.watch(messageStoreProvider),
+    activityLog: ref.watch(activityLogProvider),
+    onChanged: () => revision.state++,
+  );
+});
 
 /// The Day command bar's planner (Phase 8): the mirror to read, the backend
 /// for `find_meeting_times` only, and the same [calendarWritesProvider] every
@@ -1091,8 +1122,8 @@ final commandRouterProvider = Provider<CommandRouter>((ref) => CommandRouter(
     ));
 
 /// What the Day stop and the Today section show about the calendar as a
-/// whole; written by the inbox after each sync. SDK mode is known without
-/// asking, so it starts there rather than at unknown.
+/// whole; written after each sync tick by [calendarOutcomePublisher]. SDK
+/// mode is known without asking, so it starts there rather than at unknown.
 final calendarAvailabilityProvider = StateProvider<CalendarAvailability>((ref) {
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
@@ -1934,14 +1965,16 @@ final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
 /// never to Cloud drafts: `meeting_brief` is not in `draftStageIds` (D9).
 final meetingBriefHandlerProvider = Provider<MeetingBriefHandler>((ref) {
   final client = ref.watch(stageLlmClientProvider('meeting_brief'));
+  // Read once at build and kept by the closure, never read inside it: the
+  // call lands mid-drain, where a debug outdated-ref assert would drop the
+  // bump.
+  final briefs = ref.read(briefRevisionProvider.notifier);
   return MeetingBriefHandler(
     ref.watch(calendarStoreProvider),
     ref.watch(briefGathererProvider),
     client: () => client,
     activityLog: ref.watch(activityLogProvider),
-    // `read` inside the closure, on the pumps' rule: the call lands mid-drain
-    // and against a container that may already be gone.
-    onStored: () => ref.read(briefRevisionProvider.notifier).state++,
+    onStored: () => briefs.state++,
   );
 });
 

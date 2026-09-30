@@ -4,10 +4,11 @@ import '../models/calendar_models.dart' show CalendarDate;
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/command/command_planner.dart';
+import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
 import '../services/calendar/day_items.dart'
-    show formatEventRange, overlapLine, shortDate;
+    show formatEventRange, offlineCaption, overlapLine, shortDate;
 import '../services/calendar/overlaps.dart' show FreeSlot;
-import '../services/calendar/write_rules.dart' show emailedLine;
+import '../services/calendar/write_rules.dart' show emailedLine, mayEmailFor;
 import '../theme/tokens.dart';
 import 'calendar_write_flow.dart';
 
@@ -42,6 +43,8 @@ class CommandPlanCard extends StatelessWidget {
     required this.onPickSlot,
     required this.onChoose,
     this.onOpenEvent,
+    this.onFailed,
+    this.availability = CalendarAvailability.unknown,
   });
 
   static const Key doKey = ValueKey('command-plan-do');
@@ -82,6 +85,16 @@ class CommandPlanCard extends StatelessWidget {
   /// non-null, and drops the plan.
   final void Function(String message, CalendarWrite? undo) onDone;
 
+  /// A write that failed after the card had gone (a new Enter replaced it):
+  /// the host toasts [CalendarWriteFlow.onFailed]'s sentence.
+  final void Function(String message)? onFailed;
+
+  /// The calendar's availability as the host reads it. Offline, a plan drawn
+  /// from the mirror (an answer, slots, a proposal) says so in one line.
+  final CalendarAvailability availability;
+
+  static const Key offlineKey = ValueKey('command-plan-offline');
+
   /// Cancel and ✕: the host drops the plan.
   final VoidCallback onDismiss;
 
@@ -99,13 +112,30 @@ class CommandPlanCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final body = switch (plan) {
+    final Widget planBody = switch (plan) {
       final CalendarProposal p => _proposal(p),
       final SlotChoice c => _slots(c),
       final Answer a => _answer(a),
       final NeedsChoice c => _choice(c),
       final CannotDo c => _cannot(c),
     };
+    final fromMirror =
+        plan is CalendarProposal || plan is SlotChoice || plan is Answer;
+    final body = availability == CalendarAvailability.unavailable && fromMirror
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                offlineCaption,
+                key: offlineKey,
+                style: BondType.caption.copyWith(color: BondColors.inkMuted),
+              ),
+              const SizedBox(height: BondSpacing.s8),
+              planBody,
+            ],
+          )
+        : planBody;
     return ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: maxHeight),
       child: Container(
@@ -143,11 +173,13 @@ class CommandPlanCard extends StatelessWidget {
   Widget _proposal(CalendarProposal p) {
     final overlaps = p.overlaps;
     final overlap = overlaps == null ? null : overlapLine(overlaps);
-    final emails = emailedLine(p.notifies);
+    final mayEmail = mayEmailFor(p.write, event: p.targetEvent);
+    final emails = emailedLine(p.notifies, mayEmail: mayEmail);
     return CalendarWriteFlow(
       key: ValueKey('command-plan-flow-${identityHashCode(p)}'),
       writer: writer,
       onDone: onDone,
+      onFailed: onFailed,
       builder: (context, start, busy) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -182,7 +214,9 @@ class CommandPlanCard extends StatelessWidget {
                 onPressed: busy
                     ? null
                     : () => start(p.write,
-                        summary: p.summary, doneMessage: p.doneMessage),
+                        summary: p.summary,
+                        doneMessage: p.doneMessage,
+                        mayEmail: mayEmail),
                 child: Text(p.notifies.isEmpty ? 'Do it' : 'Send'),
               ),
               TextButton(

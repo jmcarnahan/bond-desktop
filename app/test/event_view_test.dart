@@ -4,6 +4,8 @@ import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/event_view.dart';
+import 'package:bond_inbox/services/calendar/write_rules.dart'
+    show EventRole, eventRoleOf;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -72,6 +74,24 @@ void main() {
         person('Eve Hall', 'none'),
       ]);
       expect(attendeeTally(e), '4 of 6 accepted · Sam declined · 1 no reply');
+    });
+
+    test('a copy that says organizer only by its response is the '
+        'organiser\'s, as eventRoleOf reads it', () {
+      final e = CalendarEvent(
+        id: 'e',
+        organizerAddress: 'dana.ortiz@contoso.com',
+        responseStatus: 'organizer',
+        attendees: [
+          person('Ana Ruiz', 'accepted'),
+          person('Eve Hall', 'none'),
+        ],
+      );
+      expect(isOwnersEvent(e), isTrue);
+      expect(eventRoleOf(e), EventRole.organiserWithGuests);
+      // The organiser's full tally, "no reply" and "of N" included.
+      expect(attendeeTally(e), '1 of 2 accepted · 1 no reply');
+      expect(responseLine(e), 'You organised this');
     });
 
     test('everyone accepted', () {

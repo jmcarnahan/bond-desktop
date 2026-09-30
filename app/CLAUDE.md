@@ -165,7 +165,9 @@ enforce the ones that are commands.
   attachments, context — on `fastDrainGateProvider`, shared with
   `TriageQueue`), the STORYLINE lane (the six passes in ONE worker, which is
   what keeps `docs/pipeline/06-storylines.md`'s ordering true), the DRAFT lane
-  (`draft` alone, at `AppPrefs.proseParallel` wide). Since the decision-model
+  (`draft` at `AppPrefs.proseParallel` wide, then `meeting_brief` one at a
+  time; an asked draft is also pumped with `first:` so it waits behind at
+  most one brief). Since the decision-model
   round every lane's chat calls go to the ONE generative model (drafts may go
   to Cloud drafts), so the lanes are an ORDER cut, not a server cut: a new
   handler goes on the lane whose ordering it needs, and order ACROSS lanes is
@@ -179,7 +181,10 @@ enforce the ones that are commands.
 - `requeueWork(refreshCreatedAt: true)` only where a person asked for the work
   NOW (Regenerate, Draft reply, the two Retries, Restore, a storyline action):
   the drain claims `created_at DESC`, so a bulk revive keeps its stamps rather
-  than jumping the whole batch in front of new mail.
+  than jumping the whole batch in front of new mail. The one exception is
+  `BriefPlanner`, which queues up to six briefs in reverse with the flag so the
+  soonest meeting drains first. That is safe because a lane claims one kind at
+  a time, so the stamps order briefs only among themselves.
 - `ScriptedLlm` (`test/fixtures/scripted_llm.dart`) is the ONE `LlmClient`
   double: a per-schema script whose steps are a map, a string, a hold, a
   computed closure or a throw, with `calls` and the derived recorders
@@ -576,3 +581,173 @@ enforce the ones that are commands.
   session; the hook blocks it. Design around a schema bump you do not need:
   a new flag on an existing row can ride a JSON column (`owner_known` in
   `answers_json` is the example).
+
+## Calendar (the calendar round, 2026-09)
+
+`docs/pipeline/14-calendar.md` describes the whole feature. These are the rules
+that bite.
+
+- **The bond-mcps contract** (the handoff's §3–§5 win over any other doc):
+  - `options` is a JSON object ENCODED AS A STRING. An empty string means
+    absent. `manage_event` refuses unknown keys, and
+    `create_calendar_event` silently ignores them, so spell `dry_run`
+    exactly.
+  - Key on `error`, never on `reason`. `not_connected` →
+    `ReconsentRequired`. Unmapped Graph faults (429, 5xx) arrive as tool
+    errors and mean retry later.
+  - Event rows: timed events use `start_utc` / `end_utc`, all-day events use
+    `start_date` / `end_date` (end exclusive). Never read the legacy
+    `start` / `end` / `timezone`: they are naive, and on create they echo
+    the request's zone.
+  - `sync_calendar`:
+    - the first call fixes the window and echoes it only then, so persist it
+      yourself (the `calendar_run` pref);
+    - loop while `complete == false`;
+    - `cursor_expired` means a fresh run over the same window, then
+      mark-and-sweep the whole table once `complete`;
+    - ignore `removed` ids you never stored.
+  - `manage_event.update` requires `if_match` (the stored `change_key`).
+    Store the NEW key from the answer. `event_changed` means re-read.
+  - On a write, `calendar_scope_missing` also answers a read-only calendar.
+    The app writes only to the primary calendar, so treat it as a missing
+    permission.
+  - `body_preview` and OOO text are untrusted. Render them as plain `Text`,
+    and pass them through `wrapUntrusted` before any model reads them.
+- **Time (D13):**
+  - Instants are stored as `isoStamp` UTC (`calendarStamp`, same width), so
+    SQL string order is chronological. An all-day event is `yyyy-mm-dd` with
+    an EXCLUSIVE end and is never converted through a zone.
+  - The display zone is the OS zone (`flutter_timezone`, imported only by
+    `calendar_zone.dart`, which `calendar_zone_import_test` pins), then the
+    mailbox's `time_zone_iana`, then UTC.
+  - Build dates from components (`CalendarZone.localDateTime`), never by
+    adding a `Duration` across midnight.
+  - `CalendarZone.utc().iana == 'Etc/UTC'`, so never compare against
+    `'UTC'`.
+  - `TZDateTime ==` compares the LOCATION too. Compare instants with
+    `isAtSameMomentAs`, and hand plain UTC `DateTime`s across seams.
+- **The store:**
+  - `CalendarStore` (`data/calendar_store.dart`) is a separate class from
+    `MessageStore`.
+  - `calendar_events` is SYNCED (Clear AI results keeps it); `event_briefs`
+    is DERIVED.
+  - A mirror reader gates on `calendarShowsMirror(availability)`. The mirror
+    is not cleared on a switch to SDK mode, so an ungated reader shows stale
+    rows.
+  - Calendar providers never read the clock. Their family arguments are
+    dates or instants the HOST computes from `DateTime.now()` on each
+    build, so nothing goes stale at midnight.
+  - A row written outside `CalendarSync` must carry the CURRENT run, or the
+    next sweep deletes it. That is what `CalendarSync.storeWritten`
+    (noteWrite + upsert tagged with the run, the write guard) is for.
+  - A tick publishes itself: `CalendarSync.onOutcome`, wired in
+    `calendarSyncProvider` as `calendarOutcomePublisher`, writes
+    `calendarAvailabilityProvider` and bumps `calendarRevisionProvider`, so
+    the forced sync after a write reaches the screen. The inbox only plans
+    briefs off it. A test that overrides the sync with a recording subclass
+    builds it in `overrideWith` and publishes through the same function
+    (`calendar_poll_test`).
+  - A notifier a closure bumps later is read ONCE at build and captured
+    (`final revision = ref.read(….notifier)`), never read inside the closure,
+    where a debug outdated-ref assert would drop the bump.
+- **The write policy (D5 as built):**
+  - Every write is a dry run first.
+  - It waits on a confirm when the dry run emails anyone, and always for
+    every RSVP, cancel and delete, and for any create with attendees.
+  - Undo is offered only when a preview was shown, it emailed nobody, and
+    the write is not itself an undo. The Undo is the app's one 5 s toast
+    plus `z`.
+  - Once the server has accepted a write, every local step is best-effort,
+    and the outcome never says "Nothing was changed". A real write's
+    transient error retries only Create (its `transactionId`) and Move (its
+    `if_match`).
+  - `eventRoleOf` decides the role, and whose event it is comes first.
+  - For a series master, RSVP, cancel and delete act on the whole series;
+    move and propose act on the shown occurrence. A master is never moved.
+    An Invites row answers the master only when it `answersSeries` (several
+    plain occurrences owed); the command bar acts on the matched occurrence
+    and says "· one meeting of a series".
+  - A write that confirms by its kind but whose dry run named nobody says
+    "This may email: …" from `mayEmailFor`; the toast says "Emails go to …"
+    (a preview, never "Emailed").
+- **The UI write path:**
+  - `CalendarWriteFlow` is the ONE write state machine. The panel, cards,
+    grid, command card and Find a time all go through it (or through
+    `preview` / `commit` plus `WriteConfirmStrip`).
+  - There are no date or time pickers. Typed times go through `resolveWhen`
+    / `resolveNewTime`, and a grid drop through `checkDrop`.
+  - Screen tests override `calendarWritesProvider` with a recording
+    `CalendarWriter`.
+  - A commit that fails after its flow unmounted goes to
+    `CalendarWriteFlow.onFailed` (the host toasts it); a success still goes
+    to `onDone`. The command card's `onDone` clears only its own command
+    (the serial it was built with).
+- **The grid (`kalender`):**
+  - `kalender` is pinned EXACTLY at 0.32.0, because it is pre-1.0 and its
+    minors rename API.
+  - A drop is a PROPOSAL. Never call `updateEvent` in `onEventChanged`: the
+    tile snaps back, and the store moves it after the write.
+  - Tests unmount the view (`pumpWidget(SizedBox())`) BEFORE disposing the
+    controllers.
+  - Drag tests run under `TargetPlatformVariant` for both platforms:
+    `flutter_test` is Android (a long-press drag), macOS a plain drag.
+- **Work rows:**
+  - `AiWorker.sources` (`email`, `teams`, `local`, `calendar`) is a CLAIM
+    filter. A new kind queued under a new source is silently never claimed,
+    and a "parks pending" test passes for the wrong reason. A handler test
+    must PROVE the claim (the LLM double was called);
+    `meeting_brief_handler_test` is the model.
+- **Briefs:**
+  - Briefs read MAIL only. Teams participants are `teams:<id>` and carry no
+    address to match an attendee.
+  - `BriefPlanner` runs after each `synced` tick. It rechecks an event at
+    most every 15 minutes in memory, except rows with no brief, which it
+    plans at once after Clear AI results.
+  - A failed or skipped run over a ready brief calls `touchBrief` (it moves
+    only `generated_at`) and never destroys the brief.
+  - Briefs are keyed by OCCURRENCE, never by master.
+- **The Day command bar:**
+  - The order is: Dart resolution, then the decision head, then the
+    lexicon, then the generative model on Enter only (under the 0.8 bar, or
+    a required slot unresolved with leftover words).
+  - The model COPIES phrases and never computes a date. Every phrase must
+    appear in the request on word boundaries (the literal guard) or it is
+    dropped.
+  - Never invent a time. A part of a day or a missing time is a choice of
+    real slots, and a bare hour after "to" asks for am or pm.
+  - `looksLikeCalendarCommand` gates the ⌘K Ask Day row, which is a dynamic
+    row, never a `findCommands` entry.
+- **The command head:**
+  - `CommandHeads` is tied by `encoder_qhash` (the QUESTION set's hash) AND
+    by `encoder_model` (the installed heads file's `model`). A mismatch is no
+    head, never a wrong answer.
+  - The asset `assets/calendar/command_heads.json` is ABSENT until the owner
+    runs `make calendar-heads` and then, on `adoption: go`,
+    `make calendar-heads-adopt`. The adoption line is printed, never
+    asserted.
+  - Fixture addresses use only the hygiene hook's fictional domains
+    (contoso, fabrikam, northwind, `example.*`, `acme.example`). Other
+    fictional companies are names only.
+  - Screen tests override `commandHeadsProvider` with `noCommandHeads()`
+    beside `keepingDecisionClient()` (`test/fixtures/fake_decision_client.dart`).
+- **Find a time:**
+  - `MessageStore.schedulingAskConversations` is the ONE scheduling-ask
+    rule. Read it through `schedulingAskKeys`, never re-derive it.
+  - `findMeetingTimes` REFUSES empty attendees (the server does too). A
+    search for the owner alone uses `freeSlotsInRange`.
+  - Windows are built from components (`findTimeWindowUtc`).
+  - "Put in reply" writes through `_stage`, the composer's explicit seam.
+- **Inbox widget tests** reach the real `McpCalendarBackend` through
+  `calendarSyncProvider`, which fails fast and silently. To observe the sync,
+  build a recording `CalendarSync` subclass INSIDE the test body
+  (`calendar_poll_test.dart`): a Completer made in `setUp` never delivers
+  under `tester.pump`.
+- **Process in a worktree:**
+  - The senior-review marker cannot be written from a worktree session, so
+    record the verdict in the commit body.
+  - Git nested in a compound command is refused; run each `git -C …` on its
+    own.
+  - The public-hygiene hook inspects STAGED content and blocks a whole
+    compound command, so stage and commit as separate commands.
+  - The commit hook only WARNS when the gate stamp is older than the staged
+    files. Re-run the gate.

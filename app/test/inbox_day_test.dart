@@ -123,6 +123,10 @@ class _RecordingWriter implements CalendarWriter {
   final List<CalendarWrite> previewed = [];
   final List<({CalendarWrite write, bool isUndo})> committed = [];
 
+  /// When set, a commit waits for it before answering, so the screen can
+  /// move on while the write is in the air. Made inside the test body.
+  Completer<void>? hold;
+
   @override
   Future<PreviewResult> preview(CalendarWrite write) async {
     previewed.add(write);
@@ -137,6 +141,8 @@ class _RecordingWriter implements CalendarWriter {
     bool isUndo = false,
   }) async {
     committed.add((write: write, isUndo: isUndo));
+    final held = hold;
+    if (held != null) await held.future;
     if (isUndo || write is! MoveEvent) return const WriteOutcome.ok();
     // The move back to where it was, as the real writer offers it.
     return WriteOutcome.ok(
@@ -1332,6 +1338,39 @@ void main() {
               matching: find.textContaining('Moved "Focus block"')),
           findsOneWidget);
       expect(find.text('Undo'), findsOneWidget);
+    });
+
+    testWidgets('a command written while an earlier card\'s write was in the '
+        'air keeps its card when that write lands', (tester) async {
+      await seedTomorrow();
+      final writer = _RecordingWriter()..hold = Completer<void>();
+      await pumpScreen(tester, overrides: [
+        calendarWritesProvider.overrideWithValue(writer),
+        routerOver(writer),
+      ]);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+
+      await ask(tester, 'move focus block to tomorrow 3pm');
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await settleCommand(tester);
+      expect(writer.committed, hasLength(1), reason: 'the move is in the air');
+
+      await ask(tester, "what's on tomorrow");
+      expect(find.byKey(CommandPlanCard.answerKey), findsOneWidget);
+
+      writer.hold!.complete();
+      await settleCommand(tester);
+
+      expect(find.byKey(CommandPlanCard.answerKey), findsOneWidget,
+          reason: 'the old write clears only its own card');
+      await tester.pump(const Duration(milliseconds: 750));
+      expect(
+          find.descendant(
+              of: find.byType(SnackBar),
+              matching: find.textContaining('Moved "Focus block"')),
+          findsOneWidget,
+          reason: 'the write still says what it did');
     });
 
     testWidgets('the grid draws the standing proposal as the ghost tile',

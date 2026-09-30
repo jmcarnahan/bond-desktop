@@ -97,8 +97,8 @@ void main() {
       ]);
     });
 
-    test('an empty start_utc falls back to the legacy naive string, as UTC',
-        () {
+    test('an empty start_utc leaves a timed row unplaced; the legacy naive '
+        'string is never read', () {
       final e = CalendarEvent.fromToolRow(_timedRow(overrides: {
         'start_utc': '',
         'end_utc': '',
@@ -106,13 +106,12 @@ void main() {
         'end': '2026-10-01T16:30:00.1234567',
       }));
 
-      // The 7-digit fraction parses, and the naive string is NOT read in the
-      // test machine's local zone.
-      expect(e.startUtc, DateTime.utc(2026, 10, 1, 16));
-      expect(e.startUtc!.isUtc, isTrue);
-      expect(e.endUtc!.isUtc, isTrue);
-      expect(e.endUtc!.hour, 16);
-      expect(e.endUtc!.minute, 30);
+      // On a create the legacy pair echoes the request zone, and a row
+      // cannot say which kind it is: no instant beats a wrong one.
+      expect(e.id, isNotEmpty);
+      expect(e.isAllDay, isFalse);
+      expect(e.startUtc, isNull);
+      expect(e.endUtc, isNull);
     });
 
     test('an all-day row is dates with an exclusive end, never instants', () {

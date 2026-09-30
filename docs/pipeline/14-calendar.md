@@ -7,21 +7,72 @@ a day, the invites still owed an answer, the meeting before and after a
 person, the messages that carried an invite — reads that mirror, never the
 server, so a slow or failing calendar costs the screen nothing.
 
-No chat model is involved in the mirror: it is `sync_calendar` pages written
-into sqlite. The calendar makes two model calls: the pre-meeting
-[brief](#briefs), on the generative model, off the draft lane, and — on Enter
-only, when the rules could not finish — a [command](#commands)'s
-`calendar_intent` read.
+Built in the calendar round (2026-09, schema v21). The open owner checks and
+the follow-ups are listed [at the end](#owner-checks-and-follow-ups).
 
-> **Live as of schema v21** (calendar round, Phase 2): the table, the sync,
-> the store's reads, the inbox wiring and the mailbox-settings cache. Phase 3
-> adds the first screen that reads it, [the Day stop](#the-day-stop); the rest
-> arrive in later phases — see the end of this file.
+## How it fits together
+
+One mirror that every surface reads, one write path, and three kinds of model
+use. None of them goes to the cloud.
+
+1. **The mirror.** `CalendarSync` writes `sync_calendar` pages into
+   `calendar_events` after each mail load. It runs in MCP mode only and reads
+   the primary calendar only. It also caches the mailbox settings that give
+   the display zone ([The sync](#the-sync)). A message that carried an invite
+   stores its event's id ([Meeting fields on messages](#meeting-fields-on-messages)).
+2. **The Day stop** is the eighth rail stop, right after Needs You. It draws
+   one day out of the mirror, either as an agenda (meetings, deadlines,
+   threads coming back from Later, the Now marker) or as a day or week grid.
+   It also holds the invites owed. The Inbox's Today section is a slice of it
+   ([The Day stop](#the-day-stop), [The grid](#the-grid)).
+3. **The event panel and cards.** A meeting opens as `EventPanel`, the ninth
+   side panel. An invite's thread carries a `MeetingCard`, and a person's
+   room opens with the next and last meeting
+   ([Events, invite cards and people](#events-invite-cards-and-people)).
+4. **Writes.** Every answer, move, cancel, delete and create goes through
+   `CalendarWriter` (a dry run, then the commit) and one UI state machine,
+   `CalendarWriteFlow`. A write that emails anyone waits on an inline confirm
+   that says who gets email. A write that emails nobody happens at once and
+   offers Undo. The grid's drag, the command bar's card and Find a time's
+   invite all go through this same path ([Writes](#writes)).
+5. **Briefs.** After each synced tick, `BriefPlanner` queues `meeting_brief`
+   work for the next 36 hours of meetings with people the owner has
+   exchanged mail with. The handler writes `event_briefs`, which the panel
+   draws and the agenda teases ([Briefs](#briefs)).
+6. **The command bar.** `DayCommandBar` reads a typed request mostly by
+   lookup. Dart resolvers find the time, the people and the meeting; the
+   command head, or else the lexicon, names the action. The result is a
+   proposal, a choice of slots, an answer, or a question back. ⌘K hands a
+   needle that looks like a calendar request to the bar
+   ([Commands](#commands)).
+7. **Find a time.** When the decision model reads a thread as asking for a
+   time, the thread gets a pane of real free slots. They can go into the
+   reply or out as an invite ([Find a time](#find-a-time)).
+
+**The models.**
+
+- The **generative** model (`generativeSpec`) runs two stages:
+  - `meeting_brief`;
+  - `calendar_intent`, on Enter only, only when the rules could not finish,
+    and only to copy phrases out of the request.
+- The **decision** model gets no new triage call. The calendar reads the
+  answers triage already stored:
+  - urgent invites are pinned first;
+  - a brief's threads are ranked and its open asks chosen;
+  - scheduling asks are marked.
+- The decision model's one new request is the command head's `embedRaw`,
+  and it is made only when a fitted head has been adopted.
+- Neither generative stage is in `draftStageIds`, so Cloud drafts never sees
+  a calendar call (D9).
+- The mirror, the agenda, the grid, the writes and Find a time's search call
+  no model at all.
 
 ## MCP mode only
 
-The calendar is a bond-mcps feature (`McpCalendarBackend`, over the
-`sync_calendar` / `get_mailbox_settings` / `manage_event` tools). SDK mode's
+The calendar is a bond-mcps feature. `McpCalendarBackend` calls six tools:
+`sync_calendar`, `get_calendar_event`, `get_mailbox_settings`, `manage_event`,
+`create_calendar_event` and `find_meeting_times`. That brings the app to 22
+called tools, pinned by `mcp_tool_names_test`. SDK mode's
 direct Graph sign-in asks for no calendar scope and the app carries no
 Graph-SDK calendar code, so `calendarBackendProvider` hands SDK mode
 `UnavailableCalendarBackend`, whose every call throws `CalendarUnavailable`
@@ -75,11 +126,17 @@ and unlike it in one respect: this IS mailbox data.
 | `retagRun(ids, runId)` | sets `sync_run` on the stored rows of `ids` and nothing else; the write guard's re-tag |
 | `deleteEvents(ids)` | by id; ids never stored are ignored |
 | `sweepRun(runId, keepIds:)` | deletes every row whose `sync_run` is not `runId`, except `keepIds` |
+| `setResponseStatus(id, status)` | the owner's answer on `id` and, for a series master, on every mirrored occurrence; returns the ids touched (the write guard notes them) |
+| `deleteWithOccurrences(id)` | `id` and, for a master, its mirrored occurrences; returns the ids deleted. Both write helpers take an empty id to name nothing, because an unset `series_master_id` is `''` |
 | `event(id)` | one row |
+| `occurrencesOf(seriesMasterId)` | the mirrored occurrences of a series, by start; the event panel picks the one to show from these |
 | `eventsBetween(startUtc:, endUtc:, fromDate:, toDateExclusive:)` | timed events overlapping `[startUtc, endUtc)` plus all-day events overlapping `[fromDate, toDateExclusive)`; a zero-length timed event counts when its start is in the span; cancelled included (the caller decides), series masters excluded; all-day first, then by start |
 | `invitesOwed(nowUtc:, today:)` | `CalendarEvent.needsResponse` in SQL (a null `response_requested` counts as asked), future only — timed after now, all-day from today — soonest first |
 | `nextMeetingWith(addresses, nowUtc:)` / `lastMetWith(…)` | the next timed meeting starting after now, or the latest that ended by now, with any address as attendee (`json_each` over `attendees_json`) or organiser; case-insensitive; not cancelled, not declined |
 | `messagesForEvent(eventId)` | stored messages whose `source_meta_json.event_id` is the event, newest first; a `LIKE '%"event_id"%'` prefilter first, then `json_extract` guarded by `json_valid` so one malformed blob cannot fail the statement |
+| `brief(eventId)` / `briefsFor(ids)` / `putBrief(…)` | the `event_briefs` reads and the handler's upsert ([Briefs](#briefs)) |
+| `touchBrief(eventId, generatedAt:, inputsHash:)` | moves only `generated_at` (and the hash, if one is given); the one write a failed or skipped run makes over a ready brief |
+| `deleteBriefsExcept(keepIds)` | the planner's cleanup: deletes the briefs of meetings that are no longer in the window |
 
 ## The sync
 
@@ -192,12 +249,17 @@ that still answers `mail.read`); `sdkMode`; `unavailable` (`CalendarUnavailable`
 idiom); `failed` (anything else — a transport drop, a Graph 5xx — traced with
 `debugPrint` by exception type only, retried after the backoff). Progress persisted before a failure stays.
 
-After each tick the inbox copies `CalendarSync.availability` into
-`calendarAvailabilityProvider` (synced → available; scope missing, SDK mode
-and unavailable → themselves; a failure keeps the last answer, so one dropped
-request does not flicker the Day stop) and bumps `calendarRevisionProvider`
-when rows changed or the tick wrote the mailbox-settings cache
-(`settingsRefreshed`). Readers of the mirror, and the zone, watch the revision.
+After each tick that reached an answer (never a `skipped` one) the sync's own
+`onOutcome` — wired in `calendarSyncProvider` as `calendarOutcomePublisher` —
+copies `CalendarSync.availability` into `calendarAvailabilityProvider` (synced
+→ available; scope missing, SDK mode and unavailable → themselves; a failure
+keeps the last answer, so one dropped request does not flicker the Day stop)
+and bumps `calendarRevisionProvider` when rows changed or the tick wrote the
+mailbox-settings cache (`settingsRefreshed`). The publisher, not the inbox, so
+a tick nobody on screen awaited — the forced sync after a write — reaches the
+readers too: a create or a move whose ack could not be placed shows up the
+moment that sync brings it. Readers of the mirror, and the zone, watch the
+revision. The inbox only plans briefs off the outcome it awaited.
 
 ### The write guard
 
@@ -266,8 +328,9 @@ own key, dropped for `none`) and `calendarEventId`, so
 `SyncService._fetchDetailInto` reads one shape from both backends and stores
 them in `source_meta_json` as `meeting` and `event_id`, each omitted when
 empty. `Message.meetingMessageType` and `Message.meetingEventId` read them;
-null means "nobody said", never "not a meeting". `event_id` is how later
-phases link a message to its event (`CalendarStore.messagesForEvent`). The
+null means "nobody said", never "not a meeting". `event_id` is how the
+event panel and the invite cards link a message to its event
+(`CalendarStore.messagesForEvent`). The
 SDK backend never sets `calendarEventId`. `read_email`'s `not_found` error is
 mapped to a 404, which the sync skips like any vanished message.
 
@@ -295,8 +358,8 @@ pref; Clear AI results keeps it, because it keeps `source_meta_json`.
 
 ## The Day stop
 
-**What happens.** The icon rail's Day stop (after Needs You) shows one day at a
-time as a MERGE of three things the app already holds: the mirror's events,
+**What happens.** The icon rail's Day stop (the eighth, right after Needs You)
+shows one day at a time as a MERGE of three things the app already holds: the mirror's events,
 the deadlines triage read out of the mail, and the threads coming back from
 Later. The merge is pure (`app/lib/services/calendar/day_items.dart`,
 `buildDayItems`); `DayPane` only draws it. The reads are
@@ -350,7 +413,7 @@ event beside ([Events, invite cards and people](#events-invite-cards-and-people)
 | `CalendarAvailability` | Day pane | Today section |
 |---|---|---|
 | `available` | rows; an empty day says `Nothing on your calendar.` | shown |
-| `unavailable` (offline) | rows as saved, under `Can't reach the calendar right now — showing what was saved.` | shown |
+| `unavailable` (offline) | rows as saved, under `Can't reach the calendar right now — showing what was saved.`; an empty day says `Nothing saved for this day.` | shown |
 | `unknown` (no tick yet) | rows; an empty day says `Reading your calendar…` | hidden |
 | `scopeMissing` | no rows; `Calendar permission needed — Settings › Connection` and **Open Settings** | hidden |
 | `sdkMode` | no rows; the SDK-mode backend's own sentence | hidden |
@@ -361,6 +424,13 @@ and `sdkMode` (never `No invites to answer.`), the offline caption for
 
 `calendarShowsMirror` (the first three) is the providers' gate too, so a switch
 to SDK mode stops the stale rows showing without deleting them.
+
+Offline, the other surfaces drawn from the mirror say where their answer came
+from in one muted line, `From the saved calendar — can't reach Outlook right
+now.` (`offlineCaption` in `day_items.dart`): the command bar's plan card (an
+answer, slots or a proposal — a refusal read nothing and says nothing), the
+event panel over a found event, and Find a time. Each takes the availability
+as a prop; the inbox reads the provider.
 
 ### Invites owed
 
@@ -373,8 +443,12 @@ urgency `high` or `urgent`, or importance `high`. Pinned entries come first,
 then soonest first. A decision read that throws costs that invite its pin,
 never the list. Overlaps for all invites come from ONE `eventsBetween` over
 the span they cover, capped at 121 days. Each row carries Yes / Maybe / No
-(see Writes); a row folded from a series answers the series, through its
-master's id.
+(see Writes). A row answers the whole series, through its master's id, only
+when more than one occurrence is owed AND the one shown is a plain occurrence
+(`InviteEntry.answersSeries`); a single owed invite, and a lone owed exception
+— a moved meeting of a series answered already — answers itself, since an
+answer to the master would re-answer every meeting in it. `· series` on the
+row (`isSeries`) still says the meeting belongs to one.
 
 ### The list column and the Today section
 
@@ -462,7 +536,8 @@ in-memory.
   through moves it when the mirror does.
 - **The ghost tile.** `DayGrid.proposal` draws a translucent, outlined,
   undraggable tile for a time that is not on the calendar: the pending
-  drop's "Moving here…" today, and Phase 8's hook for a proposed slot.
+  drop's "Moving here…", and a command's standing proposal, "Proposed"
+  ([The bar](#the-bar)).
 
 ## Events, invite cards and people
 
@@ -483,7 +558,10 @@ The id resolves through `eventByIdProvider`
    master still takes its occurrences from the mirror. The answer is held in memory ONLY: a row written
    outside `CalendarSync` would be swept by the next run (gotcha 36).
    `CalendarEventGone` → "This event no longer exists."; any other failure →
-   "Couldn't reach the calendar."
+   "Couldn't reach the calendar. Try again in a moment." — except a live
+   RE-read after an earlier one found the event (a revision bump re-runs the
+   read, and a master is always read live), which keeps the event it had
+   rather than turning an open panel into that sentence.
 
 The panel holds: when (`Tomorrow · Wednesday, Sep 30 · 10:00–10:30 AM`, or
 `All day · …`) with a live countdown; Join (emphasised from fifteen minutes
@@ -496,7 +574,9 @@ never HTML). Every link it offers goes through `_launchExternal`'s scheme
 guard.
 
 **The tally** counts people, never rooms, the organiser, or an entry whose
-answer is `organizer`. On a meeting you organised it is the whole picture —
+answer is `organizer`. On a meeting you organised — `isOwnersEvent`
+(`isOrganizer`, or the response `organizer`), the rule `eventRoleOf` and the
+response line read too — it is the whole picture —
 `4 of 6 accepted · Sam declined · 1 no reply`. On an attendee's copy Exchange
 does not reliably track the other attendees' answers (they commonly read
 `none`), so the tally names only definite answers — `2 accepted · Sam
@@ -505,8 +585,8 @@ carries answers at all is an owner live check.
 
 A live read that fails leaves the panel saying so with a **Retry**, which
 drops the cached answer (`ref.invalidate`) and asks again; a failed mirror
-read reads as the same "Couldn't reach the calendar", never as a panel stuck
-on "Reading…".
+read reads as the same "Couldn't reach the calendar. Try again in a moment.",
+never as a panel stuck on "Reading…".
 
 **Linked conversations** (`eventLinksProvider`): every stored message whose
 `source_meta_json.event_id` is the event — or, for an occurrence, its series
@@ -546,8 +626,13 @@ pure, in `write_rules.dart`.
 run's `notifies` — the addresses the real write would email — decides what
 happens next: a write that emails anybody, and every answer, cancel or delete,
 waits on an inline confirm (`WriteConfirmStrip`: the summary, "This emails:
-…", Send / Cancel, Enter and Esc); anything else goes at once and offers an
-**Undo** through the app's one toast (and `z`). Every answer confirms by its
+…", Send / Cancel, Enter and Esc — and, when a write that confirms by its kind
+came back from the dry run naming nobody, "This may email: …" from the event
+as the app reads it (`mayEmailFor`: the organiser for an answer, the people on
+a create, the guests of a cancel or a delete), so a strip never confirms while
+saying nothing about mail); anything else goes at once and offers an
+**Undo** through the app's one toast (five seconds, `DraftNotifier.undoWindow`,
+and `z`). Every answer confirms by its
 kind, not by the dry run's list: each one is sent and emails the organiser,
 whatever the server happened to name. An Undo exists only for a write whose
 DRY RUN emailed nobody — a commit made without a preview never offers one —
@@ -566,7 +651,8 @@ a click and an Enter in the same frame send once.
 
 A create carries a transaction id (32 hex characters from `Random.secure`) made
 once per proposal; a retry reuses the same `CreateEvent`, so a create whose
-answer was lost cannot land twice.
+answer was lost cannot land twice within a session (the transaction id is held
+in memory; a retry after a restart is a new create).
 
 **The local effect.** A real write makes the mirror agree at once, then forces
 a sync (`syncNow(force: true)`, unawaited) for what the server did beyond the
@@ -574,8 +660,10 @@ one row it answered:
 
 - a move or a create that answered a row → `CalendarSync.storeWritten`: the
   write guard noted and the row tagged with the CURRENT run, so neither a page
-  read before the write nor the next sweep undoes it (gotcha 36); a create
-  with no placeable row only notes its id and waits for the sync;
+  read before the write nor the next sweep undoes it (gotcha 36); a create or
+  a move whose ack has no placeable row (its `start_utc`/`end_utc` empty — the
+  legacy naive `start`/`end` are never read) only notes its id and waits for
+  the forced sync, whose publisher bumps the revision when it brings the row;
 - an answer → `CalendarStore.setResponseStatus` on the id and, for a master,
   every mirrored occurrence, each id noted;
 - a cancel or a delete → `CalendarStore.deleteWithOccurrences`, each id noted.
@@ -588,7 +676,10 @@ bump, the forced sync, the activity row, the Undo — each run on their own
 guard OUTSIDE the failure mapping: a throw there is logged by type and the
 write is still a success, because the server has it and a Try again would
 send it twice. The toast says a series-wide answer, cancel or delete as
-"Accepted every meeting in …", as the confirm did. The buttons are rebuilt
+"Accepted every meeting in …", as the confirm did, and ends with where the
+mail goes — "Emails go to a@x." or "Emails go to 3 people." — worded as a
+preview, because the list is the dry run's (or the `mayEmailFor` reading),
+not a receipt. The buttons are rebuilt
 fresh, so a "Move to…" field typed for the old time is gone, and the keyboard
 stays in the panel, so `z` reaches the Undo without a click.
 
@@ -757,7 +848,11 @@ activity note says `kept: ready`.
 the row's origin, and a brief's is the calendar.
 
 **The lane.** The draft lane, after `draft` — see
-[10-model-routing.md](10-model-routing.md#three-drains) for why.
+[10-model-routing.md](10-model-routing.md#three-drains) for why. Drain order
+alone would still leave a person's **Draft reply** behind a backlog of briefs
+the walk is already inside, so `DraftNotifier.generate` names the draft's
+message as a priority ref (`pump(first: …)`): it is served at the next claim
+boundary, after at most the one brief already at the model.
 
 **Planning** (`BriefPlanner.plan`). After each calendar sync whose outcome is
 `synced`, and only while processing is on, `InboxScreen._syncCalendar` fires
@@ -829,11 +924,15 @@ worker with the handler's notes: `ok` with `{threads, asks}` → "Meeting brief
 `unchanged`) → "Meeting brief — skipped (no recent mail with these people)";
 `error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)
 adds "; the last brief stands"; a park keeps the general sentence. Counts
-and enum words only.
+and enum words only: an answer that was not the JSON asked for is recorded as
+its category (`format: not JSON`, `rowErrorFor`) in the row's `error` and
+`llm_error` and the work row's error, never a word of the answer. The row's
+`entity_id` is the work row's — the OCCURRENCE id the brief is keyed by (the
+worker's convention: an activity row names the entity its work row does).
 
 ## Commands
 
-The Day stop's command bar (Phase 8; the bar itself is part 2) reads short
+The Day stop's command bar ([The bar](#the-bar)) reads short
 requests — "move my 3pm with Dana to tomorrow morning", "what's on Friday",
 "find 30 min with Lee next week" — through an engine in
 `lib/services/calendar/command/`. A calendar command is short text over
@@ -937,7 +1036,12 @@ write is dry-run through `CalendarWriter.preview` before it is offered, so a
 `CalendarProposal` already carries who it emails and whether it needs a
 confirm (the Writes policy above). A cancel follows the role: an organiser
 with guests cancels, the owner's own event is deleted, an attendee is offered
-a decline and told why. An answer to a series master says "every meeting in".
+a decline and told why. The bar acts on the matched OCCURRENCE: its
+candidates are the mirror's rows, and calendarView mirrors a series'
+occurrences, never its master, so a command never answers, cancels or deletes
+a whole series. When the meeting belongs to one, the confirm line ends
+"· one meeting of a series" (`oneOfSeriesSuffix`) — honestly unlike the card
+and the panel, whose answer to a master says "every meeting in".
 Questions are `Answer`s: a yes or no for a named time ("No — on Fri Oct 16 at
 2:00 PM you have Budget review."), the openings in a window, the day's
 meetings, next and last met.
@@ -989,7 +1093,7 @@ reads it as "Calendar command — Move · lexicon · proposal".
 
 ### The command head
 
-The decision model's second consumer (Phase 9; `10-model-routing.md`): a
+The decision model's second consumer (see `10-model-routing.md`): a
 linear head on the SAME encoder triage uses, fitted on the encoder's raw
 pooled vector of the typed command, naming its action. It lives in
 `command_heads.dart` (`CommandHeads`), kept apart from the nine message heads
@@ -1029,7 +1133,8 @@ path for a long text, and one call record labelled `command_head`.
   expected kinds by name (`LlmException` and the decision subclasses,
   `CommandHeadsRefused`, `TimeoutException`); anything else is a bug, printed
   with its stack in debug, and is still null. With no head the bar reads
-  exactly as it did before Phase 9.
+  the action with the lexicon alone, which is what ships until a fitted head
+  is adopted.
 - **Nothing asked that could not be answered.** When the decision role is
   not ready — its heads file is not on this Mac, or its target carries an
   `unavailable` sentence (the managed router not serving `bond-decide`) — or
@@ -1262,3 +1367,61 @@ send_invite | add_to_calendar}` — "Find a time — put in reply", "Find a time
 invite sent", "Find a time — added to calendar" (a slot with nobody on it; the
 invite's own `calendar_write` row is the writer's, as for every write).
 Counts and enum words only.
+
+## Owner checks and follow-ups
+
+**Live checks still owed.** Tests cannot settle these. Each needs the real
+server or the real calendar.
+
+- **From the bond-mcps handoff, §7:**
+  - If-Match on an OCCURRENCE id. If it keeps answering `event_changed`,
+    re-read the occurrence and use its own key.
+  - Recurring series through `sync_calendar`.
+  - How Outlook desktop shows an all-day move.
+  - Whether an organiser's change to `show_as` alone emails the attendees.
+  - Teams short join links. They carry no chat id, so the panel links no
+    meeting chat for them.
+- **Tally honesty.** Does an attendee's copy of a meeting carry any answers
+  at all? The attendee tally names definite answers only, on the assumption
+  that it sometimes does. If it never does, that tally can go.
+- **Writes, on the owner's calendar:**
+  - one real accept, with the confirm strip naming the organiser;
+  - one move of a private test event;
+  - one Undo.
+- **A manual pass over the routes:**
+  - the Day stop: today, tomorrow and Invites;
+  - Agenda | Grid, and a drag on a private test event;
+  - `EventPanel` opened from a Day row, from the Today section and from an
+    invite card;
+  - a brief appearing for a meeting with mail history, with processing on;
+  - the command bar: "what's on tomorrow", "move <test event> to Friday 3pm",
+    "find 30 min with <colleague> next week";
+  - ⌘K's **Ask Day** row;
+  - Find a time on a thread that asks for a time.
+- **The command head.** `make calendar-heads` needs the decision server live.
+  It prints four accuracies (head and lexicon, on the held-out and hard sets)
+  and the adoption line. Record them in the `docs/model-bakeoff.md` ledger,
+  and run `make calendar-heads-adopt` only on `adoption: go`. Until then
+  `app/assets/calendar/command_heads.json` does not exist and the lexicon
+  reads every command.
+
+**Follow-ups, not built:**
+
+- **Teams participants in briefs.** Briefs read mail only. A Teams
+  participant is `teams:<id>` and never matches an attendee's address, so the
+  fix is to map participants through the people directory. The 8-person cap
+  on `participants_json` also hides attendees in busy threads.
+- **"move my 3pm to 4".** A bare hour after "to" is refused with "Add am or
+  pm", not read daytime-first. Keeping that rule, or reading the hour in the
+  meeting's own half of the day, is an owner call. Either way it changes
+  only with a test.
+- **Resolver gaps:**
+  - "this weekend", "the 14th" and recurrence are not read;
+  - "in 30 min" is a duration, not a relative time.
+- **Out of scope for this round (D2, D3, D10, D11, D15):**
+  - secondary and shared calendars, which need new scopes;
+  - the follow-ups engine F1–F4 and To Do, which still lacks
+    `Tasks.ReadWrite`;
+  - standing rules, capacity, and a daily brief;
+  - a calendar in SDK mode;
+  - meeting reminders, which stay Outlook's.

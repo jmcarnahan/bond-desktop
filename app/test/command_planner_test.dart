@@ -152,9 +152,6 @@ void main() {
     return planner.plan(p, now: now, zone: la, today: today);
   }
 
-  Future<CommandPlan> planParsed(ParsedCommand p) =>
-      planner.plan(p, now: now, zone: la, today: today);
-
   test('an unknown action cannot be done, and says what to try', () async {
     final r = await plan('design sync notes');
     expect((r as CannotDo).reason, didntCatchSentence);
@@ -418,22 +415,43 @@ void main() {
   });
 
   group('answers to an invite', () {
-    test('a series master answers every meeting in it', () async {
-      final master = timed('m', thu, 9,
-          subject: 'Weekly sync',
-          organiser: false,
-          eventType: 'seriesMaster',
-          guests: ['me@contoso.com']);
-      final p = parseCommand('accept the weekly sync',
-              now: now, zone: la, people: const [], events: const [])
-          .copyWith(events: [EventCandidate(master, 5)]);
-      final r = await planParsed(p) as CalendarProposal;
+    test('an occurrence of a series is answered alone, and the line says '
+        'so', () async {
+      // The bar's candidates are mirror rows, and the mirror holds a series'
+      // occurrences, never its master: the answer goes to the one matched.
+      final occurrence = CalendarEvent(
+        id: 'occ-1',
+        subject: 'Weekly sync',
+        eventType: 'occurrence',
+        seriesMasterId: 'm',
+        isOrganizer: false,
+        organizerAddress: 'dana@contoso.com',
+        showAs: 'busy',
+        startUtc: at(thu, 9),
+        endUtc: at(thu, 9, 30),
+        changeKey: 'ck',
+        attendees: const [
+          Attendee(name: 'me@contoso.com', address: 'me@contoso.com'),
+        ],
+      );
+      final r = await plan('accept the weekly sync', events: [occurrence])
+          as CalendarProposal;
       final w = r.write as RespondToEvent;
-      expect(w.eventId, 'm');
+      expect(w.eventId, 'occ-1');
       expect(w.response, RsvpResponse.accept);
-      expect(r.series, isTrue);
-      expect(r.summary, 'Accept every meeting in "Weekly sync"');
+      expect(r.summary, startsWith('Accept "Weekly sync"'));
+      expect(r.summary, endsWith(oneOfSeriesSuffix));
+      expect(r.summary, isNot(contains('every meeting')));
+      expect(r.doneMessage, 'Accepted "Weekly sync".');
       expect(r.needsConfirm, isTrue);
+    });
+
+    test('a single meeting says nothing about a series', () async {
+      final e = timed('e', thu, 9,
+          subject: 'Offsite', organiser: false, guests: ['me@contoso.com']);
+      final r =
+          await plan('accept the offsite', events: [e]) as CalendarProposal;
+      expect(r.summary, isNot(contains('series')));
     });
 
     test('maybe and no', () async {

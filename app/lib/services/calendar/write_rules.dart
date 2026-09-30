@@ -2,7 +2,7 @@ import '../../models/calendar_models.dart';
 import 'calendar_writes.dart';
 import 'calendar_zone.dart';
 import 'day_items.dart' show formatEventRange, shortDate;
-import 'event_view.dart' show eventWhenLine;
+import 'event_view.dart' show eventWhenLine, isOwnersEvent;
 import 'when_resolver.dart';
 
 /// Which calendar writes an event offers, how a typed new time becomes one,
@@ -34,8 +34,7 @@ enum EventRole { attendee, organiserWithGuests, ownEvent }
 /// dry run still names every address a write emails, a room included, and
 /// the confirm follows that list rather than this role.
 EventRole eventRoleOf(CalendarEvent e) {
-  final organiser = e.isOrganizer || e.responseStatus == 'organizer';
-  if (!organiser) return EventRole.attendee;
+  if (!isOwnersEvent(e)) return EventRole.attendee;
   final self = e.organizerAddress.trim().toLowerCase();
   final guests = e.attendees.any((a) =>
       a.type.trim().toLowerCase() != 'resource' &&
@@ -424,18 +423,77 @@ String writeDoneMessage(
 
 /// "This emails: a@x, b@y" — five addresses, then "and N more" — or null
 /// when the write emails nobody.
-String? emailedLine(List<String> notifies) {
-  if (notifies.isEmpty) return null;
-  final shown = notifies.take(5).join(', ');
-  final more = notifies.length - 5;
-  return more > 0 ? 'This emails: $shown and $more more' : 'This emails: $shown';
+///
+/// [mayEmail] is who the write would reach when the dry run listed nobody
+/// ([mayEmailFor]): an RSVP, a cancel, a delete and a create with guests
+/// confirm anyway (`needsConfirm`), and a strip that confirms while saying
+/// nothing about mail would read as a write that sends none. Said as "This
+/// may email:", because it is the app's reading of the event, not the
+/// server's list.
+String? emailedLine(
+  List<String> notifies, {
+  List<String> mayEmail = const [],
+}) {
+  final (list, verb) = notifies.isNotEmpty
+      ? (notifies, 'This emails')
+      : (mayEmail, 'This may email');
+  if (list.isEmpty) return null;
+  final shown = list.take(5).join(', ');
+  final more = list.length - 5;
+  return more > 0 ? '$verb: $shown and $more more' : '$verb: $shown';
 }
 
-/// What rides the done toast: " Emailed a@x.", " Emailed 3 people.", or ''.
-String emailedSuffix(List<String> notifies) {
-  if (notifies.isEmpty) return '';
-  if (notifies.length == 1) return ' Emailed ${notifies.single}.';
-  return ' Emailed ${notifies.length} people.';
+/// What rides the done toast: " Emails go to a@x.", " Emails go to 3
+/// people.", or ''. Worded as where the mail goes rather than as mail sent:
+/// the list is the dry run's (or [mayEmail], as [emailedLine] reads it), a
+/// preview, and the server sends — or does not — after the app has let go.
+String emailedSuffix(
+  List<String> notifies, {
+  List<String> mayEmail = const [],
+}) {
+  final list = notifies.isNotEmpty ? notifies : mayEmail;
+  if (list.isEmpty) return '';
+  if (list.length == 1) return ' Emails go to ${list.single}.';
+  return ' Emails go to ${list.length} people.';
+}
+
+/// Who [w] reaches by mail as the app reads [event] (the event written to)
+/// — the fallback [emailedLine] and [emailedSuffix] use when a write that
+/// confirms anyway came back from its dry run naming nobody:
+///
+/// - an answer (and a proposal) goes to the organiser;
+/// - a create goes to the people on it;
+/// - a cancel or a delete goes to the event's guests: not rooms, not the
+///   organiser's own address (the [eventRoleOf] rule);
+/// - a move lists nobody here: it confirms only on the dry run's own list.
+///
+/// Lowercased and deduplicated, in the order given.
+List<String> mayEmailFor(CalendarWrite w, {CalendarEvent? event}) {
+  final out = <String>{};
+  void add(String address) {
+    final a = address.trim().toLowerCase();
+    if (a.isNotEmpty) out.add(a);
+  }
+
+  switch (w) {
+    case RespondToEvent():
+      add(event?.organizerAddress ?? '');
+    case CreateEvent():
+      w.attendees.forEach(add);
+    case CancelMeeting():
+    case DeleteEvent():
+      final e = event;
+      if (e == null) break;
+      final self = e.organizerAddress.trim().toLowerCase();
+      for (final a in e.attendees) {
+        if (a.type.trim().toLowerCase() == 'resource') continue;
+        if (a.address.trim().toLowerCase() == self) continue;
+        add(a.address);
+      }
+    case MoveEvent():
+      break;
+  }
+  return out.toList();
 }
 
 /// The confirm button: it names a destructive write rather than "Send".

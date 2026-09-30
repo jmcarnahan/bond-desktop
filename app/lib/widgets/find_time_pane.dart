@@ -5,12 +5,13 @@ import 'package:flutter/material.dart';
 import '../models/calendar_models.dart' show CalendarDate, CalendarEvent;
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
 import '../services/calendar/day_items.dart'
-    show formatEventRange, overlapLine, shortDate;
+    show formatEventRange, offlineCaption, overlapLine, shortDate;
 import '../services/calendar/find_time.dart';
 import '../services/calendar/overlaps.dart' show FreeSlot;
 import '../services/calendar/write_rules.dart'
-    show writeDoneMessage, writeSummary;
+    show mayEmailFor, writeDoneMessage, writeSummary;
 import '../theme/tokens.dart';
 import 'calendar_write_flow.dart';
 import 'chips.dart' show BondFilterPill;
@@ -62,6 +63,8 @@ class FindTimePane extends StatefulWidget {
     required this.onDone,
     required this.onBack,
     required this.onHome,
+    this.onFailed,
+    this.availability = CalendarAvailability.unknown,
   });
 
   /// The thread's subject; the invite is "Re: " it.
@@ -82,6 +85,14 @@ class FindTimePane extends StatefulWidget {
   /// when the slot went on the owner's calendar alone (Add to calendar).
   final void Function(String message, CalendarWrite? undo, bool invited)
       onDone;
+
+  /// An invite that failed after the pane had gone: the host toasts it
+  /// ([CalendarWriteFlow.onFailed]).
+  final void Function(String message)? onFailed;
+
+  /// The calendar's availability as the host reads it. Offline, the owner's
+  /// own busy times are the saved ones, and the pane says so in one line.
+  final CalendarAvailability availability;
   final VoidCallback onBack;
   final VoidCallback? onHome;
 
@@ -92,6 +103,7 @@ class FindTimePane extends StatefulWidget {
   static const Key lookingKey = ValueKey('find-time-looking');
   static const Key justYouKey = ValueKey('find-time-just-you');
   static const Key waitingKey = ValueKey('find-time-waiting');
+  static const Key offlineKey = ValueKey('find-time-offline');
 
   /// The durations offered, in minutes.
   static const List<int> durations = [30, 45, 60];
@@ -216,6 +228,14 @@ class _FindTimePaneState extends State<FindTimePane> {
       child: ListView(
         padding: const EdgeInsets.all(BondSpacing.s24),
         children: [
+          if (widget.availability == CalendarAvailability.unavailable) ...[
+            Text(
+              offlineCaption,
+              key: FindTimePane.offlineKey,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
+            const SizedBox(height: BondSpacing.s12),
+          ],
           if ((widget.subject ?? '').trim().isNotEmpty) ...[
             Text(
               widget.subject!.trim(),
@@ -372,6 +392,7 @@ class _FindTimePaneState extends State<FindTimePane> {
     return CalendarWriteFlow(
       writer: widget.writer,
       onDone: (message, undo) => widget.onDone(message, undo, _invited),
+      onFailed: widget.onFailed,
       builder: (context, start, busy) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -407,6 +428,7 @@ class _FindTimePaneState extends State<FindTimePane> {
                     today: widget.today),
                 doneMessage: writeDoneMessage(write,
                     shown: null, series: false, zone: zone),
+                mayEmail: mayEmailFor(write),
               );
             }, invites: addresses.isNotEmpty),
           const SizedBox(height: BondSpacing.s4),

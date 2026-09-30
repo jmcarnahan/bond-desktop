@@ -275,12 +275,11 @@ class CalendarEvent {
 
   /// An event row from any calendar tool (handoff §3.1's "event row").
   ///
-  /// Instants come from `start_utc`/`end_utc`. When one is `""` (Graph
-  /// answered in another zone) the legacy naive `start`/`end` is read
-  /// instead: on every READ those are UTC with a 7-digit fraction (handoff
-  /// §4.1), so they are parsed as UTC. The caller must not hand this a
-  /// `create_calendar_event` ack whose `start_utc` is empty — there the
-  /// legacy pair echoes the request zone.
+  /// Instants come from `start_utc`/`end_utc` only. When one is `""` (Graph
+  /// answered in another zone, a write's UTC re-read failed) the timed row
+  /// stays unplaced — null instants — and the next sync brings it. The
+  /// legacy naive `start`/`end` are never read: they are UTC on a read but
+  /// echo the REQUEST zone on a create, and a row cannot say which it is.
   ///
   /// A missing optional key is its empty default; only a missing or empty
   /// `id` is a [FormatException], because a row with no id cannot be stored,
@@ -307,8 +306,8 @@ class CalendarEvent {
       isOrganizer: _bool(row['is_organizer']),
       isAllDay: isAllDay,
       isCancelled: _bool(row['is_cancelled']),
-      startUtc: isAllDay ? null : _instant(row['start_utc'], row['start']),
-      endUtc: isAllDay ? null : _instant(row['end_utc'], row['end']),
+      startUtc: isAllDay ? null : _instant(row['start_utc']),
+      endUtc: isAllDay ? null : _instant(row['end_utc']),
       startDate: isAllDay ? CalendarDate.tryParse(_str(row['start_date'])) : null,
       endDate: isAllDay ? CalendarDate.tryParse(_str(row['end_date'])) : null,
       showAs: _str(row['show_as']),
@@ -945,19 +944,12 @@ DateTime? _stampOrNull(Object? raw) {
   return DateTime.tryParse(raw)?.toUtc();
 }
 
-/// A tool instant: the `…Z` [utc] when the server gave one, else the legacy
-/// naive [legacy] string, which is UTC on every read (handoff §4.1) and so
-/// gets a `Z` before it is parsed — a bare `DateTime.parse` would read it as
-/// the machine's local time.
-DateTime? _instant(Object? utc, Object? legacy) {
+/// A tool instant: the `…Z` [utc] the server gave, or null when it gave
+/// none (never the legacy naive `start`/`end`; see
+/// [CalendarEvent.fromToolRow]).
+DateTime? _instant(Object? utc) {
   if (utc is String && utc.isNotEmpty) {
     final parsed = DateTime.tryParse(utc);
-    if (parsed != null) return parsed.toUtc();
-  }
-  if (legacy is String && legacy.isNotEmpty) {
-    final hasZone = legacy.endsWith('Z') ||
-        RegExp(r'[+-]\d{2}:?\d{2}$').hasMatch(legacy);
-    final parsed = DateTime.tryParse(hasZone ? legacy : '${legacy}Z');
     if (parsed != null) return parsed.toUtc();
   }
   return null;

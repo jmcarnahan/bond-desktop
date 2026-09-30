@@ -7,7 +7,7 @@ import '../../backend/calendar_errors.dart';
 import '../calendar_writes.dart';
 import '../calendar_zone.dart';
 import '../day_items.dart' show formatEventRange, formatEventTime, shortDate;
-import '../event_view.dart' show lastMetLabel, nextMeetingLabel;
+import '../event_view.dart' show isSeriesEvent, lastMetLabel, nextMeetingLabel;
 import '../overlaps.dart';
 import '../when_resolver.dart';
 import '../write_rules.dart';
@@ -51,7 +51,6 @@ final class CalendarProposal extends CommandPlan {
     this.overlaps,
     this.targetEvent,
     this.notifies = const [],
-    this.series = false,
   });
 
   final CalendarWrite write;
@@ -81,9 +80,6 @@ final class CalendarProposal extends CommandPlan {
   /// Who the write emails, as the dry run said.
   final List<String> notifies;
   final bool needsConfirm;
-
-  /// The write answers, cancels or deletes every meeting in a series.
-  final bool series;
 
   @override
   String get outcomeWord => 'proposal';
@@ -197,6 +193,10 @@ String unknownPersonSentence(String name) =>
 const String noCommonTimeSentence =
     'No time when everyone is free in that window.';
 
+/// Appended to the confirm line of a write on one meeting of a series: the
+/// bar acts on the occurrence it matched, never on the series.
+const String oneOfSeriesSuffix = ' · one meeting of a series';
+
 /// The default length of a meeting nobody gave a length for.
 const Duration defaultMeetingLength = Duration(minutes: 30);
 
@@ -306,13 +306,18 @@ class CommandPlanner {
   /// [write]'s dry run as a proposal: the bar calls this for a pressed
   /// [SlotChoice] slot, and the planner for every write it builds itself.
   ///
-  /// [target] is the meeting written to (null for a create); [series] says
-  /// the write reaches every meeting in a series; [lead] is a sentence put
-  /// before the confirm line.
+  /// [target] is the meeting written to (null for a create); [lead] is a
+  /// sentence put before the confirm line.
+  ///
+  /// Never series-wide. The bar's candidates are the mirror's rows, and a
+  /// series master is never one of them (calendarView mirrors occurrences),
+  /// so every write here acts on the one meeting matched. When that meeting
+  /// belongs to a series the confirm line says so — "· one meeting of a
+  /// series" — which is where it differs, honestly, from an answer on a
+  /// card or panel that reached the master and says "every meeting in".
   Future<CommandPlan> propose(
     CalendarWrite write, {
     CalendarEvent? target,
-    bool series = false,
     String lead = '',
     required CalendarZone zone,
     required CalendarDate today,
@@ -323,8 +328,13 @@ class CommandPlanner {
         return CannotDo(message);
       case PreviewReady(:final preview, :final needsConfirm):
         final shown = target ?? const CalendarEvent(id: '');
+        final oneOfSeries = target != null &&
+            write is! CreateEvent &&
+            !target.isSeriesMaster &&
+            isSeriesEvent(target);
         final line = writeSummary(write,
-            shown: shown, series: series, zone: zone, today: today);
+                shown: shown, series: false, zone: zone, today: today) +
+            (oneOfSeries ? oneOfSeriesSuffix : '');
         DateTime? start;
         DateTime? end;
         switch (write) {
@@ -349,14 +359,13 @@ class CommandPlanner {
           preview: preview,
           summary: lead.isEmpty ? line : '$lead $line',
           doneMessage: writeDoneMessage(write,
-              shown: target, series: series, zone: zone),
+              shown: target, series: false, zone: zone),
           needsConfirm: needsConfirm,
           startUtc: start,
           endUtc: end,
           overlaps: overlaps,
           targetEvent: target,
           notifies: preview.notifies,
-          series: series,
         );
     }
   }
@@ -529,14 +538,12 @@ class CommandPlanner {
     final (:event, :stop) = _pickEvent(p, zone: zone, today: today);
     if (stop != null) return stop;
     final e = event!;
-    final series = e.isSeriesMaster;
     switch (eventRoleOf(e)) {
       case EventRole.organiserWithGuests:
         return propose(CancelMeeting(e.id),
-            target: e, series: series, zone: zone, today: today);
+            target: e, zone: zone, today: today);
       case EventRole.ownEvent:
-        return propose(DeleteEvent(e.id),
-            target: e, series: series, zone: zone, today: today);
+        return propose(DeleteEvent(e.id), target: e, zone: zone, today: today);
       case EventRole.attendee:
         if (!canRespond(e)) {
           return const CannotDo('That meeting is already cancelled.');
@@ -544,7 +551,6 @@ class CommandPlanner {
         return propose(
           RespondToEvent(e.id, RsvpResponse.decline),
           target: e,
-          series: series,
           lead: "You can't cancel it — it isn't yours — but you can decline:",
           zone: zone,
           today: today,
@@ -572,7 +578,7 @@ class CommandPlanner {
       _ => RsvpResponse.tentative,
     };
     return propose(RespondToEvent(e.id, response),
-        target: e, series: e.isSeriesMaster, zone: zone, today: today);
+        target: e, zone: zone, today: today);
   }
 
   Future<CommandPlan> _findTime(

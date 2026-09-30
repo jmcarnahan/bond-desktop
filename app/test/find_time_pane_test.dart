@@ -1,6 +1,10 @@
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/calendar/calendar_sync.dart'
+    show CalendarAvailability;
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/day_items.dart'
+    show offlineCaption;
 import 'package:bond_inbox/services/calendar/find_time.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:bond_inbox/widgets/find_time_pane.dart';
@@ -76,6 +80,7 @@ void main() {
     FindTimeResult Function(_Call call)? answer,
     CalendarWriter? writer,
     List<FindTimePerson> people = const [dana, sam],
+    CalendarAvailability availability = CalendarAvailability.available,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -109,6 +114,7 @@ void main() {
             },
             onBack: () {},
             onHome: () {},
+            availability: availability,
           ),
         ),
       ),
@@ -164,6 +170,14 @@ void main() {
     expect(calls.last.window, FindTimeWindow.nextWeek);
     expect(calls.last.minutes, 45);
     expect(calls, hasLength(3));
+  });
+
+  testWidgets('offline, the pane says its times are the saved calendar\'s',
+      (tester) async {
+    await pumpPane(tester, availability: CalendarAvailability.unavailable);
+    expect(find.text(offlineCaption), findsOneWidget);
+    await pumpPane(tester);
+    expect(find.text(offlineCaption), findsNothing);
   });
 
   testWidgets('changes inside the debounce make one search', (tester) async {

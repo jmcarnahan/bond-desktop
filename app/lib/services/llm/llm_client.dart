@@ -60,6 +60,22 @@ export 'model_slots.dart' show LlmWire, accessKeyCharsText, isUsableAccessKey;
 String redactEndpoints(String text) =>
     text.replaceAll(_endpointPattern, '<endpoint>');
 
+/// What a stored row says about [error]: [redactEndpoints] of its sentence,
+/// except for an answer the model gave that could not be used
+/// ([LlmFormatException] with a [LlmFormatException.category]), which is
+/// `format: <category>` and nothing more. That sentence quotes the start of
+/// the answer, and an answer is written from the mail, the calendar or the
+/// words a person typed in the Day bar — none of which belongs in
+/// `activity_events` or a work row. The exception keeps the whole sentence
+/// for the screen.
+String rowErrorFor(Object error) {
+  if (error is LlmFormatException) {
+    final category = error.category;
+    if (category != null) return 'format: $category';
+  }
+  return redactEndpoints('$error');
+}
+
 final RegExp _endpointPattern = RegExp(r"""https?://[^\s'"<>\)\]]+""");
 
 /// A failed call to the local model. [message] is safe to show a user.
@@ -190,8 +206,14 @@ String parkReasonFor(Object e) => switch (e) {
     };
 
 /// The model answered, but not with the JSON object that was asked for.
+///
+/// [category] is set when [message] quotes the answer, and names the failure
+/// in words that quote nothing (`not JSON`, `not an object`): a stored row
+/// carries it instead of the sentence ([rowErrorFor]).
 class LlmFormatException extends LlmException {
-  const LlmFormatException(super.message);
+  const LlmFormatException(super.message, {this.category});
+
+  final String? category;
 }
 
 /// One call to the local model, as the HTTP layer saw it.
@@ -645,12 +667,14 @@ class LlmClient {
     } on FormatException {
       throw LlmFormatException(
         '$noun did not answer with JSON: ${_snippet(content)}',
+        category: 'not JSON',
       );
     }
     if (decoded is! Map<String, dynamic>) {
       throw LlmFormatException(
         '$noun answered with ${decoded.runtimeType}, not a JSON '
         'object: ${_snippet(content)}',
+        category: 'not an object',
       );
     }
     return decoded;
@@ -821,7 +845,8 @@ class LlmClient {
         outcome: 'format',
         model: target.model,
         baseUrl: target.baseUrl,
-        error: redactEndpoints(e.message),
+        // The category, never the quoted answer (see [rowErrorFor]).
+        error: rowErrorFor(e),
       ));
       rethrow;
     } on LlmException catch (e) {

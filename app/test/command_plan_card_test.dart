@@ -1,8 +1,12 @@
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/calendar/calendar_sync.dart'
+    show CalendarAvailability;
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/command/command_planner.dart';
 import 'package:bond_inbox/services/calendar/command/command_types.dart';
+import 'package:bond_inbox/services/calendar/day_items.dart'
+    show offlineCaption;
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:bond_inbox/widgets/command_plan_card.dart';
 import 'package:bond_inbox/widgets/write_confirm_strip.dart';
@@ -72,7 +76,9 @@ void main() {
   });
 
   Future<void> pumpCard(WidgetTester tester, CommandPlan plan,
-      {CalendarWriter? writer}) async {
+      {CalendarWriter? writer,
+      CalendarAvailability availability =
+          CalendarAvailability.available}) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: SizedBox(
@@ -88,6 +94,7 @@ void main() {
             onPickSlot: (choice, slot) async => picked.add(slot),
             onChoose: (option) async => chosen.add(option),
             onOpenEvent: opened.add,
+            availability: availability,
           ),
         ),
       ),
@@ -238,6 +245,21 @@ void main() {
 
     await tester.tap(find.byKey(CommandPlanCard.cancelKey));
     expect(dismissed, 1);
+  });
+
+  testWidgets('offline, a plan drawn from the mirror says it is the saved '
+      'calendar; a reason does not', (tester) async {
+    await pumpCard(tester, move(),
+        availability: CalendarAvailability.unavailable);
+    expect(find.text(offlineCaption), findsOneWidget);
+
+    await pumpCard(tester, move());
+    expect(find.text(offlineCaption), findsNothing);
+
+    await pumpCard(tester, const CannotDo('That meeting is cancelled.'),
+        availability: CalendarAvailability.unavailable);
+    expect(find.text(offlineCaption), findsNothing,
+        reason: 'a refusal read nothing from the calendar');
   });
 
   testWidgets('a reason is said, and ✕ dismisses', (tester) async {

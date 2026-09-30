@@ -935,7 +935,7 @@ void main() {
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
-      expect(find.text('Calendar'), findsOneWidget);
+      expect(find.text('Calendar (read and write)'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(4));
       expect(find.byIcon(Icons.close), findsNothing);
       // A tenant that granted everything has nothing to be nagged about.
@@ -999,7 +999,7 @@ void main() {
       );
       await expand(tester, 'Microsoft connection');
 
-      expect(find.text('Calendar'), findsOneWidget);
+      expect(find.text('Calendar (read and write)'), findsOneWidget);
       expect(find.byIcon(Icons.close), findsOneWidget);
       expect(find.text('Sign in again to enable'), findsNothing);
     });

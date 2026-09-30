@@ -7,11 +7,14 @@ import '../theme/tokens.dart';
 import 'write_confirm_strip.dart';
 
 /// Starts one calendar write: [summary] is the confirm line, [doneMessage]
-/// the toast once it went through.
+/// the toast once it went through, and `mayEmail` who the write reaches as
+/// the placement reads its event (`mayEmailFor`) — said on the strip and the
+/// toast only when the dry run named nobody.
 typedef WriteStarter = void Function(
   CalendarWrite write, {
   required String summary,
   required String doneMessage,
+  List<String> mayEmail,
 });
 
 /// The one state machine every place a calendar write starts shares: the
@@ -26,8 +29,9 @@ typedef WriteStarter = void Function(
 ///
 /// The widget disposed mid-write (the panel closed, the row answered and
 /// gone) still hands a success to [onDone], whose toast belongs to the
-/// screen; a failure it drops — the error line had nowhere left to stand,
-/// and the revision bump brings every reader up to date.
+/// screen, and a failed commit to [onFailed]: the error line has nowhere left
+/// to stand, and a write that did not happen must not go unsaid. A failed
+/// DRY RUN after the widget went is dropped — nothing was about to happen.
 class CalendarWriteFlow extends StatefulWidget {
   const CalendarWriteFlow({
     super.key,
@@ -37,6 +41,7 @@ class CalendarWriteFlow extends StatefulWidget {
     this.fill = false,
     this.resetOnSuccess = true,
     this.onIdle,
+    this.onFailed,
   });
 
   static const Key errorKey = ValueKey('calendar-write-error');
@@ -82,6 +87,12 @@ class CalendarWriteFlow extends StatefulWidget {
   /// outlives the flow reads `busy` from the next one instead.
   final VoidCallback? onIdle;
 
+  /// Told a failed commit's sentence when the flow has gone before the
+  /// answer came back, so the screen can say it (the host toasts it). While
+  /// the flow is mounted the sentence stays inline, under the buttons, and
+  /// this is not called.
+  final void Function(String message)? onFailed;
+
   @override
   State<CalendarWriteFlow> createState() => _CalendarWriteFlowState();
 }
@@ -94,6 +105,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
   WritePreview? _preview;
   String _summary = '';
   String _doneMessage = '';
+  List<String> _mayEmail = const [];
   String _error = '';
   CalendarWrite? _retry;
 
@@ -133,6 +145,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
     CalendarWrite write, {
     required String summary,
     required String doneMessage,
+    List<String> mayEmail = const [],
   }) {
     if (_busy) return;
     setState(() {
@@ -141,6 +154,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
       _preview = null;
       _summary = summary;
       _doneMessage = doneMessage;
+      _mayEmail = mayEmail;
       _error = '';
       _retry = null;
     });
@@ -183,8 +197,10 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
     final preview = _preview;
     if (write == null || preview == null) return;
     setState(() => _phase = _Phase.committing);
-    final done = _doneMessage + emailedSuffix(preview.notifies);
+    final done =
+        _doneMessage + emailedSuffix(preview.notifies, mayEmail: _mayEmail);
     final onDone = widget.onDone;
+    final onFailed = widget.onFailed;
     final outcome = await widget.writer.commit(write, preview: preview);
     if (outcome.ok) {
       // Said even when this widget has gone meanwhile: an answered invite's
@@ -200,7 +216,10 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
       }
       return;
     }
-    if (!mounted) return;
+    if (!mounted) {
+      onFailed?.call(outcome.message);
+      return;
+    }
     setState(() {
       _phase = _Phase.failed;
       _error = outcome.message;
@@ -237,6 +256,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
           WriteConfirmStrip(
             summary: _summary,
             notifies: preview.notifies,
+            mayEmail: _mayEmail,
             confirmLabel: confirmLabelFor(write),
             dismissLabel: dismissLabelFor(write),
             busy: _phase == _Phase.committing,
@@ -259,7 +279,9 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
               TextButton(
                 key: CalendarWriteFlow.retryKey,
                 onPressed: () => _start(retry,
-                    summary: _summary, doneMessage: _doneMessage),
+                    summary: _summary,
+                    doneMessage: _doneMessage,
+                    mayEmail: _mayEmail),
                 child: const Text('Try again'),
               ),
             IconButton(

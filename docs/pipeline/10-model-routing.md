@@ -41,8 +41,9 @@ says (the calendar round's D9). `llm_routing_test` pins it.
 `calendar_intent` (a Day command the rules could not finish,
 [14-calendar.md](14-calendar.md#commands)) is generative too, and on demand:
 no work kind and no lane — `CommandRouter.submit` calls it on Enter only,
-at most once, and only when the lexicon's confidence is under 0.8 or a slot
-is unresolved with words left over. The live preview never calls it. It is
+at most once, and only when the best classifier's confidence (the command
+head's when one ships, else the lexicon's) is under 0.8 or a slot is
+unresolved with words left over. The live preview never calls it. It is
 not in `draftStageIds` either: it reads the owner's own words and writes
 nothing in their name, so Cloud drafts never sees it.
 
@@ -83,8 +84,8 @@ the decision pass, the needs-you band when the decision is unsure, and one
 records (`LlmCallRecord.label`) is its schema: `decision`, `message_text`,
 `needs_you`, …
 
-**The decision model's second consumer: the Day bar's command head (Phase
-9).** The calendar command bar asks the SAME decision client
+**The decision model's second consumer: the Day bar's command head (the
+calendar round).** The calendar command bar asks the SAME decision client
 (`decisionClientProvider`, so the same target, key, identity probe and heads
 file) for the raw pooled vector of a typed command
 (`DecisionClient.embedRaw`, call records labelled `command_head`) and applies
@@ -98,13 +99,24 @@ server that is down means the lexicon reads the command alone
 ([14-calendar.md](14-calendar.md#the-command-head)). There is no stage row
 and no routing of its own; it follows the decision role wherever that runs.
 
-**Its third: scheduling asks (Phase 9).** Find a time makes NO model call: it
+**Its third: scheduling asks.** Find a time makes NO model call: it
 reads the `intent` answer triage already stored in `message_decisions` for a
 thread's newest inbound message, and a `needs_reply` thread whose answer is
 `scheduling` at p ≥ `DecisionPolicy.booleanYes` gets the thread header's
 **Find a time** and a row in today's "Scheduling asks · N"
 ([14-calendar.md](14-calendar.md#find-a-time)). A message the decision model
 never read is simply not an ask.
+
+**And two more readers of stored answers.** Also without a call of their
+own, the calendar reads triage's `message_decisions` rows in two more places.
+The Day stop's invites owed pin an invite whose mail is `urgency ∈ {high,
+urgent}` or `importance = high`. The pre-meeting brief's gatherer uses the
+same rule to rank the threads it keeps. It picks an attendee's open asks by
+`needs_you_p ≥ DecisionPolicy.needsYouYes` or `reply_expected_p ≥
+DecisionPolicy.replyYes`, with a question, request or approval `intent`
+([14-calendar.md](14-calendar.md#briefs)). A message with no
+stored decision is neither pinned nor an ask. A decision read that throws
+costs an invite its pin, never the list.
 
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
@@ -707,7 +719,10 @@ meeting brief rides the draft lane AFTER `draft`: it is the other piece of
 prose a person reads rather than a stage another stage reads, so behind the
 storyline passes it would wait on a sweep, and ahead of the draft it would
 hold up a reply somebody is waiting on for a meeting hours away. It runs one
-at a time, whatever the draft width. On a
+at a time, whatever the draft width. Order alone is not enough once the walk
+is inside a backlog of briefs, so a person's Draft reply is also named as a
+priority ref (`pump(first:)`), served at the next claim boundary — after at
+most the one brief already at the model. On a
 managed full-tier Mac that server is the 27B with one slot, so today every
 lane's calls take turns there; that is the cost the decision pass (Phase 5)
 began to remove and the one-call-per-message task (Phase 6) finishes.

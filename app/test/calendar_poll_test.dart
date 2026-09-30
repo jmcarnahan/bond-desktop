@@ -58,10 +58,14 @@ class _FakeSync implements MailSync {
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
-/// Records each call's `force` and answers with a future the test holds.
+/// Records each call's `force` and answers with a future the test holds,
+/// publishing what it answers as a real tick does.
 class _RecordingCalendarSync extends CalendarSync {
-  _RecordingCalendarSync(MessageStore store, CalendarStore calendar)
-      : super(const UnavailableCalendarBackend(), store, calendar);
+  _RecordingCalendarSync(
+    MessageStore store,
+    CalendarStore calendar, {
+    super.onOutcome,
+  }) : super(const UnavailableCalendarBackend(), store, calendar);
 
   final List<bool> forces = [];
   final Completer<CalendarSyncOutcome> gate = Completer();
@@ -69,7 +73,10 @@ class _RecordingCalendarSync extends CalendarSync {
   @override
   Future<CalendarSyncOutcome> syncNow({bool force = false}) {
     forces.add(force);
-    return gate.future;
+    return gate.future.then((outcome) {
+      onOutcome?.call(outcome);
+      return outcome;
+    });
   }
 }
 
@@ -118,8 +125,8 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
     // Built inside the test body, not in setUp: a completer made outside the
     // fake-async zone schedules its callbacks on the real event loop, which
-    // `tester.pump` never drains.
-    calendarSync = _RecordingCalendarSync(store, CalendarStore(db));
+    // `tester.pump` never drains. Built by the override, so it publishes
+    // through the provider's own wiring.
 
     final client = MockClient((_) async => http.Response('{}', 200));
     final tokens = _Tokens();
@@ -140,7 +147,15 @@ void main() {
         initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),
         syncServiceProvider.overrideWithValue(_FakeSync()),
-        calendarSyncProvider.overrideWithValue(calendarSync),
+        calendarSyncProvider.overrideWith((ref) {
+          late final _RecordingCalendarSync sync;
+          sync = _RecordingCalendarSync(
+            store,
+            CalendarStore(db),
+            onOutcome: calendarOutcomePublisher(ref, () => sync.availability),
+          );
+          return calendarSync = sync;
+        }),
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -179,7 +194,7 @@ void main() {
     );
     await tester.pump();
     // Both waiting ticks saw a change, so the mirror's readers were told
-    // twice.
+    // twice — by the sync's publisher, not by the inbox.
     expect(container.read(calendarRevisionProvider), 2);
   });
 }

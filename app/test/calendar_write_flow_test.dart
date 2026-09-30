@@ -43,10 +43,12 @@ class _FakeWriter implements CalendarWriter {
 void main() {
   late _FakeWriter writer;
   late List<(String, CalendarWrite?)> done;
+  late List<String> failed;
 
   setUp(() {
     writer = _FakeWriter();
     done = [];
+    failed = [];
   });
 
   const accept = RespondToEvent('e1', RsvpResponse.accept);
@@ -61,6 +63,7 @@ void main() {
           body: CalendarWriteFlow(
             writer: writer,
             onDone: (message, undo) => done.add((message, undo)),
+            onFailed: failed.add,
             onIdle: onIdle,
             builder: (context, start, busy) => TextButton(
               key: const ValueKey('go'),
@@ -99,7 +102,8 @@ void main() {
 
     expect(writer.committed.single.write, accept);
     expect(writer.committed.single.preview, toDana);
-    expect(done.single.$1, 'Accepted "Design review". Emailed dana@contoso.com.');
+    expect(done.single.$1,
+        'Accepted "Design review". Emails go to dana@contoso.com.');
     expect(done.single.$2, isNull);
     expect(find.byType(WriteConfirmStrip), findsNothing);
     expect(find.text('Go'), findsOneWidget);
@@ -170,6 +174,31 @@ void main() {
     expect(find.text('This event changed in Outlook — check it and try again.'),
         findsOneWidget);
     expect(find.byType(WriteConfirmStrip), findsNothing);
+    expect(done, isEmpty);
+    expect(failed, isEmpty, reason: 'mounted, the sentence stays inline');
+  });
+
+  testWidgets('a commit that fails after the flow has gone is handed to the '
+      'host, never dropped', (tester) async {
+    writer.previews.add(const PreviewReady(toDana, needsConfirm: true));
+    final hold = Completer<WriteOutcome>();
+    writer.hold = hold;
+    await pump(tester);
+    await tester.tap(find.byKey(const ValueKey('go')));
+    await settle(tester);
+    await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+    await settle(tester);
+
+    // The panel closes while the send is in the air.
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    hold.complete(const WriteOutcome.failed(
+        "Couldn't confirm the calendar got this — check it before trying "
+        'again.'));
+    await settle(tester);
+
+    expect(failed, [
+      "Couldn't confirm the calendar got this — check it before trying again.",
+    ]);
     expect(done, isEmpty);
   });
 

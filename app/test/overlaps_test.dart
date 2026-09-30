@@ -3,7 +3,7 @@ import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The overlap maths and the free-slot walk (sbel-crm's `overlaps.py` rules).
+/// The overlap maths and the free-slot walk (the reference overlap rules).
 /// Every fixture is built on a local wall clock through the zone and handed
 /// to the code as UTC, as the mirror stores it.
 void main() {

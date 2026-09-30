@@ -27,6 +27,7 @@ class WriteConfirmStrip extends StatefulWidget {
     required this.onConfirm,
     required this.onDismiss,
     this.busy = false,
+    this.mayEmail = const [],
   });
 
   static const Key confirmKey = ValueKey('write-confirm-send');
@@ -37,6 +38,10 @@ class WriteConfirmStrip extends StatefulWidget {
 
   /// The addresses the dry run said the write would email.
   final List<String> notifies;
+
+  /// Who the write would reach as the app reads the event, said ("This may
+  /// email:") only when [notifies] is empty — see `emailedLine`.
+  final List<String> mayEmail;
   final String confirmLabel;
   final String dismissLabel;
   final VoidCallback onConfirm;
@@ -67,7 +72,7 @@ class _WriteConfirmStripState extends State<WriteConfirmStrip> {
   @override
   Widget build(BuildContext context) {
     final busy = widget.busy;
-    final emails = emailedLine(widget.notifies);
+    final emails = emailedLine(widget.notifies, mayEmail: widget.mayEmail);
     // [WriteConfirmStrip.busy] is read when the key or the press lands, not
     // when this frame was built: the shortcuts and the buttons share these
     // two, and neither acts while a send is in flight.

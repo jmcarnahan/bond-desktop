@@ -229,7 +229,9 @@ class _DayGridState extends State<DayGrid> {
         old.zone != widget.zone) {
       _events.replaceEvents(_tiles());
     }
-    if (old.span != widget.span) {
+    // A zone change rebuilds the configuration as a span change does: its
+    // first day and its window are local dates, built in the old zone.
+    if (old.span != widget.span || old.zone != widget.zone) {
       // The new configuration reaches the view on this build; the check
       // waits until it has, or it would page the view being replaced.
       _config = _configFor(widget.span);

@@ -222,6 +222,36 @@ void main() {
       expect([for (final o in lookup.occurrences) o.id], ['o1', 'o2']);
     });
 
+    test('a live re-read that cannot reach the server keeps what it found; '
+        'a gone one does not', () async {
+      backend.answer = timed('m', inHours(-500), eventType: 'seriesMaster');
+      final c = containerFor(CalendarAvailability.available);
+      final sub = c.listen(eventByIdProvider('m'), (_, _) {});
+      addTearDown(sub.close);
+      expect((await c.read(eventByIdProvider('m').future)).state,
+          EventLookupState.found);
+
+      // A sync moved some row, the panel re-reads, and the server is down.
+      backend.error = const CalendarTransient('boom', statusCode: 503);
+      c.read(calendarRevisionProvider.notifier).state++;
+      final kept = await c.read(eventByIdProvider('m').future);
+      expect(backend.calls, ['m', 'm']);
+      expect(kept.state, EventLookupState.found);
+      expect(kept.event!.id, 'm');
+
+      // Deleted meanwhile: that is news, and it is said.
+      backend.error = const CalendarEventGone();
+      c.read(calendarRevisionProvider.notifier).state++;
+      expect((await c.read(eventByIdProvider('m').future)).state,
+          EventLookupState.gone);
+
+      // And with nothing found before, unreachable is unreachable.
+      backend.error = const CalendarTransient('boom', statusCode: 503);
+      c.read(calendarRevisionProvider.notifier).state++;
+      expect((await c.read(eventByIdProvider('m').future)).state,
+          EventLookupState.unreachable);
+    });
+
     test('a mirror read that throws is unreachable, not a failed future',
         () async {
       final container = ProviderContainer(overrides: [

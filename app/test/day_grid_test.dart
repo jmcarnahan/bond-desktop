@@ -6,6 +6,8 @@ import 'package:bond_inbox/widgets/day_grid.dart';
 import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kalender/kalender.dart' show KalenderView;
+import 'package:timezone/timezone.dart' as tz;
 
 /// The Day stop's grid over `kalender`, prop-only: a pinned clock, a named
 /// zone, tiles found by their key or their text.
@@ -68,6 +70,7 @@ void main() {
     GridProposal? proposal,
     bool locked = false,
     DateTime? now,
+    CalendarZone? zone,
     void Function(String)? onOpenEvent,
     void Function(DayItem)? onOpenItem,
     void Function(String, DateTime, DateTime)? onMoveRequested,
@@ -87,7 +90,7 @@ void main() {
             markers: markers,
             proposal: proposal,
             locked: locked,
-            zone: la,
+            zone: zone ?? la,
             clock: () => now ?? clock,
             onOpenEvent: onOpenEvent,
             onOpenItem: onOpenItem,
@@ -406,6 +409,25 @@ void main() {
     for (final d in changed) {
       expect(d.isBefore(mondayOf(first)), isFalse, reason: '$d');
     }
+    await unmount(tester);
+  });
+
+  testWidgets('a zone change rebuilds the configuration in the new zone',
+      (tester) async {
+    await pumpGrid(tester);
+    final before = tester.widget<KalenderView>(find.byType(KalenderView));
+    expect((before.viewConfiguration.initialDateTime! as tz.TZDateTime)
+        .location
+        .name, 'America/Los_Angeles');
+
+    final auckland = CalendarZone.tryNamed('Pacific/Auckland')!;
+    await pumpGrid(tester, zone: auckland);
+    final after = tester.widget<KalenderView>(find.byType(KalenderView));
+    expect(after.location!.name, 'Pacific/Auckland');
+    final initial = after.viewConfiguration.initialDateTime! as tz.TZDateTime;
+    expect(initial.location.name, 'Pacific/Auckland',
+        reason: 'the first day and the window are local dates');
+    expect(auckland.dateOf(initial.toUtc()), day);
     await unmount(tester);
   });
 

@@ -43,9 +43,11 @@ class EventPanelBody extends StatelessWidget {
     this.brief,
     this.actions,
     this.onRetry,
+    this.availability = CalendarAvailability.unknown,
   });
 
   static const String goneText = 'This event no longer exists.';
+  static const Key offlineKey = ValueKey('event-panel-offline');
   static const String unreachableText =
       "Couldn't reach the calendar. Try again in a moment.";
 
@@ -103,6 +105,11 @@ class EventPanelBody extends StatelessWidget {
   /// without this a moment offline would stand until then. Null draws no
   /// button.
   final VoidCallback? onRetry;
+
+  /// The calendar's availability as the host reads it — not the lookup's,
+  /// which is as of the read. Offline, a found event says it is the saved
+  /// copy in one line.
+  final CalendarAvailability availability;
 
   static final TextStyle _muted =
       BondType.small.copyWith(color: BondColors.inkMuted);
@@ -180,6 +187,14 @@ class EventPanelBody extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(BondSpacing.s16),
       children: [
+        if (availability == CalendarAvailability.unavailable) ...[
+          Text(
+            offlineCaption,
+            key: offlineKey,
+            style: BondType.caption.copyWith(color: BondColors.inkMuted),
+          ),
+          const SizedBox(height: BondSpacing.s8),
+        ],
         if (when.isNotEmpty || series)
           Text(
             '$when${series ? '${when.isEmpty ? '' : ' · '}series' : ''}',
@@ -209,7 +224,7 @@ class EventPanelBody extends StatelessWidget {
         ),
         if (shown.location.trim().isNotEmpty)
           Text(shown.location.trim(), style: _muted),
-        if (shown.isOrganizer)
+        if (isOwnersEvent(shown))
           Text('You organised this', style: _muted)
         else if (organiser.isNotEmpty)
           Text('Organised by $organiser', style: _muted),
@@ -236,7 +251,7 @@ class EventPanelBody extends StatelessWidget {
               child: Text(tally, key: tallyKey, style: BondType.small),
             ),
           for (final a in shown.attendees)
-            _attendeeRow(a, organiserCopy: shown.isOrganizer),
+            _attendeeRow(a, organiserCopy: isOwnersEvent(shown)),
         ],
         if (links.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s16),

@@ -445,6 +445,13 @@ void main() {
       expect(opened, ['email|c-ask']);
     });
 
+    testWidgets('an empty day offline says nothing is saved, not that '
+        'nothing is on', (tester) async {
+      await pumpPane(tester, availability: CalendarAvailability.unavailable);
+      expect(find.text(nothingSavedText), findsOneWidget);
+      expect(find.text(DayPane.emptyText), findsNothing);
+    });
+
     testWidgets('an empty day still shows the group', (tester) async {
       await pumpPane(tester, schedulingAsks: const [ask],
           onFindTime: (_, _) {});

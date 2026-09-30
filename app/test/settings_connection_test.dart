@@ -452,7 +452,7 @@ void main() {
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
-      expect(find.text('Calendar'), findsOneWidget);
+      expect(find.text('Calendar (read and write)'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(2));
       // Chat.Read and Calendars.ReadWrite were not granted; there is nothing
       // on this screen that can change that, so there is no offer beside

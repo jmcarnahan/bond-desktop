@@ -13,10 +13,15 @@ says, and which model serves it.
 - **Decision** — a fine-tuned ModernBERT-large encoder served as a mean-pooled
   embedding model (router id `bond-decide`), whose nine calibrated heads run
   in Dart. It answers every classification-shaped question, one forward pass
-  per kept message, and no chat model is asked any of them.
+  per kept message, and no chat model is asked any of them. The calendar
+  reads its stored answers (invite pinning, brief ranking and asks,
+  scheduling asks). Once a fitted head is adopted, it also asks the same
+  encoder for a Day-bar command's action through a second head
+  ([14-calendar.md](14-calendar.md#the-command-head)).
 - **Generative** — ONE chat model for every piece of text: the message text,
   the needs-you band, attachment and directory digests, every storyline call,
-  drafts and Improve. The box 27B by default when the build names one, else the
+  drafts and Improve, pre-meeting briefs, and the Day bar's fallback read of
+  a command. The box 27B by default when the build names one, else the
   27B or the 4B the app's own router serves.
 - **Embeddings** — always on this Mac; search, clustering and retrieval.
 
@@ -65,7 +70,7 @@ reads the probability stage 5 stored in `message_decisions`. There is no
 **Stage numbers are the order inside a lane, not a single queue.** Since Round
 C (2026-09) the work queue drains through THREE `AiWorker` instances on three
 gates: a fast lane (stages 6–10b, plus triage's own queue in front of it on
-the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
+the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13b).
 Within a lane the order above is exactly the order the work happens in; ACROSS
 lanes, a stage reaches the next one by enqueuing a row and waking the lane that
 owns it. What that buys is stage 5's seconds: a new message's triage,
@@ -157,6 +162,7 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Improve a draft | Generative, or Cloud drafts when set and consented | `draft_improve` | `:8080` |
 | Pre-meeting brief | Generative (never Cloud drafts) | `meeting_brief` | `:8080` |
 | Calendar command (Enter only, when the rules could not finish) | Generative (never Cloud drafts) | `calendar_intent` | `:8080` |
+| Day-bar command action (only once a fitted head is adopted; live preview and Enter) | Decision | — (an Enter records `command_head`; the preview records nothing) | `:8083` |
 | Embeddings | Embeddings (not routed) | `embeddings` | `:8081` (`make embed`) |
 
 The routing is a RULE, not stored rows: `AppPrefs.specForStage` sends

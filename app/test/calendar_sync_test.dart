@@ -165,6 +165,7 @@ void main() {
   CalendarSync build({
     Future<CalendarSyncStatus?> Function()? precheck,
     MessageStore? over,
+    void Function(CalendarSyncOutcome outcome)? onOutcome,
   }) =>
       CalendarSync(
         backend,
@@ -173,6 +174,7 @@ void main() {
         activityLog: activity,
         clock: () => clock,
         precheck: precheck,
+        onOutcome: onOutcome,
       );
 
   CalendarEvent event(String id, {String changeKey = 'ck'}) => CalendarEvent(
@@ -589,6 +591,39 @@ void main() {
       expect((await sync.syncNow(force: true)).status,
           CalendarSyncStatus.synced);
       expect(backend.calls, hasLength(2));
+    });
+
+    test('every tick that reached an answer is published, after the '
+        'availability; a skipped one never is', () async {
+      final published = <(CalendarSyncStatus, bool, CalendarAvailability)>[];
+      late final CalendarSync sync;
+      sync = build(
+        onOutcome: (o) =>
+            published.add((o.status, o.changed, sync.availability)),
+      );
+
+      backend.steps.add(page(ids: ['a'], cursor: 'd1'));
+      await sync.syncNow();
+      expect(published, [
+        (CalendarSyncStatus.synced, true, CalendarAvailability.available),
+      ]);
+
+      clock = clock.add(const Duration(seconds: 60));
+      expect((await sync.syncNow()).status, CalendarSyncStatus.skipped);
+      expect(published, hasLength(1), reason: 'the throttle is not news');
+
+      backend.steps.add(const CalendarTransient('dropped'));
+      await sync.syncNow(force: true);
+      expect(published.last,
+          (CalendarSyncStatus.failed, false, CalendarAvailability.available));
+      expect(published, hasLength(2));
+    });
+
+    test('a throwing publisher never breaks the tick', () async {
+      final sync = build(onOutcome: (_) => throw StateError('gone'));
+      backend.steps.add(page(ids: ['a'], cursor: 'd1'));
+      expect((await sync.syncNow()).status, CalendarSyncStatus.synced);
+      expect(await storedIds(), ['a']);
     });
 
     test('the precheck answers without a backend call', () async {

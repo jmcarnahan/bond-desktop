@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:bond_inbox/data/calendar_store.dart';
@@ -56,13 +57,16 @@ class _FakeCalendarBackend implements CalendarBackend {
         : EventWriteAck(id: id);
   }
 
+  /// What a real sync's read is answered with; unset, a read is a mistake.
+  CalendarSyncPage? page;
+
   @override
   Future<CalendarSyncPage> syncPage({
     String cursor = '',
     String? startUtc,
     String? endUtc,
-  }) =>
-      throw UnimplementedError();
+  }) async =>
+      page ?? (throw UnimplementedError());
 
   @override
   Future<CalendarEvent> getEvent(String id) async {
@@ -594,6 +598,72 @@ void main() {
       expect(await calendar.event('unplaced'), isNull);
       expect(sync.noted, containsAll(['made', 'unplaced']));
     });
+  });
+
+  test('a create the server placed nowhere is brought by the forced sync, '
+      'and that sync tells the readers', () async {
+    final start = t0.add(const Duration(days: 3));
+    final end = start.add(const Duration(minutes: 30));
+    backend.answers['create'] = [const EventWriteAck(id: 'unplaced')];
+    backend.page = CalendarSyncPage(
+      events: [
+        CalendarEvent(
+            id: 'unplaced', isOrganizer: true, startUtc: start, endUtc: end),
+      ],
+      cursor: 'd1',
+    );
+    // The real sync, network half stubbed, publishing as the provider wires
+    // it: a bump on a tick that moved rows.
+    final published = <CalendarSyncOutcome>[];
+    final ticked = Completer<void>();
+    final real = CalendarSync(
+      backend,
+      store,
+      calendar,
+      onOutcome: (o) {
+        published.add(o);
+        if (!ticked.isCompleted) ticked.complete();
+      },
+    );
+    var bumps = 0;
+    final realWrites = CalendarWrites(
+      backend,
+      calendar,
+      real,
+      store,
+      clock: () => t0,
+      onChanged: () => bumps += 1,
+    );
+
+    final outcome = await realWrites.commit(
+        CreateEvent.propose(subject: 'Focus', startUtc: start, endUtc: end));
+    expect(outcome.ok, isTrue);
+    expect(await calendar.event('unplaced'), isNull,
+        reason: 'the ack carried no row to store');
+    expect(bumps, 1, reason: 'the write itself tells the readers once');
+
+    await ticked.future;
+    expect(published.single.changed, isTrue);
+    expect(await calendar.event('unplaced'), isNotNull,
+        reason: 'the forced sync brought the row the ack could not place');
+  });
+
+  test('a move whose ack could not be placed is handled as a create\'s: the '
+      'id noted, the old row left for the forced sync', () async {
+    await calendar.upsertEvents([timed('e1')], syncRun: run);
+    backend.answers['update'] = [const EventWriteAck(id: 'e1')];
+    final outcome = await writes.commit(
+      MoveEvent.timed('e1',
+          startUtc: t0.add(const Duration(days: 2)),
+          endUtc: t0.add(const Duration(days: 2, hours: 1))),
+      preview: privately,
+    );
+    expect(outcome.ok, isTrue);
+    expect(sync.noted, contains('e1'));
+    expect(sync.forced, 1);
+    expect((await calendar.event('e1'))!.startUtc,
+        t0.add(const Duration(days: 1)),
+        reason: 'nothing guessed: the sync moves it');
   });
 
   test('a write the server took stays a success when the mirror cannot '

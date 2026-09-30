@@ -15,6 +15,7 @@ void main() {
   Future<void> pump(
     WidgetTester tester, {
     List<String> notifies = const ['dana@contoso.com'],
+    List<String> mayEmail = const [],
     bool busy = false,
   }) async {
     await tester.pumpWidget(MaterialApp(
@@ -22,6 +23,7 @@ void main() {
         body: WriteConfirmStrip(
           summary: 'Accept "Design review" · Thu Oct 8 · 10:00–11:00 AM',
           notifies: notifies,
+          mayEmail: mayEmail,
           confirmLabel: 'Send',
           dismissLabel: 'Cancel',
           onConfirm: () => confirmed += 1,
@@ -47,6 +49,14 @@ void main() {
   testWidgets('no emails line when nobody is emailed', (tester) async {
     await pump(tester, notifies: const []);
     expect(find.byKey(WriteConfirmStrip.emailsKey), findsNothing);
+  });
+
+  testWidgets('a dry run naming nobody, on a write that confirms anyway, '
+      'says who it may email', (tester) async {
+    await pump(tester,
+        notifies: const [], mayEmail: const ['dana@contoso.com']);
+    expect(find.byKey(WriteConfirmStrip.emailsKey), findsOneWidget);
+    expect(find.text('This may email: dana@contoso.com'), findsOneWidget);
   });
 
   testWidgets('Enter confirms, numpad Enter too', (tester) async {

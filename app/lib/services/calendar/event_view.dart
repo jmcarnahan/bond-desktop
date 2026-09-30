@@ -186,6 +186,14 @@ CalendarEvent displayOccurrence(
   return occurrences.last;
 }
 
+/// Whether [e] is the owner's own event — they organised it. Graph marks
+/// the owner's copy `isOrganizer`, and its response `organizer`; either says
+/// it. The one organiser rule: the role a write takes (`eventRoleOf`), the
+/// tally ([attendeeTally]) and the response line all read it here, so no two
+/// of them can disagree about whose meeting it is.
+bool isOwnersEvent(CalendarEvent e) =>
+    e.isOrganizer || e.responseStatus.trim().toLowerCase() == 'organizer';
+
 /// Whether [e] is part of a recurring series: the master itself, or one of
 /// its occurrences or exceptions.
 bool isSeriesEvent(CalendarEvent e) =>
@@ -259,7 +267,7 @@ String? attendeeTally(CalendarEvent e) {
       : declined.length > 1
           ? '${declined.length} declined'
           : null;
-  if (!e.isOrganizer) {
+  if (!isOwnersEvent(e)) {
     if (accepted + maybe + declined.length == 0) return null;
     return [
       if (accepted > 0) '$accepted accepted',
@@ -287,7 +295,7 @@ String? attendeeTally(CalendarEvent e) {
 String responseLine(CalendarEvent e) {
   if (e.isCancelled) return 'Cancelled';
   final status = e.responseStatus.trim().toLowerCase();
-  if (e.isOrganizer || status == 'organizer') return 'You organised this';
+  if (isOwnersEvent(e)) return 'You organised this';
   switch (status) {
     case 'accepted':
       return 'You accepted';

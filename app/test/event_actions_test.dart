@@ -10,7 +10,13 @@ void main() {
   setUpAll(initCalendarZones);
 
   late CalendarZone la;
-  late List<({CalendarWrite write, String summary, String done})> started;
+  late List<
+      ({
+        CalendarWrite write,
+        String summary,
+        String done,
+        List<String> mayEmail,
+      })> started;
 
   // Monday Oct 5 2026, 08:00 in Los Angeles; a test moves it on to show the
   // widget reads the clock at the moment it resolves, not when it was built.
@@ -34,10 +40,12 @@ void main() {
     String eventType = '',
     bool? allowNewTimeProposals,
     String responseStatus = 'none',
+    String organizerAddress = '',
   }) =>
       CalendarEvent(
         id: id,
         subject: 'Design review',
+        organizerAddress: organizerAddress,
         isOrganizer: isOrganizer,
         attendees: attendees,
         isCancelled: isCancelled,
@@ -67,8 +75,16 @@ void main() {
             busy: busy,
             compact: compact,
             respondId: respondId,
-            start: (write, {required summary, required doneMessage}) =>
-                started.add((write: write, summary: summary, done: doneMessage)),
+            start: (write,
+                    {required summary,
+                    required doneMessage,
+                    mayEmail = const []}) =>
+                started.add((
+                  write: write,
+                  summary: summary,
+                  done: doneMessage,
+                  mayEmail: mayEmail,
+                )),
           ),
         ),
       ));
@@ -173,6 +189,14 @@ void main() {
       expect(write.eventId, 'e1');
       expect(started.single.summary, endsWith(' with your note'));
       expect(started.single.done, 'Declined "Design review".');
+    });
+
+    testWidgets('an answer hands the flow the organiser it may email',
+        (tester) async {
+      await pump(tester,
+          target: meeting(organizerAddress: 'sam@fabrikam.com'));
+      await tester.tap(find.byKey(EventActions.yesKey));
+      expect(started.single.mayEmail, ['sam@fabrikam.com']);
     });
 
     testWidgets('a series master answers every meeting', (tester) async {

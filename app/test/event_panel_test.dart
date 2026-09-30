@@ -2,6 +2,8 @@ import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart'
     show CalendarAvailability;
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/day_items.dart'
+    show offlineCaption;
 import 'package:bond_inbox/services/calendar/event_view.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:bond_inbox/widgets/day_pane.dart';
@@ -69,6 +71,7 @@ void main() {
     VoidCallback? onRetry,
     Widget? brief,
     Widget? actions,
+    CalendarAvailability availability = CalendarAvailability.available,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -88,6 +91,7 @@ void main() {
           onRetry: onRetry,
           brief: brief,
           actions: actions,
+          availability: availability,
         ),
       ),
     ));
@@ -96,6 +100,17 @@ void main() {
 
   String textOf(WidgetTester tester, Key key) =>
       tester.widget<Text>(find.byKey(key)).data!;
+
+  testWidgets('offline, a found event says it is the saved copy',
+      (tester) async {
+    await pumpBody(tester, EventLookup.found(meeting()),
+        availability: CalendarAvailability.unavailable);
+    expect(find.text(offlineCaption), findsOneWidget);
+    expect(find.byKey(EventPanelBody.whenKey), findsOneWidget);
+
+    await pumpBody(tester, EventLookup.found(meeting()));
+    expect(find.text(offlineCaption), findsNothing);
+  });
 
   testWidgets('the when line, standing, tally and overlap', (tester) async {
     await pumpBody(
