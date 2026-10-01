@@ -915,8 +915,11 @@ final attentionServiceProvider = Provider<AttentionService>(
 
 /// Typed as [MailSync], not [SyncService], so a test can override it with a
 /// stand-in that never touches the network. Typed out on the declaration as
-/// well: the re-decide reads [triageQueueProvider] at call time and the queue
-/// watches this provider, an inference cycle (never a build-time one).
+/// well, for the type-inference cycle: the re-decide reads
+/// [triageQueueProvider] at call time, and the queue reads this provider at
+/// call time too (`ref.read` on both sides, no `watch` either way — a watch
+/// on either side would make the other's read a CircularDependencyError in
+/// debug builds, see [triageQueueProvider]).
 final Provider<MailSync> syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
     ref.watch(mailBackendProvider),
@@ -1298,8 +1301,15 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     ref.watch(messageStoreProvider),
     // Triage fetches its own bodies rather than waiting for a human to open
     // the thread. Taken off [MailSync], so this stays typed to the interface
-    // a test can override.
-    ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+    // a test can override. `ref.read` at call time, never `watch`: the sync's
+    // install-time re-decide reads THIS provider from its own ref, and
+    // riverpod judges a `read` against the dependency graph exactly as it
+    // judges a `watch` — with the watch here, that read threw
+    // CircularDependencyError in every debug run and the re-decide never
+    // ran (found 2026-10-01 on the calendar branch's foreground pass;
+    // `redecide_wiring_test` pins it). Read lazily, the queue also follows a
+    // rebuilt sync (a backend switch) without rebuilding itself.
+    ensureBody: (id) => ref.read(syncServiceProvider).ensureMessageBody(id),
     // The FAST lane's gate, shared with the fast worker for ordering (see
     // [fastDrainGateProvider]); triage itself calls only the decision model.
     gate: ref.watch(fastDrainGateProvider),

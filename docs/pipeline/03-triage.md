@@ -108,7 +108,14 @@ itself is parked on the decision model it asks nothing, and a re-decide park
 is logged once per question set and reason per app run. Not in `derivedOneShotPrefs`: Clear AI results re-triages every message
 under the current model anyway. Older rows outside the window still read as
 undecided, and the raw SQL readers (the claim order's importance,
-`requeueOwnerlessNeedsYou`) read them as they stand.
+`requeueOwnerlessNeedsYou`) read them as they stand. The wiring is two
+`ref.read`s at call time and no `watch` either way — the sync reads the queue
+to start the re-decide, the queue reads the sync for its body fetch — because
+riverpod judges a provider's `read` against the dependency graph exactly as it
+judges a `watch`: from 2026-09-29 to 2026-10-01 the queue watched the sync, and
+in every debug run the sync's read threw `CircularDependencyError` and the
+re-decide never ran (`redecide_wiring_test` pins the wiring; release builds,
+where the assert is compiled out, were unaffected).
 
 **The CTA rollup.** `foldCtaUp` (`app/lib/services/conversation_cta.dart`) is
 the ONE fold, called twice per message. Triage calls it with the decision's

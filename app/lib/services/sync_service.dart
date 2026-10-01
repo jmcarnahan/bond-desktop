@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/context_store.dart';
 import '../data/message_store.dart';
@@ -311,7 +311,12 @@ class SyncService implements MailSync {
   /// the processing switch leaves it open and the next pass resumes, because
   /// what was re-decided has dropped out of the list. A throw is logged and
   /// leaves it open too — a re-decide is never a failed sync.
-  void _startRedecide() {
+  ///
+  /// Visible for `redecide_wiring_test`, which drives the real provider
+  /// wiring through here without a mail backend; the app reaches it only
+  /// from the pass.
+  @visibleForTesting
+  void startRedecide() {
     final redecide = _redecide;
     if (redecide == null || _redeciding != null) return;
     late final Future<void> run;
@@ -605,7 +610,7 @@ class SyncService implements MailSync {
 
       // The install-time re-decide: once per question-set hash, see
       // [redecideQhashKey]. Started, not awaited — see [_redeciding].
-      _startRedecide();
+      startRedecide();
 
       // Every pass, not once: the triage pass writes an ownerless decision's
       // probability when the keychain has not answered yet, and it is untrusted
