@@ -295,9 +295,13 @@ class StorylineTuning {
   /// mailbox: a first sync queues thousands of extractions, and the pool the
   /// sweep draws from grows for as long as they drain. Clustering the first
   /// tenth of a mailbox proposes the storylines the first tenth happens to
-  /// hold, files them as possible when the model says no, and then cannot
-  /// re-ask the same question once the rest arrives, because the hash on that
-  /// row recognises the cluster.
+  /// hold, smaller than they will be, and files a declined one as possible.
+  /// The hash on that row is over the MEMBER SET, so a cluster that gains
+  /// members once the rest arrives is a new set and is asked again; what is
+  /// lost is only a declined partial cluster that never changes. A proposal
+  /// that is kept grows through assign and recruit. So the floors no longer
+  /// hold the sweep back alone: [sweepProgressStep] lets an unsettled mailbox
+  /// sweep as its pool grows, and these floors are the SETTLED test.
   ///
   /// All three floors are read from ONE [MessageStore.pipelinePulse] call:
   /// that query already returns pending and processing per `task_kind` AND the
@@ -334,6 +338,27 @@ class StorylineTuning {
   /// embedded, before triage has spoken — so a triage backlog is the earliest
   /// evidence that the pool is still filling.
   static const int sweepTriageFloor = 20;
+
+  /// How many threads the sweep's pool (unassigned, embedded, not done) must
+  /// have gained since the last sweep that passed the gate before an
+  /// UNSETTLED mailbox sweeps anyway. The three floors above stay the
+  /// settled test; this is the other way through the gate.
+  ///
+  /// Without it a first sync never sweeps until extraction has drained, and
+  /// storylines are born only in the sweep, so on a fresh database every
+  /// assign is a no-op: the owner's replay of 2026-10-01 ran ~730 texts over
+  /// ~15 min at three wide and formed no storyline in those 15 minutes. Forty
+  /// is a sweep every couple of minutes of extraction on the box, so the
+  /// first proposals arrive while the rest is still landing. What an early
+  /// sweep costs is said on [sweepExtractFloor]: a declined partial cluster
+  /// that never changes is not re-asked, and a kept one grows through assign
+  /// and recruit.
+  ///
+  /// Measured on the owner's replay (time to the first storyline, the text
+  /// wall), NOT on the golden sweep: that bench runs one pass over a settled
+  /// pool, which this gate always lets through, so it cannot see the number.
+  /// The pool size at the last pass is `storylineSweepPoolAtKey`.
+  static const int sweepProgressStep = 40;
 
   /// How old an unanswered automatic suggestion gets before the sweep
   /// dismisses it, in days.
@@ -2137,12 +2162,14 @@ class StorylineService {
   /// that, a thread marked done on Monday could never be part of a story that
   /// formed on Tuesday, while [recruit] has always been free to find it.
   ///
-  /// It runs on a SETTLED mailbox. Both syncs and the fast lane re-arm the
-  /// work row, but the pass itself reads the pipeline's backlog once and
-  /// defers, noted, while extraction, embedding or triage is still above its
-  /// floor: a pool that is still filling would have this pass propose the
-  /// storylines the first tenth of a mailbox happens to hold, and file them
-  /// as possible before the rest arrived. Stale suggestions expire BEFORE
+  /// It runs on a SETTLED mailbox, or on one whose pool has grown by
+  /// [StorylineTuning.sweepProgressStep] since the last pass. Both syncs and
+  /// the fast lane re-arm the work row, but the pass itself reads the
+  /// pipeline's backlog once and defers, noted, while extraction, triage or
+  /// assign is still above its floor and the pool has not grown by the step:
+  /// a pool that is still filling would have every wake propose the
+  /// storylines the first tenth of a mailbox happens to hold, and the step
+  /// spaces those passes out. Stale suggestions expire BEFORE
   /// that check, or a mailbox that never settles would never expire anything
   /// and the deadlock the expiry exists to break would survive it. The long
   /// form is in `docs/pipeline/06-storylines.md`, *When the sweep runs*.
@@ -2177,7 +2204,15 @@ class StorylineService {
     // the gate would never run on it.
     await _expireStaleSuggestions();
 
-    if (await _settleGate()) return;
+    // The gate reads the pool's SIZE, from a count that agrees with the loop
+    // below clause for clause: a deferred or room-full pass — most of them —
+    // pays one pulse and one COUNT, not the blobs and a decode per row.
+    // After [_expireStaleSuggestions] and before the room check, as before.
+    final pool = await _store.storylinePoolCount(
+      embedModel: EmbeddingsClient.modelTag,
+      sources: _sources,
+    );
+    if (await _settleGate(pool: pool)) return;
 
     // `suggested` rows only, since [StorylineTuning.possibleHoldsRoom] is off:
     // a `possible` row is a group the models declined, and letting it hold a
@@ -2194,7 +2229,16 @@ class StorylineService {
         .where((storyline) => storyline.createdBy == 'auto')
         .length;
     final room = StorylineTuning.maxPendingSuggestions - pending;
-    if (room <= 0) return;
+    // A full rail still counts as a pass that examined the pool: there is
+    // nothing more to ask until a slot frees, so the progressive gate waits
+    // for the pool to grow again from here.
+    if (room <= 0) {
+      // Said on the row, so a progressive pass that stopped here does not
+      // read as one that swept and found nothing.
+      _log.note({'room': 0});
+      await _store.setPref(storylineSweepPoolAtKey, '$pool');
+      return;
+    }
 
     // Asked per source and unioned as [threadKey] composites, because source
     // and key together are what identifies a thread. The two connectors mint
@@ -2241,6 +2285,8 @@ class StorylineService {
       vectors.add(vector);
     }
 
+    // No pool size written here: nothing was examined, and a pool under two
+    // threads is under any step.
     if (rows.length < StorylineTuning.sweepMinUnassigned) return;
 
     // The subject, before the geometry. A recurring series reads as one thing
@@ -2457,7 +2503,7 @@ class StorylineService {
         // every all-zero sweep loud again. That holds for every count below
         // too, `lint` and `charter_model` included: what this row carries is
         // how many clusters each check filed as possible. The one deliberate
-        // exception on this row is `deferred`, written by [_deferSweep]
+        // exception on this row is `deferred`, written by [_settleGate]
         // instead of any of these, whose value is a STRING so that a deferred
         // pass is never suppressed as quiet.
         'joined': joined,
@@ -2474,6 +2520,12 @@ class StorylineService {
         'namer_calls': namerCalls,
       });
     }
+    // Whatever the pass proposed, it clustered this pool: the progressive
+    // gate counts growth from here. A pass that THROWS after the gate (a
+    // decision model not ready, a namer call timing out) never gets here and
+    // leaves the mark where it was, so the next wake runs a progressive pass
+    // again. Bounded: every cluster already answered is skipped by its hash.
+    await _store.setPref(storylineSweepPoolAtKey, '$pool');
   }
 
   /// Whether at least [StorylineTuning.possibleOverlapShare] of [threads] are
@@ -2524,6 +2576,10 @@ class StorylineService {
   /// Whether the mailbox is still too busy to sweep, having said so on the row
   /// if it is. True means the caller returns.
   ///
+  /// Settled when all three floors hold; an unsettled mailbox proceeds anyway
+  /// when [pool] has grown by [StorylineTuning.sweepProgressStep] since the
+  /// size the last pass recorded under `storylineSweepPoolAtKey`.
+  ///
   /// One query for all three floors — see
   /// [StorylineTuning.sweepExtractFloor] — over [AiWorker.sources] rather than
   /// this service's own list, because what is being measured is the backlog the
@@ -2541,7 +2597,7 @@ class StorylineService {
   /// a pass says "something happened" without inventing a count. An all-zero
   /// sweep stays quiet; a deferred one writes a visible row saying what it was
   /// waiting for, and the handler closes it `done` as it closes every sweep.
-  Future<bool> _settleGate() async {
+  Future<bool> _settleGate({required int pool}) async {
     final pulse = await _store.pipelinePulse(
       sinceIso: MessageStore.isoStamp(DateTime.now()),
       sources: AiWorker.sources,
@@ -2557,11 +2613,34 @@ class StorylineService {
         assign <= StorylineTuning.sweepAssignFloor) {
       return false;
     }
+    // Unsettled, but the pool may have grown enough to be worth a pass — see
+    // [StorylineTuning.sweepProgressStep]. Absent or unreadable is zero, so a
+    // fresh mailbox sweeps once its pool first reaches the step.
+    final poolAt =
+        int.tryParse(await _store.getPref(storylineSweepPoolAtKey) ?? '') ?? 0;
+    final grown = pool - poolAt;
+    if (grown >= StorylineTuning.sweepProgressStep) {
+      // A string again, so the row says why an unsettled mailbox swept.
+      _log.note({'sweep': 'progressive', 'pool': pool, 'grown': grown});
+      return false;
+    }
+    // The pool also SHRINKS between passes — assign files threads into the
+    // storylines a pass proposed and the owner kept — so the mark follows it
+    // down. Growth is counted in threads that arrived since the low point;
+    // a mark left at the old high would make the next progressive pass wait
+    // for the threads assign took to be replaced first. It also heals a clear
+    // that raced an in-flight sweep: that pass writes its pre-clear pool
+    // after the clear deleted the pref, and the next deferred pass lowers it.
+    if (grown < 0) {
+      await _store.setPref(storylineSweepPoolAtKey, '$pool');
+    }
     _log.note({
       'deferred': 'unsettled',
       'extract': extract,
       'triage': triage,
       'assign': assign,
+      'pool': pool,
+      'grown': grown,
     });
     return true;
   }

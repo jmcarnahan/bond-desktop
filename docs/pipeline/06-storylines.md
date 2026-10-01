@@ -116,9 +116,10 @@ recap after the sweep. See [10-model-routing.md](10-model-routing.md).
    sweep finds its pairs*.
    Finished
    threads are held out of the clustering and offered to the newborn storyline
-   afterwards instead — "join, not seed", its own section below. It runs only
-   over a settled mailbox and it expires stale suggestions before it decides
-   that, both under *When the sweep runs* below.
+   afterwards instead — "join, not seed", its own section below. It runs
+   over a settled mailbox, or over one whose pool has grown by
+   `sweepProgressStep` (40) since the last pass, and it expires stale
+   suggestions before it decides that, all under *When the sweep runs* below.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
 4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
@@ -903,8 +904,12 @@ not a person asking for something now.
 
 **The order inside the pass is an argument.** First the two catch-ups, the
 refresh and the recap, because they heal wakeups that were LOST and the pass
-returns early on most sweeps. Then the expiry. Then the settle gate. Then the
-room count and everything the sweep is actually for. The expiry sits ahead of
+returns early on most sweeps. Then the expiry. Then the pool's SIZE
+(`MessageStore.storylinePoolCount`, a COUNT whose clauses mirror the sweep's
+loop over `conversationsWithEmbeddings` — unassigned, unblocked, embedded, not
+done — so a deferred or room-full pass never reads a blob), then the settle
+gate, which reads it. Then the room count and everything the sweep is
+actually for. The expiry sits ahead of
 the gate deliberately: a mailbox that never settles is exactly the one whose
 rail fills with proposals nobody answered, and an expiry behind the gate would
 never run on it, so the deadlock the expiry exists to break would survive the
@@ -937,8 +942,40 @@ is being measured is the backlog the worker drains, and the worker's list is
 the one that grows the day a connector is added. The comparison is strictly
 greater than the floor, so a backlog sitting exactly at one of these numbers is
 settled enough. A pass that stands down notes `deferred: unsettled` with the
-`extract`, `triage` and `assign` counts and returns, and its work row closes
-`done` like any other sweep.
+`extract`, `triage` and `assign` counts, the `pool` and how far it has
+`grown`, and returns, and its work row closes `done` like any other sweep.
+
+**Settled OR grown.** Storylines are born only in the sweep, so on a fresh
+database every assign is a no-op until one sweeps; with the floors alone a
+first sync never swept until extraction had drained (the owner's replay of
+2026-10-01: ~730 texts over ~15 min, no storyline in those 15 minutes). So an
+unsettled mailbox sweeps anyway once the pool — the unassigned, embedded,
+not-done threads the pass would cluster — has grown by
+`StorylineTuning.sweepProgressStep` (40) since the last pass that got through
+the gate, and notes `sweep: progressive` with `pool` and `grown`. That size
+lives in the `storyline_sweep_pool_at` pref (`storylineSweepPoolAtKey`;
+absent is zero), written at the end of every pass that passed the gate and
+reached clustering, whatever it proposed, and by a pass that found the rail
+full (it examined the pool; nothing more is asked until a slot frees). A pass
+whose pool is under `sweepMinUnassigned` writes nothing. The pool also shrinks
+— assign files threads into the storylines the owner kept — so a deferred
+pass that finds it below the mark lowers the mark to it, and growth counts
+threads arrived since the low point. The pref is in
+`MessageStore.derivedOneShotPrefs`, so Clear AI results and Forget everything
+reset it with the pool; a clear that races an in-flight sweep, which then
+writes its pre-clear pool, is healed by the same low-water mark. A pass that
+throws after the gate (a decision model not ready, a namer call timing out)
+leaves the mark where it was, so the next wake runs a progressive pass again,
+bounded because every cluster already answered is skipped by its hash. A
+room-full pass notes `room: 0`. Cold start: the first sweep runs once 40 threads are
+in the pool, and about every 40 after that while extraction runs, then on the
+floors as before. Early proposals are real storylines, just smaller: a kept
+one grows through assign and recruit and refresh renames it; what is lost is
+only a declined partial cluster that never changes (its member set's hash
+answers it). `maxPendingSuggestions` (3) is unchanged, so a cold start shows
+three proposals early, and each Keep or Dismiss frees a slot for the next
+progressive pass. The step is measured on the owner's replay, not the golden
+sweep, which runs one pass over a settled pool and never sees it.
 The triage count filters on no direction and needs none:
 `triageStatusOnInsert(outbound: true)` writes every outbound row `skipped` at
 the moment it is inserted, so a row still at `pending` is an inbound one

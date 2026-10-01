@@ -473,7 +473,7 @@ void main() {
       }
     });
 
-    test('name every search-corpus one-shot, and account for all twelve',
+    test('name every search-corpus one-shot, and account for all thirteen',
         () {
       // The same rule over the four search corpora, and it bites harder here:
       // the clear EMPTIES `message_vectors`, `attachment_chunks` and
@@ -489,12 +489,24 @@ void main() {
       // The count, so a key added to the store's list without a walk behind it
       // shows up here rather than in a mailbox. Six from before the search
       // corpora, four with them, the needs-you veto's lowering twin of the
-      // verdict backfill, and the decision-vector backfill (v24). The
-      // behaviour of each search walk is pinned in `embed_backfill_test.dart`.
-      expect(MessageStore.derivedOneShotPrefs, hasLength(12));
+      // verdict backfill, the decision-vector backfill (v24), and the sweep's
+      // pool size at its last pass. The behaviour of each search walk is
+      // pinned in `embed_backfill_test.dart`.
+      expect(MessageStore.derivedOneShotPrefs, hasLength(13));
       expect(
         MessageStore.derivedOneShotPrefs.toSet(),
         hasLength(MessageStore.derivedOneShotPrefs.length),
+      );
+    });
+
+    test('name the sweep pool size, so a clear resets the progressive gate',
+        () {
+      // A pool size kept over threads whose storylines the clear has deleted
+      // would hold the next progressive sweep back until the new pool
+      // outgrew the old count.
+      expect(
+        MessageStore.derivedOneShotPrefs,
+        contains(storylineSweepPoolAtKey),
       );
     });
   });

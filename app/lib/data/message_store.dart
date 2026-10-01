@@ -140,6 +140,14 @@ const String activityLastSyncMailKey = 'activity_last_sync_mail';
 const String activityLastSyncTeamsKey = 'activity_last_sync_teams';
 const String activityLastSweepKey = 'activity_last_sweep';
 
+/// The size of the storyline sweep's pool — unassigned, embedded, not-done
+/// threads — when a sweep last passed its settle gate, as a decimal string;
+/// absent means zero. The gate lets an unsettled mailbox sweep anyway once
+/// the pool has grown by `StorylineTuning.sweepProgressStep` since this
+/// number. Declared here because [MessageStore.derivedOneShotPrefs] has to
+/// name it, and this layer imports nothing above itself.
+const String storylineSweepPoolAtKey = 'storyline_sweep_pool_at';
+
 /// How often a worker holding a claim says it is still alive, by bumping the
 /// row's `updated_at`.
 ///
@@ -3721,6 +3729,10 @@ RETURNING *
     'search_embed_v2_attachments',
     'search_embed_v2_passages',
     'search_embed_v2_descriptions',
+    // Not a one-shot but the same kind of claim: a pool size over threads
+    // whose storylines and vectors this reset has just deleted, which would
+    // hold the next progressive sweep back until the new pool outgrew it.
+    storylineSweepPoolAtKey,
   ];
 
   /// What [wipeAll] deletes from, derived rather than hand-copied so a table
@@ -4079,8 +4091,9 @@ FROM messages
   /// how far back THIS mailbox was drained and would otherwise tell the next
   /// bootstrap that its window had already been covered.
   ///
-  /// And every marker in [derivedOneShotPrefs] — twelve of them — each saying a
-  /// catch-up has already run over rows this method is deleting: left behind,
+  /// And every marker in [derivedOneShotPrefs] — thirteen of them — each
+  /// saying a catch-up has already run over rows this method is deleting
+  /// (the last, the sweep's pool size, a count over them): left behind,
   /// they would tell the next first sync that its mailbox had been reconciled,
   /// its verdicts backfilled and its vectors re-embedded when nothing had read
   /// a single row of it.
@@ -6856,6 +6869,54 @@ FROM storylines s''';
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// How many threads the storyline sweep would cluster: the rows
+  /// [conversationsWithEmbeddings] returns under [embedModel] that the sweep
+  /// keeps — a non-empty key, a vector of at least one float, not `done`, and
+  /// not in [assignedOrBlockedKeys] for its source.
+  ///
+  /// A COUNT, so the sweep's settle gate can read the pool's size without the
+  /// blobs, the series subquery and a decode per row: a deferred or room-full
+  /// pass, which is most of them, stops here. Each clause mirrors one filter
+  /// of the sweep's loop, so the two agree exactly — the NOT EXISTS pair is
+  /// [assignedOrBlockedKeys]' two arms, per source; `typeof … = 'blob'` is the
+  /// loop's `is Uint8List`; four bytes is what `decodeEmbedding` needs to
+  /// return a float; `IS NOT 'done'` lets a null state through as the loop
+  /// does.
+  Future<int> storylinePoolCount({
+    required String embedModel,
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return 0;
+    final row = await db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM conversation_ai a '
+          'JOIN conversations c '
+          '  ON c.source = a.source AND c.conversation_key = a.conversation_key '
+          'WHERE a.embedding IS NOT NULL AND a.embed_model = ? '
+          'AND a.source IN (${_placeholders(sources.length)}) '
+          "AND a.conversation_key != '' "
+          "AND typeof(a.embedding) = 'blob' AND length(a.embedding) >= 4 "
+          "AND c.state IS NOT 'done' "
+          'AND EXISTS (SELECT 1 FROM messages m '
+          '  WHERE m.source = a.source '
+          '  AND m.conversation_key = a.conversation_key '
+          "  AND m.direction = 'inbound' AND ${keptMessageSql('m')}) "
+          'AND NOT EXISTS (SELECT 1 FROM storyline_members sm '
+          '  JOIN storylines s ON s.id = sm.storyline_id '
+          '  WHERE sm.source = a.source '
+          '  AND sm.conversation_key = a.conversation_key '
+          "  AND s.status IN ('suggested', 'active')) "
+          'AND NOT EXISTS (SELECT 1 FROM storyline_member_blocks b '
+          '  JOIN storylines s ON s.id = b.storyline_id '
+          '  WHERE b.source = a.source '
+          '  AND b.conversation_key = a.conversation_key '
+          "  AND s.status IN ('suggested', 'active'))",
+          variables: _args([embedModel, ...sources]),
+        )
+        .getSingle();
+    return row.data['n'] as int? ?? 0;
   }
 
   /// The threads still carrying a vector under [embedModel], newest first, at

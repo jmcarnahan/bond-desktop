@@ -2938,6 +2938,16 @@ It clears at most 15 wrong threads at the cut, or costs up to four golden
 items at 0.5,
 because the round-two labels the model trained on say yes to both families.
 
+**Replay (2026-10-01).** Forget everything and re-sync on the sample sandbox,
+processing on (counts only). Triage decided 3,565 kept messages in ~6 min,
+every decision storing its vector. Message text then ran 3 wide (a typed
+Your-server address) at ~20 per 30 s, and no storyline formed within 15 min:
+the sweep deferred on the extraction floor every minute, and every assign was a
+no-op with no storyline to join. The progressive sweep
+(`sweepProgressStep` 40, `docs/pipeline/06-storylines.md`) and eight-wide
+message text on Your server followed. After: time to the first storyline and
+the text wall from the owner's replay, to be filled in.
+
 ## oMLX
 
 [oMLX](https://github.com/jundot/omlx) is an MLX-based OpenAI-compatible

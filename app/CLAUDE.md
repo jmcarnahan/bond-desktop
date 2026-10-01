@@ -175,7 +175,7 @@ enforce the ones that are commands.
   storyline lane per row (`onStorylineQueued`, `onDraftQueued`'s shape), so
   an assign never waits for the whole extraction backlog; it never embeds
   the card (`vectorFor` does, in the assign pass). The fast lane's message
-  text is `LlmTargetSpec.textParallel` wide (8 on the build's box, else at
+  text is `LlmTargetSpec.textParallel` wide (8 on Your server, else at
   least 3). Triage makes no chat call but still
   shares `fastDrainGateProvider` for the yield ticket, so a triage pump can wait
   behind a message-text call already in flight. A handler that must wake the drain it runs INSIDE is handed
@@ -319,7 +319,13 @@ enforce the ones that are commands.
   (20) and `sweepAssignFloor` (10, the `storyline` KIND via
   `PipelinePulse.kindCount`, not the stage, which also counts the asking
   sweep row); no `embed_message` floor, since search vectors never fed the
-  pool. The sync-time `requeueSweep()` is the durable trigger.
+  pool. Unsettled, it sweeps anyway once its pool (unassigned, embedded, not
+  done) has grown by `sweepProgressStep` (40) since the size in the
+  `storyline_sweep_pool_at` pref (a derived pref, reset by Clear AI results
+  and Forget everything; the gate reads the size from
+  `storylinePoolCount`, a COUNT that mirrors the pool loop clause for clause,
+  so keep the two in step). The sync-time
+  `requeueSweep()` is the durable trigger.
 - A `StorylineTuning` number moves only with a `make golden-sweep` row on each
   side, and a diagnostic flip of one is a single shell command that puts the
   constant back before it exits.
