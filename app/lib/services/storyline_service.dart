@@ -1045,8 +1045,10 @@ class StorylineService {
   /// model's version is parked in `charter_suggestion` for the About block to
   /// offer.
   ///
-  /// It waits for a settled mailbox — the floors [sweep] gates on — and
-  /// returns, quietly noted `unsettled`, when the pipeline is still filling. The
+  /// It waits for a settled mailbox — the extract and assign floors [sweep]
+  /// gates on; triage's is not read, since this pass never asks the decision
+  /// model — and returns, quietly noted `unsettled`, when the pipeline is
+  /// still filling. The
   /// storyline lane is one worker, and on a cold start a namer call under the
   /// text load holds it for tens of seconds while the assigns that grow the
   /// pool queue behind it; a description written then is rewritten as soon as
@@ -2203,8 +2205,9 @@ class StorylineService {
   /// spaces those passes out. Stale suggestions expire BEFORE
   /// that check, or a mailbox that never settles would never expire anything
   /// and the deadlock the expiry exists to break would survive it. The heal
-  /// that re-queues stale refreshes and recaps runs only on a settled
-  /// mailbox, because those two passes wait for one. The long
+  /// that re-queues stale refreshes and recaps runs only when extract and
+  /// assign are at their floors (triage is not read), because that is what
+  /// those two passes wait for. The long
   /// form is in `docs/pipeline/06-storylines.md`, *When the sweep runs*.
   Future<void> sweep() async {
     // The backlog, read once for the whole pass: the heal below runs only on
@@ -2221,12 +2224,12 @@ class StorylineService {
     // description eventually matches the members" true rather than likely.
     // Costs one query and, on a mailbox where nothing moved, nothing else.
     //
-    // Only on a SETTLED mailbox, because [refresh] and [recap] defer on an
-    // unsettled one: healing then would queue a pass that defers at once, on
-    // every wake, and spend the storyline lane's turns on nothing. What they
-    // deferred is still stale by the durable question, so the first settled
-    // pass queues it.
-    if (pulse.settled) {
+    // Only on a mailbox whose storyline lane is free ([_pulse]'s `lane`, the
+    // test [refresh] and [recap] defer on): healing otherwise would queue a
+    // pass that defers at once, on every wake, and spend the storyline
+    // lane's turns on nothing. What they deferred is still stale by the
+    // durable question, so the first such pass queues it.
+    if (pulse.lane) {
       for (final id in await _store.staleRefreshStorylineIds()) {
         await _store.requeueWork('storyline_refresh', _workSource, id);
       }
@@ -2618,8 +2621,17 @@ class StorylineService {
     if (expired > 0) _log.note({'expired': expired});
   }
 
-  /// The pipeline's backlog against the three settle floors, read once: the
-  /// test the sweep's gate makes, and the one [refresh] and [recap] wait on.
+  /// The pipeline's backlog against the three settle floors, read once.
+  ///
+  /// `settled` is all three floors: the test the sweep's gate makes, since a
+  /// sweep proposes from a pool every stage is still feeding. `lane` is the
+  /// extract and assign floors alone: what [refresh], [recap] and the
+  /// sweep's heal wait on. Their deferral keeps the one storyline lane free
+  /// for the assigns of a cold start, not the decision model — neither pass
+  /// asks it — so a triage backlog must not hold them, or a decision model
+  /// that is down (triage puts its messages back to pending) would defer
+  /// every description and recap indefinitely. On a real cold start extract
+  /// is far above its floor whenever triage is.
   ///
   /// One query for all three floors — see
   /// [StorylineTuning.sweepExtractFloor] — over [AiWorker.sources] rather than
@@ -2631,7 +2643,8 @@ class StorylineService {
   /// progress rows settled, dropped and judged since the stamp, and no caller
   /// here consults them; a stamp of now makes that read return zeros over no
   /// rows rather than scanning a window this caller would throw away.
-  Future<({bool settled, int extract, int triage, int assign})> _pulse() async {
+  Future<({bool settled, bool lane, int extract, int triage, int assign})>
+      _pulse() async {
     final pulse = await _store.pipelinePulse(
       sinceIso: MessageStore.isoStamp(DateTime.now()),
       sources: AiWorker.sources,
@@ -2646,14 +2659,17 @@ class StorylineService {
       settled: extract <= StorylineTuning.sweepExtractFloor &&
           triage <= StorylineTuning.sweepTriageFloor &&
           assign <= StorylineTuning.sweepAssignFloor,
+      lane: extract <= StorylineTuning.sweepExtractFloor &&
+          assign <= StorylineTuning.sweepAssignFloor,
       extract: extract,
       triage: triage,
       assign: assign,
     );
   }
 
-  /// Whether [refresh] or [recap] should wait for a settled mailbox, having
-  /// noted so if it should.
+  /// Whether [refresh] or [recap] should wait for a settled mailbox — the
+  /// pulse's `lane`, extract and assign at their floors, never triage —
+  /// having noted so if it should.
   ///
   /// Numbers only, and the `unsettled` marker is what [ActivityLog] reads to
   /// keep the row QUIET: on a cold start these two run on every extraction
@@ -2661,8 +2677,8 @@ class StorylineService {
   /// The sweep's own row, which writes the string `deferred`, is the visible
   /// record of the wait.
   Future<bool> _deferredUnsettled() async {
-    final (:settled, :extract, :triage, :assign) = await _pulse();
-    if (settled) return false;
+    final (:lane, :extract, :triage, :assign, settled: _) = await _pulse();
+    if (lane) return false;
     _log.note({
       'unsettled': 1,
       'extract': extract,
@@ -2689,9 +2705,10 @@ class StorylineService {
   /// waiting for, and the handler closes it `done` as it closes every sweep.
   Future<bool> _settleGate({
     required int pool,
-    required ({bool settled, int extract, int triage, int assign}) pulse,
+    required ({bool settled, bool lane, int extract, int triage, int assign})
+        pulse,
   }) async {
-    final (:settled, :extract, :triage, :assign) = pulse;
+    final (:settled, :extract, :triage, :assign, lane: _) = pulse;
     if (settled) return false;
     // Unsettled, but the pool may have grown enough to be worth a pass — see
     // [StorylineTuning.sweepProgressStep]. Absent or unreadable is zero, so a

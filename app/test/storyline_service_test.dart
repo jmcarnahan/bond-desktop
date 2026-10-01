@@ -8035,6 +8035,26 @@ void main() {
         expect(await store.nextPendingWork('storyline_recap'), isNull);
       });
 
+      test('a triage backlog alone defers the sweep but not the heal',
+          () async {
+        // Refresh and recap never ask the decision model, so a triage
+        // backlog — a decision model that is down puts its messages back to
+        // pending — must not hold them; the sweep itself still waits.
+        await seedOwed();
+        for (var i = 0; i < 21; i++) {
+          await seedMessage(store, 'unjudged$i', 'u$i');
+        }
+
+        final detail = await sweepAndRecord(fakeLlm(const {}));
+
+        expect(detail['deferred'], 'unsettled');
+        expect(detail['triage'], 21);
+        expect((await store.nextPendingWork('storyline_refresh'))?['entity_id'],
+            'sl-1');
+        expect((await store.nextPendingWork('storyline_recap'))?['entity_id'],
+            'sl-1');
+      });
+
       test('a settled pass heals the refresh and the recap', () async {
         await seedOwed();
 
@@ -8108,6 +8128,41 @@ void main() {
         await drainAssigns();
         await service.refresh('sl-1');
 
+        expect(llm.schemas, ['storyline_refresh']);
+        expect((await store.getStoryline('sl-1'))!.refreshedMemberHash,
+            isNotNull);
+      });
+
+      test('a triage backlog alone does not defer a refresh; an extract '
+          'backlog does', () async {
+        await seedStoryline(store);
+        await store.updateStoryline('sl-1',
+            memberHash: memberHashOf(['member']));
+        for (var i = 0; i < 21; i++) {
+          await seedMessage(store, 'unjudged$i', 'u$i');
+        }
+        for (var i = 0; i < 11; i++) {
+          await store.enqueueWork('extract', 'email', 'x$i');
+        }
+        final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
+        final log = ActivityLog(store);
+        addTearDown(log.dispose);
+        final service = StorylineService(store, llm,
+            judge: sweepJudge(store, llm), activityLog: log);
+
+        await service.refresh('sl-1');
+
+        final (:detail, stored: _) = await noted(log, 'storyline_refresh');
+        expect(detail['unsettled'], 1);
+        expect(detail['extract'], 11);
+        expect(llm.calls, isEmpty);
+
+        for (var i = 0; i < 11; i++) {
+          await store.writeWork('extract', 'email', 'x$i', status: 'done');
+        }
+        await service.refresh('sl-1');
+
+        // Triage is still 21 over its floor of 20, and the refresh runs.
         expect(llm.schemas, ['storyline_refresh']);
         expect((await store.getStoryline('sl-1'))!.refreshedMemberHash,
             isNotNull);

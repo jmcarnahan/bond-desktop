@@ -7672,10 +7672,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 /// The bar's sentence for a Needs You press: `Removed from Needs You — and 78
 /// like it.` / `Added to Needs You — and 3 like it.` with the threads the
 /// press's sweep moved ([NeedsYouPress.changed]), and the head alone when it
-/// moved none or could not look ([NeedsYouPress.similar] false: a backend
-/// with no vector, where the answer holds for the pressed thread alone).
+/// moved none — always on a backend with no vector, where the answer holds
+/// for the pressed thread alone.
 String needsYouPressSaid(NeedsYouPress press, {required bool remove}) {
   final head = remove ? 'Removed from Needs You' : 'Added to Needs You';
-  if (!press.similar || press.changed == 0) return '$head.';
+  if (press.changed == 0) return '$head.';
   return '$head — and ${press.changed} like it.';
 }

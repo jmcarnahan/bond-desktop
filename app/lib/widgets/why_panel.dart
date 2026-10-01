@@ -183,14 +183,21 @@ class WhyPanelBody extends StatelessWidget {
   /// no model said that number.
   ///
   /// The owner's own answer ([StoredDecision.ownerAnswer]) reads as theirs,
-  /// with no percentage: `Needs you: no — you removed it`. The 0.0 or 1.0
-  /// under it is the owner's word, not a model's confidence.
+  /// with no percentage: `Needs you: no — you removed it`, or `— like one
+  /// you removed` when the answer came from a message like this one
+  /// ([DecisionAnswers.ownerExact] false). The 0.0 or 1.0 under it is the
+  /// owner's word, not a model's confidence.
   String _headline(Message m) {
+    final exact = decision?.answers.ownerExact ?? false;
     switch (decision?.ownerAnswer) {
       case 'no':
-        return 'Needs you: no — you removed it';
+        return exact
+            ? 'Needs you: no — you removed it'
+            : 'Needs you: no — like one you removed';
       case 'yes':
-        return 'Needs you: yes — you added it';
+        return exact
+            ? 'Needs you: yes — you added it'
+            : 'Needs you: yes — like one you added';
     }
     final decidedNow = decision != null;
     if (m.needsYouP != null &&

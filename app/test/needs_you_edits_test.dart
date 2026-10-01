@@ -3,10 +3,10 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
 import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
-import 'package:bond_inbox/services/decision/stored_decision.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart'
     show DecisionUnavailableException;
 import 'package:bond_inbox/services/needs_you_edits.dart';
+import 'package:bond_inbox/services/triage_queue.dart' show applyDecision;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_decision_client.dart';
@@ -136,7 +136,7 @@ void main() {
         owner: () async => 'Lo <lo@x.com>',
         threshold: () async => threshold,
         enabled: enabled,
-        modelTag: () => client.modelTag,
+        modelTag: client.resolvedModelTag,
       );
 
   /// The thread's number as the rail reads it.
@@ -180,10 +180,9 @@ void main() {
           receivedAt: '2026-09-30T11:00:00Z', p: 0.6);
       final client = model();
 
-      final press = await edits(client).remove('email', 't1');
+      await edits(client).remove('email', 't1');
 
       expect(client.calls, isEmpty);
-      expect(press.similar, isTrue);
       final labels = await store.needsYouLabels();
       expect(labels.map((l) => l.sourceMessageId), ['w1', 'w2']);
       expect(labels.every((l) => l.answer == 'no'), isTrue);
@@ -334,7 +333,6 @@ void main() {
       final press = await edits(client).remove('email', 't-one');
 
       expect(client.calls, isEmpty, reason: 'a scan, not model calls');
-      expect(press.similar, isTrue);
       expect(press.changed, 1);
       expect(await pOf('a1'), 0.0);
       expect(await pOf('b1'), 0.0);
@@ -376,7 +374,6 @@ void main() {
       final press = await edits(client).add('email', 't-one');
 
       expect(client.calls, isEmpty, reason: 'a scan, not model calls');
-      expect(press.similar, isTrue);
       expect(press.changed, 1);
       expect(await threadP('t-one'), 1.0);
       expect(await threadP('t-two'), 1.0);
@@ -432,7 +429,6 @@ void main() {
       final press = await edits(kev).remove('email', 't-one');
 
       expect(press.ids, hasLength(1));
-      expect(press.similar, isFalse);
       expect(press.changed, 0);
       expect(await pOf('a1'), 0.0);
       expect(await pOf('b1'), closeTo(0.9, 1e-9));
@@ -481,44 +477,68 @@ void main() {
       expect(await pOf('b1'), closeTo(0.1, 1e-9));
     });
 
-    test('an override that did not keep the model number is decided by the '
-        'model', () async {
+    test('an undo on a backend with no vector restores the model number with '
+        'the decision server down', () async {
       await thread('t1');
-      await message('t1', 'w1', 'Access granted: receipt-one');
-      // A press from before the model's number was kept beside it.
-      const stamp = '2026-09-30T12:00:00.000000Z';
-      final id = await store.writeNeedsYouLabel(
-        source: 'email',
-        conversationKey: 't1',
-        sourceMessageId: 'w1',
-        answer: 'no',
-        origin: 'remove',
-        vector: vectors['receipt-one'],
-        vectorModel: tag,
-        createdAt: stamp,
-      );
+      await message('t1', 'w1', 'First note', p: 0.1, stored: false);
       await store.writeDecision(
         'email',
         'w1',
-        fakeDecision(
-          fakeAnswers(needsYou: 0.9).withNeedsYou('no', exact: true),
-          vector: vectors['receipt-one'],
-        ),
+        fakeDecision(fakeAnswers(needsYou: 0.1), model: 'kev'),
         qhash: decisionQhash,
         ownerKnown: true,
-        extraKeys: {
-          decisionOwnerAnswerKey: 'no',
-          decisionOwnerLabelIdKey: id,
-          decisionOwnerExactKey: true,
-        },
       );
-      await store.writeNeedsYouP('email', 'w1', p: 0.0);
-      final client = model(needsYou: 0.7);
+      var down = false;
+      // Kev's client: no tag, and down by the time of the undo.
+      final kev = FakeDecisionClient((_) {
+        if (down) throw const DecisionUnavailableException('down');
+        return fakeDecision(fakeAnswers(needsYou: 0.1), model: 'kev');
+      });
+      final e = edits(kev);
+      final press = await e.add('email', 't1');
+      expect(await pOf('w1'), 1.0);
+      down = true;
 
-      expect(await edits(client).retract(NeedsYouPress([id], stamp)), 1);
+      expect(await e.retract(press), 1);
 
-      expect(client.calls, hasLength(1));
-      expect(await pOf('w1'), closeTo(0.7, 1e-9));
+      expect(kev.calls, hasLength(1), reason: 'the press, not the undo');
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(await pOf('w1'), closeTo(0.1, 1e-9));
+      final w1 = (await store.decisionFor('email', 'w1'))!;
+      expect(w1.ownerAnswer, isNull);
+      expect(w1.model, 'kev');
+    });
+
+    test('a citation written between the press and the undo is restored',
+        () async {
+      await seedList();
+      final client = model();
+      final e = edits(client);
+      final press = await e.remove('email', 't-one');
+      // A message like the pressed one, decided after the press (a triage
+      // claim, say): it takes the press's answer and cites its label.
+      await thread('t-new', lastMessageAt: '2026-09-30T11:00:00Z');
+      await message('t-new', 'n1', 'Access granted: receipt-two',
+          stored: false);
+      await applyDecision(
+        store,
+        'email',
+        (await store.getMessageRow('email', 'n1'))!,
+        fakeDecision(
+          fakeAnswers(needsYou: 0.9, intent: 'request'),
+          vector: vectors['receipt-two'],
+          model: tag,
+        ),
+        ownerKnown: true,
+        exemplars: exemplars,
+      );
+      expect(await pOf('n1'), 0.0);
+
+      expect(await e.retract(press), 3);
+
+      expect(client.calls, isEmpty);
+      expect(await pOf('n1'), closeTo(0.9, 1e-9));
+      expect((await store.decisionFor('email', 'n1'))!.ownerAnswer, isNull);
     });
 
     test('an unknown id is a no-op', () async {
@@ -571,33 +591,6 @@ void main() {
       expect((await store.decisionFor('email', 'w1'))!.ownerAnswer, 'yes');
     });
 
-    test('a decision server down at the undo changes nothing', () async {
-      await thread('t1');
-      await message('t1', 'w1', 'First note', p: 0.1, stored: false);
-      var down = false;
-      // No tag: nothing stored can stand in, so the undo must ask.
-      final client = FakeDecisionClient((input) {
-        if (down) throw const DecisionUnavailableException('down');
-        return fakeDecision(fakeAnswers(needsYou: 0.1),
-            vector: vectorOf(input));
-      });
-      final e = edits(client);
-      final press = await e.add('email', 't1');
-      down = true;
-
-      await expectLater(
-        e.retract(press),
-        throwsA(isA<DecisionUnavailableException>()),
-      );
-
-      expect(await store.needsYouLabels(), hasLength(1));
-      expect(await pOf('w1'), 1.0);
-      // So the same press can be undone once the server is back.
-      down = false;
-      expect(await e.retract(press), 1);
-      expect(await pOf('w1'), closeTo(0.1, 1e-9));
-    });
-
     test('every label of one press shares one stamp', () async {
       await thread('t1');
       await message('t1', 'w1', 'Access granted: receipt-one',
@@ -646,8 +639,8 @@ void main() {
   });
 
   group('retractAll', () {
-    test("forgets every press, newest first, and the model's numbers come "
-        'back with no model call', () async {
+    test("forgets every press, and the model's numbers come back with no "
+        'model call', () async {
       await seedList();
       await thread('t-quiet', lastMessageAt: '2026-09-30T07:00:00Z');
       await message('t-quiet', 'q1', 'A quiet note', p: 0.1);
@@ -657,8 +650,7 @@ void main() {
       // A later stamp than the removal's, whatever the clock's grain.
       await Future<void>.delayed(const Duration(milliseconds: 2));
       final added = await e.add('email', 't-quiet');
-      expect(await store.needsYouLabelStamps(),
-          [added.createdAt, removed.createdAt]);
+      expect(added.createdAt, isNot(removed.createdAt));
       expect(await store.needsYouPressCounts(), (removed: 1, added: 1));
 
       final written = await e.retractAll();
@@ -670,6 +662,25 @@ void main() {
       expect(await pOf('a1'), closeTo(0.9, 1e-9));
       expect(await pOf('b1'), closeTo(0.9, 1e-9));
       expect(await pOf('q1'), closeTo(0.1, 1e-9));
+    });
+
+    test('heals an override whose label is already gone', () async {
+      await seedList();
+      final e = edits(model());
+      await e.remove('email', 't-one');
+      // The labels deleted behind the overrides' backs: what an undo's race
+      // or a stopped undo leaves.
+      await db.customStatement(
+        "DELETE FROM decision_labels WHERE question = 'needs_you'",
+      );
+      exemplars.invalidate();
+      expect(await pOf('b1'), 0.0);
+
+      expect(await e.retractAll(), 2);
+
+      expect(await pOf('a1'), closeTo(0.9, 1e-9));
+      expect(await pOf('b1'), closeTo(0.9, 1e-9));
+      expect((await store.decisionFor('email', 'b1'))!.ownerAnswer, isNull);
     });
 
     test('with nothing pressed does nothing', () async {

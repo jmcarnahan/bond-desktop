@@ -840,8 +840,11 @@ CREATE TABLE message_decisions (
 -- backend with no vector (Kev), and on every storyline row.
 --
 -- `INTEGER PRIMARY KEY` for feedback_events' reason (AUTOINCREMENT drags in
--- sqlite_sequence, which is not STRICT); nothing is deleted from this log but
--- a wipe, so an id is never reused.
+-- sqlite_sequence, which is not STRICT); nothing is deleted but a wipe and
+-- the undo or Forget of Needs You presses (`deleteNeedsYouLabels`,
+-- `deleteAllNeedsYouLabels`), and without AUTOINCREMENT a deleted highest id
+-- is handed out again — which is why the undo's delete also matches
+-- `created_at`.
 CREATE TABLE decision_labels (
   id INTEGER PRIMARY KEY,
   question TEXT NOT NULL,

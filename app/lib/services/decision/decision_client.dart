@@ -409,10 +409,10 @@ class DecisionClient {
   /// this run has not learned yet. Synchronous and never a request — the
   /// heads are cached per file modification and a server's kind per address.
   ///
-  /// What the owner's Needs You presses read to tell a stored decision's
-  /// vector they can compare from one they cannot (`NeedsYouEdits`; a press
-  /// that finds null asks the model, which is harmless). The needs-you pass
-  /// reads [resolvedModelTag] instead.
+  /// Callers read it through [resolvedModelTag]: the owner's Needs You
+  /// presses, to tell a stored decision's vector they can compare from one
+  /// they cannot (`NeedsYouEdits`; a press that finds null asks the model,
+  /// which is harmless), and the needs-you pass.
   String? get modelTag {
     final destination = target;
     if (destination.unavailable != null) return null;

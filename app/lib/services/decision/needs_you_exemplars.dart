@@ -71,6 +71,12 @@ class OwnerAnswer {
 /// reads the list again when it moved. A wipe — sign-out, Forget everything,
 /// the identity guard — deletes the rows without telling this object, and one
 /// account's answers must never decide the next account's mail.
+///
+/// So the [invalidate] after an insert or a delete (a press, an undo) is
+/// belt-and-braces, save for a delete followed by an insert that reuses the
+/// same highest id. The LOAD-BEARING call is the one after the vector-heal
+/// UPDATE in `applyDecision`: an UPDATE moves neither the count nor the
+/// highest id, so without it the healed vector would go unseen.
 class NeedsYouExemplars {
   final MessageStore _store;
 

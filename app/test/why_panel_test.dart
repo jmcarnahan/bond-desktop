@@ -203,7 +203,9 @@ void main() {
         ),
       );
 
-      expect(find.text('Needs you: no — you removed it'), findsOneWidget);
+      // From a message like this one, not this message: the headline says so.
+      expect(find.text('Needs you: no — like one you removed'),
+          findsOneWidget);
       expect(find.text('Needs you: 0%'), findsNothing);
       expect(
         find.text('You removed a message like this from Needs You.'),

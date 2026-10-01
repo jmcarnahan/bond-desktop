@@ -1170,8 +1170,9 @@ final needsYouEditsProvider = Provider<NeedsYouEdits>((ref) {
     // the sweep and the undo stop when it is off, so a reset is not raced.
     enabled: _enabledReader(ref),
     // Read per press: a stored decision stands in for a model call only
-    // under the model the client answers with now.
-    modelTag: () => decision.modelTag,
+    // under the model the client answers with now, Your server's kind
+    // learned first so the first press after launch is not all model calls.
+    modelTag: decision.resolvedModelTag,
   );
 });
 

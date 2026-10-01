@@ -110,7 +110,7 @@ class SettingsScreen extends StatefulWidget {
   /// Null while the host has not read them, which draws no line.
   final ({int removed, int added})? needsYouAnswers;
 
-  /// Forgets every Needs You press — each one undone, so the model's own
+  /// Forgets every Needs You press — all undone, so the model's own
   /// numbers come back (`NeedsYouEdits.retractAll`) — behind a two-step
   /// button. Null takes the button off; a throw is said under it.
   final Future<void> Function()? onForgetNeedsYouAnswers;
@@ -2304,7 +2304,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _confirmingForgetAnswers = false;
         _forgetAnswersError =
             "Your answers couldn't be forgotten just now — processing has to "
-            'be on and the decision model reachable.';
+            'be on.';
       });
     }
   }

@@ -207,7 +207,7 @@ void main() {
 
       expect(
         find.text("Your answers couldn't be forgotten just now — processing "
-            'has to be on and the decision model reachable.'),
+            'has to be on.'),
         findsOneWidget,
       );
     });

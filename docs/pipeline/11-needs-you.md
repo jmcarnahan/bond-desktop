@@ -49,9 +49,9 @@ under the row's `model` tag; NULL on Kev), and when the owner's answer replaces
 the model's, `answers_json` keeps the model's own p(yes) as
 `model_needs_you_p`. So a press needs no model call for a message whose stored
 decision has a vector under the model the client answers with now
-(`DecisionClient.modelTag`: the heads file's model; null on Kev, when the heads
-are missing, and for Your server whose kind this run has not learned yet — the
-needs-you pass reads `resolvedModelTag`, which learns it with one listing GET): its label takes the stored vector and its decision is
+(`DecisionClient.resolvedModelTag`: the heads file's model, after learning Your
+server's kind with one listing GET when this run has not; null on Kev and when
+the heads are missing — the needs-you pass reads the same): its label takes the stored vector and its decision is
 written again from the stored answers (`StoredDecision.modelAnswers`) through
 `applyDecision`, which now finds the label. Only a message without one (decided
 before v24, or under another model) is decided by the model, as every press was
@@ -75,42 +75,47 @@ after the similar threads have already moved, and counts them
 stored decision cannot be written again as it stands is left to its next
 decision, which inherits the label anyway; processing turned off stops the
 sweep between messages. A press whose labels carry no vector (Kev) sweeps
-nothing (`NeedsYouPress.similar` is false).
+nothing (`NeedsYouPress.changed` is 0).
 
 **Undo is a retract, not the opposite press.** `remove` and `add` return a
 `NeedsYouPress`: the label ids they wrote and the ONE `created_at` stamp every
-one of them carries (empty ids when the window was empty), with `similar` and
-`changed` for the toast. `NeedsYouEdits.retract(press)` DELETES those rows
-(`deleteNeedsYouLabels(ids, createdAt:)`, the one delete the log takes short of
-a wipe), then writes again every message whose stored decision cites one of
-them (`owner_label_id`, `messagesCitingNeedsYouLabels`) — from its stored
-decision with the model's own number put back (`model_needs_you_p`) when it has
-a vector under the current model, else decided by the model — so the pressed
-thread AND every thread the sweep moved take the model's number back, unless
-another label still matches. One pass: the sweep runs inside its press, so no
-sweep of the press can write a citation after the delete. The stamp is there
-because `decision_labels.id` has no AUTOINCREMENT: a deleted highest id is
-handed out again, and an Undo retried with stale ids must not delete a newer
-press's label (an id a newer press holds is left to that press entirely). An
-opposite label would instead tie the removed one for every near-duplicate, and
-the newer `yes` would put the whole template in Needs You.
+one of them carries (empty ids when the window was empty), with `changed` for
+the toast. `NeedsYouEdits.retract(press)` DELETES those rows FIRST
+(`deleteNeedsYouLabels(ids, createdAt:)`, which returns the ids that went),
+then reads every message whose stored decision cites one of them
+(`owner_label_id`, `messagesCitingNeedsYouLabels`) and writes each again from
+its stored decision with the model's own number put back
+(`model_needs_you_p`, `StoredDecision.modelAnswers`), under the row's own model
+and vector — no model call and no tag check, so Undo works with the decision
+server down and on Kev. The pressed thread AND every thread the sweep moved
+take the model's number back, unless another label still matches. Reading the
+citing rows after the delete means a decision that matched a label while the
+undo ran is in the list too. The stamp is there because `decision_labels.id`
+has no AUTOINCREMENT: a deleted highest id is handed out again, and an Undo
+retried with stale ids must not delete a newer press's label. An opposite
+label would instead tie the removed one for every near-duplicate, and the
+newer `yes` would put the whole template in Needs You.
 
 **Forget.** Settings → Needs You lists the presses ("Your answers", counted by
-stamp) and **Forget all Needs You answers** undoes every one of them, newest
-first (`NeedsYouEdits.retractAll` over `needsYouLabelStamps`, one retract per
-stamp), then reloads the list ([settings.md](../settings.md)).
+stamp) and **Forget all Needs You answers** undoes every one of them at once
+(`NeedsYouEdits.retractAll`: `deleteAllNeedsYouLabels`, then every message
+whose stored decision carries an owner's answer, `messagesWithOwnerAnswer`,
+written again from its stored decision as Undo writes it), then reloads the
+list ([settings.md](../settings.md)). Because it restores by the answer, not
+by the label id, Forget also heals an answer whose label is already gone.
 
-**Decide first, write second.** A press has every message's decision in hand
-(from the store, or the one network step) before it writes any label or
-decision, and a retract has the citing messages' before it deletes the labels,
-then writes each (`applyDecision` looks the owner's answer up at write time, so
-the deleted labels no longer match). A decision server that cannot answer
-therefore fails a press or an Undo with NOTHING written, so the failure bar's
-"the thread is unchanged" holds literally, and a failed retract can be run again
-with the same press. Processing turned off refuses all of them the same way,
-before anything is touched (`StateError('processing is off')`): an Undo that
-deleted the labels and then stopped at the switch would leave the answers in
-place with no label behind them. Labels are compared only under their own model
+**Decide first, write second — for a press.** A press has every message's
+decision in hand (from the store, or the one network step) before it writes any
+label or decision. A decision server that cannot answer therefore fails a press
+with NOTHING written, so the failure bar's "the thread is unchanged" holds
+literally. Undo and Forget need no decision (`applyDecision` looks the owner's
+answer up at write time, so the deleted labels no longer match). Processing
+turned off refuses all of them before anything is touched
+(`StateError('processing is off')`); turned off part-way through an Undo, it
+stops the writes between messages, and the answers left without a label are
+what Forget heals. A stored override from before the model's number was kept
+(no `model_needs_you_p`) cannot be restored without the model: Undo and Forget
+log it and leave it, and Clear AI results decides it again. Labels are compared only under their own model
 tag; a label whose message is decided under another model (or with no vector)
 has its vector refreshed from that decision, so a model swap heals the labels as
 the install-time re-decide reaches their messages, and the needs-you pass
@@ -124,10 +129,12 @@ press rewrote it can copy the model's p back onto `messages` (the decision
 row keeps the owner's answer, and the next needs-you item for the message
 copies it again); and a message pressed while its triage is still pending can
 still be dropped by the learned gate when its claim runs, which takes it out
-of the window. A triage claim, a needs-you re-decide or the install-time
-re-decide — or another press's sweep — that matched a label just before an Undo
-deleted it and writes after the retract's pass still cites the deleted label
-until that message is next decided. A sweep reaches only messages with a stored vector under the press's
+of the window. The window an Undo leaves open is one `applyDecision` — a triage
+claim, a needs-you re-decide, the install-time re-decide or another press's
+sweep — that loaded the labels before the delete and writes after the Undo read
+the citing messages: that message cites the deleted label until it is next
+decided, and Forget heals it, since it restores every row with an owner answer.
+A sweep reaches only messages with a stored vector under the press's
 model; the rest inherit the label at their next decision. A heads refit that
 keeps the same model name re-applies the OLD heads' stored answers on a press
 (the vector is still right, the answers are the previous heads'); a follow-up
@@ -550,8 +557,9 @@ it always did. Every per-message ask line still focuses the box.
 **The owner's answer.** When the message's stored decision carries the
 owner's answer (`StoredDecision.ownerAnswer`), the headline is theirs, with
 no percentage: **"Needs you: no — you removed it"** or **"Needs you: yes — you
-added it"** — the 0.0 or 1.0 under it is the owner's word, not a model's
-confidence. The stored reason ("You removed a message like this from Needs
+added it"** (**"— like one you removed"** / **"— like one you added"** when the
+answer came from a message like it, and the history screen's line the same) —
+the 0.0 or 1.0 under it is the owner's word, not a model's confidence. The stored reason ("You removed a message like this from Needs
 You.") is shown on EITHER side of the line, since it says what the owner did,
 and the line against the slider follows as usual. The rail's chip and the
 thread's `Why:` line, which have only the thread's stored reason, tell the

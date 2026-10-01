@@ -280,7 +280,7 @@ void main() {
       )),
     );
     expect(
-      find.text('Needs you: no — you removed it — '
+      find.text('Needs you: no — like one you removed — '
           'You removed a message like this from Needs You.'),
       findsOneWidget,
     );

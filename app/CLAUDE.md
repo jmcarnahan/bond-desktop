@@ -704,11 +704,14 @@ enforce the ones that are commands.
   ("Remove from Needs You" / "Add to Needs You") through `writeNeedsYouLabel`,
   read back by `needsYouLabels()` as `NeedsYouLabel`. The one UPDATE the log
   takes is `updateNeedsYouLabelVector`, the vector refresh `applyDecision`
-  makes when a labelled message is decided under another model, and the one
-  DELETE short of a wipe is `deleteNeedsYouLabels`, the undo of a press
-  (`NeedsYouEdits.retract`, which then writes again the messages citing the
-  deleted ids; `retractAll`, Settings' Forget, retracts every press by its
-  stamp, `needsYouLabelStamps`). Undo is never the opposite press.
+  makes when a labelled message is decided under another model, and the
+  DELETEs short of a wipe are `deleteNeedsYouLabels`, the undo of a press
+  (`NeedsYouEdits.retract`: delete first, then write again the messages
+  citing the ids it returns), and `deleteAllNeedsYouLabels`, Settings'
+  Forget (`retractAll`, which then writes again every message with an owner
+  answer, `messagesWithOwnerAnswer`). Both restore from the stored
+  decision's own model number and need no model. Undo is never the opposite
+  press.
   `NeedsYouExemplars` checks a count/max-id signature on every load, so a
   wipe is seen without an invalidate. Clear AI results keeps it and
   `wipeAll` deletes it. The storyline `DecisionLabel` is a RECORD typedef
@@ -723,19 +726,20 @@ enforce the ones that are commands.
   `ConversationsNotifier.removeFromNeedsYou` / `addToNeedsYou` (null on a
   decision error, which the inbox words as the house failure toast), and the
   toast's Undo hands it to `undoNeedsYouPress` → `NeedsYouEdits.retract`,
-  which deletes by id AND stamp (`id` is reused after a delete) in one pass.
+  which deletes by id AND stamp (`id` is reused after a delete), then
+  restores the citing messages from their stored decisions, no model call.
   The press's SWEEP runs inside it, awaited, both ways (a removal over the
   threads in Needs You, an addition over those out of it and neither done
   nor in Later): a SCAN of stored decision vectors
   (`needsYouCandidateVectors`, cosine ≥ 0.97 to any of the press's label
   vectors), never model calls, so `NeedsYouPress.changed` is final when the
-  toast reads `Removed from Needs You — and N like it.` (no tail when N is 0
-  or `similar` is false, Kev). A press, its sweep and a retract write from
-  the STORED decision (`StoredDecision.modelAnswers` + `vector`) whenever
-  it has a vector under `DecisionClient.modelTag`, and ask the model only
-  for a message without one; the needs-you pass reads `resolvedModelTag`,
-  which learns Your server's kind first (the sync getter answers null until
-  then). An addition's sweep scans most of a mailbox, so candidates come
+  toast reads `Removed from Needs You — and N like it.` (no tail when N is 0,
+  always on Kev). A press and its sweep write from the STORED decision
+  (`StoredDecision.modelAnswers` + `vector`) whenever it has a vector under
+  `DecisionClient.resolvedModelTag` (which learns Your server's kind first;
+  the sync `modelTag` answers null until then), and ask the model only for a
+  message without one; the needs-you pass reads the same. Undo and Forget
+  restore from the stored row under its own model, never asking. An addition's sweep scans most of a mailbox, so candidates come
   back as BLOBs and are compared off the bytes, never decoded in bulk.
   `FakeDecisionClient.tag` is what a test sets to make its stored decisions
   count (both getters answer it), and `calls` proves no call was made. Add
@@ -743,8 +747,9 @@ enforce the ones that are commands.
   Add is not drawn when `Conversation.needsYouP` is null
   (`ThreadActionBar.needsYouDecided`). The notifier takes the service
   as a getter (`needsYouEdits: () => …`), so a test builds it over `testDb()`
-  without a decision client. A press or Undo decides before it writes and
-  refuses with processing off (`StateError`), so a failure changes nothing.
+  without a decision client. A press decides before it writes, so a failure
+  changes nothing; a press, Undo and Forget refuse with processing off
+  (`StateError`).
   An inbox test that presses overrides
   `authSessionProvider` (the press reads the owner's account, which the
   default session never answers under `flutter test`). The owner's four

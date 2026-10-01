@@ -140,12 +140,12 @@ mail yet.* when there are none, and, when there are, a two-step quiet button
 **Forget all Needs You answers** → **Really forget?** (keyed
 `settings-forget-needs-you-answers`; no dialog, the label turns into the second
 step). The second press calls `SettingsHost.forgetNeedsYouAnswers()`, which undoes
-every press newest first (`NeedsYouEdits.retractAll`, the toast's Undo once per
-press), so each message they answered for takes the model's own number back, then
-reloads the list and the line. It needs processing ON, and the decision model
-reachable for a message with no stored vector, which is decided again; either
-failure reads *Your answers couldn't be forgotten just now — processing has to be
-on and the decision model reachable.* under the button. The line is drawn only once the host has read the counts, and
+every press at once (`NeedsYouEdits.retractAll`: every label deleted, then every
+message carrying an owner's answer written again from its stored decision), so
+each message they answered for takes the model's own number back, then reloads
+the list and the line. No model is asked. It needs processing ON; off reads
+*Your answers couldn't be forgotten just now — processing has to be on.* under
+the button. The line is drawn only once the host has read the counts, and
 it is not in the section summary. See
 [pipeline/11-needs-you.md](pipeline/11-needs-you.md).
 

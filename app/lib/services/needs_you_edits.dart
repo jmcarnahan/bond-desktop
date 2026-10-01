@@ -10,7 +10,6 @@ import 'decision/needs_you_exemplars.dart';
 import 'decision/needs_you_predicate.dart';
 import 'decision/stored_decision.dart';
 import 'llm/embeddings_client.dart' show decodeEmbedding;
-import 'llm/llm_client.dart';
 import 'pipeline_progress.dart';
 import 'triage_queue.dart' show applyDecision, decisionInputFor;
 
@@ -31,20 +30,15 @@ class NeedsYouPress {
   /// The `created_at` every one of [ids] was written with.
   final String createdAt;
 
-  /// Whether any label carried a vector, so the press can reach mail like
-  /// the pressed thread at all. False on a backend with no vector (Kev),
-  /// where the answer holds for the pressed messages alone and the toast
-  /// promises nothing more.
-  final bool similar;
-
   /// How many OTHER threads the press's sweep moved across the owner's
   /// slider: out of Needs You for a removal, into it for an addition.
+  /// Always 0 on a backend with no vector (Kev), where no sweep runs and the
+  /// answer holds for the pressed messages alone.
   final int changed;
 
   NeedsYouPress(
     List<int> ids,
     this.createdAt, {
-    this.similar = false,
     this.changed = 0,
   }) : ids = List.unmodifiable(ids);
 
@@ -52,7 +46,6 @@ class NeedsYouPress {
   const NeedsYouPress.none()
       : ids = const [],
         createdAt = '',
-        similar = false,
         changed = 0;
 
   bool get isEmpty => ids.isEmpty;
@@ -77,9 +70,9 @@ typedef _Decided = ({DecisionResult result, bool ownerKnown});
 ///
 /// The decision and its vector come from the STORED decision
 /// ([MessageStore.decisionFor]) whenever it has a vector under the model the
-/// client answers with now ([DecisionClient.modelTag]): no model call. A
-/// message without one is decided by the model, as every press was before
-/// v24.
+/// client answers with now ([DecisionClient.resolvedModelTag]): no model
+/// call. A message without one is decided by the model, as every press was
+/// before v24.
 ///
 /// Then the sweep: a SCAN, not model calls. Every window message of every
 /// thread on the other side of the press — in Needs You for a removal, out
@@ -93,10 +86,13 @@ typedef _Decided = ({DecisionResult result, bool ownerKnown});
 /// Undo is not the opposite press. A `yes` label on a message whose vector
 /// is the removed one's would make every near-duplicate a yes from then on,
 /// and the threads the sweep removed would stay removed. [retract] deletes
-/// the labels the press wrote and writes again every message whose stored
+/// the labels the press wrote, THEN writes again every message whose stored
 /// decision took its answer from one of them, from the model's own number
 /// kept beside the override (`model_needs_you_p`), so the model's numbers
-/// come back — on the pressed thread and on every thread the sweep took.
+/// come back — on the pressed thread and on every thread the sweep took. No
+/// model call and no tag check: the stored row already holds what the model
+/// said, under whichever model said it, so Undo and Forget work with the
+/// decision server down and on Kev.
 ///
 /// No work kind and no durable queue: the label is stored first, and any
 /// later decision of a message like it applies it anyway.
@@ -123,10 +119,11 @@ class NeedsYouEdits {
   final bool Function()? _enabled;
 
   /// The tag a fresh decision's vector carries now
-  /// ([DecisionClient.modelTag]); a stored decision is used in place of a
-  /// model call only under it. Unwired, or answering null, asks the model
-  /// for every pressed message.
-  final String? Function()? _modelTag;
+  /// ([DecisionClient.resolvedModelTag], which learns Your server's kind
+  /// first); a press uses a stored decision in place of a model call only
+  /// under it. Unwired, or answering null, asks the model for every pressed
+  /// message.
+  final Future<String?> Function()? _modelTag;
 
   NeedsYouEdits(
     this._store,
@@ -192,7 +189,7 @@ class NeedsYouEdits {
     List<Map<String, Object?>> rows, {
     required String answer,
   }) async {
-    final tag = _modelTag?.call();
+    final tag = await _modelTag?.call();
     String? owner;
     var ownerAsked = false;
     final decided = <_Decided>[];
@@ -210,7 +207,7 @@ class NeedsYouEdits {
         ownerAsked = true;
       }
       decided.add((
-        result: await _decide(row, owner, conversationKey: conversationKey),
+        result: await _decide(row, owner),
         ownerKnown: owner != null,
       ));
     }
@@ -239,107 +236,75 @@ class NeedsYouEdits {
     return NeedsYouPress(
       ids,
       createdAt,
-      similar: vectors.isNotEmpty,
       changed: vectors.isEmpty
           ? 0
           : await _sweep(vectors, removing: answer == 'no'),
     );
   }
 
-  /// The undo of a press: deletes the labels [press] wrote and writes again,
-  /// with the labels that remain, every message whose stored decision cites
-  /// one of them — the pressed thread's and every thread the sweep moved —
-  /// so each takes the model's number back unless another label still
-  /// matches it. Returns how many messages it wrote; an unknown id deletes
-  /// and writes nothing, and an id a newer press took over (ids are handed
-  /// out again) is left to that press entirely.
+  /// The undo of a press: deletes the labels [press] wrote, then writes
+  /// again, with the labels that remain, every message whose stored decision
+  /// cites one of the deleted ones — the pressed thread's and every thread
+  /// the sweep moved — so each takes the model's number back unless another
+  /// label still matches it ([_restore]). Returns how many messages it
+  /// wrote. An unknown id deletes and writes nothing, and so does an id a
+  /// newer press took over (ids are handed out again; the delete matches
+  /// [NeedsYouPress.createdAt] too).
   ///
-  /// A citing message whose stored decision kept the model's own number and
-  /// vector under the current model ([_storedResult]) is written from it with
-  /// no model call; the rest are decided by the model.
-  ///
-  /// Decide first, as a press does: every citing message's decision is in
-  /// hand before the labels are deleted, then each is written (and
-  /// [applyDecision] looks up the owner's answer at write time, so the
-  /// deleted labels no longer match). A decision server that cannot answer
-  /// therefore propagates with nothing changed, and so does processing
-  /// turned off ([_refuseWhenOff]): an undo that deleted the labels and then
-  /// stopped would leave the press's answers in place with no label behind
-  /// them and no way back. A per-message format fault is logged and that
-  /// message keeps its decision.
-  ///
-  /// One pass: the sweep runs inside its press, so no sweep of this press
-  /// can write a citation after the delete.
+  /// DELETE FIRST: the citing messages are read after the labels are gone,
+  /// so a decision that matched one of them while the undo ran is in the
+  /// list. What is left is one [applyDecision] that loaded the labels before
+  /// the delete and writes after the read; [retractAll] heals that too.
+  /// Processing turned off refuses the undo before the delete
+  /// ([_refuseWhenOff]), and stops the writes between messages.
   Future<int> retract(NeedsYouPress press) async {
     _refuseWhenOff();
     if (press.isEmpty) return 0;
-    final takenOver = {
-      for (final label in await _exemplars.load())
-        if (label.createdAt != press.createdAt) label.id,
-    };
-    final ids = [
-      for (final id in press.ids)
-        if (!takenOver.contains(id)) id,
-    ];
-    if (ids.isEmpty) return 0;
-    final tag = _modelTag?.call();
-    String? owner;
-    var ownerAsked = false;
-    final decided = <(Map<String, Object?>, _Decided)>[];
-    for (final row in await _store.messagesCitingNeedsYouLabels(ids)) {
-      final stored = _storedResult(
-        await _store.decisionFor(
-          row['source'] as String,
-          row['source_message_id'] as String,
-        ),
-        tag,
-      );
-      if (stored != null) {
-        decided.add((row, stored));
-        continue;
-      }
-      if (!ownerAsked) {
-        owner = await _owner();
-        ownerAsked = true;
-      }
-      try {
-        decided.add((
-          row,
-          (result: await _decide(row, owner), ownerKnown: owner != null),
-        ));
-      } on LlmFormatException catch (e) {
-        debugPrint('needs_you: an undo could not decide one message: '
-            '${e.runtimeType}');
-      }
-    }
-    await _store.deleteNeedsYouLabels(ids, createdAt: press.createdAt);
+    final gone = await _store.deleteNeedsYouLabels(
+      press.ids,
+      createdAt: press.createdAt,
+    );
     _exemplars.invalidate();
-    var written = 0;
-    for (final (row, d) in decided) {
-      if (_off) break;
-      await _apply(row, d);
-      written++;
-    }
-    return written;
+    return _restore(await _store.messagesCitingNeedsYouLabels(gone));
   }
 
-  /// Every Needs You press the owner ever made, undone, newest first
-  /// ([MessageStore.needsYouLabelStamps], one [retract] per stamp): Settings'
-  /// **Forget all Needs You answers**. Returns how many messages were
-  /// written. Throws what [retract] throws, keeping the presses it already
-  /// undid undone.
+  /// Every Needs You press the owner ever made, undone at once: Settings'
+  /// **Forget all Needs You answers**. Deletes every label
+  /// ([MessageStore.deleteAllNeedsYouLabels]), then writes again every
+  /// message whose stored decision carries an owner's answer
+  /// ([MessageStore.messagesWithOwnerAnswer]) — whatever label it cites, so
+  /// an answer orphaned by an undo's race or by a stopped undo is healed
+  /// too. Returns how many messages were written.
   Future<int> retractAll() async {
     _refuseWhenOff();
-    final labels = await _store.needsYouLabels();
+    await _store.deleteAllNeedsYouLabels();
+    _exemplars.invalidate();
+    return _restore(await _store.messagesWithOwnerAnswer());
+  }
+
+  /// [rows] written again from their stored decisions with the model's own
+  /// answers put back ([StoredDecision.modelAnswers]) and the row's own
+  /// vector and model, through [applyDecision] with the labels as they
+  /// stand now. No model call. A row whose stored decision did not keep the
+  /// model's number (an override written before it was kept) is logged and
+  /// left; Clear AI results decides it again. Stops between messages when
+  /// processing turns off. Returns how many it wrote.
+  Future<int> _restore(List<Map<String, Object?>> rows) async {
     var written = 0;
-    for (final stamp in await _store.needsYouLabelStamps()) {
-      written += await retract(NeedsYouPress(
-        [
-          for (final label in labels)
-            if (label.createdAt == stamp) label.id,
-        ],
-        stamp,
-      ));
+    for (final row in rows) {
+      if (_off) break;
+      final stored = await _store.decisionFor(
+        row['source'] as String,
+        row['source_message_id'] as String,
+      );
+      final decided = stored == null ? null : _fromStored(stored);
+      if (decided == null) {
+        debugPrint("needs_you: an undo found no model's number for one "
+            'message');
+        continue;
+      }
+      await _apply(row, decided);
+      written++;
     }
     return written;
   }
@@ -351,12 +316,12 @@ class NeedsYouEdits {
     if (_off) throw StateError('processing is off');
   }
 
-  /// [stored] as a decision ready to write again, with no model call — the
-  /// model's own answers ([StoredDecision.modelAnswers]) and the vector they
-  /// came with — or null when it cannot stand in for a fresh decision: no
-  /// stored decision, no vector, a vector under another model than [tag]
-  /// (or no current tag at all), or an override that did not keep the
-  /// model's number.
+  /// [stored] as a decision that can stand in for a FRESH one, with no
+  /// model call ([_fromStored]), or null when it cannot: no stored decision,
+  /// no vector, a vector under another model than [tag] (or no current tag
+  /// at all), or an override that did not keep the model's number. A press
+  /// and its sweep need the vector under the current model, to label with
+  /// and to compare; an undo needs neither and reads [_fromStored] alone.
   ///
   /// [vector] stands in for the stored one when the caller already decoded
   /// it (the sweep, from the candidate's bytes).
@@ -368,6 +333,14 @@ class NeedsYouEdits {
     if (stored == null || tag == null) return null;
     vector ??= stored.vector;
     if (vector == null || stored.vectorModel != tag) return null;
+    return _fromStored(stored, vector: vector);
+  }
+
+  /// [stored] as a decision ready to write again — the model's own answers
+  /// ([StoredDecision.modelAnswers]) under the row's own model, with [vector]
+  /// (else the stored one, null on Kev) — or null when the override did not
+  /// keep the model's number.
+  static _Decided? _fromStored(StoredDecision stored, {List<double>? vector}) {
     final answers = stored.modelAnswers;
     if (answers == null) return null;
     return (
@@ -378,7 +351,7 @@ class NeedsYouEdits {
         // The model's own timing, kept: the Why panel prints it.
         latencyMs: stored.latencyMs?.round() ?? 0,
         truncated: stored.truncated,
-        vector: vector,
+        vector: vector ?? stored.vector,
       ),
       ownerKnown: stored.ownerKnown,
     );
@@ -388,14 +361,13 @@ class NeedsYouEdits {
   /// throws.
   Future<DecisionResult> _decide(
     Map<String, Object?> row,
-    String? owner, {
-    String? conversationKey,
-  }) async =>
+    String? owner,
+  ) async =>
       _client.decide(await decisionInputFor(
         _store,
         row['source'] as String,
         Message.fromRow(row),
-        conversationKey: conversationKey ?? row['conversation_key'] as String?,
+        conversationKey: row['conversation_key'] as String?,
         owner: owner,
       ));
 
@@ -485,12 +457,8 @@ class NeedsYouEdits {
   }) async {
     var crossed = 0;
     for (final (source, key) in touched) {
-      double? max;
-      for (final row in await _store.needsYouWindowMessages(source, key)) {
-        final p = (row['needs_you_p'] as num?)?.toDouble();
-        if (p != null && (max == null || p > max)) max = p;
-      }
-      if (needsYouAt(max, cut) != removing) crossed++;
+      final p = await _store.threadNeedsYouP(source, key);
+      if (needsYouAt(p, cut) != removing) crossed++;
     }
     return crossed;
   }

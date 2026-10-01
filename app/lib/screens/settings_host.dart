@@ -613,12 +613,11 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   }
 
   /// Settings' **Forget all Needs You answers**: every Remove and Add press
-  /// the owner made, undone newest first (`NeedsYouEdits.retractAll`), so
-  /// each message they answered for takes the model's own number back; then
-  /// the list and the section's count are read again. Throws what the undo
-  /// throws — processing off, or the decision model unable to answer for a
-  /// message it has no stored vector for — after reloading whatever did
-  /// change.
+  /// the owner made, undone at once (`NeedsYouEdits.retractAll`), so each
+  /// message they answered for takes the model's own number back, with no
+  /// model call; then the list and the section's count are read again.
+  /// Throws what the undo throws — processing off — after reloading
+  /// whatever did change.
   Future<void> forgetNeedsYouAnswers() async {
     if (!mounted) return;
     final edits = ref.read(needsYouEditsProvider);

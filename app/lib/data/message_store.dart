@@ -5243,10 +5243,10 @@ SELECT conversation_key FROM (
   /// row id: [answer] `yes`/`no` about the message [sourceMessageId], with the
   /// decision model's [vector] of it under [vectorModel] (both null on a
   /// backend with no vector). Append-only, like [writeDecisionLabels]: a later
-  /// press on the same message is a later row, and the newest row wins — with
-  /// ONE exception, the undo of a press, which deletes the rows that press
-  /// wrote ([deleteNeedsYouLabels]) rather than answering them with the
-  /// opposite label.
+  /// press on the same message is a later row, and the newest row wins —
+  /// except the undo of a press and Forget, which delete rows
+  /// ([deleteNeedsYouLabels], [deleteAllNeedsYouLabels]) rather than
+  /// answering them with the opposite label.
   ///
   /// Written by `NeedsYouEdits` at the press and by nothing automatic. A
   /// press that labels several messages passes ONE [createdAt] stamp for all
@@ -5350,40 +5350,37 @@ SELECT conversation_key FROM (
     return (removed: removed, added: added);
   }
 
-  /// Every Needs You press's `created_at` stamp, newest first — what
-  /// `NeedsYouEdits.retractAll` walks, one press at a time.
-  Future<List<String>> needsYouLabelStamps() async {
-    final rows = await db
-        .customSelect(
-          'SELECT DISTINCT created_at FROM decision_labels '
-          "WHERE question = 'needs_you' ORDER BY created_at DESC",
-        )
-        .get();
-    return [for (final row in rows) row.data['created_at'] as String];
-  }
-
-  /// Deletes the Needs You labels [ids] stamped [createdAt] and returns how
-  /// many went: the undo of a press (`NeedsYouEdits.retract`), the one
-  /// DELETE the log takes short of a wipe. Only `needs_you` rows; an unknown
-  /// id deletes nothing, and so does an id a NEWER press took over — `id` is
-  /// an INTEGER PRIMARY KEY without AUTOINCREMENT, so a deleted highest id is
-  /// handed out again, and the stamp is what tells the two rows apart.
-  Future<int> deleteNeedsYouLabels(
+  /// Deletes the Needs You labels [ids] stamped [createdAt] and returns the
+  /// ids that went: the undo of a press (`NeedsYouEdits.retract`), which then
+  /// writes again the messages citing exactly those. Only `needs_you` rows;
+  /// an unknown id deletes nothing, and so does an id a NEWER press took
+  /// over — `id` is an INTEGER PRIMARY KEY without AUTOINCREMENT, so a
+  /// deleted highest id is handed out again, and the stamp is what tells the
+  /// two rows apart.
+  Future<List<int>> deleteNeedsYouLabels(
     List<int> ids, {
     required String createdAt,
   }) async {
-    if (ids.isEmpty) return 0;
-    return db.customUpdate(
+    if (ids.isEmpty) return const [];
+    final rows = await db.customWriteReturning(
       'DELETE FROM decision_labels '
       "WHERE question = 'needs_you' AND id IN (${_placeholders(ids.length)}) "
-      'AND created_at = ?',
+      'AND created_at = ? RETURNING id',
       variables: _args([...ids, createdAt]),
     );
+    return [for (final row in rows) row.data['id'] as int];
   }
+
+  /// Deletes every Needs You label and returns how many went: Settings'
+  /// Forget (`NeedsYouEdits.retractAll`). The storyline rows of the log are
+  /// untouched.
+  Future<int> deleteAllNeedsYouLabels() => db.customUpdate(
+        "DELETE FROM decision_labels WHERE question = 'needs_you'",
+      );
 
   /// The full `messages` rows whose stored decision took its Needs You answer
   /// from one of the labels [ids] (`owner_label_id` in `answers_json`),
-  /// oldest first — what an undo decides again so the model's number returns.
+  /// oldest first — what an undo writes again so the model's number returns.
   /// A malformed blob is passed over rather than failing the read.
   Future<List<Map<String, Object?>>> messagesCitingNeedsYouLabels(
     List<int> ids,
@@ -5397,6 +5394,22 @@ SELECT conversation_key FROM (
       'IN (${_placeholders(ids.length)}) '
       'ORDER BY m.received_at, m.source_message_id',
       variables: _args(ids),
+    ).get();
+    return [for (final row in rows) row.data];
+  }
+
+  /// The full `messages` rows whose stored decision carries an owner's Needs
+  /// You answer ([decisionOwnerAnswerKey] in `answers_json`), whatever label
+  /// it cites, oldest first — what Forget writes again, so an answer whose
+  /// label is already gone is healed too. A malformed blob is passed over.
+  Future<List<Map<String, Object?>>> messagesWithOwnerAnswer() async {
+    final rows = await db.customSelect(
+      'SELECT m.* FROM message_decisions d JOIN messages m '
+      'ON m.source = d.source AND m.source_message_id = d.source_message_id '
+      'WHERE json_valid(d.answers_json) '
+      "AND json_extract(d.answers_json, '\$.$decisionOwnerAnswerKey') "
+      'IS NOT NULL '
+      'ORDER BY m.received_at, m.source_message_id',
     ).get();
     return [for (final row in rows) row.data];
   }
@@ -9393,6 +9406,18 @@ $m.source = $c.source
     AND m5.needs_you_p IS NOT NULL
   ORDER BY m5.needs_you_p DESC, m5.received_at DESC,
     m5.source_message_id DESC LIMIT 1)""";
+
+  /// One thread's needs-you probability ([threadNeedsYouPSql]), or null when
+  /// nothing in its window is decided or the thread has no `conversations`
+  /// row: how many threads a press's sweep moved (`NeedsYouEdits`).
+  Future<double?> threadNeedsYouP(String source, String conversationKey) async {
+    final row = await db.customSelect(
+      'SELECT ${threadNeedsYouPSql('c')} AS p FROM conversations c '
+      'WHERE c.source = ? AND c.conversation_key = ?',
+      variables: _args([source, conversationKey]),
+    ).getSingleOrNull();
+    return (row?.data['p'] as num?)?.toDouble();
+  }
 
   /// The messages of one thread's Needs You window ([_needsYouWindowSql]) as
   /// full `messages` rows, oldest first: what "Remove from Needs You" labels.
