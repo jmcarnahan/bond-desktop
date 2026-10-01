@@ -2945,8 +2945,18 @@ Your-server address) at ~20 per 30 s, and no storyline formed within 15 min:
 the sweep deferred on the extraction floor every minute, and every assign was a
 no-op with no storyline to join. The progressive sweep
 (`sweepProgressStep` 40, `docs/pipeline/06-storylines.md`) and eight-wide
-message text on Your server followed. After: time to the first storyline and
-the text wall from the owner's replay, to be filled in.
+message text on Your server followed, then refresh/recap deferral while
+unsettled and the Teams pull with mail on a Forget.
+
+| replay (same sandbox, cold start) | Teams arrival | triage | message text (625) | first storyline | assign backlog peak | refresh/recap calls while unsettled |
+|---|---|---|---|---|---|---|
+| 1 — settled-only sweep, text 3 wide | +8 min | 2.5 + 2.5 min, text paused between | ~12.5 min at ~20 per 30 s | none in 15 min | — | — |
+| 2 — progressive sweep, text 8 wide | +8 min | 2.5 + 2.5 min, text paused ~2 min | ~12.5 min at ~30 per 30 s (per-call latency ~2×: the L40S is the ceiling) | +90 s after text; 4 progressive passes, 7–26 s | 40–65 | ~15 (10–32 s each) |
+| 3 — + refresh/recap deferred, Teams with mail | with mail | one window, ~5.5 min | **9 min** | +90 s; passes 10–30 s | 3–13 | 0 (ran once settled) |
+
+Processing-on to the last text: ~21 min (replay 2) → ~14.5 min (replay 3).
+Progressive vs deferred sweep rows in replay 3: 5 progressive (2 of them rail
+full), 6 deferred, 1 settled. Eight wide buys ~1.5× on one L40S, not more.
 
 ## oMLX
 
