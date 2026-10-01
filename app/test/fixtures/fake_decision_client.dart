@@ -62,12 +62,21 @@ DecisionAnswers fakeAnswers({
   });
 }
 
-DecisionResult fakeDecision(DecisionAnswers answers, {int latencyMs = 42}) =>
+/// A scripted decision. [vector] stands in for the encoder's pooled vector
+/// (the owner's Needs You labels keep it); [model] is the tag it is compared
+/// under.
+DecisionResult fakeDecision(
+  DecisionAnswers answers, {
+  int latencyMs = 42,
+  List<double>? vector,
+  String model = 'bond-decide-fake',
+}) =>
     DecisionResult(
       answers: answers,
       state: 'state',
-      model: 'bond-decide-fake',
+      model: model,
       latencyMs: latencyMs,
+      vector: vector,
     );
 
 /// A [DecisionClient] that answers from a script and records what it read.

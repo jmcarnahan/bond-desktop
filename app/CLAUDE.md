@@ -656,10 +656,17 @@ enforce the ones that are commands.
   golden-prose` for `replyYes`), the `StorylineTuning` rule.
 - Needs You is ONE predicate: `needsYouAt(p, threshold)` / `needsYouAtSql` /
   `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
-  default 0.35) is the only control; every reader goes through it; no
+  default 0.35) is the only CUT; every reader goes through it; no
   language model is asked about needs-you, and the attention score only
-  orders. A THREAD's p is the MAX over its kept inbound messages after its
-  last outbound (all kept inbound when it has none), not the newest one's, so
+  orders. The owner's Remove/Add presses are NOT a second rule: they are
+  labels that `applyDecision` applies before it stores a decision
+  (`NeedsYouExemplars`: the message's own label, else the nearest label vector
+  at cosine ≥ 0.97 under the same `vector_model`), so `needs_you_p` already
+  carries the owner's answer as 1.0/0.0 and no predicate, SQL spelling or
+  reader reads a label. A new decision path goes through `applyDecision` with
+  the provider's `needsYouExemplarsProvider` or it ignores the owner. A
+  THREAD's p is the MAX over its kept inbound messages after its last
+  outbound (all kept inbound when it has none), not the newest one's, so
   a bystander's reply-all cannot hide an older unanswered ask; that is
   deliberate, do not "fix" it to the newest. `needs_you_verdict`,
   `attention_threshold` and `needs_you_rules` are inert.
@@ -677,10 +684,26 @@ enforce the ones that are commands.
   trained on.
 - `decision_labels` (v22) is KEPT: the owner's storyline presses logged as
   labels for the storyline questions (`member_of`, `charter_specific`), with
-  the storyline's title and charter at the press. Written ONLY by
-  `StorylineEdits` at an owner press (Keep and Dismiss of a suggestion or
-  possible row, add, remove, a charter written — Allow again writes none,
-  lifting a veto is not a yes), never by an automatic pass; Clear AI results keeps it and `wipeAll` deletes it.
+  the storyline's title and charter at the press. Written ONLY at an owner
+  press, never by an automatic pass: storyline rows by `StorylineEdits` (Keep
+  and Dismiss of a suggestion or possible row, add, remove, a charter written
+  — Allow again writes none, lifting a veto is not a yes) through
+  `writeDecisionLabels`, and `question = 'needs_you'` rows by `NeedsYouEdits`
+  ("Remove from Needs You" / "Add to Needs You") through `writeNeedsYouLabel`,
+  read back by `needsYouLabels()` as `NeedsYouLabel`. The one UPDATE the log
+  takes is `updateNeedsYouLabelVector`, the vector refresh `applyDecision`
+  makes when a labelled message is decided under another model, and the one
+  DELETE short of a wipe is `deleteNeedsYouLabels`, the undo of a press
+  (`NeedsYouEdits.retract`, which then re-decides the messages citing the
+  deleted ids). Undo is never the opposite press. `NeedsYouExemplars` checks a
+  count/max-id signature on every load, so a wipe is seen without an
+  invalidate. Clear AI results keeps it and `wipeAll` deletes it. The storyline `DecisionLabel` is
+  a RECORD typedef with no optional fields; do not widen it, add a writer.
+- Schema v23 appends `decision_labels.source_message_id`, `vector` (BLOB,
+  float32 LE via `encodeEmbedding`) and `vector_model` for the needs-you
+  labels; NULL on every storyline row. A label's vector is the decision
+  model's RAW pooled vector (`DecisionResult.vector`, null on Kev), compared
+  only under the same `vector_model` tag.
 - The install-time re-decide (`TriageQueue.redecideStale`) runs the DECISION
   pass again for the last 30 days of kept inbound messages decided under
   another qhash (at most 2,000, newest first), writing only the decision row,

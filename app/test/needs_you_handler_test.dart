@@ -9,6 +9,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart'
     show needsYouYesReason;
 import 'package:bond_inbox/services/decision/decision_questions.dart';
+import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart'
@@ -280,6 +281,78 @@ void main() {
 
       expect(decision.calls, isEmpty);
       expect((await answerOf('email', 'm1'))['p'], 0.5);
+    });
+  });
+
+  group("the owner's Needs You answer", () {
+    // `applyDecision` stores the owner's answer in the decision row; the
+    // copy step copies that COLUMN, so it can never write the model's p back.
+    Future<void> decideOverridden({String answer = 'no', bool exact = false}) =>
+        store.writeDecision(
+          'email',
+          'm1',
+          fakeDecision(fakeAnswers(needsYou: 0.9, intent: 'request')
+              .withNeedsYou(answer, exact: exact)),
+          qhash: decisionQhash,
+          ownerKnown: true,
+          extraKeys: {
+            'owner_answer': answer,
+            'owner_label_id': 7,
+            'owner_cosine': exact ? 1.0 : 0.99,
+            'owner_exact': exact,
+          },
+        );
+
+    test('the copy step keeps an overridden 0.0 and words it', () async {
+      await seed();
+      await decideOverridden();
+      await writeP(0.9);
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision));
+
+      expect(decision.calls, isEmpty);
+      expect(await answerOf('email', 'm1'), {
+        'p': 0.0,
+        'reason': 'You removed a message like this from Needs You.',
+      });
+    });
+
+    test('an exact addition copies as 1.0 with its own sentence', () async {
+      await seed();
+      await decideOverridden(answer: 'yes', exact: true);
+      await writeP(null);
+
+      await runOne(handler());
+
+      expect(await answerOf('email', 'm1'), {
+        'p': 1.0,
+        'reason': 'You added this message to Needs You.',
+      });
+    });
+
+    test('a re-decide applies the label through the handler', () async {
+      await seed();
+      final exemplars = NeedsYouExemplars(store);
+      await store.writeNeedsYouLabel(
+        source: 'email',
+        conversationKey: 'chat-1',
+        sourceMessageId: 'm1',
+        answer: 'no',
+        origin: 'remove',
+      );
+
+      await runOne(NeedsYouHandler(
+        store,
+        decisionClient:
+            FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+        exemplars: exemplars,
+      ));
+
+      expect(await answerOf('email', 'm1'), {
+        'p': 0.0,
+        'reason': 'You removed this message from Needs You.',
+      });
     });
   });
 

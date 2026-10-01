@@ -252,6 +252,10 @@ void main() {
       expect(result.model, 'bond-decide-synthetic');
       expect(result.truncated, false);
       expect(result.latencyMs, greaterThanOrEqualTo(0));
+      // The raw vector rides on the result, for the owner's Needs You labels.
+      final state = renderDecisionState(input, toLocal: _pacific);
+      expect(result.vector, hasLength(1024));
+      expect(result.vector, _vectorForText(state));
 
       expect(records, hasLength(1));
       expect(records.single.label, 'decision');
@@ -335,6 +339,17 @@ void main() {
         throwsA(isA<DecisionMisconfiguredException>()
             .having((e) => e.message, 'message', contains('bad vector index'))),
       );
+    });
+
+    test('a batch result carries each message its own raw vector', () async {
+      final inputs = [_input('First note.'), _input('Please DROP this one.')];
+      final results = await client().decideBatch(inputs);
+      for (var i = 0; i < inputs.length; i++) {
+        expect(
+          results[i].vector,
+          _vectorForText(renderDecisionState(inputs[i], toLocal: _pacific)),
+        );
+      }
     });
 
     test('a batch answered with the wrong number of vectors is refused',

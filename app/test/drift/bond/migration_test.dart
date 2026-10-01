@@ -1305,6 +1305,35 @@ void main() {
     expect([for (final r in storylines) r.data['title']], ['Lisbon offsite']);
   });
 
+  test('v22 to v23 gives decision_labels a message and a vector, NULL on '
+      'the storyline labels already there', () async {
+    // Nothing to backfill: every v22 row is a storyline label, which answers
+    // about a thread and carries no vector.
+    final schema = await verifier.schemaAt(22);
+    schema.rawDatabase.execute("""
+      INSERT INTO decision_labels (question, answer, storyline_id, source,
+        conversation_key, title, origin, created_at) VALUES
+        ('member_of', 'yes', 'sl-1', 'email', 'c1', 'Lisbon offsite', 'keep',
+         't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 23);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT question, title, source_message_id, vector, '
+            'vector_model FROM decision_labels')
+        .get();
+    expect(rows, hasLength(1));
+    expect(rows.single.data, {
+      'question': 'member_of',
+      'title': 'Lisbon offsite',
+      'source_message_id': null,
+      'vector': null,
+      'vector_model': null,
+    });
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

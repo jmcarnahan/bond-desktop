@@ -794,6 +794,78 @@ void main() {
       expect((await store.decisionFor('teams', 't1'))!.ownerKnown, isTrue);
     });
 
+    test("the owner's Needs You answers reach the triage queue and the "
+        'needs-you pass', () async {
+      // The wiring nothing else can see: the app-built queue and handler both
+      // hold the ONE exemplars instance, so a label answers for a message
+      // whichever path decides it. Exact-id labels, so no vector is needed.
+      final idleStoryline =
+          AiWorker(store, handlers: const [], gate: DrainGate());
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(idleStoryline.dispose);
+      addTearDown(idleDraft.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          decisionClientProvider.overrideWithValue(
+            FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+          ),
+          stageLlmClientProvider
+              .overrideWith((ref, _) => ScriptedLlm.never(label: 'routing')),
+          storylineWorkerProvider.overrideWithValue(idleStoryline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+      container.read(processingProvider.notifier).set(true);
+      expect(
+        identical(
+          container.read(needsYouExemplarsProvider),
+          container.read(needsYouExemplarsProvider),
+        ),
+        isTrue,
+      );
+      expect(container.read(needsYouEditsProvider), isNotNull);
+
+      final at = DateTime.now()
+          .toUtc()
+          .subtract(const Duration(hours: 1))
+          .toIso8601String();
+      for (final (id, status) in const [('t1', 'pending'), ('t2', 'triaged')]) {
+        await store.upsertMessage({
+          'source': 'teams',
+          'source_message_id': id,
+          'conversation_key': 'chat-$id',
+          'direction': 'inbound',
+          'from_name': 'Helpdesk',
+          'from_address': 'teams:u-helpdesk',
+          'received_at': at,
+          'body_text': 'Your access was granted.',
+          'triage_status': status,
+        });
+        await store.writeNeedsYouLabel(
+          source: 'teams',
+          conversationKey: 'chat-$id',
+          sourceMessageId: id,
+          answer: 'no',
+          origin: 'remove',
+        );
+      }
+
+      // The triage claim.
+      await container.read(triageQueueProvider).pump();
+      expect((await store.getMessageRow('teams', 't1'))!['needs_you_p'], 0.0);
+
+      // The needs-you pass deciding a message with no decision yet.
+      await store.enqueueWork('needs_you', 'teams', 't2');
+      await container.read(aiWorkerProvider).pump();
+      await pumpEventQueue();
+      final t2 = (await store.getMessageRow('teams', 't2'))!;
+      expect(t2['needs_you_p'], 0.0);
+      expect(t2['needs_you_reason'], 'You removed this message from Needs You.');
+    });
+
     test('every lane and the triage queue carry the processing switch',
         () async {
       // The wiring nothing else can be asked about: a lane built without the

@@ -5,6 +5,7 @@ import 'ai_worker.dart';
 import 'decision/decision_client.dart';
 import 'decision/decision_input.dart' show decisionOwnerString;
 import 'decision/decision_policy.dart';
+import 'decision/needs_you_exemplars.dart';
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
 import 'triage_queue.dart'
@@ -30,7 +31,9 @@ import 'triage_queue.dart'
 /// not decided yet, never a low probability.
 ///
 /// No language model is asked about needs-you, on any path, and there is no
-/// band, bar or floor: the slider is the owner's one control over it.
+/// band, bar or floor: the slider is the owner's control over the cut, and
+/// the owner's Needs You answers (`NeedsYouExemplars`, applied inside
+/// [applyDecision]) are already in the stored number this pass copies.
 ///
 /// This handler deliberately has NO arm in [AiWorker]'s `_park` and
 /// `_recordFailure` per-kind ladders. Those ladders exist for one reason: a
@@ -83,6 +86,13 @@ class NeedsYouHandler extends WorkHandler {
   /// language-model fallback for the default prompt.
   final DecisionClient _decision;
 
+  /// The owner's Needs You answers, which [applyDecision] lets replace the
+  /// model's on a re-decide. The copy step needs none: it copies the stored
+  /// decision's `needs_you_p`, which already carries the owner's answer, and
+  /// its reason from the stored answers, which say so. Null in a test that
+  /// wires none.
+  final NeedsYouExemplars? _exemplars;
+
   NeedsYouHandler(
     this._store, {
     required DecisionClient decisionClient,
@@ -90,6 +100,7 @@ class NeedsYouHandler extends WorkHandler {
     OwnerLookup? owner,
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<double> Function()? needsYouThreshold,
+    this._exemplars,
   })  : _decision = decisionClient,
         _log = activityLog ?? ActivityLog.disabled(),
         _owner = memoizedOwner(owner ?? (() async => null)),
@@ -221,6 +232,7 @@ class NeedsYouHandler extends WorkHandler {
       ownerKnown: owner != null,
       progress: _pipeline,
       threshold: _threshold,
+      exemplars: _exemplars,
     );
     _log.note({
       'source': 'decision',

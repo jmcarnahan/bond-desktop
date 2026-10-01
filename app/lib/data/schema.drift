@@ -825,6 +825,13 @@ CREATE TABLE message_decisions (
 -- label must still say what it answered. `origin` names the press: keep,
 -- dismiss, add, remove or charter_edit.
 --
+-- `question = 'needs_you'` rows (v23) are the owner's Needs You presses:
+-- `answer` yes/no, `origin` remove/add, the message in `source_message_id`,
+-- and the decision model's vector of that message in `vector` (float32 LE,
+-- `encodeEmbedding`) under `vector_model` (the `DecisionResult.model` tag it
+-- came from). A vector is compared only under its own model; NULL on a
+-- backend with no vector (Kev), and on every storyline row.
+--
 -- `INTEGER PRIMARY KEY` for feedback_events' reason (AUTOINCREMENT drags in
 -- sqlite_sequence, which is not STRICT); nothing is deleted from this log but
 -- a wipe, so an id is never reused.
@@ -840,5 +847,8 @@ CREATE TABLE decision_labels (
   title TEXT,
   charter TEXT,
   origin TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  source_message_id TEXT,
+  vector BLOB,
+  vector_model TEXT
 ) STRICT;

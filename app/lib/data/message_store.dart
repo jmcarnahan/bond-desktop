@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show immutable;
 
 import '../models/attachment_models.dart';
 import '../models/drafts_models.dart';
@@ -47,6 +48,12 @@ import '../services/decision/stored_decision.dart';
 // query here compares a probability against the threshold the same way the
 // Dart readers do.
 import '../services/decision/needs_you_predicate.dart';
+// And the vector BLOB codec, on the same licence: two pure functions over
+// bytes. The owner's Needs You labels keep the decision model's vector in the
+// form `message_vectors` keeps the embedder's, and a second codec here is how
+// a stored label and its reader would disagree about a float.
+import '../services/llm/embeddings_client.dart'
+    show decodeEmbedding, encodeEmbedding;
 // [extractionFor] needs `ExtractionResult.fromJson` to be the same decoder the
 // text handler wrote through — a second copy of it here is how a stored blob
 // and its reader come to disagree about a field name. It lives in `models/`
@@ -213,6 +220,46 @@ typedef DecisionLabel = ({
   /// The press: keep, dismiss, add, remove or charter_edit.
   String origin,
 });
+
+/// One `question = 'needs_you'` row of `decision_labels`: the owner's own
+/// answer about one message, as a Needs You press made it, with the decision
+/// model's vector of that message. See `schema.drift` for the columns,
+/// [MessageStore.writeNeedsYouLabel] for the writer and `NeedsYouExemplars`
+/// for the reader that applies it.
+@immutable
+class NeedsYouLabel {
+  final int id;
+  final String source;
+  final String conversationKey;
+  final String sourceMessageId;
+
+  /// `yes` (add) or `no` (remove).
+  final String answer;
+
+  /// The press: `remove` or `add`.
+  final String origin;
+
+  /// The decision model's raw pooled vector of the message, or null when
+  /// the backend had none (Kev) — such a label matches only its own message.
+  final List<double>? vector;
+
+  /// The `DecisionResult.model` tag [vector] came from; a vector is compared
+  /// only with one under the same tag.
+  final String? vectorModel;
+  final String createdAt;
+
+  const NeedsYouLabel({
+    required this.id,
+    required this.source,
+    required this.conversationKey,
+    required this.sourceMessageId,
+    required this.answer,
+    required this.origin,
+    this.vector,
+    this.vectorModel,
+    required this.createdAt,
+  });
+}
 
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
@@ -1092,15 +1139,7 @@ WHERE source = ? AND conversation_key = ?
           'LEFT JOIN messages nr '
           '  ON nr.source = c.source '
           '  AND nr.conversation_key = c.conversation_key '
-          '  AND nr.source_message_id = ('
-          '    SELECT m5.source_message_id FROM messages m5 '
-          '     WHERE m5.source = c.source '
-          '       AND m5.conversation_key = c.conversation_key '
-          "       AND m5.direction = 'inbound' AND ${keptMessageSql('m5')} "
-          '       AND m5.needs_you_p IS NOT NULL '
-          "       AND m5.received_at > COALESCE(c.last_outbound_at, '') "
-          '     ORDER BY m5.needs_you_p DESC, m5.received_at DESC, '
-          '       m5.source_message_id DESC LIMIT 1) '
+          '  AND nr.source_message_id = ${needsYouDriverIdSql('c')} '
           // `nk` — the newest KEPT inbound, judged or not: the message the
           // thread is waiting on.
           'LEFT JOIN messages nk '
@@ -2572,12 +2611,17 @@ WHERE COALESCE(cta_text, '') <> ''
   /// and not a Map, so `DecisionAnswers.fromJson` passes over it — because
   /// the needs-you head was trained with that line and an ownerless row's
   /// needs-you probability is not to be trusted.
+  ///
+  /// [extraKeys] ride beside it on the same terms — scalars, never a Map: the
+  /// owner's Needs You answer when it replaced the model's
+  /// ([decisionOwnerAnswerKey] and its siblings, `applyDecision`).
   Future<void> writeDecision(
     String source,
     String sourceMessageId,
     DecisionResult result, {
     required String qhash,
     required bool ownerKnown,
+    Map<String, Object?> extraKeys = const {},
   }) async {
     final a = result.answers;
     double? pOf(String field, String option) =>
@@ -2600,7 +2644,11 @@ WHERE COALESCE(cta_text, '') <> ''
         sourceMessageId,
         result.model,
         qhash,
-        jsonEncode({...a.toJson(), decisionOwnerKnownKey: ownerKnown}),
+        jsonEncode({
+          ...a.toJson(),
+          decisionOwnerKnownKey: ownerKnown,
+          ...extraKeys,
+        }),
         pOf('gate', 'drop'),
         pOf('needs_you', 'yes'),
         pOf('needs_action', 'yes'),
@@ -3578,8 +3626,9 @@ RETURNING *
   /// The two label tables are here because **Clear AI results** must not take
   /// them: a word the owner typed is not something a model produced, and
   /// re-running the pipeline would never write it back. `decision_labels` is
-  /// here for the same reason — the owner's storyline presses, which nothing
-  /// re-derives. All three are still deleted by [wipeAll] — see
+  /// here for the same reason — the owner's storyline and Needs You presses,
+  /// which nothing re-derives (the next decision applies a Needs You label
+  /// again). All three are still deleted by [wipeAll] — see
   /// [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
@@ -3668,9 +3717,10 @@ RETURNING *
         // is not what the owner built.
         'conversation_labels',
         'labels',
-        // The owner's storyline presses go for the labels' reason: each one
-        // names a conversation key in the mailbox this deletes, and carries a
-        // title and charter written about that mail.
+        // The owner's storyline and Needs You presses go for the labels'
+        // reason: each one names a conversation key in the mailbox this
+        // deletes, and carries a title and charter, or a message and its
+        // vector, taken from that mail.
         'decision_labels',
       ];
 
@@ -5148,6 +5198,137 @@ SELECT conversation_key FROM (
         );
       }
     });
+  }
+
+  /// Appends one owner Needs You answer to `decision_labels` and returns its
+  /// row id: [answer] `yes`/`no` about the message [sourceMessageId], with the
+  /// decision model's [vector] of it under [vectorModel] (both null on a
+  /// backend with no vector). Append-only, like [writeDecisionLabels]: a later
+  /// press on the same message is a later row, and the newest row wins — with
+  /// ONE exception, the undo of a press, which deletes the rows that press
+  /// wrote ([deleteNeedsYouLabels]) rather than answering them with the
+  /// opposite label.
+  ///
+  /// Written by `NeedsYouEdits` at the press and by nothing automatic.
+  Future<int> writeNeedsYouLabel({
+    required String source,
+    required String conversationKey,
+    required String sourceMessageId,
+    required String answer,
+    required String origin,
+    List<double>? vector,
+    String? vectorModel,
+  }) async {
+    final rows = await db.customWriteReturning(
+      'INSERT INTO decision_labels '
+      '(question, answer, source, conversation_key, origin, created_at, '
+      'source_message_id, vector, vector_model) '
+      "VALUES ('needs_you', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+      variables: _args([
+        answer,
+        source,
+        conversationKey,
+        origin,
+        _nowIso(),
+        sourceMessageId,
+        vector == null ? null : encodeEmbedding(vector),
+        vector == null ? null : vectorModel,
+      ]),
+    );
+    return rows.first.data['id'] as int;
+  }
+
+  /// Every owner Needs You answer, oldest first (by id) — what
+  /// `NeedsYouExemplars` holds in memory.
+  Future<List<NeedsYouLabel>> needsYouLabels() async {
+    final rows = await db
+        .customSelect(
+          'SELECT id, source, conversation_key, source_message_id, answer, '
+          'origin, vector, vector_model, created_at FROM decision_labels '
+          "WHERE question = 'needs_you' AND source IS NOT NULL "
+          'AND conversation_key IS NOT NULL '
+          'AND source_message_id IS NOT NULL ORDER BY id',
+        )
+        .get();
+    return [
+      for (final row in rows)
+        NeedsYouLabel(
+          id: row.data['id'] as int,
+          source: row.data['source'] as String,
+          conversationKey: row.data['conversation_key'] as String,
+          sourceMessageId: row.data['source_message_id'] as String,
+          answer: row.data['answer'] as String,
+          origin: row.data['origin'] as String,
+          vector: switch (row.data['vector']) {
+            final Uint8List blob => decodeEmbedding(blob),
+            _ => null,
+          },
+          vectorModel: row.data['vector_model'] as String?,
+          createdAt: row.data['created_at'] as String,
+        ),
+    ];
+  }
+
+  /// A cheap fingerprint of the Needs You labels — how many rows and the
+  /// highest id — that `NeedsYouExemplars` checks before reusing its cached
+  /// list, so a wipe (which deletes the rows behind its back) is seen.
+  Future<({int count, int maxId})> needsYouLabelSignature() async {
+    final row = (await db
+            .customSelect(
+              'SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS max_id '
+              "FROM decision_labels WHERE question = 'needs_you'",
+            )
+            .getSingle())
+        .data;
+    return (count: row['n'] as int, maxId: row['max_id'] as int);
+  }
+
+  /// Deletes the Needs You labels [ids] and returns how many went: the undo
+  /// of a press (`NeedsYouEdits.retract`), the one DELETE the log takes short
+  /// of a wipe. Only `needs_you` rows; an unknown id deletes nothing.
+  Future<int> deleteNeedsYouLabels(List<int> ids) async {
+    if (ids.isEmpty) return 0;
+    return db.customUpdate(
+      'DELETE FROM decision_labels '
+      "WHERE question = 'needs_you' AND id IN (${_placeholders(ids.length)})",
+      variables: _args(ids),
+    );
+  }
+
+  /// The full `messages` rows whose stored decision took its Needs You answer
+  /// from one of the labels [ids] (`owner_label_id` in `answers_json`),
+  /// oldest first — what an undo decides again so the model's number returns.
+  /// A malformed blob is passed over rather than failing the read.
+  Future<List<Map<String, Object?>>> messagesCitingNeedsYouLabels(
+    List<int> ids,
+  ) async {
+    if (ids.isEmpty) return const [];
+    final rows = await db.customSelect(
+      'SELECT m.* FROM message_decisions d JOIN messages m '
+      'ON m.source = d.source AND m.source_message_id = d.source_message_id '
+      'WHERE json_valid(d.answers_json) '
+      "AND json_extract(d.answers_json, '\$.$decisionOwnerLabelIdKey') "
+      'IN (${_placeholders(ids.length)}) '
+      'ORDER BY m.received_at, m.source_message_id',
+      variables: _args(ids),
+    ).get();
+    return [for (final row in rows) row.data];
+  }
+
+  /// Replaces one Needs You label's vector with a fresh one under
+  /// [vectorModel] — how a label taken under another decision model (or
+  /// under Kev, with no vector) heals the next time its message is decided.
+  /// The only UPDATE the log takes: the answer is never revised.
+  Future<void> updateNeedsYouLabelVector(
+    int id,
+    List<double> vector,
+    String vectorModel,
+  ) async {
+    await db.customUpdate(
+      'UPDATE decision_labels SET vector = ?, vector_model = ? '
+      "WHERE id = ? AND question = 'needs_you'",
+      variables: _args([encodeEmbedding(vector), vectorModel, id]),
+    );
   }
 
   /// Every row of `decision_labels`, oldest first — for the reporting counts
@@ -9051,10 +9232,70 @@ EXISTS (SELECT 1 FROM message_decisions dq
   /// `ix_messages_conv` makes it an index walk per thread.
   static String threadNeedsYouPSql(String c) => """
 (SELECT MAX(np.needs_you_p) FROM messages np
-  WHERE np.source = $c.source
-    AND np.conversation_key = $c.conversation_key
-    AND np.direction = 'inbound' AND ${keptMessageSql('np')}
-    AND np.received_at > COALESCE($c.last_outbound_at, ''))""";
+  WHERE ${_needsYouWindowSql('np', c)})""";
+
+  /// The Needs You window as a SQL condition with no placeholders: message
+  /// [m] is a KEPT inbound message of the thread behind the `conversations`
+  /// alias [c], received after the thread's last outbound. The one spelling
+  /// [threadNeedsYouPSql], its driver ([needsYouDriverIdSql]) and the owner's
+  /// press ([needsYouWindowMessages]) all read, so the max, the message it
+  /// came from and the messages a press labels are one set.
+  static String _needsYouWindowSql(String m, String c) => """
+$m.source = $c.source
+    AND $m.conversation_key = $c.conversation_key
+    AND $m.direction = 'inbound' AND ${keptMessageSql(m)}
+    AND $m.received_at > COALESCE($c.last_outbound_at, '')""";
+
+  /// The id of the message [threadNeedsYouPSql] takes its maximum from, for
+  /// the thread behind the `conversations` alias [c]: among the window's
+  /// decided messages, the HIGHEST `needs_you_p`, ties to the newest (then
+  /// the id). A scalar subselect with no placeholders — the `nr` join of
+  /// [loadConversations] and the sweep's [needsYouDriverRows] both read it.
+  static String needsYouDriverIdSql(String c) => """
+(SELECT m5.source_message_id FROM messages m5
+  WHERE ${_needsYouWindowSql('m5', c)}
+    AND m5.needs_you_p IS NOT NULL
+  ORDER BY m5.needs_you_p DESC, m5.received_at DESC,
+    m5.source_message_id DESC LIMIT 1)""";
+
+  /// The messages of one thread's Needs You window ([_needsYouWindowSql]) as
+  /// full `messages` rows, oldest first: what "Remove from Needs You" labels.
+  /// Empty when the thread has no `conversations` row.
+  Future<List<Map<String, Object?>>> needsYouWindowMessages(
+    String source,
+    String conversationKey,
+  ) async {
+    final rows = await db.customSelect(
+      'SELECT m.* FROM conversations c JOIN messages m '
+      'ON ${_needsYouWindowSql('m', 'c')} '
+      'WHERE c.source = ? AND c.conversation_key = ? '
+      'ORDER BY m.received_at, m.source_message_id',
+      variables: _args([source, conversationKey]),
+    ).get();
+    return [for (final row in rows) row.data];
+  }
+
+  /// One row per thread in Needs You at [threshold] ([_liveNeedsYouThread],
+  /// the rail's rule): the driver message ([needsYouDriverIdSql]) as a full
+  /// `messages` row, newest thread first — what the sweep after a "Remove
+  /// from Needs You" press decides again.
+  Future<List<Map<String, Object?>>> needsYouDriverRows(
+    double threshold,
+  ) async {
+    final rows = await db.customSelect(
+      'SELECT nr.* FROM conversations c '
+      'LEFT JOIN conversation_ai ai '
+      '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+      'JOIN messages nr '
+      '  ON nr.source = c.source '
+      '  AND nr.conversation_key = c.conversation_key '
+      '  AND nr.source_message_id = ${needsYouDriverIdSql('c')} '
+      'WHERE $_liveNeedsYouThread '
+      'ORDER BY c.last_message_at DESC, c.conversation_key',
+      variables: _args([threshold]),
+    ).get();
+    return [for (final row in rows) row.data];
+  }
 
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
   /// and never empty — every filter narrows something, so a caller can always

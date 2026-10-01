@@ -19706,6 +19706,37 @@ class DecisionLabels extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _vectorMeta = const VerificationMeta('vector');
+  late final GeneratedColumn<Uint8List> vector = GeneratedColumn<Uint8List>(
+    'vector',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _vectorModelMeta = const VerificationMeta(
+    'vectorModel',
+  );
+  late final GeneratedColumn<String> vectorModel = GeneratedColumn<String>(
+    'vector_model',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -19720,6 +19751,9 @@ class DecisionLabels extends Table
     charter,
     origin,
     createdAt,
+    sourceMessageId,
+    vector,
+    vectorModel,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -19822,6 +19856,30 @@ class DecisionLabels extends Table
     } else if (isInserting) {
       context.missing(_createdAtMeta);
     }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('vector')) {
+      context.handle(
+        _vectorMeta,
+        vector.isAcceptableOrUnknown(data['vector']!, _vectorMeta),
+      );
+    }
+    if (data.containsKey('vector_model')) {
+      context.handle(
+        _vectorModelMeta,
+        vectorModel.isAcceptableOrUnknown(
+          data['vector_model']!,
+          _vectorModelMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -19879,6 +19937,18 @@ class DecisionLabels extends Table
         DriftSqlType.string,
         data['${effectivePrefix}created_at'],
       )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      ),
+      vector: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}vector'],
+      ),
+      vectorModel: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}vector_model'],
+      ),
     );
   }
 
@@ -19906,6 +19976,9 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
   final String? charter;
   final String origin;
   final String createdAt;
+  final String? sourceMessageId;
+  final Uint8List? vector;
+  final String? vectorModel;
   const DecisionLabel({
     required this.id,
     required this.question,
@@ -19919,6 +19992,9 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
     this.charter,
     required this.origin,
     required this.createdAt,
+    this.sourceMessageId,
+    this.vector,
+    this.vectorModel,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -19949,6 +20025,15 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
     }
     map['origin'] = Variable<String>(origin);
     map['created_at'] = Variable<String>(createdAt);
+    if (!nullToAbsent || sourceMessageId != null) {
+      map['source_message_id'] = Variable<String>(sourceMessageId);
+    }
+    if (!nullToAbsent || vector != null) {
+      map['vector'] = Variable<Uint8List>(vector);
+    }
+    if (!nullToAbsent || vectorModel != null) {
+      map['vector_model'] = Variable<String>(vectorModel);
+    }
     return map;
   }
 
@@ -19980,6 +20065,15 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
           : Value(charter),
       origin: Value(origin),
       createdAt: Value(createdAt),
+      sourceMessageId: sourceMessageId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(sourceMessageId),
+      vector: vector == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vector),
+      vectorModel: vectorModel == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vectorModel),
     );
   }
 
@@ -20003,6 +20097,9 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
       charter: serializer.fromJson<String?>(json['charter']),
       origin: serializer.fromJson<String>(json['origin']),
       createdAt: serializer.fromJson<String>(json['created_at']),
+      sourceMessageId: serializer.fromJson<String?>(json['source_message_id']),
+      vector: serializer.fromJson<Uint8List?>(json['vector']),
+      vectorModel: serializer.fromJson<String?>(json['vector_model']),
     );
   }
   @override
@@ -20023,6 +20120,9 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
       'charter': serializer.toJson<String?>(charter),
       'origin': serializer.toJson<String>(origin),
       'created_at': serializer.toJson<String>(createdAt),
+      'source_message_id': serializer.toJson<String?>(sourceMessageId),
+      'vector': serializer.toJson<Uint8List?>(vector),
+      'vector_model': serializer.toJson<String?>(vectorModel),
     };
   }
 
@@ -20039,6 +20139,9 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
     Value<String?> charter = const Value.absent(),
     String? origin,
     String? createdAt,
+    Value<String?> sourceMessageId = const Value.absent(),
+    Value<Uint8List?> vector = const Value.absent(),
+    Value<String?> vectorModel = const Value.absent(),
   }) => DecisionLabel(
     id: id ?? this.id,
     question: question ?? this.question,
@@ -20056,6 +20159,11 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
     charter: charter.present ? charter.value : this.charter,
     origin: origin ?? this.origin,
     createdAt: createdAt ?? this.createdAt,
+    sourceMessageId: sourceMessageId.present
+        ? sourceMessageId.value
+        : this.sourceMessageId,
+    vector: vector.present ? vector.value : this.vector,
+    vectorModel: vectorModel.present ? vectorModel.value : this.vectorModel,
   );
   DecisionLabel copyWithCompanion(DecisionLabelsCompanion data) {
     return DecisionLabel(
@@ -20079,6 +20187,13 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
       charter: data.charter.present ? data.charter.value : this.charter,
       origin: data.origin.present ? data.origin.value : this.origin,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      vector: data.vector.present ? data.vector.value : this.vector,
+      vectorModel: data.vectorModel.present
+          ? data.vectorModel.value
+          : this.vectorModel,
     );
   }
 
@@ -20096,7 +20211,10 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
           ..write('title: $title, ')
           ..write('charter: $charter, ')
           ..write('origin: $origin, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('vector: $vector, ')
+          ..write('vectorModel: $vectorModel')
           ..write(')'))
         .toString();
   }
@@ -20115,6 +20233,9 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
     charter,
     origin,
     createdAt,
+    sourceMessageId,
+    $driftBlobEquality.hash(vector),
+    vectorModel,
   );
   @override
   bool operator ==(Object other) =>
@@ -20131,7 +20252,10 @@ class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
           other.title == this.title &&
           other.charter == this.charter &&
           other.origin == this.origin &&
-          other.createdAt == this.createdAt);
+          other.createdAt == this.createdAt &&
+          other.sourceMessageId == this.sourceMessageId &&
+          $driftBlobEquality.equals(other.vector, this.vector) &&
+          other.vectorModel == this.vectorModel);
 }
 
 class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
@@ -20147,6 +20271,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
   final Value<String?> charter;
   final Value<String> origin;
   final Value<String> createdAt;
+  final Value<String?> sourceMessageId;
+  final Value<Uint8List?> vector;
+  final Value<String?> vectorModel;
   const DecisionLabelsCompanion({
     this.id = const Value.absent(),
     this.question = const Value.absent(),
@@ -20160,6 +20287,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
     this.charter = const Value.absent(),
     this.origin = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.vector = const Value.absent(),
+    this.vectorModel = const Value.absent(),
   });
   DecisionLabelsCompanion.insert({
     this.id = const Value.absent(),
@@ -20174,6 +20304,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
     this.charter = const Value.absent(),
     required String origin,
     required String createdAt,
+    this.sourceMessageId = const Value.absent(),
+    this.vector = const Value.absent(),
+    this.vectorModel = const Value.absent(),
   }) : question = Value(question),
        answer = Value(answer),
        origin = Value(origin),
@@ -20191,6 +20324,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
     Expression<String>? charter,
     Expression<String>? origin,
     Expression<String>? createdAt,
+    Expression<String>? sourceMessageId,
+    Expression<Uint8List>? vector,
+    Expression<String>? vectorModel,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -20206,6 +20342,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
       if (charter != null) 'charter': charter,
       if (origin != null) 'origin': origin,
       if (createdAt != null) 'created_at': createdAt,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (vector != null) 'vector': vector,
+      if (vectorModel != null) 'vector_model': vectorModel,
     });
   }
 
@@ -20222,6 +20361,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
     Value<String?>? charter,
     Value<String>? origin,
     Value<String>? createdAt,
+    Value<String?>? sourceMessageId,
+    Value<Uint8List?>? vector,
+    Value<String?>? vectorModel,
   }) {
     return DecisionLabelsCompanion(
       id: id ?? this.id,
@@ -20236,6 +20378,9 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
       charter: charter ?? this.charter,
       origin: origin ?? this.origin,
       createdAt: createdAt ?? this.createdAt,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      vector: vector ?? this.vector,
+      vectorModel: vectorModel ?? this.vectorModel,
     );
   }
 
@@ -20280,6 +20425,15 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
     if (createdAt.present) {
       map['created_at'] = Variable<String>(createdAt.value);
     }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (vector.present) {
+      map['vector'] = Variable<Uint8List>(vector.value);
+    }
+    if (vectorModel.present) {
+      map['vector_model'] = Variable<String>(vectorModel.value);
+    }
     return map;
   }
 
@@ -20297,7 +20451,10 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
           ..write('title: $title, ')
           ..write('charter: $charter, ')
           ..write('origin: $origin, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('vector: $vector, ')
+          ..write('vectorModel: $vectorModel')
           ..write(')'))
         .toString();
   }
@@ -29699,6 +29856,9 @@ typedef $DecisionLabelsCreateCompanionBuilder =
       Value<String?> charter,
       required String origin,
       required String createdAt,
+      Value<String?> sourceMessageId,
+      Value<Uint8List?> vector,
+      Value<String?> vectorModel,
     });
 typedef $DecisionLabelsUpdateCompanionBuilder =
     DecisionLabelsCompanion Function({
@@ -29714,6 +29874,9 @@ typedef $DecisionLabelsUpdateCompanionBuilder =
       Value<String?> charter,
       Value<String> origin,
       Value<String> createdAt,
+      Value<String?> sourceMessageId,
+      Value<Uint8List?> vector,
+      Value<String?> vectorModel,
     });
 
 class $DecisionLabelsFilterComposer
@@ -29782,6 +29945,21 @@ class $DecisionLabelsFilterComposer
 
   ColumnFilters<String> get createdAt => $composableBuilder(
     column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get vectorModel => $composableBuilder(
+    column: $table.vectorModel,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -29854,6 +30032,21 @@ class $DecisionLabelsOrderingComposer
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get vectorModel => $composableBuilder(
+    column: $table.vectorModel,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $DecisionLabelsAnnotationComposer
@@ -29908,6 +30101,19 @@ class $DecisionLabelsAnnotationComposer
 
   GeneratedColumn<String> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get vector =>
+      $composableBuilder(column: $table.vector, builder: (column) => column);
+
+  GeneratedColumn<String> get vectorModel => $composableBuilder(
+    column: $table.vectorModel,
+    builder: (column) => column,
+  );
 }
 
 class $DecisionLabelsTableManager
@@ -29953,6 +30159,9 @@ class $DecisionLabelsTableManager
                 Value<String?> charter = const Value.absent(),
                 Value<String> origin = const Value.absent(),
                 Value<String> createdAt = const Value.absent(),
+                Value<String?> sourceMessageId = const Value.absent(),
+                Value<Uint8List?> vector = const Value.absent(),
+                Value<String?> vectorModel = const Value.absent(),
               }) => DecisionLabelsCompanion(
                 id: id,
                 question: question,
@@ -29966,6 +30175,9 @@ class $DecisionLabelsTableManager
                 charter: charter,
                 origin: origin,
                 createdAt: createdAt,
+                sourceMessageId: sourceMessageId,
+                vector: vector,
+                vectorModel: vectorModel,
               ),
           createCompanionCallback:
               ({
@@ -29981,6 +30193,9 @@ class $DecisionLabelsTableManager
                 Value<String?> charter = const Value.absent(),
                 required String origin,
                 required String createdAt,
+                Value<String?> sourceMessageId = const Value.absent(),
+                Value<Uint8List?> vector = const Value.absent(),
+                Value<String?> vectorModel = const Value.absent(),
               }) => DecisionLabelsCompanion.insert(
                 id: id,
                 question: question,
@@ -29994,6 +30209,9 @@ class $DecisionLabelsTableManager
                 charter: charter,
                 origin: origin,
                 createdAt: createdAt,
+                sourceMessageId: sourceMessageId,
+                vector: vector,
+                vectorModel: vectorModel,
               ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))

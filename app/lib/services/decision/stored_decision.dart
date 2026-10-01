@@ -7,6 +7,17 @@ import 'decision_heads.dart';
 /// can never be read as an answer.
 const String decisionOwnerKnownKey = 'owner_known';
 
+/// The keys in `answers_json` that record the owner's Needs You answer when
+/// it replaced the model's (`applyDecision`, `NeedsYouExemplars`): the answer
+/// (`yes`/`no`), the `decision_labels` row it came from, the cosine between
+/// the two vectors (1.0 for a label on this very message), and whether the
+/// label was on this very message. Scalars, never a Map, so
+/// `DecisionAnswers.fromJson` never reads one as a field.
+const String decisionOwnerAnswerKey = 'owner_answer';
+const String decisionOwnerLabelIdKey = 'owner_label_id';
+const String decisionOwnerCosineKey = 'owner_cosine';
+const String decisionOwnerExactKey = 'owner_exact';
+
 /// The key in `answers_json` that marks a message the install-time re-decide
 /// could not decide (a 4xx that one request earned). The row carries the
 /// current question hash, so the re-decide's stale list stops returning it,
@@ -43,6 +54,11 @@ class StoredDecision {
   /// probability is shown but untrusted: the needs-you pass decides the
   /// message again once the owner is known.
   final bool ownerKnown;
+
+  /// The owner's Needs You answer (`yes`/`no`) when it replaced the model's
+  /// ([decisionOwnerAnswerKey]); null for a decision the model alone made.
+  /// The stored [needsYouP] is then 1.0 or 0.0.
+  String? get ownerAnswer => answers.ownerAnswer;
 
   const StoredDecision({
     required this.answers,

@@ -10,7 +10,14 @@ import 'decision/decision_client.dart';
 import 'decision/decision_heads.dart';
 import 'decision/decision_input.dart';
 import 'decision/decision_policy.dart';
+import 'decision/needs_you_exemplars.dart';
 import 'decision/needs_you_predicate.dart';
+import 'decision/stored_decision.dart'
+    show
+        decisionOwnerAnswerKey,
+        decisionOwnerCosineKey,
+        decisionOwnerExactKey,
+        decisionOwnerLabelIdKey;
 import 'decision/decision_questions.dart' show decisionQhash;
 import 'drain_gate.dart';
 import 'gates.dart';
@@ -274,6 +281,10 @@ class TriageQueue {
   /// moved with it. Null in a test that wires none, which reads the default.
   final Future<double> Function()? _threshold;
 
+  /// The owner's Needs You answers, which [applyDecision] lets replace the
+  /// model's. Null in a test that wires none: the model's answer stands.
+  final NeedsYouExemplars? _exemplars;
+
   TriageQueue(
     this._store, {
     required this._decisionClient,
@@ -288,6 +299,7 @@ class TriageQueue {
     this._onGated,
     this._owner,
     Future<double> Function()? needsYouThreshold,
+    this._exemplars,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress,
@@ -807,6 +819,7 @@ class TriageQueue {
         ownerKnown: owner != null,
         progress: _pipeline,
         threshold: _threshold,
+        exemplars: _exemplars,
         verdict: (fields) => _writeTriage(
           source,
           id,
@@ -1071,6 +1084,7 @@ class TriageQueue {
         ownerKnown: owner != null,
         progress: _pipeline,
         threshold: _threshold,
+        exemplars: _exemplars,
       );
       redecided++;
     }
@@ -1343,6 +1357,18 @@ Future<DecisionInput> decisionInputFor(
 /// the claim writes its row once. [row] is the message row as the caller
 /// read it BEFORE deciding: its `needs_you_p` is the "before" of the chip
 /// rule, and its text feeds the fold.
+///
+/// [exemplars] are the owner's Needs You answers. When one applies to this
+/// message — a label on it, or on a message whose vector is a near duplicate
+/// of [decided]'s ([NeedsYouExemplars.answerFor]) — the owner's answer
+/// replaces the model's `needs_you` BEFORE anything is written, so
+/// `message_decisions.needs_you_p`, `messages.needs_you_p`, the reason and the
+/// chip all carry 1.0 or 0.0, and `answers_json` records where it came from
+/// ([decisionOwnerAnswerKey] and its siblings). This is the one place the
+/// override lives: every decision path passes through here. A label on this
+/// message taken under another model (or with no vector, Kev) has its vector
+/// refreshed from [decided] on the way through, so a model swap heals the
+/// labels as their messages are decided again.
 Future<void> applyDecision(
   MessageStore store,
   String source,
@@ -1352,10 +1378,50 @@ Future<void> applyDecision(
   PipelineProgress progress = const PipelineProgress.disabled(),
   Future<double> Function()? threshold,
   Future<void> Function(TriageResult fields)? verdict,
+  NeedsYouExemplars? exemplars,
 }) async {
   final id = row['source_message_id'] as String? ?? '';
   final message = Message.fromRow(row);
   final previous = (row['needs_you_p'] as num?)?.toDouble();
+  var extraKeys = const <String, Object?>{};
+  if (exemplars != null) {
+    final owner = await exemplars.answerFor(
+      source: source,
+      sourceMessageId: id,
+      vector: decided.vector,
+      model: decided.model,
+    );
+    if (owner != null) {
+      decided = decided.withAnswers(
+        decided.answers.withNeedsYou(owner.answer, exact: owner.exact),
+      );
+      extraKeys = {
+        decisionOwnerAnswerKey: owner.answer,
+        decisionOwnerLabelIdKey: owner.labelId,
+        decisionOwnerCosineKey: owner.cosine,
+        decisionOwnerExactKey: owner.exact,
+      };
+      final vector = decided.vector;
+      if (owner.exact && vector != null) {
+        var healed = false;
+        for (final label in await exemplars.labelsOn(
+          source: source,
+          sourceMessageId: id,
+        )) {
+          if (label.vector != null && label.vectorModel == decided.model) {
+            continue;
+          }
+          await store.updateNeedsYouLabelVector(
+            label.id,
+            vector,
+            decided.model,
+          );
+          healed = true;
+        }
+        if (healed) exemplars.invalidate();
+      }
+    }
+  }
   final answers = decided.answers;
   await store.writeDecision(
     source,
@@ -1363,6 +1429,7 @@ Future<void> applyDecision(
     decided,
     qhash: decisionQhash,
     ownerKnown: ownerKnown,
+    extraKeys: extraKeys,
   );
   final fields = TriageQueue.decidedTriage(answers);
   if (verdict != null) {

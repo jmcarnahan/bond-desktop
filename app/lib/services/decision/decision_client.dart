@@ -94,13 +94,31 @@ class DecisionResult {
   /// The state was longer than the model's context and was cut to it.
   final bool truncated;
 
+  /// The encoder's raw pooled vector the heads read ([DecisionHeads.width]
+  /// wide, not normalised), or null on a backend that answers probabilities
+  /// itself (`systemone`). The owner's Needs You labels keep it, so a press
+  /// can recognise near-duplicate mail (`NeedsYouExemplars`).
+  final List<double>? vector;
+
   const DecisionResult({
     required this.answers,
     required this.state,
     required this.model,
     required this.latencyMs,
     this.truncated = false,
+    this.vector,
   });
+
+  /// This result with [answers] in place of its own — how the owner's Needs
+  /// You answer replaces the model's before the decision is stored.
+  DecisionResult withAnswers(DecisionAnswers answers) => DecisionResult(
+        answers: answers,
+        state: state,
+        model: model,
+        latencyMs: latencyMs,
+        truncated: truncated,
+        vector: vector,
+      );
 }
 
 /// The per-call facts the one [LlmCallRecord] reports, gathered across the
@@ -1408,6 +1426,7 @@ class _EncoderHeadsBackend implements _DecisionBackend {
       model: heads.model,
       latencyMs: sw.elapsedMilliseconds,
       truncated: truncated,
+      vector: vector,
     );
   }
 
@@ -1427,6 +1446,7 @@ class _EncoderHeadsBackend implements _DecisionBackend {
           model: heads.model,
           latencyMs: sw.elapsedMilliseconds,
           truncated: truncated[i],
+          vector: vectors[i],
         ),
     ];
   }

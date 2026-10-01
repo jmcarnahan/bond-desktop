@@ -230,6 +230,9 @@ void main() {
       expect(server.listings.single.url.toString(), '$_box/decide/v1/models');
       expect(server.requests.map((r) => r.url.toString()), [_kevUrl]);
       expect(result.model, _kevModel);
+      // No encoder, so no vector: a Needs You label taken here matches only
+      // its own message.
+      expect(result.vector, isNull);
     });
 
     test('a listing with no qhash is encoder-heads, and the identity probe '

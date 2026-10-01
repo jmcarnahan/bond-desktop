@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 22;
+  int get schemaVersion => 23;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -779,6 +779,36 @@ WHERE needs_you_p IS NULL''');
               from21To22: (m, schema) async {
                 if (!await _tableExists('decision_labels')) {
                   await m.createTable(schema.decisionLabels);
+                }
+              },
+              // v23 — the owner's Needs You answers. `decision_labels` gains
+              // the message a `needs_you` label answers and the decision
+              // model's vector of it (with the model tag the vector came
+              // from), so a press generalises to near-duplicate mail.
+              //
+              // Nothing to backfill: every existing row is a storyline label,
+              // which has neither a message nor a vector.
+              from22To23: (m, schema) async {
+                if (!await _columnExists(
+                  'decision_labels',
+                  'source_message_id',
+                )) {
+                  await m.addColumn(
+                    schema.decisionLabels,
+                    schema.decisionLabels.sourceMessageId,
+                  );
+                }
+                if (!await _columnExists('decision_labels', 'vector')) {
+                  await m.addColumn(
+                    schema.decisionLabels,
+                    schema.decisionLabels.vector,
+                  );
+                }
+                if (!await _columnExists('decision_labels', 'vector_model')) {
+                  await m.addColumn(
+                    schema.decisionLabels,
+                    schema.decisionLabels.vectorModel,
+                  );
                 }
               },
             ),

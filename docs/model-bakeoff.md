@@ -2899,6 +2899,45 @@ whole pool at once buys none. The re-based exit,
 70 of 98 on the declared path with forbidden hits at or below 3, is MET at 86
 of 98 with 1.
 
+### Needs You audit (2026-10-01)
+
+The owner judged the 321 threads the sample sandbox listed under Needs You on
+the v3 model at the 0.35 cut: 80 right, 185 wrong, 56 on the bubble (319
+matched to the database for the offline measurements; counts only, no mail
+leaves the scratchpad). Two templated families, of 79 and 46 threads, make up
+most of the wrong ones, and the teacher labels both as needs-you, so the fix
+is the owner's own answer rather than a refit. What shipped is the exemplar
+memory (`NeedsYouExemplars`, `docs/pipeline/11-needs-you.md`, "The owner's
+answer"): a press labels the message with its raw pooled v3 vector, and a
+message within cosine τ of a label takes the label's answer.
+
+Exemplar radius, leave-one-out over the 319 threads, one press suppressing
+every thread within τ (raw vectors; near-duplicates sit at 0.99 or above, the
+median unrelated pair at 0.27; centering changes nothing):
+
+| τ | presses to clear all 185 wrong | wrong with a same-verdict neighbour | correct caught | bubble caught |
+|---|---|---|---|---|
+| 0.90 | 49 | 144 | 0 | 2 |
+| 0.95 | 52 | 140 | 0 | 1 |
+| **0.97** (shipped, `matchCosine`) | 54 | 137 | 0 | 0 |
+| 0.99 | 56 | 135 | 0 | 0 |
+
+At 0.97 the greedy groups are 79, 46, 4, 4, 2 and 2 threads, then 48
+singletons: **two presses clear 125 of the 185 wrong threads with no correct
+or bubble thread caught**, ten presses 141.
+
+The refit that did not ship, a logistic needs_you head on the frozen v3
+encoder (train 38,391 / dev 5,956 / golden 100, temperature on dev):
+
+| targets | dev agreement | golden keep-only @0.35 | audit @0.35 (correct in / wrong in) | @0.5 golden / audit correct / audit wrong |
+|---|---|---|---|---|
+| shipped v3 head | 97.5% | 70/76 (fp0 fn6) | 78/79 / 181/185 | 67/76 / 77 / 170 |
+| defined framing only | 97.2–98.2% | 69–70/76 (fp1) | 77–78 / 170–171 | 66–68/76 / 75–77 / 83–161 |
+
+It clears at most 15 wrong threads at the cut, or costs up to four golden
+items at 0.5,
+because the round-two labels the model trained on say yes to both families.
+
 ## oMLX
 
 [oMLX](https://github.com/jundot/omlx) is an MLX-based OpenAI-compatible

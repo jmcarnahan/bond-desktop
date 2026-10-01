@@ -76,8 +76,18 @@ double? needsYouP(DecisionAnswers a) =>
 ///
 /// The Why panel and the rail's "can it explain itself" check read that
 /// column, and the decision model writes no evidence of its own, so the
-/// reason is templated from its intent and reply answers.
+/// reason is templated from its intent and reply answers — unless the owner
+/// answered for it ([DecisionAnswers.ownerAnswer]), when the sentence says so:
+/// "this message" for a label on the message itself, "a message like this"
+/// for a near-duplicate's.
 String needsYouYesReason(DecisionAnswers a) {
+  final owner = a.ownerAnswer;
+  if (owner != null) {
+    final what = a.ownerExact ? 'this message' : 'a message like this';
+    return owner == 'yes'
+        ? 'You added $what to Needs You.'
+        : 'You removed $what from Needs You.';
+  }
   switch (a['intent'].choice) {
     case 'approval':
       return 'Asks you to approve something.';

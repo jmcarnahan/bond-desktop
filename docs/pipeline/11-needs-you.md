@@ -6,14 +6,78 @@ probability that it does, `messages.needs_you_p`, is at or above the owner's
 whole rule. No band hands a middle probability to a language model, there is no
 cold-outreach bar, no Teams 1:1 or @mention floor, no attachment-digest requeue
 and no owner-written rules text. **No generative model is asked about needs-you
-at all**, on any path. The slider is the owner's one control, and moving it
-re-reads stored probabilities without asking any model anything.
+at all**, on any path. The slider is the owner's control over the cut, and
+moving it re-reads stored probabilities without asking any model anything. The
+owner's other control, **their own answers** (below), is already inside the
+probability, so the rule never reads it separately.
 
 The rule is ONE predicate with two spellings, in
 `app/lib/services/decision/needs_you_predicate.dart`: `needsYouAt(p, threshold)`
 for Dart and `needsYouAtSql(column, threshold)` for a query, pinned to agree by
 `needs_you_predicate_test`. NULL is a message not decided yet. It needs nobody in
 either spelling, and it is never shown as a low probability.
+
+**The owner's answer.** "Remove from Needs You" and "Add to Needs You" on a
+thread (`NeedsYouEdits`, `app/lib/services/needs_you_edits.dart`) store the
+owner's word as a LABEL: a `question = 'needs_you'` row of `decision_labels`
+with `answer` `no` or `yes`, `origin` `remove` or `add`, the message, and the
+decision model's raw pooled vector of that message with the model tag it came
+from. A removal labels every message of the thread's Needs You window (the
+kept inbound after the last outbound, the messages the thread's number is the
+max over); an addition labels the newest one. The label is then applied where
+every decision is written, `applyDecision` (`triage_queue.dart`), through
+`NeedsYouExemplars` (`app/lib/services/decision/needs_you_exemplars.dart`):
+before the decision is stored, its `needs_you` becomes the owner's answer with
+certainty (p 1.0 or 0.0) when the message itself carries a label (EXACT; the
+newest row for a message wins) or when its vector is within cosine
+`NeedsYouExemplarTuning.matchCosine` = **0.97** of a label's vector under the
+same model tag (SIMILAR; the nearest wins). The 0.97 is measured on the
+owner's audit: templated duplicates sit at 0.99 or above, unrelated mail at a
+median of 0.27, and at 0.97 two presses cleared 125 of 185 wrong threads with
+no correct thread caught (`docs/model-bakeoff.md`, "Needs You audit"). Because
+the override lands in the stored number, every path inherits it with no code
+of its own: the triage claim, the needs-you pass's copy step and re-decide,
+the install-time re-decide, Re-judge and Clear AI results' re-triage. The
+reason says so: "You removed this message from Needs You." / "You removed a
+message like this from Needs You." (and "added … to"), from the scalar
+`owner_answer` and `owner_exact` keys in `answers_json` beside
+`owner_label_id` and `owner_cosine`.
+
+A removal then **sweeps**: every thread still in Needs You at the slider has
+every message of its window decided again (not only the highest-p one: a
+templated thread often holds several near-duplicates, and the next would
+become the driver) through the same `decide` + `applyDecision` path,
+unawaited after the pressed thread is written, so the near-duplicates leave
+with their chips, and the conversation list reloads once when it ends. It
+runs only when a label the press wrote carries a vector. No work kind, no
+durable queue: a second press during a sweep makes it run one more pass, a
+decision server that cannot answer stops it with one log line, a per-message
+fault is logged and that message keeps its current decision, processing
+turned off stops it, and a crash mid-sweep costs a second press — the labels
+are stored first, so the next sweep, or any later decision of those messages,
+applies them. An addition sweeps nothing.
+
+**Undo is a retract, not the opposite press.** `remove` and `add` return the
+label ids they wrote, and `NeedsYouEdits.retract(ids)` DELETES those rows
+(`deleteNeedsYouLabels`, the one delete the log takes short of a wipe), then
+decides again every message whose stored decision cites one of them
+(`owner_label_id`, `messagesCitingNeedsYouLabels`): the pressed thread AND
+every thread the sweep removed take the model's number back, unless another
+label still matches. An opposite label would instead tie the removed one for
+every near-duplicate, and the newer `yes` would put the whole template in
+Needs You. Labels are compared only
+under their own model tag; a label whose message is decided under another
+model (or with no vector) has its vector refreshed from that decision, so a
+model swap heals the labels as the install-time re-decide reaches their
+messages. **Kev** (the `systemone` backend) returns no vector: on it a label
+applies to its own message only, and no sweep runs.
+
+Known limits: a needs-you pass that read the model's decision just before a
+press rewrote it can copy the model's p back onto `messages` (the decision
+row keeps the owner's answer, and the next needs-you item for the message
+copies it again); and a message pressed while its triage is still pending can
+still be dropped by the learned gate when its claim runs, which takes it out
+of the window.
 
 **The slider's default is 0.35.** It is fitted on the golden set, keep-only
 needs_you of 76, and it moves with the decision model, because a probability's
@@ -134,7 +198,11 @@ language model. The handler has **no arm** in `AiWorker`'s `_park` /
 **Storage.** `messages.needs_you_p` (REAL, schema v21) is the ONE number every
 reader reads; NULL means not decided. `messages.needs_you_reason` says why.
 `message_decisions` keeps the decision's own `needs_you_p` beside its other
-answers. `messages.needs_you_verdict` is INERT since v21: v21 mapped it into
+answers. The owner's answers are `decision_labels` rows (KEPT, so Clear AI
+results keeps them and the next decision applies them again; `wipeAll` deletes
+them) with three columns added in v23: `source_message_id`, `vector` (BLOB,
+float32 little-endian, `encodeEmbedding`) and `vector_model`.
+`messages.needs_you_verdict` is INERT since v21: v21 mapped it into
 `needs_you_p`, and nothing writes or reads it any more. The pref key
 `needs_you_rules` is inert too. Nothing reads it, and `wipeAll` still clears a
 stored copy with the rest of one person's text.
@@ -142,7 +210,8 @@ stored copy with the rest of one person's text.
 **The chip follows the probability.** `message_progress.needs_you` is a
 snapshot taken at settle time from `notifyWorthy`. When any decision writer
 changes a probability ACROSS the owner's slider (the needs-you pass, and
-through `applyDecision` the triage claim and the install-time re-decide), the
+through `applyDecision` the triage claim, the install-time re-decide and the
+owner's Needs You presses and their sweep), the
 shared `followNeedsYouChip` hands the message to
 `PipelineProgress.refreshNeedsYou`, which re-asks `notifyWorthy` and rewrites
 the flag. A probability that moved without crossing the slider is a repeat of

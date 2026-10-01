@@ -597,6 +597,33 @@ void main() {
       expect(labels.single['charter'], 'Getting invoice 4471 paid.');
     });
 
+    test("keeps the owner's Needs You answers and their vectors across Clear "
+        'AI results', () async {
+      await seedEverything();
+      final id = await store.writeNeedsYouLabel(
+        source: 'email',
+        conversationKey: 'conv-1',
+        sourceMessageId: 'm-receipt',
+        answer: 'no',
+        origin: 'remove',
+        vector: const [0.5, -0.25, 1.0],
+        vectorModel: 'bond-decide-v3',
+      );
+
+      await store.clearDerived();
+
+      // The decisions they overrode are derived and gone; the answers stay,
+      // so the next decision of a message like it applies them again.
+      expect(await rows('message_decisions'), 0);
+      final labels = await store.needsYouLabels();
+      expect(labels.single.id, id);
+      expect(labels.single.answer, 'no');
+      expect(labels.single.vector, [0.5, -0.25, 1.0]);
+      expect(labels.single.vectorModel, 'bond-decide-v3');
+      // Beside the storyline label, which is untouched.
+      expect(await rows('decision_labels'), 2);
+    });
+
     test('keeps the verdicts ingest wrote and re-pends the rest', () async {
       // The four ingest wrote, which nothing would write a second time.
       await seedMessage('out-1',
