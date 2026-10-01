@@ -13,6 +13,7 @@ import '../services/mention_index.dart';
 import '../services/profile_photos.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
+import 'app_rail.dart' show isNeedsYou;
 import 'attachment_card.dart';
 import 'attachment_format.dart';
 import 'bot_run_row.dart';
@@ -166,6 +167,12 @@ class ThreadDetailPanel extends StatefulWidget {
   /// sender-wide [onSendToLater] stays in the ⋯, where the corrections about
   /// a sender live. Null hides the button.
   final VoidCallback? onLaterThread;
+
+  /// The owner's "Remove from Needs You" / "Add to Needs You" on this thread
+  /// — the action bar draws whichever the thread's place calls for, by the
+  /// rail's own rule ([isNeedsYou] at [needsYouThreshold]). Null hides it.
+  final VoidCallback? onRemoveFromNeedsYou;
+  final VoidCallback? onAddToNeedsYou;
 
   /// Takes one label off this thread (the chip's ✕). Null draws chips with no
   /// ✕.
@@ -354,6 +361,8 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onDropSender,
     this.onKeepInInbox,
     this.onLaterThread,
+    this.onRemoveFromNeedsYou,
+    this.onAddToNeedsYou,
     this.onRemoveLabel,
     this.onFindLabel,
     this.afterTranscript,
@@ -1333,6 +1342,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       onReopen: widget.onReopen,
       onLater: widget.onLaterThread,
       onKeepInInbox: widget.onKeepInInbox,
+      inNeedsYou: isNeedsYou(c, threshold: widget.needsYouThreshold),
+      needsYouDecided: c.needsYouP != null,
+      onRemoveFromNeedsYou: widget.onRemoveFromNeedsYou,
+      onAddToNeedsYou: widget.onAddToNeedsYou,
       onStoryline: widget.onAddToStoryline,
       onContext: widget.onContext,
       contextLinked: widget.contextLinked,

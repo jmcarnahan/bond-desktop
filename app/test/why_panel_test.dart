@@ -1,5 +1,7 @@
 import 'package:bond_inbox/models/extraction_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/decision/needs_you_exemplars.dart'
+    show NeedsYouOverride;
 import 'package:bond_inbox/services/decision/stored_decision.dart';
 import 'package:bond_inbox/widgets/why_panel.dart';
 import 'package:flutter/material.dart';
@@ -184,6 +186,55 @@ void main() {
         ),
       );
       expect(find.text('Needs you: 100%'), findsOneWidget);
+    });
+
+    testWidgets("the owner's removal reads as theirs, with its sentence "
+        'below the line', (tester) async {
+      await pump(
+        tester,
+        message: msg(
+          needsYouP: 0.0,
+          needsYouReason: 'You removed a message like this from Needs You.',
+        ),
+        decision: StoredDecision(
+          answers: fakeAnswers(needsYou: 0.9).withNeedsYou('no'),
+          model: 'bond-decide-fake',
+          needsYouP: 0.0,
+        ),
+      );
+
+      // From a message like this one, not this message: the headline says so.
+      expect(find.text('Needs you: no — like one you removed'),
+          findsOneWidget);
+      expect(find.text('Needs you: 0%'), findsNothing);
+      expect(
+        find.text('You removed a message like this from Needs You.'),
+        findsOneWidget,
+      );
+      expect(find.text('Not in Needs You: below your 35% line.'),
+          findsOneWidget);
+    });
+
+    testWidgets("the owner's addition reads as theirs, with no percentage",
+        (tester) async {
+      await pump(
+        tester,
+        message: msg(
+          needsYouP: 1.0,
+          needsYouReason: 'You added this message to Needs You.',
+        ),
+        decision: StoredDecision(
+          answers: fakeAnswers(needsYou: 0.1).withNeedsYou('yes', exact: true),
+          model: 'bond-decide-fake',
+          needsYouP: 1.0,
+        ),
+      );
+
+      expect(find.text('Needs you: yes — you added it'), findsOneWidget);
+      expect(find.text('Needs you: 100%'), findsNothing);
+      expect(find.text('You added this message to Needs You.'), findsOneWidget);
+      expect(find.text('In Needs You: at or above your 35% line.'),
+          findsOneWidget);
     });
 
     testWidgets("the reader's own slider is the cut", (tester) async {

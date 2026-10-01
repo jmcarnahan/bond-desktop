@@ -11,7 +11,11 @@ import '../widgets/activity_log_panel.dart';
 import '../widgets/home_result.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/needs_you_reason.dart'
-    show needsYouFromEarlierModel, needsYouPercentWords;
+    show
+        needsYouFromEarlierModel,
+        needsYouPercentWords,
+        ownerAnswerExact,
+        ownerAnswerOf;
 import '../widgets/pane_surface.dart';
 import '../widgets/source_glyph.dart';
 import '../widgets/stage_bar.dart';
@@ -455,7 +459,19 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     // message over the owner's slider, where it is an answer
     // (`home_result.dart` keeps the same rule).
     final showWhy = why.isNotEmpty && needsYouAt(p, history.threshold);
-    lines.add('Needs you: $verdict${showWhy ? ' — $why' : ''}');
+    // The owner's own answer reads as theirs, with its sentence on either side
+    // of the line — the Why panel's headline, one click away, says the same.
+    final exact = ownerAnswerExact(why);
+    switch (ownerAnswerOf(why)) {
+      case 'no':
+        lines.add('Needs you: no — '
+            '${exact ? 'you removed it' : 'like one you removed'} — $why');
+      case 'yes':
+        lines.add('Needs you: yes — '
+            '${exact ? 'you added it' : 'like one you added'} — $why');
+      default:
+        lines.add('Needs you: $verdict${showWhy ? ' — $why' : ''}');
+    }
 
     final score = history.attentionScore;
     lines.add(

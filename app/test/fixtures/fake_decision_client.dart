@@ -62,12 +62,21 @@ DecisionAnswers fakeAnswers({
   });
 }
 
-DecisionResult fakeDecision(DecisionAnswers answers, {int latencyMs = 42}) =>
+/// A scripted decision. [vector] stands in for the encoder's pooled vector
+/// (the owner's Needs You labels keep it); [model] is the tag it is compared
+/// under.
+DecisionResult fakeDecision(
+  DecisionAnswers answers, {
+  int latencyMs = 42,
+  List<double>? vector,
+  String model = 'bond-decide-fake',
+}) =>
     DecisionResult(
       answers: answers,
       state: 'state',
-      model: 'bond-decide-fake',
+      model: model,
       latencyMs: latencyMs,
+      vector: vector,
     );
 
 /// A [DecisionClient] that answers from a script and records what it read.
@@ -166,6 +175,19 @@ class FakeDecisionClient extends DecisionClient {
     if (error != null) throw error;
     return [for (final state in states) yesFor(question, state)];
   }
+
+  /// What [modelTag] answers: null — no vector to compare under, as the real
+  /// client answers with no heads file — unless a test says. A test of the
+  /// owner's stored-vector presses sets it to the tag its stored decisions
+  /// carry (`fakeDecision`'s `'bond-decide-fake'`).
+  String? tag;
+
+  @override
+  String? get modelTag => tag;
+
+  /// [tag] as well: no kind to learn in a fake.
+  @override
+  Future<String?> resolvedModelTag() async => tag;
 
   /// How many [ensureReady] checks were made.
   int readyChecks = 0;

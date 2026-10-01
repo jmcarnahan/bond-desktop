@@ -473,7 +473,7 @@ void main() {
       }
     });
 
-    test('name every search-corpus one-shot, and account for all eleven',
+    test('name every search-corpus one-shot, and account for all thirteen',
         () {
       // The same rule over the four search corpora, and it bites harder here:
       // the clear EMPTIES `message_vectors`, `attachment_chunks` and
@@ -488,13 +488,25 @@ void main() {
       }
       // The count, so a key added to the store's list without a walk behind it
       // shows up here rather than in a mailbox. Six from before the search
-      // corpora, four with them, and the needs-you veto's lowering twin of
-      // the verdict backfill. The behaviour of each search walk is pinned in
-      // `embed_backfill_test.dart`.
-      expect(MessageStore.derivedOneShotPrefs, hasLength(11));
+      // corpora, four with them, the needs-you veto's lowering twin of the
+      // verdict backfill, the decision-vector backfill (v24), and the sweep's
+      // pool size at its last pass. The behaviour of each search walk is
+      // pinned in `embed_backfill_test.dart`.
+      expect(MessageStore.derivedOneShotPrefs, hasLength(13));
       expect(
         MessageStore.derivedOneShotPrefs.toSet(),
         hasLength(MessageStore.derivedOneShotPrefs.length),
+      );
+    });
+
+    test('name the sweep pool size, so a clear resets the progressive gate',
+        () {
+      // A pool size kept over threads whose storylines the clear has deleted
+      // would hold the next progressive sweep back until the new pool
+      // outgrew the old count.
+      expect(
+        MessageStore.derivedOneShotPrefs,
+        contains(storylineSweepPoolAtKey),
       );
     });
   });
@@ -595,6 +607,33 @@ void main() {
       expect(labels.single['question'], 'member_of');
       expect(labels.single['answer'], 'yes');
       expect(labels.single['charter'], 'Getting invoice 4471 paid.');
+    });
+
+    test("keeps the owner's Needs You answers and their vectors across Clear "
+        'AI results', () async {
+      await seedEverything();
+      final id = await store.writeNeedsYouLabel(
+        source: 'email',
+        conversationKey: 'conv-1',
+        sourceMessageId: 'm-receipt',
+        answer: 'no',
+        origin: 'remove',
+        vector: const [0.5, -0.25, 1.0],
+        vectorModel: 'bond-decide-v3',
+      );
+
+      await store.clearDerived();
+
+      // The decisions they overrode are derived and gone; the answers stay,
+      // so the next decision of a message like it applies them again.
+      expect(await rows('message_decisions'), 0);
+      final labels = await store.needsYouLabels();
+      expect(labels.single.id, id);
+      expect(labels.single.answer, 'no');
+      expect(labels.single.vector, [0.5, -0.25, 1.0]);
+      expect(labels.single.vectorModel, 'bond-decide-v3');
+      // Beside the storyline label, which is untouched.
+      expect(await rows('decision_labels'), 2);
     });
 
     test('keeps the verdicts ingest wrote and re-pends the rest', () async {

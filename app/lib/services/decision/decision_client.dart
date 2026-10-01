@@ -94,13 +94,31 @@ class DecisionResult {
   /// The state was longer than the model's context and was cut to it.
   final bool truncated;
 
+  /// The encoder's raw pooled vector the heads read ([DecisionHeads.width]
+  /// wide, not normalised), or null on a backend that answers probabilities
+  /// itself (`systemone`). The owner's Needs You labels keep it, so a press
+  /// can recognise near-duplicate mail (`NeedsYouExemplars`).
+  final List<double>? vector;
+
   const DecisionResult({
     required this.answers,
     required this.state,
     required this.model,
     required this.latencyMs,
     this.truncated = false,
+    this.vector,
   });
+
+  /// This result with [answers] in place of its own — how the owner's Needs
+  /// You answer replaces the model's before the decision is stored.
+  DecisionResult withAnswers(DecisionAnswers answers) => DecisionResult(
+        answers: answers,
+        state: state,
+        model: model,
+        latencyMs: latencyMs,
+        truncated: truncated,
+        vector: vector,
+      );
 }
 
 /// The per-call facts the one [LlmCallRecord] reports, gathered across the
@@ -381,6 +399,52 @@ class DecisionClient {
     }
     final heads = _heads();
     return 'heads:${heads.model}@${heads.fingerprint}';
+  }
+
+  /// The tag a fresh decision's vector would carry right now
+  /// ([DecisionResult.model] on the encoder-heads kind: the heads file's
+  /// model), or null when this client would answer with no vector or cannot
+  /// say without asking: the target unavailable, the heads file missing or
+  /// refused, Your server of the systemone kind, or Your server whose kind
+  /// this run has not learned yet. Synchronous and never a request — the
+  /// heads are cached per file modification and a server's kind per address.
+  ///
+  /// Callers read it through [resolvedModelTag]: the owner's Needs You
+  /// presses, to tell a stored decision's vector they can compare from one
+  /// they cannot (`NeedsYouEdits`; a press that finds null asks the model,
+  /// which is harmless), and the needs-you pass.
+  String? get modelTag {
+    final destination = target;
+    if (destination.unavailable != null) return null;
+    if (_yours(destination) &&
+        _kinds[_keyOf(destination)]?.kind != DecisionServerKind.encoderHeads) {
+      return null;
+    }
+    try {
+      return _heads().model;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// [modelTag], after learning Your server's kind when this run has not:
+  /// one listing GET per address, cached as every call caches it. What the
+  /// needs-you pass reads (`NeedsYouHandler`), which otherwise never makes a
+  /// request and so would read null for every item of the vector backfill
+  /// on Your server and copy them all. A kind that cannot be learned (the
+  /// server down, the key refused, another question set) answers null,
+  /// which owes nothing, so the pass copies as before rather than parking.
+  Future<String?> resolvedModelTag() async {
+    final destination = target;
+    if (destination.unavailable != null) return null;
+    if (_yours(destination) && !_kinds.containsKey(_keyOf(destination))) {
+      try {
+        await _resolveKind(destination, _CallFacts(yourServer: true));
+      } on LlmException {
+        return null;
+      }
+    }
+    return modelTag;
   }
 
   /// `same_effort` for each pair of thread texts (`renderStorylineThread`),
@@ -1408,6 +1472,7 @@ class _EncoderHeadsBackend implements _DecisionBackend {
       model: heads.model,
       latencyMs: sw.elapsedMilliseconds,
       truncated: truncated,
+      vector: vector,
     );
   }
 
@@ -1427,6 +1492,7 @@ class _EncoderHeadsBackend implements _DecisionBackend {
           model: heads.model,
           latencyMs: sw.elapsedMilliseconds,
           truncated: truncated[i],
+          vector: vectors[i],
         ),
     ];
   }

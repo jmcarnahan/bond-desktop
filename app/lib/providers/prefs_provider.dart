@@ -485,18 +485,26 @@ class AppPrefs {
   /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The wire is
   /// read off the host.
   ///
-  /// The widths are sized to what is known about the server. A remote whose
-  /// URL FOLLOWS THE BUILD is the compiled box (`tools/inference.sh`): drafts
-  /// four wide, message text eight. Its PROSE-ONLY profile runs vLLM at
+  /// The widths are sized to what is known about the server. Message text
+  /// runs eight wide on Your server whether or not the address follows the
+  /// build: it is the owner's own server either way (a third-party host is
+  /// refused for this role), and a server with fewer slots queues the extra
+  /// requests rather than failing them. The compiled box
+  /// (`tools/inference.sh`) runs its PROSE-ONLY profile at vLLM
   /// `--max-num-seqs 16`, which leaves the rest to the storyline lane; with a
   /// bulk slot (`--bulk-model`) the prose slot has 8 sequences and vLLM
   /// queues the extra requests, their wait counting against the client's
-  /// 120 s timeout. The attachment digests share extraction's eight: they
-  /// drain after it on the same lane, one kind at a time.
-  /// A stored address is an unknown server — drafts one at a time, because a
-  /// one-slot llama-server queues the rest past the prose client's ceiling,
-  /// and message text three, the width it always had. This Mac's server
-  /// gives message text its [proseParallel] slots, never fewer than three.
+  /// 90 s timeout (`LlmClient.proseTimeout`, every generative stage's). The
+  /// bound is conscious: on a one-slot server the eighth text waits about
+  /// seven calls, so a server slower than ~11 s per text would time out;
+  /// the box is ~4 s. The attachment digests share extraction's eight: they
+  /// drain after it on the same lane, one kind at a time. A typed address ran
+  /// three wide until the 2026-10-01 replay, where ~730 texts took ~15 min.
+  /// Drafts keep the split: four wide on an address that follows the build,
+  /// one at a time on a stored one, because drafts stream and a stored
+  /// address may be a laptop's one-slot llama-server, which would queue the
+  /// rest past the prose client's ceiling. This Mac's server gives message
+  /// text its [proseParallel] slots, never fewer than three.
   LlmTargetSpec get generativeSpec {
     final url = effectiveGenerativeUrl;
     if (modelPlacement == ModelPlacement.box &&
@@ -510,7 +518,7 @@ class AppPrefs {
         wire: wireForHost(url),
         hasBearer: boxBigKeyStored,
         parallel: boxBigUrl.isEmpty ? 4 : 1,
-        textParallel: boxBigUrl.isEmpty ? 8 : 3,
+        textParallel: 8,
       );
     }
     if (managedServer) {

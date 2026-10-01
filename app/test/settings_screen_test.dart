@@ -50,6 +50,8 @@ void main() {
     void Function(String)? onDeleteLabel,
     bool replySendMarksDone = false,
     void Function(bool)? onReplySendMarksDoneChanged,
+    ({int removed, int added})? needsYouAnswers,
+    Future<void> Function()? onForgetNeedsYouAnswers,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -81,6 +83,8 @@ void main() {
           onDeleteLabel: onDeleteLabel,
           replySendMarksDone: replySendMarksDone,
           onReplySendMarksDoneChanged: onReplySendMarksDoneChanged,
+          needsYouAnswers: needsYouAnswers,
+          onForgetNeedsYouAnswers: onForgetNeedsYouAnswers,
         ),
       ),
     ));
@@ -129,6 +133,96 @@ void main() {
           'Each message shows its own percentage.'),
       findsOneWidget,
     );
+  });
+
+  group("the owner's Needs You answers", () {
+    testWidgets('counts the presses and forgets them in two steps',
+        (tester) async {
+      var forgot = 0;
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        needsYouAnswers: (removed: 3, added: 1),
+        onForgetNeedsYouAnswers: () async => forgot++,
+      );
+      await expand(tester, 'Needs You');
+
+      expect(find.text('Your answers'), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(find.byKey(SettingsScreen.needsYouAnswersLineKey))
+            .data,
+        "You've removed 3 kinds of mail from Needs You and added 1 kind.",
+      );
+      final button = find.byKey(SettingsScreen.forgetNeedsYouAnswersKey);
+      expect(find.text('Forget all Needs You answers'), findsOneWidget);
+
+      // The first press only arms it.
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(forgot, 0);
+      expect(find.text('Really forget?'), findsOneWidget);
+
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(forgot, 1);
+      expect(find.text('Forget all Needs You answers'), findsOneWidget);
+    });
+
+    testWidgets('with no answers says so and offers nothing to forget',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        needsYouAnswers: (removed: 0, added: 0),
+        onForgetNeedsYouAnswers: () async {},
+      );
+      await expand(tester, 'Needs You');
+
+      expect(find.text("You haven't answered for any mail yet."),
+          findsOneWidget);
+      expect(find.byKey(SettingsScreen.forgetNeedsYouAnswersKey),
+          findsNothing);
+    });
+
+    testWidgets('a Forget that fails says so under the button',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        needsYouAnswers: (removed: 1, added: 0),
+        onForgetNeedsYouAnswers: () async => throw StateError('off'),
+      );
+      await expand(tester, 'Needs You');
+      final button = find.byKey(SettingsScreen.forgetNeedsYouAnswersKey);
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text("Your answers couldn't be forgotten just now — processing "
+            'has to be on.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('before the host has read them, no line', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      expect(find.text('Your answers'), findsNothing);
+      expect(find.byKey(SettingsScreen.needsYouAnswersLineKey), findsNothing);
+    });
   });
 
   testWidgets('the Needs You summary is the threshold as a percentage',

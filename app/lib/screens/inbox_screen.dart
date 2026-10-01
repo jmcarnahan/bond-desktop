@@ -51,6 +51,7 @@ import '../services/llm/draft_task.dart' show DraftOption;
 // stop needs it to say whether the models run on the box.
 import '../services/llm/model_slots.dart' show ModelPlacement;
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
+import '../services/needs_you_edits.dart' show NeedsYouPress;
 import '../services/profile_photos.dart' show photoKeyFor;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
@@ -1179,9 +1180,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The Storylines pane's Sync: [_refreshAll] and nothing else.
   ///
   /// There is no second, storyline-shaped sync to build. The ordinary pull
-  /// ends by requeueing the sweep, and the sweep's catch-ups drain the
-  /// refreshes and recaps that were owed — so asking for mail is already
-  /// asking for the storylines to be brought up to date.
+  /// ends by requeueing the sweep, and on a settled mailbox the sweep's
+  /// catch-ups drain the refreshes and recaps that were owed — so asking for
+  /// mail is already asking for the storylines to be brought up to date.
+  /// During a cold start both wait for the mailbox to settle.
   Future<void> _syncNow() async {
     if (_syncing) return;
     setState(() => _syncing = true);
@@ -2717,8 +2719,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _takeTriageFocus();
         return;
       }
-      if (landing != null) {
-        _selectTriageRow(landing.source, landing.key);
+      // The act can take the landing out of the pile too — a Needs You
+      // press moves every thread like the pressed one, and those are its
+      // neighbours — so the reader lands on the nearest row still drawn, read
+      // from the notifier's state as the act left it: [_rows] waits for the
+      // next build.
+      final standing = landing == null
+          ? null
+          : _stillDrawn(
+              landing,
+              target,
+              before: rows,
+              now: _pileAsLoaded(),
+            );
+      if (standing != null) {
+        _selectTriageRow(standing.source, standing.key);
         return;
       }
       final beside = _threadBeside;
@@ -2738,6 +2753,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _triaging = false;
       idle.complete();
     }
+  }
+
+  /// The pile as the notifier's state holds it now, ahead of the build that
+  /// will draw it: [_rows] taken from the state the way the build takes it,
+  /// then [_triageRows].
+  List<Conversation> _pileAsLoaded() {
+    if (ref.read(conversationsProvider)
+        case ConversationsLoaded(:final conversations)) {
+      _rows = bySource(conversations, _sourceFilter);
+    }
+    return _triageRows(ref.read(appPrefsProvider));
+  }
+
+  /// [landing] if [now] still draws it; else the nearest row of [before]
+  /// that [now] still draws, walking down from [landing], then up — never
+  /// [target], the thread the act just cleared. Null when nothing is left.
+  ({String source, String key})? _stillDrawn(
+    ({String source, String key}) landing,
+    ({String source, String key}) target, {
+    required List<Conversation> before,
+    required List<Conversation> now,
+  }) {
+    final drawn = {for (final c in now) (source: c.source, key: c.id)};
+    if (drawn.contains(landing)) return landing;
+    final order = [for (final c in before) (source: c.source, key: c.id)];
+    final at = order.indexOf(landing);
+    if (at < 0) return null;
+    for (final i in [
+      for (var i = at + 1; i < order.length; i++) i,
+      for (var i = at - 1; i >= 0; i--) i,
+    ]) {
+      if (order[i] != target && drawn.contains(order[i])) return order[i];
+    }
+    return null;
   }
 
   /// Dismiss: `done`, said in a bar with the way back on it.
@@ -2796,6 +2845,75 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _toast('Sent to Later.', onUndo: () => unawaited(undo()));
     return true;
   }
+
+  /// "Remove from Needs You", on the bar: the owner's `no` about this
+  /// thread and every thread like it, said in a bar that counts the others
+  /// and whose Undo takes the whole press back
+  /// ([ConversationsNotifier.undoNeedsYouPress]), never the opposite press.
+  ///
+  /// The thread leaves the pile, so it runs under [_triageAndAdvance] and the
+  /// reader lands on the next row still drawn: the press's sweep has already
+  /// written when it returns, so the landing skips the threads it took. A
+  /// press that wrote nothing (no message in the thread waits on the owner)
+  /// or that failed answers false and moves nobody.
+  Future<bool> _removeFromNeedsYou(({String source, String key}) target) =>
+      _pressNeedsYou(target, remove: true);
+
+  /// "Add to Needs You", on the bar: the owner's `yes`, with the same count
+  /// and Undo. The thread stays where the reader is, so it advances nobody,
+  /// and so it is not under [_triaging]'s latch: [_adding] is its own, and a
+  /// second press while one (with its sweep) is out is dropped, rather than
+  /// writing a second stamp whose `yes` would outlive the first one's Undo.
+  Future<void> _addToNeedsYou(({String source, String key}) target) async {
+    if (_adding) return;
+    _adding = true;
+    try {
+      await _pressNeedsYou(target, remove: false);
+    } finally {
+      _adding = false;
+    }
+  }
+
+  /// An Add is out — see [_addToNeedsYou].
+  bool _adding = false;
+
+  Future<bool> _pressNeedsYou(
+    ({String source, String key}) target, {
+    required bool remove,
+  }) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    final press = remove
+        ? await notifier.removeFromNeedsYou(target.source, target.key)
+        : await notifier.addToNeedsYou(target.source, target.key);
+    if (!mounted) return press != null && !press.isEmpty;
+    if (press == null) {
+      _toast(_needsYouFailed);
+      return false;
+    }
+    if (press.isEmpty) {
+      _toast('Nothing here is waiting on you.');
+      return false;
+    }
+    _toast(
+      needsYouPressSaid(press, remove: remove),
+      onUndo: () => unawaited(_undoNeedsYou(press)),
+    );
+    return true;
+  }
+
+  Future<void> _undoNeedsYou(NeedsYouPress press) async {
+    try {
+      await ref.read(conversationsProvider.notifier).undoNeedsYouPress(press);
+    } catch (e) {
+      debugPrint('needs_you: an undo failed: ${e.runtimeType}');
+      _toast("Couldn't undo that just now.");
+    }
+  }
+
+  /// The bar's sentence for a Needs You press the decision model could not
+  /// answer: nothing was kept, in the house's "Couldn't … just now." form.
+  static const String _needsYouFailed =
+      "Couldn't save that just now — the thread is unchanged.";
 
   /// [_laterThread]'s do-step: defers the thread and hands back its way out,
   /// with no bar — [_bulkLater] raises one bar for all of them.
@@ -5440,6 +5558,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _laterThread,
         on: (source: selected.source, key: selected.id),
       )),
+      // The owner's Needs You answer. Remove takes the thread off the pile,
+      // so it advances like Mark done; Add leaves the reader where they are.
+      onRemoveFromNeedsYou: () => unawaited(_triageAndAdvance(
+        _removeFromNeedsYou,
+        on: (source: selected.source, key: selected.id),
+      )),
+      onAddToNeedsYou: () => unawaited(
+        _addToNeedsYou((source: selected.source, key: selected.id)),
+      ),
       onRemoveLabel: (label) => unawaited(_removeLabel(
         (source: selected.source, key: selected.id),
         label,
@@ -7540,4 +7667,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       },
     );
   }
+}
+
+/// The bar's sentence for a Needs You press: `Removed from Needs You — and 78
+/// like it.` / `Added to Needs You — and 3 like it.` with the threads the
+/// press's sweep moved ([NeedsYouPress.changed]), and the head alone when it
+/// moved none — always on a backend with no vector, where the answer holds
+/// for the pressed thread alone.
+String needsYouPressSaid(NeedsYouPress press, {required bool remove}) {
+  final head = remove ? 'Removed from Needs You' : 'Added to Needs You';
+  if (press.changed == 0) return '$head.';
+  return '$head — and ${press.changed} like it.';
 }

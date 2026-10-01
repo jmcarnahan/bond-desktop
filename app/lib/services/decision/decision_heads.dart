@@ -24,6 +24,8 @@ import '../llm/llm_client.dart'
         decisionOlderModelText;
 import 'decision_questions.dart';
 import 'decision_state.dart' show decisionRendererVersion;
+import 'stored_decision.dart'
+    show decisionOwnerAnswerKey, decisionOwnerExactKey;
 
 /// The fields in head order, which is `distill/questions.py` `FIELDS`.
 const List<String> decisionFields = [
@@ -135,7 +137,22 @@ class ChoiceAnswer {
 class DecisionAnswers {
   final Map<String, ChoiceAnswer> fields;
 
-  const DecisionAnswers(this.fields);
+  /// The owner's own Needs You answer (`yes` or `no`) when it replaced the
+  /// model's `needs_you` — a label on this message or on one like it
+  /// (`NeedsYouExemplars`) — else null. Not a field: it rides `answers_json`
+  /// as the scalar [decisionOwnerAnswerKey], which [fromJson] reads back, so
+  /// a fresh decision and a stored one word their reason the same.
+  final String? ownerAnswer;
+
+  /// Whether [ownerAnswer] came from a label on this very message rather
+  /// than a near-duplicate's ([decisionOwnerExactKey]).
+  final bool ownerExact;
+
+  const DecisionAnswers(
+    this.fields, {
+    this.ownerAnswer,
+    this.ownerExact = false,
+  });
 
   /// All nine answers from each field's calibrated probabilities, keyed by
   /// field and then option: [ChoiceAnswer.fromProbabilities] over
@@ -172,12 +189,19 @@ class DecisionAnswers {
           key: value.toJson(),
       };
 
-  /// Entries that are not a Map (a stored `owner_known` flag) are skipped.
-  factory DecisionAnswers.fromJson(Map<String, Object?> json) =>
-      DecisionAnswers({
+  /// Entries that are not a Map (a stored `owner_known` flag) are skipped as
+  /// fields; the owner's Needs You answer is read from its scalar keys.
+  factory DecisionAnswers.fromJson(Map<String, Object?> json) {
+    final owner = json[decisionOwnerAnswerKey];
+    return DecisionAnswers(
+      {
         for (final MapEntry(:key, :value) in json.entries)
           if (value is Map) key: ChoiceAnswer.fromJson(value.cast()),
-      });
+      },
+      ownerAnswer: owner is String ? owner : null,
+      ownerExact: owner is String && json[decisionOwnerExactKey] == true,
+    );
+  }
 }
 
 /// One question's linear head.

@@ -109,7 +109,7 @@ Each role's spec resolves in the same order, per call:
 | Your server: id | `box-prose` | `box-decide` |
 | Your server: URL | `box_big_url`, else `$BOND_BOX_URL/prose/v1/chat/completions` | `decision_url`, else `$BOND_BOX_URL/decide/v1/embeddings` |
 | Your server: model | `box_big_model` (discovered), else `qwen3.8` (`boxProseModel`) | `decision_model` (discovered), else `bond-decide-mbl-v3` (`boxDecideModel`) |
-| Your server: width | 4 when the URL follows the build, 1 for a stored address | 1 |
+| Your server: width | drafts 4 when the URL follows the build, 1 for a stored address; message text 8 either way | 1 |
 | Managed: id, URL | `local-generative`, `<router>/v1/chat/completions` | `local-decision`, `<router>/v1/embeddings` |
 | Managed: model | `managedGenerativeIdFor(tier, generative_managed_model)`: `bond-prose` (27B) or `bond-bulk` (4B) | `bond-decide` |
 | Hand servers | `LLAMA_URL` / `LLAMA_MODEL` (`:8080`, `qwen3.8`) | `DECIDE_URL` / `DECIDE_MODEL` (`:8083`, `bond-decide`, `make decide`) |
@@ -125,16 +125,23 @@ Each role's spec resolves in the same order, per call:
   `docs/inference-endpoint.md`).
 - **The width.** Two numbers on `LlmTargetSpec`: `parallel` (drafts) and
   `textParallel` (message text — extraction and the attachment digests; 1–8,
-  default 3). A URL that follows the build is four wide for drafts and EIGHT
-  for message text. The compiled box's PROSE-ONLY profile runs vLLM at
+  default 3). Message text runs EIGHT wide on Your server, whether the URL
+  follows the build or was typed: it is the owner's own server either way (a
+  third-party host is refused for this role), and a server with fewer slots
+  queues the extra requests rather than failing them. A URL that follows the
+  build is four wide for drafts. The compiled box's PROSE-ONLY profile runs vLLM at
   `--max-num-seqs 16` (`tools/inference.sh`), which leaves the rest to the
   storyline lane; with a bulk slot (`--bulk-model`) the prose slot has 8
   sequences and vLLM queues the extra requests, their wait counting against
-  the client's 120 s timeout. The digests share extraction's eight: they
+  the client's 90 s timeout (`LlmClient.proseTimeout`, every generative
+  stage's). On a one-slot server the eighth text waits ~7 calls, so a server
+  slower than ~11 s per text would time out; the box is ~4 s. The digests
+  share extraction's eight: they
   drain after it on the same lane, one kind at a time. A stored address is
-  one at a time for drafts, because a one-slot llama-server queues the rest past the
-  generative client's ninety-second ceiling, and three for message text, the
-  width it always had. The managed generative width is `prose_parallel`
+  one at a time for drafts, because drafts stream and a one-slot
+  llama-server queues the rest past the generative client's ninety-second
+  ceiling. Message text on a stored address was three wide until the owner's
+  2026-10-01 replay, where ~730 texts at ~20 per 30 s took ~15 min. The managed generative width is `prose_parallel`
   (1–8, default 1), and message text takes it but never fewer than three.
 - **The managed generative model.** `generative_managed_model` is `''` (by
   hardware tier: the 27B on the full tier, the 4B on the inbox tier),

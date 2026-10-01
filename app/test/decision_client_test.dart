@@ -252,6 +252,10 @@ void main() {
       expect(result.model, 'bond-decide-synthetic');
       expect(result.truncated, false);
       expect(result.latencyMs, greaterThanOrEqualTo(0));
+      // The raw vector rides on the result, for the owner's Needs You labels.
+      final state = renderDecisionState(input, toLocal: _pacific);
+      expect(result.vector, hasLength(1024));
+      expect(result.vector, _vectorForText(state));
 
       expect(records, hasLength(1));
       expect(records.single.label, 'decision');
@@ -335,6 +339,17 @@ void main() {
         throwsA(isA<DecisionMisconfiguredException>()
             .having((e) => e.message, 'message', contains('bad vector index'))),
       );
+    });
+
+    test('a batch result carries each message its own raw vector', () async {
+      final inputs = [_input('First note.'), _input('Please DROP this one.')];
+      final results = await client().decideBatch(inputs);
+      for (var i = 0; i < inputs.length; i++) {
+        expect(
+          results[i].vector,
+          _vectorForText(renderDecisionState(inputs[i], toLocal: _pacific)),
+        );
+      }
     });
 
     test('a batch answered with the wrong number of vectors is refused',
@@ -1439,5 +1454,98 @@ void main() {
       c.decide(_longInput()),
       throwsA(isA<DecisionUnavailableException>()),
     );
+  });
+
+  group('modelTag', () {
+    DecisionClient tagged({
+      LlmTarget Function()? resolve,
+      DecisionHeads Function()? heads,
+      bool yourServer = false,
+    }) =>
+        DecisionClient(
+          resolveTarget: resolve ?? () => target,
+          heads: heads ?? syntheticHeads,
+          client: server.client,
+          onCall: records.add,
+          toLocal: _pacific,
+          isYourServer: yourServer ? (_) => true : null,
+        );
+
+    test("on the encoder kind it is the tag a fresh decision's vector "
+        'carries', () async {
+      final c = tagged();
+
+      expect(c.modelTag, 'bond-decide-synthetic');
+      expect(await c.resolvedModelTag(), 'bond-decide-synthetic');
+      // Neither asked anything: the GET a decide makes is its heads pairing.
+      expect(server.listings, isEmpty);
+      expect((await c.decide(_input('a'))).model, c.modelTag);
+    });
+
+    test('an unavailable target has none, and asks nothing', () async {
+      final c = tagged(
+        resolve: () => const LlmTarget(
+          baseUrl: _url,
+          model: 'bond-decide',
+          unavailable: 'The decision model is not installed.',
+        ),
+        yourServer: true,
+      );
+
+      expect(c.modelTag, isNull);
+      expect(await c.resolvedModelTag(), isNull);
+      expect(server.listings, isEmpty);
+    });
+
+    test('heads that cannot be read give none', () async {
+      final c = tagged(heads: () => throw StateError('no heads file'));
+
+      expect(c.modelTag, isNull);
+      expect(await c.resolvedModelTag(), isNull);
+    });
+
+    test("Your server: none until its kind is learned; the resolver learns "
+        'it with one listing and answers the heads model', () async {
+      final c = tagged(yourServer: true);
+
+      expect(c.modelTag, isNull);
+      expect(server.listings, isEmpty, reason: 'the getter never asks');
+
+      expect(await c.resolvedModelTag(), 'bond-decide-synthetic');
+      expect(server.listings, hasLength(1));
+      expect(c.modelTag, 'bond-decide-synthetic');
+      // Cached: no second listing.
+      expect(await c.resolvedModelTag(), 'bond-decide-synthetic');
+      expect(server.listings, hasLength(1));
+    });
+
+    test('a systemone server has none, before and after its kind is known',
+        () async {
+      server.listing = {
+        'models': [
+          {
+            'name': 'kev',
+            'qhash': decisionQhash,
+            'renderer': decisionRendererVersion,
+          },
+        ],
+      };
+      final c = tagged(yourServer: true);
+
+      expect(c.modelTag, isNull);
+      expect(await c.resolvedModelTag(), isNull);
+      expect(server.listings, hasLength(1));
+      expect(c.kindOf(url: _url, model: 'bond-decide'),
+          DecisionServerKind.systemOne);
+      expect(c.modelTag, isNull);
+    });
+
+    test('a kind that cannot be learned answers none rather than throwing',
+        () async {
+      server.listingStatus = 503;
+      final c = tagged(yourServer: true);
+
+      expect(await c.resolvedModelTag(), isNull);
+    });
   });
 }

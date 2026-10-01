@@ -32,7 +32,9 @@ import 'time_format.dart';
 /// It is read-only, and nothing it shows feeds back anywhere. This reads model
 /// OUTPUT that has already been through the untrusted-data fence upstream; it
 /// writes nothing, sends nothing and prompts nothing, so there is no second
-/// fence to build here.
+/// fence to build here. The owner's own Needs You answer is SHOWN here — "you
+/// removed it", and the sentence saying whether it was this message or one
+/// like it — but it is taken on the thread's action bar, never in this panel.
 class WhyPanelBody extends StatelessWidget {
   /// The message being explained. Null — synced away, wiped — says so and
   /// draws nothing else: an explanation of a message nobody has is a page of
@@ -179,7 +181,24 @@ class WhyPanelBody extends StatelessWidget {
   /// under this build's questions, `needsYouFromEarlierModel`) reads
   /// `Needs you: — (earlier model)`: it still counts against the slider, but
   /// no model said that number.
+  ///
+  /// The owner's own answer ([StoredDecision.ownerAnswer]) reads as theirs,
+  /// with no percentage: `Needs you: no — you removed it`, or `— like one
+  /// you removed` when the answer came from a message like this one
+  /// ([DecisionAnswers.ownerExact] false). The 0.0 or 1.0 under it is the
+  /// owner's word, not a model's confidence.
   String _headline(Message m) {
+    final exact = decision?.answers.ownerExact ?? false;
+    switch (decision?.ownerAnswer) {
+      case 'no':
+        return exact
+            ? 'Needs you: no — you removed it'
+            : 'Needs you: no — like one you removed';
+      case 'yes':
+        return exact
+            ? 'Needs you: yes — you added it'
+            : 'Needs you: yes — like one you added';
+    }
     final decidedNow = decision != null;
     if (m.needsYouP != null &&
         needsYouFromEarlierModel(m.needsYouP, decidedNow: decidedNow)) {
@@ -200,9 +219,15 @@ class WhyPanelBody extends StatelessWidget {
       // is shown only where it is an answer: under the line it would say
       // "asks you a question" about a message the reader was told needs
       // nothing (`home_result.dart` keeps the same rule).
+      //
+      // The owner's answer is the exception: its sentence says what the
+      // owner did ("You removed a message like this from Needs You."), which
+      // is the answer on either side of the line.
       final line = needsYouPercentWords(threshold);
+      final owners = decision?.ownerAnswer != null;
+      if (owners && reason.isNotEmpty) lines.add(_reasonSentence(reason));
       if (needsYouAt(m.needsYouP, threshold)) {
-        if (reason.isNotEmpty) lines.add(_reasonSentence(reason));
+        if (!owners && reason.isNotEmpty) lines.add(_reasonSentence(reason));
         lines.add('In Needs You: at or above your $line line.');
       } else {
         lines.add('Not in Needs You: below your $line line.');

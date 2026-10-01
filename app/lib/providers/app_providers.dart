@@ -39,6 +39,8 @@ import '../services/context/directory_access.dart';
 import '../services/cloud_drafts.dart';
 import '../services/decision/decision_client.dart';
 import '../services/decision/decision_heads_file.dart';
+import '../services/decision/decision_input.dart' show decisionOwnerString;
+import '../services/decision/needs_you_exemplars.dart';
 import '../services/draft_handler.dart';
 import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
@@ -71,6 +73,7 @@ import '../services/server/process_runner.dart';
 import '../services/server/server_state.dart';
 import '../services/system/system_info.dart';
 import '../services/system/updater.dart';
+import '../services/needs_you_edits.dart';
 import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/owner_lookup.dart';
@@ -1133,9 +1136,44 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     // The decision state's owner line. Asked without waiting (see the
     // queue's `_askOwner`), so a keychain read never holds a claim.
     owner: _ownerLookup(ref),
+    // The owner's Needs You answers, which replace the model's inside
+    // `applyDecision` — for the claim and the install-time re-decide alike.
+    exemplars: ref.watch(needsYouExemplarsProvider),
   );
   ref.onDispose(queue.dispose);
   return queue;
+});
+
+/// The owner's Needs You labels in memory (`NeedsYouExemplars`). ONE for the
+/// app, shared by every decision path and by the presses, so a press's
+/// `invalidate()` is seen by the very next decision anywhere.
+final needsYouExemplarsProvider = Provider<NeedsYouExemplars>(
+  (ref) => NeedsYouExemplars(ref.watch(messageStoreProvider)),
+);
+
+/// "Remove from Needs You" / "Add to Needs You", the sweep inside each press
+/// and the undo (`NeedsYouEdits`), over the same decision client, exemplars,
+/// owner line and slider as the triage queue. The notifier reloads the list
+/// after a press, which already holds the sweep's writes.
+final needsYouEditsProvider = Provider<NeedsYouEdits>((ref) {
+  final store = ref.watch(messageStoreProvider);
+  final owner = memoizedOwner(_ownerLookup(ref));
+  final decision = ref.watch(decisionClientProvider);
+  return NeedsYouEdits(
+    store,
+    decision,
+    ref.watch(needsYouExemplarsProvider),
+    owner: () async => decisionOwnerString(await owner()),
+    threshold: needsYouThresholdReader(store),
+    progress: ref.watch(pipelineProgressProvider),
+    // The processing switch — see [processingProvider] and [_enabledReader]:
+    // the sweep and the undo stop when it is off, so a reset is not raced.
+    enabled: _enabledReader(ref),
+    // Read per press: a stored decision stands in for a model call only
+    // under the model the client answers with now, Your server's kind
+    // learned first so the first press after launch is not all model calls.
+    modelTag: decision.resolvedModelTag,
+  );
 });
 
 /// The embedding server. A second llama-server on its own port, started by
@@ -1435,6 +1473,13 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         needsYouThreshold:
             needsYouThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
+        // The owner's Needs You answers, for a re-decide here; the copy step
+        // reads them off the stored decision.
+        exemplars: ref.watch(needsYouExemplarsProvider),
+        // The tag a fresh vector carries now: a stored decision with no
+        // vector under it is decided again rather than copied, so the
+        // owner's presses can compare it.
+        modelTag: () => ref.read(decisionClientProvider).resolvedModelTag(),
       ),
       // The message-text stage next (kind `extract`). The thread's clustering
       // card is built from what it writes, so it is what decides, by the

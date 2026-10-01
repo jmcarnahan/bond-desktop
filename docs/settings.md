@@ -104,7 +104,8 @@ same order, and drops the rest.
 `settings_sync_about_test.dart`). This table and those tests must agree; when
 one moves, move both.
 
-The Needs You slider is the owner's ONE control over what lands in Needs You:
+The Needs You slider is the owner's ONE control over the cut on what lands in
+Needs You (the thread bar's Remove and Add presses answer for kinds of mail, below):
 a threshold on the decision model's needs-you probability (`needs_you_threshold`,
 default **0.35**; see [pipeline/11-needs-you.md](pipeline/11-needs-you.md)). A
 message needs you when its probability is at or above it. The slider runs
@@ -129,6 +130,24 @@ control.* (keyed `settings-old-needs-you-rules`), and never reads the text. The 
 setting is not carried over: its scale was the 0..2 attention score, not a
 probability, so the Needs You slider starts at its default of 35% and the old
 value is simply never read again.
+
+Under them, **Your answers**: one line counting the owner's thread-bar presses
+(`MessageStore.needsYouPressCounts`, one press per `created_at` stamp however many
+messages it labelled), **You've removed N kinds of mail from Needs You and added
+M kinds.** (keyed `settings-needs-you-answers-line`; `1 kind` for one, on either
+count), or *You haven't answered for any
+mail yet.* when there are none, and, when there are, a two-step quiet button
+**Forget all Needs You answers** → **Really forget?** (keyed
+`settings-forget-needs-you-answers`; no dialog, the label turns into the second
+step). The second press calls `SettingsHost.forgetNeedsYouAnswers()`, which undoes
+every press at once (`NeedsYouEdits.retractAll`: every label deleted, then every
+message carrying an owner's answer written again from its stored decision), so
+each message they answered for takes the model's own number back, then reloads
+the list and the line. No model is asked. It needs processing ON; off reads
+*Your answers couldn't be forgotten just now — processing has to be on.* under
+the button. The line is drawn only once the host has read the counts, and
+it is not in the section summary. See
+[pipeline/11-needs-you.md](pipeline/11-needs-you.md).
 
 The section's last control is a switch, **Sending a reply marks it done** — *A
 thread leaves Needs You as soon as you answer it, instead of waiting for you to
@@ -802,8 +821,13 @@ The sync's own backlog calls are bounded by the lookback floor — right for a
 poll, wrong for a reset, which is the one path that re-pends mail older than
 the window — and they still run on every pass, idempotent over what the reset
 filed. **Forget everything and re-sync** queues nothing: it deletes the
-mailbox, so the next poll fetches the window again and ingest queues what it
-brings. See [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+mailbox, then starts the mail pull and the Teams pull together, through the
+inbox's own refresh (`SettingsHost.onRefreshNow`, the Sync button's path,
+which raises both pull flags a later reset waits out), so the window is
+fetched again at once and ingest queues what it brings. Teams goes with mail because the minute
+poll pulls mail only — without it a cold start's chats waited for a refresh
+press or a resume and landed minutes behind the mail. See
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
 
 **What the owner decided by hand survives a clear.** A message they restored
 keeps its `gate_override`, and one they ignored keeps `gate_reason = 'user'`

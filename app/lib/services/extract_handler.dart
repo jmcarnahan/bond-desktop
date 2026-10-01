@@ -148,10 +148,11 @@ class ExtractHandler extends WorkHandler {
   /// are idempotent by construction (`requeueWork` on a key that is already
   /// queued is the same row).
   ///
-  /// The width is the target's, not a constant: the build's box (sixteen
-  /// sequences in its prose-only profile) can take eight message-text calls
-  /// beside the drafts and the storyline lane, while a stored address or a
-  /// small local server keeps three, where past a small batch each request
+  /// The width is the target's, not a constant: Your server takes eight
+  /// message-text calls (the build's box has sixteen sequences in its
+  /// prose-only profile, beside the drafts and the storyline lane, and a
+  /// typed address with fewer slots queues the rest), while a small local
+  /// server keeps at least three, where past a small batch each request
   /// slows down enough that the first result takes longer to reach the
   /// screen.
   @override

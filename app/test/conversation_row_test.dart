@@ -422,6 +422,36 @@ void main() {
       expect(text, startsWith('The sender asks you'));
     });
 
+    testWidgets("the owner's answer is a short chip with no percentage, "
+        'and a swept thread says it was like one', (tester) async {
+      Future<String> chipFor(String reason, double p) async {
+        await tester.pumpWidget(_host(ConversationRow(
+          conversation: _conv(
+            state: ConversationState.needsReply,
+            reason: reason,
+            needsYouP: p,
+            decidedNow: true,
+          ),
+          selected: false,
+          onTap: () {},
+        )));
+        return chipText(tester);
+      }
+
+      expect(await chipFor('You removed this message from Needs You.', 0.0),
+          'You removed it');
+      expect(await chipFor('You added this message to Needs You.', 1.0),
+          'You added it');
+      expect(
+        await chipFor('You removed a message like this from Needs You.', 0.0),
+        'Like one you removed',
+      );
+      expect(
+        await chipFor('You added a message like this to Needs You.', 1.0),
+        'Like one you added',
+      );
+    });
+
     testWidgets('a thread with no reason draws no chip', (tester) async {
       await tester.pumpWidget(_host(ConversationRow(
         conversation: _conv(state: ConversationState.needsReply),

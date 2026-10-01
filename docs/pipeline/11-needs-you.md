@@ -6,14 +6,140 @@ probability that it does, `messages.needs_you_p`, is at or above the owner's
 whole rule. No band hands a middle probability to a language model, there is no
 cold-outreach bar, no Teams 1:1 or @mention floor, no attachment-digest requeue
 and no owner-written rules text. **No generative model is asked about needs-you
-at all**, on any path. The slider is the owner's one control, and moving it
-re-reads stored probabilities without asking any model anything.
+at all**, on any path. The slider is the owner's control over the cut, and
+moving it re-reads stored probabilities without asking any model anything. The
+owner's other control, **their own answers** (below), is already inside the
+probability, so the rule never reads it separately.
 
 The rule is ONE predicate with two spellings, in
 `app/lib/services/decision/needs_you_predicate.dart`: `needsYouAt(p, threshold)`
 for Dart and `needsYouAtSql(column, threshold)` for a query, pinned to agree by
 `needs_you_predicate_test`. NULL is a message not decided yet. It needs nobody in
 either spelling, and it is never shown as a low probability.
+
+**The owner's answer.** "Remove from Needs You" and "Add to Needs You" on a
+thread (`NeedsYouEdits`, `app/lib/services/needs_you_edits.dart`) store the
+owner's word as a LABEL: a `question = 'needs_you'` row of `decision_labels`
+with `answer` `no` or `yes`, `origin` `remove` or `add`, the message, and the
+decision model's raw pooled vector of that message with the model tag it came
+from. A removal labels every message of the thread's Needs You window (the
+kept inbound after the last outbound, the messages the thread's number is the
+max over); an addition labels the newest one. The label is then applied where
+every decision is written, `applyDecision` (`triage_queue.dart`), through
+`NeedsYouExemplars` (`app/lib/services/decision/needs_you_exemplars.dart`):
+before the decision is stored, its `needs_you` becomes the owner's answer with
+certainty (p 1.0 or 0.0) when the message itself carries a label (EXACT; the
+newest row for a message wins) or when its vector is within cosine
+`NeedsYouExemplarTuning.matchCosine` = **0.97** of a label's vector under the
+same model tag (SIMILAR; the nearest wins). The 0.97 is measured on the
+owner's audit: templated duplicates sit at 0.99 or above, unrelated mail at a
+median of 0.27, and at 0.97 two presses cleared 125 of 185 wrong threads with
+no correct thread caught (`docs/model-bakeoff.md`, "Needs You audit"). Because
+the override lands in the stored number, every path inherits it with no code
+of its own: the triage claim, the needs-you pass's copy step and re-decide,
+the install-time re-decide, Re-judge and Clear AI results' re-triage. The
+reason says so: "You removed this message from Needs You." / "You removed a
+message like this from Needs You." (and "added … to"), from the scalar
+`owner_answer` and `owner_exact` keys in `answers_json` beside
+`owner_label_id` and `owner_cosine`.
+
+**Stored vectors make a press instant.** Every decision stores the decision
+model's raw pooled vector beside its answers (`message_decisions.vector`, v24,
+under the row's `model` tag; NULL on Kev), and when the owner's answer replaces
+the model's, `answers_json` keeps the model's own p(yes) as
+`model_needs_you_p`. So a press needs no model call for a message whose stored
+decision has a vector under the model the client answers with now
+(`DecisionClient.resolvedModelTag`: the heads file's model, after learning Your
+server's kind with one listing GET when this run has not; null on Kev and when
+the heads are missing — the needs-you pass reads the same): its label takes the stored vector and its decision is
+written again from the stored answers (`StoredDecision.modelAnswers`) through
+`applyDecision`, which now finds the label. Only a message without one (decided
+before v24, or under another model) is decided by the model, as every press was
+before.
+
+Then each press **sweeps**, BOTH ways, inside the press: a removal over every
+thread in Needs You at the slider, an addition over every thread out of it that
+is neither done nor in Later. The sweep is a SCAN, not model calls: one query
+(`needsYouCandidateVectors`) returns every window message of those threads that
+has a stored vector under the press's model, and each one within
+`matchCosine` of ANY of the press's label vectors has its stored decision
+written again through `applyDecision`, so its thread moves with its chip. Every
+window message, not only the driver: a templated thread often holds several
+near-duplicates, and the next would become the driver. Because nothing waits on
+a server, a sweep never competes with triage for the decision model. A removal
+scans the Needs You set; an addition scans every stored vector outside it, most
+of a mailbox, so each candidate is compared straight off its BLOB (no decoded
+list is built; only a match is decoded). Either way it runs AWAITED: the toast shows
+after the similar threads have already moved, and counts them
+(`NeedsYouPress.changed`, threads that crossed the slider). A candidate whose
+stored decision cannot be written again as it stands is left to its next
+decision, which inherits the label anyway; processing turned off stops the
+sweep between messages. A press whose labels carry no vector (Kev) sweeps
+nothing (`NeedsYouPress.changed` is 0).
+
+**Undo is a retract, not the opposite press.** `remove` and `add` return a
+`NeedsYouPress`: the label ids they wrote and the ONE `created_at` stamp every
+one of them carries (empty ids when the window was empty), with `changed` for
+the toast. `NeedsYouEdits.retract(press)` DELETES those rows FIRST
+(`deleteNeedsYouLabels(ids, createdAt:)`, which returns the ids that went),
+then reads every message whose stored decision cites one of them
+(`owner_label_id`, `messagesCitingNeedsYouLabels`) and writes each again from
+its stored decision with the model's own number put back
+(`model_needs_you_p`, `StoredDecision.modelAnswers`), under the row's own model
+and vector — no model call and no tag check, so Undo works with the decision
+server down and on Kev. The pressed thread AND every thread the sweep moved
+take the model's number back, unless another label still matches. Reading the
+citing rows after the delete means a decision that matched a label while the
+undo ran is in the list too. The stamp is there because `decision_labels.id`
+has no AUTOINCREMENT: a deleted highest id is handed out again, and an Undo
+retried with stale ids must not delete a newer press's label. An opposite
+label would instead tie the removed one for every near-duplicate, and the
+newer `yes` would put the whole template in Needs You.
+
+**Forget.** Settings → Needs You lists the presses ("Your answers", counted by
+stamp) and **Forget all Needs You answers** undoes every one of them at once
+(`NeedsYouEdits.retractAll`: `deleteAllNeedsYouLabels`, then every message
+whose stored decision carries an owner's answer, `messagesWithOwnerAnswer`,
+written again from its stored decision as Undo writes it), then reloads the
+list ([settings.md](../settings.md)). Because it restores by the answer, not
+by the label id, Forget also heals an answer whose label is already gone.
+
+**Decide first, write second — for a press.** A press has every message's
+decision in hand (from the store, or the one network step) before it writes any
+label or decision. A decision server that cannot answer therefore fails a press
+with NOTHING written, so the failure bar's "the thread is unchanged" holds
+literally. Undo and Forget need no decision (`applyDecision` looks the owner's
+answer up at write time, so the deleted labels no longer match). Processing
+turned off refuses all of them before anything is touched
+(`StateError('processing is off')`); turned off part-way through an Undo, it
+stops the writes between messages, and the answers left without a label are
+what Forget heals. A stored override from before the model's number was kept
+(no `model_needs_you_p`) cannot be restored without the model: Undo and Forget
+log it and leave it, and Clear AI results decides it again. Labels are compared only under their own model
+tag; a label whose message is decided under another model (or with no vector)
+has its vector refreshed from that decision, so a model swap heals the labels as
+the install-time re-decide reaches their messages, and the needs-you pass
+decides a stored decision with no vector under the current tag again rather
+than copying it (once the owner is known), so the stored vectors heal the same
+way. **Kev** (the `systemone` backend) returns no vector: on it a label applies
+to its own message only, no sweep runs, and the toast promises nothing more.
+
+Known limits: a needs-you pass that read the model's decision just before a
+press rewrote it can copy the model's p back onto `messages` (the decision
+row keeps the owner's answer, and the next needs-you item for the message
+copies it again); and a message pressed while its triage is still pending can
+still be dropped by the learned gate when its claim runs, which takes it out
+of the window. The window an Undo leaves open is one `applyDecision` — a triage
+claim, a needs-you re-decide, the install-time re-decide or another press's
+sweep — that loaded the labels before the delete and writes after the Undo read
+the citing messages: that message cites the deleted label until it is next
+decided, and Forget heals it, since it restores every row with an owner answer.
+A sweep reaches only messages with a stored vector under the press's
+model; the rest inherit the label at their next decision. A heads refit that
+keeps the same model name re-applies the OLD heads' stored answers on a press
+(the vector is still right, the answers are the previous heads'); a follow-up
+could run `heads.apply(vector)` on the stored vector to refresh them with no
+request.
 
 **The slider's default is 0.35.** It is fitted on the golden set, keep-only
 needs_you of 76, and it moves with the decision model, because a probability's
@@ -36,6 +162,39 @@ messages count. `loadConversations` loads it as `Conversation.needsYouP`, and
 the `needs_you_reason` it carries comes off the message with that highest
 probability (newest on a tie), so the reason names the message whose number is
 shown.
+
+**The two buttons.** The thread's action bar (`ThreadActionBar`, built by
+`ThreadDetailPanel._actionBar()`) carries exactly one of **Remove from Needs
+You** (`thread-action-needs-you-remove`) and **Add to Needs You**
+(`thread-action-needs-you-add`), beside Mark done and Later, picked by the
+rail's own rule (`isNeedsYou` at the owner's slider): Remove on a thread in
+Needs You, Add on one that is not. Add is never drawn on a Done thread
+(Reopen is there) or one in Later (Keep in inbox is): Needs You reads
+neither, so the press would change nothing the reader could see. Both are
+labelled buttons, and the Needs You word gives way to its icon before Mark
+done's does when the row runs short. Remove runs `_triageAndAdvance`, like
+Mark done: the thread leaves the pile and the reader lands on the next row,
+and the bar says **"Removed from Needs You — and 78 like it."** (the threads the
+sweep moved; **"Removed from Needs You."** when it moved none or the backend has
+no vector) with an Undo; Add leaves the reader where they are and says **"Added
+to Needs You — and 3 like it."** / **"Added to Needs You."** the same way, with
+an Undo. Each goes through `ConversationsNotifier.removeFromNeedsYou` /
+`addToNeedsYou` (the press with its sweep, then one store-only reload). Undo is
+`ConversationsNotifier.undoNeedsYouPress`, the retract above — the threads the
+sweep moved go back with the pressed one. Add is not drawn either on a thread
+with nothing decided in its window (`Conversation.needsYouP` null: the owner
+wrote last, or nothing is decided yet), since it could only answer that. A
+thread
+whose window is empty (the owner wrote last) says **"Nothing here is waiting
+on you."** with no Undo and moves nobody. A press the decision model could not
+answer says **"Couldn't save that just now — the thread is unchanged."** with
+no Undo and moves nobody; a failed Undo says "Couldn't undo that just now."
+The landing is worked out before the press, and the next row is often a near
+duplicate the same press's sweep took; `_triageAndAdvance` reads the pile as
+the press left it and walks on from the landing to the nearest row still drawn
+(`_stillDrawn`). The row chip of a thread the sweep moved says **Like one you
+removed** / **Like one you added**; one the owner pressed says **You removed
+it** / **You added it**.
 
 **Who reads it.** Every reader goes through the one predicate at the owner's
 slider:
@@ -115,7 +274,10 @@ Per message it:
    templated reason onto the row if the row's differs, and otherwise writes
    nothing;
 3. when the decision was made **ownerless** and the owner is now known, or
-   there is no decision at all (triaged before the decision model),
+   it has **no vector under the current model** (`DecisionClient.modelTag`:
+   decided before v24 or under another model) and the owner is known — never
+   on Kev, whose tag is null — or there is no decision at all (triaged before
+   the decision model),
    **re-decides** the message with the decision model, on the input the triage
    pass builds (`decisionInputFor`), and writes the whole state that decision
    determines through the triage claim's own writer (`applyDecision`): the
@@ -134,7 +296,14 @@ language model. The handler has **no arm** in `AiWorker`'s `_park` /
 **Storage.** `messages.needs_you_p` (REAL, schema v21) is the ONE number every
 reader reads; NULL means not decided. `messages.needs_you_reason` says why.
 `message_decisions` keeps the decision's own `needs_you_p` beside its other
-answers. `messages.needs_you_verdict` is INERT since v21: v21 mapped it into
+answers. The owner's answers are `decision_labels` rows (KEPT, so Clear AI
+results keeps them and the next decision applies them again; `wipeAll` deletes
+them) with three columns added in v23: `source_message_id`, `vector` (BLOB,
+float32 little-endian, `encodeEmbedding`) and `vector_model`. Since v24
+`message_decisions.vector` keeps each decision's own vector the same way (NULL
+on Kev and on rows decided before v24), and `answers_json` keeps
+`model_needs_you_p` beside an override.
+`messages.needs_you_verdict` is INERT since v21: v21 mapped it into
 `needs_you_p`, and nothing writes or reads it any more. The pref key
 `needs_you_rules` is inert too. Nothing reads it, and `wipeAll` still clears a
 stored copy with the rest of one person's text.
@@ -142,7 +311,8 @@ stored copy with the rest of one person's text.
 **The chip follows the probability.** `message_progress.needs_you` is a
 snapshot taken at settle time from `notifyWorthy`. When any decision writer
 changes a probability ACROSS the owner's slider (the needs-you pass, and
-through `applyDecision` the triage claim and the install-time re-decide), the
+through `applyDecision` the triage claim, the install-time re-decide and the
+owner's Needs You presses and their sweeps), the
 shared `followNeedsYouChip` hands the message to
 `PipelineProgress.refreshNeedsYou`, which re-asks `notifyWorthy` and rewrites
 the flag. A probability that moved without crossing the slider is a repeat of
@@ -163,8 +333,13 @@ that ran an earlier build, so the probability rule reconciles the chips under
 keys of its own. Both `_p` keys are in `derivedOneShotPrefs`, so Clear AI
 results and a wipe reopen them. `needs_you_hedge_rejudge` requeues every in-window `needs_you_p =
 0.0`, which an older build's hedge can have become, so the pass settles each
-one again. Each reports its count on the sync's activity row, absent rather than
-zero when it did not run.
+one again. `decision_vectors_backfill` (v24) requeues the needs-you pass for
+every kept inbound message whose decision under the current question set has no
+vector, newest first and at most 2,000 (`requeueVectorlessDecisions`), and the
+pass decides each one again for its vector, so the owner's presses can compare
+them; it is in `derivedOneShotPrefs`, since Clear AI results empties the table
+and triage writes every row again with its vector. Each reports its count on
+the sync's activity row, absent rather than zero when it did not run.
 
 **The chip follows the thread out of Later, too.** A message that settles while
 its thread sits in Later takes a 0 on the strength of the bucket alone, and
@@ -379,8 +554,24 @@ this ask come from" had no answer anywhere. With no Why wired, or on a thread
 with nothing inbound in it, the banner falls back to focusing the composer as
 it always did. Every per-message ask line still focuses the box.
 
-**What it never does.** It feeds nothing back. This reads model OUTPUT that
-has already been through the untrusted-data fence upstream; it writes nothing,
+**The owner's answer.** When the message's stored decision carries the
+owner's answer (`StoredDecision.ownerAnswer`), the headline is theirs, with
+no percentage: **"Needs you: no — you removed it"** or **"Needs you: yes — you
+added it"** (**"— like one you removed"** / **"— like one you added"** when the
+answer came from a message like it, and the history screen's line the same) —
+the 0.0 or 1.0 under it is the owner's word, not a model's confidence. The stored reason ("You removed a message like this from Needs
+You.") is shown on EITHER side of the line, since it says what the owner did,
+and the line against the slider follows as usual. The rail's chip and the
+thread's `Why:` line, which have only the thread's stored reason, tell the
+owner's four sentences from a model's by `ownerNeedsYouReasons`
+(`decision_policy.dart`, where `ownerNeedsYouReason` spells them once): the
+chip reads **You removed it** / **You added it** and neither draws a
+percentage.
+
+**What it never does.** It takes no answer: the owner's Needs You answer is
+SHOWN here, and taken on the thread's action bar (the two buttons above),
+never in this panel. It feeds nothing back. This reads model OUTPUT that has
+already been through the untrusted-data fence upstream; it writes nothing,
 sends nothing and prompts nothing, so there is no second fence here. And it
 renders sentences, never stored shapes — no JSON, no enum names dressed as
 prose, no field names. `teams_direct` reads "A direct message to you on

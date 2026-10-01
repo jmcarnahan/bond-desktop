@@ -120,6 +120,8 @@ void main() {
     VoidCallback? onCloseLabelPicker,
     String source = 'email',
     List<Label> threadLabels = const [],
+    VoidCallback? onRemoveFromNeedsYou,
+    VoidCallback? onAddToNeedsYou,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -160,6 +162,8 @@ void main() {
           onCreateLabel: onCreateLabel,
           onDismissWithoutLabel: onDismissWithoutLabel,
           onCloseLabelPicker: onCloseLabelPicker,
+          onRemoveFromNeedsYou: onRemoveFromNeedsYou,
+          onAddToNeedsYou: onAddToNeedsYou,
         ),
       ),
     ));
@@ -277,6 +281,47 @@ void main() {
         'Why: Asks you to confirm the launch date. · 72% · '
         '${formatTimestamp(at)}',
       );
+    });
+
+    testWidgets("the owner's answer is its own sentence, with no percentage",
+        (tester) async {
+      await pump(
+        tester,
+        messages: messages,
+        ctaText: null,
+        reason: 'You removed a message like this from Needs You.',
+        reasonAt: at,
+        needsYouP: 0.0,
+      );
+
+      expect(
+        lineText(tester),
+        'Why: You removed a message like this from Needs You. · '
+        '${formatTimestamp(at)}',
+      );
+    });
+
+    testWidgets('the bar offers Remove or Add by the rail\'s own rule',
+        (tester) async {
+      await pump(
+        tester,
+        messages: messages,
+        needsYouP: 0.72,
+        onRemoveFromNeedsYou: () {},
+        onAddToNeedsYou: () {},
+      );
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsOneWidget);
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+
+      await pump(
+        tester,
+        messages: messages,
+        needsYouP: 0.1,
+        onRemoveFromNeedsYou: () {},
+        onAddToNeedsYou: () {},
+      );
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsOneWidget);
     });
 
     testWidgets('the banner answers first when there is one', (tester) async {

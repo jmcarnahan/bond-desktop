@@ -175,7 +175,7 @@ enforce the ones that are commands.
   storyline lane per row (`onStorylineQueued`, `onDraftQueued`'s shape), so
   an assign never waits for the whole extraction backlog; it never embeds
   the card (`vectorFor` does, in the assign pass). The fast lane's message
-  text is `LlmTargetSpec.textParallel` wide (8 on the build's box, else at
+  text is `LlmTargetSpec.textParallel` wide (8 on Your server, else at
   least 3). Triage makes no chat call but still
   shares `fastDrainGateProvider` for the yield ticket, so a triage pump can wait
   behind a message-text call already in flight. A handler that must wake the drain it runs INSIDE is handed
@@ -319,7 +319,19 @@ enforce the ones that are commands.
   (20) and `sweepAssignFloor` (10, the `storyline` KIND via
   `PipelinePulse.kindCount`, not the stage, which also counts the asking
   sweep row); no `embed_message` floor, since search vectors never fed the
-  pool. The sync-time `requeueSweep()` is the durable trigger.
+  pool. Unsettled, it sweeps anyway once its pool (unassigned, embedded, not
+  done) has grown by `sweepProgressStep` (40) since the size in the
+  `storyline_sweep_pool_at` pref (a derived pref, reset by Clear AI results
+  and Forget everything; the gate reads the size from
+  `storylinePoolCount`, a COUNT that mirrors the pool loop clause for clause,
+  so keep the two in step). The sync-time
+  `requeueSweep()` is the durable trigger. The same floors (one reader,
+  `StorylineService._pulse`) make `refresh` and `recap` return, quietly
+  noted `unsettled: 1` (`ActivityLog` keeps that marker's row out of the
+  panel), before any call or write, so a cold start's single
+  storyline lane spends itself on assign and the sweep; the sweep's
+  stale-refresh/recap heal runs only on a settled pass, or every wake would
+  queue work that defers at once. Audit and recruit never defer.
 - A `StorylineTuning` number moves only with a `make golden-sweep` row on each
   side, and a diagnostic flip of one is a single shell command that puts the
   constant back before it exits.
@@ -656,10 +668,17 @@ enforce the ones that are commands.
   golden-prose` for `replyYes`), the `StorylineTuning` rule.
 - Needs You is ONE predicate: `needsYouAt(p, threshold)` / `needsYouAtSql` /
   `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
-  default 0.35) is the only control; every reader goes through it; no
+  default 0.35) is the only CUT; every reader goes through it; no
   language model is asked about needs-you, and the attention score only
-  orders. A THREAD's p is the MAX over its kept inbound messages after its
-  last outbound (all kept inbound when it has none), not the newest one's, so
+  orders. The owner's Remove/Add presses are NOT a second rule: they are
+  labels that `applyDecision` applies before it stores a decision
+  (`NeedsYouExemplars`: the message's own label, else the nearest label vector
+  at cosine ≥ 0.97 under the same `vector_model`), so `needs_you_p` already
+  carries the owner's answer as 1.0/0.0 and no predicate, SQL spelling or
+  reader reads a label. A new decision path goes through `applyDecision` with
+  the provider's `needsYouExemplarsProvider` or it ignores the owner. A
+  THREAD's p is the MAX over its kept inbound messages after its last
+  outbound (all kept inbound when it has none), not the newest one's, so
   a bystander's reply-all cannot hide an older unanswered ask; that is
   deliberate, do not "fix" it to the newest. `needs_you_verdict`,
   `attention_threshold` and `needs_you_rules` are inert.
@@ -677,10 +696,96 @@ enforce the ones that are commands.
   trained on.
 - `decision_labels` (v22) is KEPT: the owner's storyline presses logged as
   labels for the storyline questions (`member_of`, `charter_specific`), with
-  the storyline's title and charter at the press. Written ONLY by
-  `StorylineEdits` at an owner press (Keep and Dismiss of a suggestion or
-  possible row, add, remove, a charter written — Allow again writes none,
-  lifting a veto is not a yes), never by an automatic pass; Clear AI results keeps it and `wipeAll` deletes it.
+  the storyline's title and charter at the press. Written ONLY at an owner
+  press, never by an automatic pass: storyline rows by `StorylineEdits` (Keep
+  and Dismiss of a suggestion or possible row, add, remove, a charter written
+  — Allow again writes none, lifting a veto is not a yes) through
+  `writeDecisionLabels`, and `question = 'needs_you'` rows by `NeedsYouEdits`
+  ("Remove from Needs You" / "Add to Needs You") through `writeNeedsYouLabel`,
+  read back by `needsYouLabels()` as `NeedsYouLabel`. The one UPDATE the log
+  takes is `updateNeedsYouLabelVector`, the vector refresh `applyDecision`
+  makes when a labelled message is decided under another model, and the
+  DELETEs short of a wipe are `deleteNeedsYouLabels`, the undo of a press
+  (`NeedsYouEdits.retract`: delete first, then write again the messages
+  citing the ids it returns), and `deleteAllNeedsYouLabels`, Settings'
+  Forget (`retractAll`, which then writes again every message with an owner
+  answer, `messagesWithOwnerAnswer`). Both restore from the stored
+  decision's own model number and need no model. Undo is never the opposite
+  press.
+  `NeedsYouExemplars` checks a count/max-id signature on every load, so a
+  wipe is seen without an invalidate. Clear AI results keeps it and
+  `wipeAll` deletes it. The storyline `DecisionLabel` is a RECORD typedef
+  with no optional fields; do not widen it, add a writer.
+- The owner's Needs You buttons are on `ThreadActionBar`, exactly one drawn
+  by `inNeedsYou` (`isNeedsYou` at the slider, passed by
+  `ThreadDetailPanel._actionBar()`): `thread-action-needs-you-remove` /
+  `thread-action-needs-you-add` (`needsYouRemoveKey` / `needsYouAddKey`), and
+  Add never on a Done or Later thread. A press returns a `NeedsYouPress`
+  (`needs_you_edits.dart`: the label `ids` and the ONE `createdAt` stamp they
+  share; empty ids when the window was) through
+  `ConversationsNotifier.removeFromNeedsYou` / `addToNeedsYou` (null on a
+  decision error, which the inbox words as the house failure toast), and the
+  toast's Undo hands it to `undoNeedsYouPress` → `NeedsYouEdits.retract`,
+  which deletes by id AND stamp (`id` is reused after a delete), then
+  restores the citing messages from their stored decisions, no model call.
+  The press's SWEEP runs inside it, awaited, both ways (a removal over the
+  threads in Needs You, an addition over those out of it and neither done
+  nor in Later): a SCAN of stored decision vectors
+  (`needsYouCandidateVectors`, cosine ≥ 0.97 to any of the press's label
+  vectors), never model calls, so `NeedsYouPress.changed` is final when the
+  toast reads `Removed from Needs You — and N like it.` (no tail when N is 0,
+  always on Kev). A press and its sweep write from the STORED decision
+  (`StoredDecision.modelAnswers` + `vector`) whenever it has a vector under
+  `DecisionClient.resolvedModelTag` (which learns Your server's kind first;
+  the sync `modelTag` answers null until then), and ask the model only for a
+  message without one; the needs-you pass reads the same. Undo and Forget
+  restore from the stored row under its own model, never asking. An addition's sweep scans most of a mailbox, so candidates come
+  back as BLOBs and are compared off the bytes, never decoded in bulk.
+  `FakeDecisionClient.tag` is what a test sets to make its stored decisions
+  count (both getters answer it), and `calls` proves no call was made. Add
+  has its own in-flight guard on the inbox (`_adding`).
+  Add is not drawn when `Conversation.needsYouP` is null
+  (`ThreadActionBar.needsYouDecided`). The notifier takes the service
+  as a getter (`needsYouEdits: () => …`), so a test builds it over `testDb()`
+  without a decision client. A press decides before it writes, so a failure
+  changes nothing; a press, Undo and Forget refuse with processing off
+  (`StateError`).
+  An inbox test that presses overrides
+  `authSessionProvider` (the press reads the owner's account, which the
+  default session never answers under `flutter test`). The owner's four
+  reason sentences are spelled once, `ownerNeedsYouReason`
+  (`decision_policy.dart`); a surface holding only a stored reason tells them
+  apart by `ownerNeedsYouReasons`, never by its own string match.
+- `messages.needs_you_p` has ONE writer, `MessageStore.writeNeedsYouP`, with
+  two callers: `applyDecision` and `NeedsYouHandler`'s copy step, which
+  copies the `message_decisions.needs_you_p` COLUMN (never a recomputation
+  from `answers_json`). The owner's answer lives in that column, so a third
+  writer, or a copy that recomputes, silently undoes every press.
+- `needsYouFromEarlierModel` reads an exact 0.0/1.0 with no current decision
+  as an earlier model's verdict; the owner's override is written under
+  `decisionQhash`, so it is decided-now, and every surface (Why panel,
+  history, chip, Why line) words the owner's answer BEFORE it reads a
+  percentage, so a press never shows as `0%`/`100%`.
+- There is no DB stream: the rail and the pile follow
+  `ConversationsNotifier.load()` (a press reloads once, after its sweep;
+  progress reloads on `_scheduleReload`), and Home follows
+  `ProgressTick`s. A new writer that changes what the list shows reloads it.
+- Schema v23 appends `decision_labels.source_message_id`, `vector` (BLOB,
+  float32 LE via `encodeEmbedding`) and `vector_model` for the needs-you
+  labels; NULL on every storyline row. A label's vector is the decision
+  model's RAW pooled vector (`DecisionResult.vector`, null on Kev), compared
+  only under the same `vector_model` tag.
+- Schema v24 appends `message_decisions.vector` (BLOB, float32 LE): every
+  `writeDecision` stores `DecisionResult.vector` under the row's `model`
+  tag, NULL on Kev, and `decisionFor` decodes it into `StoredDecision.vector`.
+  When `applyDecision` overrides, `answers_json` also keeps the model's own
+  p(yes) as `model_needs_you_p` (`decisionModelNeedsYouKey`), so a stored
+  decision can be written again with the labels gone and the model's number
+  comes back with no call. The needs-you pass decides a stored decision
+  again when it has no vector under `DecisionClient.modelTag` (and the owner
+  is known; a null tag owes nothing), and the sync one-shot
+  `decision_vectors_backfill` (in `derivedOneShotPrefs`) requeues the pass
+  for every kept inbound vectorless decision once, newest first, cap 2,000.
 - The install-time re-decide (`TriageQueue.redecideStale`) runs the DECISION
   pass again for the last 30 days of kept inbound messages decided under
   another qhash (at most 2,000, newest first), writing only the decision row,
@@ -698,7 +803,9 @@ enforce the ones that are commands.
 - `message_decisions` is DERIVED (Clear AI results empties it; the triage
   pass writes it again), keyed by `(source, source_message_id)`. The four
   `*_p` columns are the probabilities read by hand; `answers_json` is every
-  option's calibrated probability plus `owner_known`. A row decided WITHOUT an
+  option's calibrated probability plus `owner_known` (and the owner's
+  answer's scalar keys with `model_needs_you_p` on an override); `vector`
+  (v24) is the decision model's vector of the message. A row decided WITHOUT an
   owner line (the keychain had not answered yet) has an untrusted
   `needs_you_p`: triage still writes it to `messages.needs_you_p` and it is
   SHOWN, every mail sync (and Retry owed stages) requeues the needs-you pass

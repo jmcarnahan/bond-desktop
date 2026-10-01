@@ -7,6 +7,10 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/screens/settings_host.dart';
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart'
+    show decisionQhash;
+import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
+import 'package:bond_inbox/services/decision/stored_decision.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
@@ -95,8 +99,10 @@ void main() {
   var thumbnailsForgotten = 0;
   var settleWaits = 0;
   Completer<void>? settleGate;
+  var refreshes = 0;
 
   setUp(() {
+    refreshes = 0;
     processingSetTo.clear();
     toasts.clear();
     thumbnailsForgotten = 0;
@@ -108,6 +114,7 @@ void main() {
     WidgetTester tester, {
     SettingsScope scope = SettingsScope.all,
     ModelServerProbe? probe,
+    FakeDecisionClient? decision,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -116,7 +123,9 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
-        keepingDecisionClient(),
+        decision == null
+            ? keepingDecisionClient()
+            : decisionClientProvider.overrideWithValue(decision),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         // The two platform channels a widget test has nobody on the other end
@@ -141,7 +150,7 @@ void main() {
               settleWaits++;
               await settleGate?.future;
             },
-            onRefreshNow: () async {},
+            onRefreshNow: () async => refreshes++,
             onSignOut: () async {},
             onOpenActivityLog: () {},
             onForgetThumbnails: () => thumbnailsForgotten++,
@@ -253,6 +262,108 @@ void main() {
     // message is back on the queue — the reset's own enqueue, not a sync's.
     expect(await store.workCounts('extract'), {'pending': 1});
     expect(thumbnailsForgotten, 1);
+  });
+
+  testWidgets('Forget everything and re-sync starts the inbox\'s pulls',
+      (tester) async {
+    await store.setPref(processingOnKey, 'false');
+    await pumpHost(tester);
+    await openSection(tester, 'Processing');
+    expect(refreshes, 0);
+
+    await tapKey(tester, SettingsScreen.forgetResyncKey);
+    await tapKey(tester, SettingsScreen.forgetResyncConfirmKey);
+    // Bounded, as the reset case above: the wipe, the cursor clear and the
+    // two pulls are a chain of store awaits, each one a frame here.
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+
+    // Mail and Teams together, through the inbox's own refresh, which
+    // raises the pull flags a second reset waits out: the minute poll pulls
+    // mail only, and without this a cold start's chats waited for a refresh
+    // press or a resume.
+    expect(refreshes, 1);
+  });
+
+  testWidgets("Forget all Needs You answers undoes every press and the line "
+      'says so', (tester) async {
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'conv-1',
+      'subject': 'Access granted',
+      'state': 'needs_reply',
+      'last_message_at': DateTime.now().toUtc().toIso8601String(),
+    });
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm1',
+      'conversation_key': 'conv-1',
+      'direction': 'inbound',
+      'subject': 'Access granted',
+      'from_name': 'Portal',
+      'from_address': 'portal@fabrikam.example.com',
+      'received_at': DateTime.now().toUtc().toIso8601String(),
+      'body_text': 'Your access was granted.',
+      'triage_status': 'triaged',
+    });
+    // One removal, as a press leaves it: the label with its vector, and the
+    // message's decision written at 0.0 citing it, with the model's own 0.8
+    // kept beside the override and the decision's vector.
+    const vector = [1.0, 0.0, 0.0, 0.0];
+    final labelId = await store.writeNeedsYouLabel(
+      source: 'email',
+      conversationKey: 'conv-1',
+      sourceMessageId: 'm1',
+      answer: 'no',
+      origin: 'remove',
+      vector: vector,
+      vectorModel: 'bond-decide-fake',
+    );
+    await store.writeDecision(
+      'email',
+      'm1',
+      fakeDecision(
+        fakeAnswers(needsYou: 0.8).withNeedsYou('no', exact: true),
+        vector: vector,
+      ),
+      qhash: decisionQhash,
+      ownerKnown: true,
+      extraKeys: {
+        decisionOwnerAnswerKey: 'no',
+        decisionOwnerLabelIdKey: labelId,
+        decisionOwnerExactKey: true,
+        decisionModelNeedsYouKey: 0.8,
+      },
+    );
+    await store.writeNeedsYouP('email', 'm1', p: 0.0);
+    // Under the stored vector's model, so the Forget needs no model call.
+    final client = FakeDecisionClient(
+      (_) => fakeDecision(fakeAnswers(needsYou: 0.3)),
+    )..tag = 'bond-decide-fake';
+    await pumpHost(tester, decision: client);
+    await openSection(tester, 'Needs You');
+    expect(find.text("You've removed 1 kind of mail from Needs You and "
+        'added 0 kinds.'), findsOneWidget);
+
+    await tapKey(tester, SettingsScreen.forgetNeedsYouAnswersKey);
+    expect(find.text('Really forget?'), findsOneWidget);
+    await tapKey(tester, SettingsScreen.forgetNeedsYouAnswersKey);
+    // Bounded, as the reset case above: the Forget is a chain of store
+    // awaits (the retract, the list reload, the counts re-read), each one a
+    // frame here, and `pumpAndSettle` is off the table in this file.
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+
+    expect(await store.needsYouLabels(), isEmpty);
+    expect(
+      (await store.getMessageRow('email', 'm1'))!['needs_you_p'],
+      closeTo(0.8, 1e-9),
+    );
+    expect(client.calls, isEmpty);
+    expect(find.text("You haven't answered for any mail yet."),
+        findsOneWidget);
   });
 
   testWidgets('the full scope renders every section', (tester) async {

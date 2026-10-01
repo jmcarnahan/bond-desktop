@@ -159,12 +159,13 @@ void main() {
       expect(onBox.specForStage('draft_reply')!.parallel, 1);
     });
 
-    test('the text width: this Mac at least three, a stored address three', () {
+    test('the text width: this Mac at least three, Your server eight', () {
       // Message text (extraction and the attachment digests) reads its own
       // width. This Mac gives it the server's slots, never fewer than three;
-      // a stored address keeps the three it always had. (Eight is for an
-      // address that FOLLOWS the build, which `flutter test` cannot
-      // construct: `boxUrlDefault` is empty here.)
+      // Your server runs it eight wide, a typed address included — it is the
+      // owner's own server either way. (An address that FOLLOWS the build
+      // takes the same branch with the same eight; `flutter test` cannot
+      // construct one, because `boxUrlDefault` is empty here.)
       expect(const AppPrefs(proseParallel: 1)
           .specForStage('message_text')!.textParallel, 3);
       expect(const AppPrefs(proseParallel: 6)
@@ -173,8 +174,11 @@ void main() {
           .specForStage('message_text')!.textParallel, 6);
       expect(const AppPrefs(proseParallel: 2, managedServer: false)
           .specForStage('message_text')!.textParallel, 3);
-      expect(onBox.specForStage('message_text')!.textParallel, 3);
-      expect(onBox.specForStage('attachment_digest')!.textParallel, 3);
+      expect(onBox.specForStage('message_text')!.textParallel, 8);
+      expect(onBox.specForStage('attachment_digest')!.textParallel, 8);
+      // The drafts' width is not this one: a typed address still drafts one
+      // at a time.
+      expect(onBox.specForStage('draft_reply')!.parallel, 1);
     });
   });
 
