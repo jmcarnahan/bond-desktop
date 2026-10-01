@@ -26,7 +26,9 @@ import 'command_types.dart';
 /// not ready ([decisionReady]) or the installed heads naming another model
 /// than the head's `encoder_model`, the classifier returns null BEFORE any
 /// request — so no `command_head` call record, and no activity row, speaks
-/// of a model nobody could have asked.
+/// of a model nobody could have asked. The same for Your server of the
+/// systemone kind (Kev), which has no raw vector to read: the client's
+/// `resolvedModelTag` says so, and the lexicon reads commands alone.
 ///
 /// The client, the heads and the two checks are closures, resolved per call:
 /// the client follows Settings the way `decisionClientProvider` does, the
@@ -165,7 +167,14 @@ class DecisionCommandClassifier implements CommandClassifier {
       }
       return null;
     }
-    final vectors = await client().embedRaw([text], report: report);
+    // The client's own word on whether a vector is to be had: null for a
+    // target marked unavailable, heads that are missing, or Your server of
+    // the systemone kind (Kev), which answers questions already calibrated
+    // and gives no raw vector. One cached listing GET per address at most,
+    // as any decision call pays; no request at all for a managed target.
+    final decisionClient = client();
+    if (await decisionClient.resolvedModelTag() == null) return null;
+    final vectors = await decisionClient.embedRaw([text], report: report);
     return loaded.apply(vectors.single, bar: bar);
   }
 

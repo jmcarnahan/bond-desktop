@@ -303,15 +303,15 @@ const List<String> cosineBinLabels = [
 
 /// The same four edges, moved down to where the shipped gates actually sit.
 ///
-/// Every gate the clustering and the assign run on is UNDER [cosineBinEdges]'
-/// bottom edge of 0.50: `assignCosineGateWithOverlap` 0.37,
-/// `clusterCoherenceFloor` 0.43, `assignCosineGate` 0.44 and
-/// `clusterLinkThreshold` 0.48, all four in `storyline_service.dart`. On the
-/// old edges every near-gate pair falls in the first bucket, so the chart
-/// cannot answer "how many pairs would the 0.43 floor reject". On these edges
-/// the overlap gate sits in `0.35-0.40`, the coherence floor and the assign
-/// gate in `0.40-0.45`, the link threshold in `0.45-0.50`, and everything at
-/// or above 0.50 is the tail.
+/// Both gates the clustering runs on are UNDER [cosineBinEdges]' bottom edge
+/// of 0.50: `clusterCoherenceFloor` 0.43 and `clusterLinkThreshold` 0.48, in
+/// `storyline_service.dart`. On the old edges every near-gate pair falls in
+/// the first bucket, so the chart cannot answer "how many pairs would the
+/// 0.43 floor reject". On these edges the coherence floor sits in
+/// `0.40-0.45`, the link threshold in `0.45-0.50`, and everything at or above
+/// 0.50 is the tail. The assign pass's retrieval floor
+/// (`StorylinePolicy.assignRetrievalFloor`, 0.30) is under the bottom edge: it
+/// only decides what the decision model is asked about.
 ///
 /// A printed shape and a JSON key, never an assertion: a live bench states
 /// counts and the ledger reads them.
@@ -397,10 +397,9 @@ Map<String, int> charterLintCounts(List<LintCandidate> storylines) {
 /// One report from the service's `clusterObserver` seam: a cluster the sweep
 /// asked about, and the one word for what became of it.
 ///
-/// [threads] are [threadKeyOf] keys, the cluster as the clustering formed it —
-/// before the namer's outliers narrowed it and without the fragment siblings
-/// that ride its members. The words are the seam's five: `formed`,
-/// `incoherent`, `lint`, `thin`, `answered`.
+/// [threads] are [threadKeyOf] keys, the cluster as the grouping proposed it,
+/// without the fragment siblings that ride its members. The words are the seam's five: `formed`, `lint`,
+/// `charter_model`, `thin`, `answered`.
 typedef JudgedCluster = ({List<String> threads, String outcome});
 
 /// The clusters behind [judged], one entry per distinct thread set.
@@ -440,10 +439,10 @@ List<JudgedCluster> distinctClusters(Iterable<JudgedCluster> judged) {
 /// How pure a set of clusters was BEFORE the namer saw them.
 ///
 /// The one number Phase 5 could not read: the store keeps no record of a
-/// cluster the namer declined beyond its tombstone hash, so a namer that
-/// refuses gold-pure groups and a clustering that builds mixed ones look
-/// identical from the outside. Read per outcome, the two come apart — pure
-/// declined clusters accuse the naming rule, mixed ones accuse the clustering.
+/// declined cluster beyond its hash, so a check that refuses gold-pure groups
+/// and a grouping that builds mixed ones look identical from the outside.
+/// Read per outcome, the two come apart — pure declined clusters accuse the
+/// charter check or the confirms, mixed ones accuse the grouping.
 class ClusterPurity {
   /// Clusters in this bucket, the ones with nothing to say about purity
   /// included.
@@ -530,16 +529,16 @@ class ClusterPurity {
 /// The outcome words present in [distinct], each with its clusters' purity.
 ///
 /// In the seam's own order, absent words skipped, and with one derived bucket:
-/// `declined` is every cluster the sweep judged and did not ship — the namer's
-/// refusals, the lint's, and the groups the confirms thinned out — which is the
+/// `declined` is every cluster the sweep judged and did not ship — the charter
+/// check's refusals, either arm, and the groups the confirms thinned out — which is the
 /// bucket `formed` is read against. It overlaps the three it unions, so
 /// [SweepTally.clustersJudged] leaves it out.
 Map<String, ClusterPurity> clusterPurityByOutcome(
   List<JudgedCluster> distinct,
   Map<String, String> goldByThread,
 ) {
-  const order = ['formed', 'incoherent', 'lint', 'thin', 'answered'];
-  const declinedWords = {'incoherent', 'lint', 'thin'};
+  const order = ['formed', 'lint', 'charter_model', 'thin', 'answered'];
+  const declinedWords = {'lint', 'charter_model', 'thin'};
   final byOutcome = <String, ClusterPurity>{};
   for (final outcome in order) {
     final bucket = [
@@ -559,8 +558,50 @@ Map<String, ClusterPurity> clusterPurityByOutcome(
   return byOutcome;
 }
 
+/// Every pool pair, split by whether the two threads are the same gold effort:
+/// the ONE split [pairCosinesOf] reads by cosine and the pairs stage asks the
+/// decision model about, so the two readings are over the same pairs.
+///
+/// Sorted keys, `i < j`, so the populations do not depend on the order the
+/// caller built [keys] in. [withNone] is every pair at least one side of which
+/// gold files nowhere or carries no slug at all.
+({
+  List<(String, String)> sameEffort,
+  List<(String, String)> crossEffort,
+  List<(String, String)> withNone,
+}) poolPairsOf({
+  required Iterable<String> keys,
+  required Map<String, String> goldByThread,
+}) {
+  final sameEffort = <(String, String)>[];
+  final crossEffort = <(String, String)>[];
+  final withNone = <(String, String)>[];
+  final sorted = keys.toList()..sort();
+  String? slugOf(String key) {
+    final slug = goldByThread[key];
+    if (slug == null || slug.isEmpty || slug == noneId) return null;
+    return slug;
+  }
+
+  for (var i = 0; i < sorted.length; i++) {
+    for (var j = i + 1; j < sorted.length; j++) {
+      final pair = (sorted[i], sorted[j]);
+      final a = slugOf(sorted[i]);
+      final b = slugOf(sorted[j]);
+      if (a == null || b == null) {
+        withNone.add(pair);
+      } else if (a == b) {
+        sameEffort.add(pair);
+      } else {
+        crossEffort.add(pair);
+      }
+    }
+  }
+  return (sameEffort: sameEffort, crossEffort: crossEffort, withNone: withNone);
+}
+
 /// Every pool pair's cosine, split by whether the two threads are the same
-/// gold effort.
+/// gold effort ([poolPairsOf]).
 ///
 /// The separability read, and the ceiling on every threshold the clustering
 /// could be given: a floor that keeps the in-effort pairs and drops the rest
@@ -577,38 +618,107 @@ Map<String, ClusterPurity> clusterPurityByOutcome(
   required Map<String, List<double>> vectors,
   required Map<String, String> goldByThread,
 }) {
-  final sameEffort = <double>[];
-  final crossEffort = <double>[];
-  final withNone = <double>[];
-  // Sorted, so the three populations do not depend on the order the caller
-  // happened to build the map in.
-  final keys = vectors.keys.toList()..sort();
-  String? slugOf(String key) {
-    final slug = goldByThread[key];
-    if (slug == null || slug.isEmpty || slug == noneId) return null;
-    return slug;
-  }
+  final pairs = poolPairsOf(keys: vectors.keys, goldByThread: goldByThread);
+  List<double> cosines(List<(String, String)> of) => [
+        for (final (a, b) in of) cosine(vectors[a]!, vectors[b]!),
+      ];
+  return (
+    sameEffort: cosines(pairs.sameEffort),
+    crossEffort: cosines(pairs.crossEffort),
+    withNone: cosines(pairs.withNone),
+  );
+}
 
-  for (var i = 0; i < keys.length; i++) {
-    for (var j = i + 1; j < keys.length; j++) {
-      final value = cosine(vectors[keys[i]]!, vectors[keys[j]]!);
-      final a = slugOf(keys[i]);
-      final b = slugOf(keys[j]);
-      if (a == null || b == null) {
-        withNone.add(value);
-      } else if (a == b) {
-        sameEffort.add(value);
-      } else {
-        crossEffort.add(value);
+/// The highest value in [values] that still has at least [pct]% of them at or
+/// above it — a value the data contains, never an interpolated percentile, so
+/// the share read beside it is a real count. Zero for an empty list.
+///
+/// [separationOf]'s recall-70 walk, at any recall.
+double valueAtRecall(List<double> values, int pct) {
+  if (values.isEmpty) return 0;
+  final sorted = [...values]..sort();
+  var at = sorted.first;
+  var firstOfValue = 0;
+  for (var i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i] != sorted[i - 1]) firstOfValue = i;
+    final atOrAbove = sorted.length - firstOfValue;
+    if (atOrAbove * 100 >= sorted.length * pct) at = sorted[i];
+  }
+  return at;
+}
+
+/// The chance a random same-effort pair scores above a random cross-effort
+/// pair, ties counting half: the area under the ROC curve, by counting. 0.5
+/// for an empty side, which separates nothing.
+double aucOf({
+  required List<double> sameEffort,
+  required List<double> crossEffort,
+}) {
+  if (sameEffort.isEmpty || crossEffort.isEmpty) return 0.5;
+  var wins = 0.0;
+  for (final same in sameEffort) {
+    for (final cross in crossEffort) {
+      if (same > cross) {
+        wins += 1;
+      } else if (same == cross) {
+        wins += 0.5;
       }
     }
   }
+  return wins / (sameEffort.length * crossEffort.length);
+}
+
+/// The pairs stage's reading of one per-pair score (the decision model's
+/// p(same_effort)), over the same same and cross lists [separationOf] reads:
+/// the AUC, and at each of [recalls] the score that keeps that share of the
+/// same-effort pairs and the share of cross-effort pairs it would link too.
+/// Seventy is [separationOf]'s own point, so its cosine row and this one are
+/// read side by side.
+({
+  int same,
+  int cross,
+  double auc,
+  List<({int recallPct, double at, int falseLinkPct})> points,
+}) pairReadingOf({
+  required List<double> sameEffort,
+  required List<double> crossEffort,
+  List<int> recalls = const [50, 70, 90],
+}) {
+  int sharePct(List<double> values, double bar) => values.isEmpty
+      ? 0
+      : (values.where((v) => v >= bar).length * 100 / values.length).round();
   return (
-    sameEffort: sameEffort,
-    crossEffort: crossEffort,
-    withNone: withNone,
+    same: sameEffort.length,
+    cross: crossEffort.length,
+    auc: aucOf(sameEffort: sameEffort, crossEffort: crossEffort),
+    points: [
+      for (final recall in recalls)
+        (
+          recallPct: recall,
+          at: valueAtRecall(sameEffort, recall),
+          falseLinkPct: sharePct(crossEffort, valueAtRecall(sameEffort, recall)),
+        ),
+    ],
   );
 }
+
+/// [pairReadingOf]'s numbers on one line. Counts, ratios and two-decimal
+/// probabilities only.
+String pairReadingLine(
+  ({
+    int same,
+    int cross,
+    double auc,
+    List<({int recallPct, double at, int falseLinkPct})> points,
+  }) reading,
+) =>
+    'pairs: same ${reading.same} · cross ${reading.cross} · '
+    'AUC ${reading.auc.toStringAsFixed(3)} · '
+    '${[
+      for (final point in reading.points)
+        'recall ${point.recallPct}% at p ${point.at.toStringAsFixed(2)} '
+            'false-link ${point.falseLinkPct}%',
+    ].join(' · ')}';
 
 /// The commonest English function words, dropped before two subjects are
 /// compared.
@@ -850,18 +960,11 @@ List<int> sharedPeopleBins(Iterable<double> counts) {
     );
   }
 
-  // Ascending, then the LAST value whose "at or above me" share still clears
-  // seven in ten. Walking the values rather than interpolating a percentile
-  // keeps the answer a cosine the data actually contains, which is what makes
-  // the share beside it a real count rather than an estimate.
+  // The LAST value whose "at or above me" share still clears seven in ten
+  // ([valueAtRecall]): a cosine the data actually contains, which is what
+  // makes the share beside it a real count rather than an estimate.
   final sortedSame = [...sameEffort]..sort();
-  var recall70 = sortedSame.first;
-  var firstOfValue = 0;
-  for (var i = 0; i < sortedSame.length; i++) {
-    if (i > 0 && sortedSame[i] != sortedSame[i - 1]) firstOfValue = i;
-    final atOrAbove = sortedSame.length - firstOfValue;
-    if (atOrAbove * 100 >= sortedSame.length * 70) recall70 = sortedSame[i];
-  }
+  final recall70 = valueAtRecall(sameEffort, 70);
 
   // The same walk over the cross list, taking the FIRST value whose share has
   // fallen to one in twenty. A list where even the largest value is held by
@@ -872,7 +975,7 @@ List<int> sharedPeopleBins(Iterable<double> counts) {
   var cross5 = sortedSame.last;
   if (sortedCross.isNotEmpty) {
     cross5 = sortedCross.last;
-    firstOfValue = 0;
+    var firstOfValue = 0;
     for (var i = 0; i < sortedCross.length; i++) {
       if (i > 0 && sortedCross[i] != sortedCross[i - 1]) firstOfValue = i;
       final atOrAbove = sortedCross.length - firstOfValue;
@@ -1124,7 +1227,7 @@ class SweepTally {
   /// rows whose status is `dismissed` or `possible`.
   ///
   /// `possible` counts because that is where a declined cluster goes since
-  /// decision 31: the namer, the charter lint or the confirms refused it, and
+  /// decision 31: the charter check or the confirms refused it, and
   /// instead of a member-less tombstone the sweep files the group with its
   /// members for a person to keep or dismiss. The word on the printed line
   /// stays `tombstoned` so a row taken today reads against every row in the
@@ -1132,24 +1235,19 @@ class SweepTally {
   /// would vouch for.
   final int tombstoned;
 
-  /// Clusters the charter lint refused, summed off the sweep's own
-  /// activity rows.
+  /// Clusters the regex charter lint refused, summed off the sweep's own
+  /// activity rows (`SWEEP_CHARTER=lint`).
   final int lintRejected;
 
-  /// Clusters the namer refused, summed the same way: a `coherent: false` that
-  /// named no outliers, or an outlier list that left fewer than two threads.
-  /// Both are the model naming no group to keep, so neither contributes to
-  /// [outliersDropped].
-  final int incoherent;
+  /// Clusters the decision model's `charter_specific` refused, summed the
+  /// same way (`SWEEP_CHARTER=model`, what ships).
+  final int charterModelRejected;
 
   /// Series the pre-pass seeded as clusters of their own.
   final int seriesSeeded;
 
   /// Threads the pre-pass took out of the pool as notification-shaped.
   final int seriesExcluded;
-
-  /// Threads the namer named as not belonging, dropped before the confirms.
-  final int outliersDropped;
 
   /// Pool rows that were fragments of a member's own thread and joined on its
   /// verdict, never clustered, named or confirmed in their own right.
@@ -1207,29 +1305,11 @@ class SweepTally {
   /// Items in no storyline at all.
   final int filedNowhere;
 
-  /// Model calls per task label — `storyline_name`, `storyline_membership`.
+  /// Model calls per task label — `storyline_name`, `decision:member_of`.
   final Map<String, int> callsByKind;
 
-  /// Grouping calls the sweep made, summed off its own activity rows.
-  ///
-  /// Zero on a tree running `GroupingMode.cosine`, which is what ships: the
-  /// sweep writes all four of these keys in either mode so that a row from
-  /// the two trees is the same row with different numbers in it. The four
-  /// default to 0 here for the same reason a missing key reads 0 — a ledger
-  /// row taken before these existed is a cosine row, and that is what a
-  /// cosine row says.
-  final int groupingCalls;
-
-  /// Threads a grouping call placed in a group big enough to propose.
-  final int grouped;
-
-  /// Grouping calls that left their piece ungrouped: the call threw, or it
-  /// named no group at all.
-  final int groupingFailed;
-
-  /// Pieces dropped before any call — too few threads after a split, or still
-  /// too wide to show in one call at the top of the ladder.
-  final int groupingUnfit;
+  /// Naming calls the sweep made — what `maxQuestionsPerPass` caps.
+  final int namerCalls;
 
   /// Model calls made in each sweep pass, in pass order.
   final List<int> callsPerPass;
@@ -1257,7 +1337,7 @@ class SweepTally {
   final Map<String, int> lintCounts;
 
   /// Outcome word to the purity of the clusters the sweep judged under it,
-  /// read BEFORE the namer narrowed or refused any of them. Carries the
+  /// read BEFORE the namer wrote a word about any of them. Carries the
   /// derived `declined` bucket as well as the seam's five words; see
   /// [clusterPurityByOutcome].
   final Map<String, ClusterPurity> clusterPurity;
@@ -1300,10 +1380,9 @@ class SweepTally {
     required this.formed,
     required this.tombstoned,
     required this.lintRejected,
-    required this.incoherent,
+    this.charterModelRejected = 0,
     required this.seriesSeeded,
     required this.seriesExcluded,
-    required this.outliersDropped,
     required this.fragmentsJoined,
     required this.fragmentsFolded,
     required this.purityByStoryline,
@@ -1318,10 +1397,7 @@ class SweepTally {
     required this.unmapped,
     required this.filedNowhere,
     required this.callsByKind,
-    this.groupingCalls = 0,
-    this.grouped = 0,
-    this.groupingFailed = 0,
-    this.groupingUnfit = 0,
+    this.namerCalls = 0,
     required this.callsPerPass,
     required this.wallPerPassMs,
     required this.cosineBins,
@@ -1378,10 +1454,9 @@ class SweepTally {
         'formed': formed,
         'tombstoned': tombstoned,
         'lint_rejected': lintRejected,
-        'incoherent': incoherent,
+        'charter_model_rejected': charterModelRejected,
         'series': seriesSeeded,
         'series_excluded': seriesExcluded,
-        'outliers': outliersDropped,
         'fragments': fragmentsJoined,
         'folded': fragmentsFolded,
         'purity': {
@@ -1406,10 +1481,7 @@ class SweepTally {
         'unmapped': unmapped,
         'filed_nowhere': filedNowhere,
         'calls_by_kind': callsByKind,
-        'grouping_calls': groupingCalls,
-        'grouped': grouped,
-        'grouping_failed': groupingFailed,
-        'grouping_unfit': groupingUnfit,
+        'namer_calls': namerCalls,
         'calls_per_pass': callsPerPass,
         'wall_per_pass_ms': wallPerPassMs,
         'cosine_bins': {
@@ -1480,9 +1552,9 @@ class SweepTally {
         clusterPurity[outcome]?.line() ?? 'none';
     return 'sweep:\n'
         '  storylines  formed $formed  tombstoned $tombstoned'
-        '  lint-rejected $lintRejected  incoherent $incoherent\n'
+        '  lint-rejected $lintRejected  charter-rejected $charterModelRejected\n'
         '  series  seeded $seriesSeeded  excluded $seriesExcluded'
-        '  outliers dropped $outliersDropped  fragments $fragmentsJoined'
+        '  fragments $fragmentsJoined'
         '  folded $fragmentsFolded\n'
         '  formable: $formablePositives of $formableItems correct'
         '   ceiling $ceiling of $items\n'
@@ -1495,15 +1567,14 @@ class SweepTally {
         '  filed nowhere $filedNowhere  forbidden hits $forbiddenHits '
         'over ${forbiddenByAnti.length} buckets\n'
         '  calls  $calls   per pass ${callsPerPass.join(', ')}'
-        '   grouping calls $groupingCalls  grouped $grouped'
-        '  failed $groupingFailed  unfit $groupingUnfit\n'
+        '   namer calls $namerCalls\n'
         '  wall per pass ms ${wallPerPassMs.join(', ')}\n'
         '  in-cluster cosines (0.50..0.65)  $bins\n'
         '  in-cluster cosines (0.35..0.50)  $binsQwen\n'
         '  clusters judged $clustersJudged'
         '  formed ${clustersAt('formed')}'
-        '  incoherent ${clustersAt('incoherent')}'
         '  lint ${clustersAt('lint')}'
+        '  charter ${clustersAt('charter_model')}'
         '  thin ${clustersAt('thin')}'
         '  answered ${clustersAt('answered')}\n'
         '  purity before naming  formed: ${purityAt('formed')}\n'

@@ -16,6 +16,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/services/cloud_drafts.dart' show DraftRoutes;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
@@ -419,6 +420,23 @@ void main() {
     final label = await store.createLabel('FYI only', tone: 'success');
     await store.applyLabels('email', 'conv-1', [label.id]);
 
+    // One storyline press, logged as a decision label: the owner's word, like
+    // the vocabulary above, and nothing a re-run would write back.
+    await store.writeDecisionLabels([
+      (
+        question: 'member_of',
+        answer: 'yes',
+        storylineId: 'sl-1',
+        source: 'email',
+        conversationKey: 'conv-1',
+        otherSource: null,
+        otherConversationKey: null,
+        title: 'Invoice 4471',
+        charter: 'Getting invoice 4471 paid.',
+        origin: 'add',
+      ),
+    ]);
+
     // Configuration, which neither reset may touch.
     await store.setSenderPref('eric@example.com', 'later');
     await store.setPref('backend_mode', 'sdk');
@@ -454,7 +472,7 @@ void main() {
       expect(classified.length, classified.toSet().length);
       expect(MessageStore.derivedTables, hasLength(18));
       expect(MessageStore.syncedTables, hasLength(8));
-      expect(MessageStore.keptTables, hasLength(5));
+      expect(MessageStore.keptTables, hasLength(6));
     });
 
     test('name every retired clustering one-shot', () {
@@ -472,7 +490,7 @@ void main() {
       }
     });
 
-    test('name every search-corpus one-shot, and account for all eleven',
+    test('name every search-corpus one-shot, and account for all thirteen',
         () {
       // The same rule over the four search corpora, and it bites harder here:
       // the clear EMPTIES `message_vectors`, `attachment_chunks` and
@@ -487,13 +505,25 @@ void main() {
       }
       // The count, so a key added to the store's list without a walk behind it
       // shows up here rather than in a mailbox. Six from before the search
-      // corpora, four with them, and the needs-you veto's lowering twin of
-      // the verdict backfill. The behaviour of each search walk is pinned in
-      // `embed_backfill_test.dart`.
-      expect(MessageStore.derivedOneShotPrefs, hasLength(11));
+      // corpora, four with them, the needs-you veto's lowering twin of the
+      // verdict backfill, the decision-vector backfill (v24), and the sweep's
+      // pool size at its last pass. The behaviour of each search walk is
+      // pinned in `embed_backfill_test.dart`.
+      expect(MessageStore.derivedOneShotPrefs, hasLength(13));
       expect(
         MessageStore.derivedOneShotPrefs.toSet(),
         hasLength(MessageStore.derivedOneShotPrefs.length),
+      );
+    });
+
+    test('name the sweep pool size, so a clear resets the progressive gate',
+        () {
+      // A pool size kept over threads whose storylines the clear has deleted
+      // would hold the next progressive sweep back until the new pool
+      // outgrew the old count.
+      expect(
+        MessageStore.derivedOneShotPrefs,
+        contains(storylineSweepPoolAtKey),
       );
     });
   });
@@ -582,6 +612,47 @@ void main() {
       );
     });
 
+    test('keeps the storyline labels the owner pressed', () async {
+      await seedEverything();
+
+      await store.clearDerived();
+
+      // The storylines they were pressed on are derived and gone; the labels
+      // are the owner's word and stay, with the words they answered.
+      expect(await rows('storylines'), 0);
+      final labels = await store.decisionLabels();
+      expect(labels.single['question'], 'member_of');
+      expect(labels.single['answer'], 'yes');
+      expect(labels.single['charter'], 'Getting invoice 4471 paid.');
+    });
+
+    test("keeps the owner's Needs You answers and their vectors across Clear "
+        'AI results', () async {
+      await seedEverything();
+      final id = await store.writeNeedsYouLabel(
+        source: 'email',
+        conversationKey: 'conv-1',
+        sourceMessageId: 'm-receipt',
+        answer: 'no',
+        origin: 'remove',
+        vector: const [0.5, -0.25, 1.0],
+        vectorModel: 'bond-decide-v3',
+      );
+
+      await store.clearDerived();
+
+      // The decisions they overrode are derived and gone; the answers stay,
+      // so the next decision of a message like it applies them again.
+      expect(await rows('message_decisions'), 0);
+      final labels = await store.needsYouLabels();
+      expect(labels.single.id, id);
+      expect(labels.single.answer, 'no');
+      expect(labels.single.vector, [0.5, -0.25, 1.0]);
+      expect(labels.single.vectorModel, 'bond-decide-v3');
+      // Beside the storyline label, which is untouched.
+      expect(await rows('decision_labels'), 2);
+    });
+
     test('keeps the verdicts ingest wrote and re-pends the rest', () async {
       // The four ingest wrote, which nothing would write a second time.
       await seedMessage('out-1',
@@ -651,7 +722,7 @@ void main() {
             source,
             id,
             fakeDecision(fakeAnswers(gateDrop: 0.9, dropReason: 'outbound')),
-            qhash: 'test',
+            qhash: decisionQhash,
             ownerKnown: true,
           );
       await seedMessage('learned-out',
@@ -764,7 +835,8 @@ void main() {
         "summary = 'An old summary', needs_action = 1, "
         "action_items_json = '[]', label = 'work', reply_expected = 1, "
         "deadline = 'Friday', needs_you_verdict = 1, "
-        "needs_you_reason = 'addressed you', addressed_me = 1",
+        "needs_you_reason = 'addressed you', needs_you_p = 0.8, "
+        'addressed_me = 1',
       );
 
       await store.clearDerived();
@@ -790,6 +862,7 @@ void main() {
         'deadline',
         'needs_you_verdict',
         'needs_you_reason',
+        'needs_you_p',
       ]) {
         expect(row[column], isNull, reason: column);
       }
@@ -1308,6 +1381,9 @@ void main() {
       // written about mail that is gone.
       expect(await rows('conversation_labels'), 0);
       expect(await rows('labels'), 0);
+      // The storyline labels too: each names a thread of the mailbox this
+      // wipe just deleted.
+      expect(await rows('decision_labels'), 0);
       // And the sender rule beside them, to show this is a deliberate
       // difference rather than the identity flag doing the work.
       expect(await store.getSenderPref('eric@example.com'), 'later');

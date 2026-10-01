@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
 import '../services/deadline_parse.dart' show showableDeadline;
+import '../services/decision/needs_you_predicate.dart';
 import '../services/decision/stored_decision.dart';
 import '../services/decision/decision_policy.dart'
     show DecisionPolicy, learnedGateReasons;
 import '../models/extraction_models.dart';
 import '../theme/tokens.dart';
 import 'home_result.dart' show homeDropLabels;
+import 'needs_you_reason.dart'
+    show needsYouFromEarlierModel, needsYouPercentWords;
 import 'time_format.dart';
 
 /// Why one message got the verdict it did, in plain words.
@@ -29,7 +32,9 @@ import 'time_format.dart';
 /// It is read-only, and nothing it shows feeds back anywhere. This reads model
 /// OUTPUT that has already been through the untrusted-data fence upstream; it
 /// writes nothing, sends nothing and prompts nothing, so there is no second
-/// fence to build here.
+/// fence to build here. The owner's own Needs You answer is SHOWN here — "you
+/// removed it", and the sentence saying whether it was this message or one
+/// like it — but it is taken on the thread's action bar, never in this panel.
 class WhyPanelBody extends StatelessWidget {
   /// The message being explained. Null — synced away, wiped — says so and
   /// draws nothing else: an explanation of a message nobody has is a page of
@@ -50,8 +55,8 @@ class WhyPanelBody extends StatelessWidget {
   /// message. One line under the verdict when present.
   final StoredDecision? decision;
 
-  /// The reader's own needs-you threshold, so the score is reported against
-  /// the line they actually set rather than against a default.
+  /// The reader's own needs-you threshold, so the message's probability is
+  /// judged against the line they actually set rather than against a default.
   final double threshold;
 
   final DateTime now;
@@ -167,41 +172,66 @@ class WhyPanelBody extends StatelessWidget {
     );
   }
 
-  /// The verdict in three words, tri-state preserved. "Not judged yet" is a
-  /// different answer from "Not flagged" and the panel never collapses them:
-  /// the unjudged rows are the pass's own worklist.
+  /// The message's needs-you probability as the percentage the Settings
+  /// slider is set in, so the two read as one number: `Needs you: 72%`. A
+  /// dash when the decision model has not read it: an undecided message is
+  /// not a low one, and the panel never shows it as 0%.
   ///
-  /// A NULL verdict WITH a reason is a fourth reading: a hedge, a yes the
-  /// pass was not sure enough of to raise. It is neither a no nor unjudged,
-  /// and the panel says so rather than claiming either.
-  String _headline(Message m) => switch (m.needsYouVerdict) {
-        true => 'Needs you',
-        false => 'Not flagged',
-        null when _hedged(m) => 'Not sure',
-        null => 'Not judged yet',
-      };
-
-  /// Whether the pass judged this message a hedge: NULL verdict, reason kept.
-  static bool _hedged(Message m) =>
-      m.needsYouVerdict == null && (m.needsYouReason?.trim() ?? '').isNotEmpty;
+  /// An earlier model's carried verdict (a 1.0 or 0.0 with no [decision]
+  /// under this build's questions, `needsYouFromEarlierModel`) reads
+  /// `Needs you: — (earlier model)`: it still counts against the slider, but
+  /// no model said that number.
+  ///
+  /// The owner's own answer ([StoredDecision.ownerAnswer]) reads as theirs,
+  /// with no percentage: `Needs you: no — you removed it`, or `— like one
+  /// you removed` when the answer came from a message like this one
+  /// ([DecisionAnswers.ownerExact] false). The 0.0 or 1.0 under it is the
+  /// owner's word, not a model's confidence.
+  String _headline(Message m) {
+    final exact = decision?.answers.ownerExact ?? false;
+    switch (decision?.ownerAnswer) {
+      case 'no':
+        return exact
+            ? 'Needs you: no — you removed it'
+            : 'Needs you: no — like one you removed';
+      case 'yes':
+        return exact
+            ? 'Needs you: yes — you added it'
+            : 'Needs you: yes — like one you added';
+    }
+    final decidedNow = decision != null;
+    if (m.needsYouP != null &&
+        needsYouFromEarlierModel(m.needsYouP, decidedNow: decidedNow)) {
+      return 'Needs you: — (earlier model)';
+    }
+    final percent = needsYouPercentWords(m.needsYouP, decidedNow: decidedNow);
+    return 'Needs you: ${percent ?? '—'}';
+  }
 
   List<String> _verdictLines(Message m) {
     final lines = <String>[];
     final reason = m.needsYouReason?.trim() ?? '';
-    switch (m.needsYouVerdict) {
-      case null when _hedged(m):
-        lines.add('The pass leaned yes but was not sure, so triage decides. '
-            '${_reasonSentence(reason)}');
-      case null:
-        lines.add('The needs-you pass has not reached this message.');
-      case true:
-        lines.add(reason.isEmpty
-            ? 'The pass judged it wants you.'
-            : _reasonSentence(reason));
-      case false:
-        lines.add(reason.isEmpty
-            ? 'The pass judged it does not need you.'
-            : _reasonSentence(reason));
+    if (m.needsYouP == null) {
+      lines.add('The needs-you pass has not reached this message.');
+    } else {
+      // The answer the rail acts on, against the reader's own line. The
+      // reason is templated from the decision whatever its probability, so it
+      // is shown only where it is an answer: under the line it would say
+      // "asks you a question" about a message the reader was told needs
+      // nothing (`home_result.dart` keeps the same rule).
+      //
+      // The owner's answer is the exception: its sentence says what the
+      // owner did ("You removed a message like this from Needs You."), which
+      // is the answer on either side of the line.
+      final line = needsYouPercentWords(threshold);
+      final owners = decision?.ownerAnswer != null;
+      if (owners && reason.isNotEmpty) lines.add(_reasonSentence(reason));
+      if (needsYouAt(m.needsYouP, threshold)) {
+        if (!owners && reason.isNotEmpty) lines.add(_reasonSentence(reason));
+        lines.add('In Needs You: at or above your $line line.');
+      } else {
+        lines.add('Not in Needs You: below your $line line.');
+      }
     }
     final gate = m.gateReason?.trim() ?? '';
     if (gate.isNotEmpty) {
@@ -317,11 +347,10 @@ class WhyPanelBody extends StatelessWidget {
     if (score == null) {
       lines.add('Not scored yet.');
     } else {
-      // `>=` counts as above, exactly as the rail's own partition does: a
-      // thread sitting on the line is one the reader asked to see.
-      final side = score >= threshold ? 'above' : 'below';
-      lines.add('Attention ${score.toStringAsFixed(1)} — $side your '
-          'threshold of ${threshold.toStringAsFixed(1)}.');
+      // The score orders Needs You and gates nothing, so it is reported on
+      // its own rather than against the slider, which cuts the needs-you
+      // probability.
+      lines.add('Attention ${score.toStringAsFixed(1)}.');
     }
 
     final row = ai;

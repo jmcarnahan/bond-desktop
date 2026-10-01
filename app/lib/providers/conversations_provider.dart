@@ -12,6 +12,8 @@ import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
 import '../services/deadline_parse.dart';
+import '../services/decision/needs_you_predicate.dart';
+import '../services/needs_you_edits.dart';
 import '../services/notification_coordinator.dart';
 import '../services/pipeline_progress.dart';
 import '../services/read_ack_queue.dart';
@@ -19,7 +21,6 @@ import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
 import 'app_providers.dart';
-import 'prefs_provider.dart' show attentionThresholdKey;
 
 /// The inbox's read model.
 ///
@@ -181,8 +182,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// The home screen's recorder. This notifier owns exactly one thing about
   /// it: the backstop sweep at the end of a pump, which is the only place in
   /// the app that knows both that the drains have finished and what the user's
-  /// attention threshold is.
+  /// Needs You slider is.
   final PipelineProgress _pipeline;
+
+  /// The owner's Needs You presses, read at press time — a getter rather
+  /// than the service, so building this notifier builds no decision client.
+  /// Null in tests that never press; a press then reads as a failure.
+  final NeedsYouEdits Function()? _needsYouEdits;
 
   StreamSubscription<TriageProgress>? _triageProgress;
 
@@ -209,6 +215,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     this._readAcks,
     this._notify,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    this._needsYouEdits,
     Future<String?>? userAddress,
   })  : _triage = triage,
         _aiWorker = aiWorker,
@@ -447,22 +454,20 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     // for the same reason the settle is: the rows are written by now, and a
     // bar left saying "settling" forever is not something to skip because the
     // list went away.
-    await _pipeline.sweepSettled(threshold: await _attentionThreshold());
+    await _pipeline.sweepSettled(threshold: await _needsYouThreshold());
     if (!mounted) return;
     await load(syncFirst: false);
   }
 
-  /// The user's own loudness control, or the default when nothing has set it
-  /// or the read failed. Read here rather than at the sweep so the settle pass
-  /// judges the mailbox against the same number the tiles do.
-  Future<double> _attentionThreshold() async {
+  /// The owner's Needs You slider, or the default when the read failed. Read
+  /// here rather than at the sweep so the settle pass judges the mailbox
+  /// against the same number the tiles do.
+  Future<double> _needsYouThreshold() async {
     try {
-      final stored = await _store.getPref(attentionThresholdKey);
-      return (stored == null ? null : double.tryParse(stored)) ??
-          AttentionTuning.defaultThreshold;
+      return await _store.needsYouThreshold();
     } catch (e) {
-      debugPrint('reading the attention threshold failed: $e');
-      return AttentionTuning.defaultThreshold;
+      debugPrint('reading the needs-you threshold failed: $e');
+      return NeedsYouTuning.defaultThreshold;
     }
   }
 
@@ -966,21 +971,79 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     await load(syncFirst: false);
   }
 
+  /// "Remove from Needs You" on one thread: the owner's `no`, kept as a label
+  /// on every message of the thread's Needs You window and written again, so
+  /// the thread leaves the pile at once, with every thread like it — the
+  /// press's sweep runs inside it ([NeedsYouEdits.remove]) — and then the
+  /// list is read again, once, with all of it.
+  ///
+  /// Returns the press for the Undo ([undoNeedsYouPress]) and the toast
+  /// ([NeedsYouPress.changed]) — an empty one when nothing in the thread
+  /// waits on the owner — or null when the decision model could not answer.
+  /// Null changes nothing on screen and sets no error: the caller says it in
+  /// its own bar.
+  Future<NeedsYouPress?> removeFromNeedsYou(
+    String source,
+    String conversationKey,
+  ) =>
+      _pressNeedsYou((edits) => edits.remove(source, conversationKey));
+
+  /// "Add to Needs You" on one thread: the owner's `yes` on its newest
+  /// message, so the thread is in Needs You at any slider, with every thread
+  /// like it ([NeedsYouEdits.add]). Returns what [removeFromNeedsYou]
+  /// returns.
+  Future<NeedsYouPress?> addToNeedsYou(
+    String source,
+    String conversationKey,
+  ) =>
+      _pressNeedsYou((edits) => edits.add(source, conversationKey));
+
+  Future<NeedsYouPress?> _pressNeedsYou(
+    Future<NeedsYouPress> Function(NeedsYouEdits edits) press,
+  ) async {
+    final edits = _needsYouEdits?.call();
+    if (edits == null) return null;
+    final NeedsYouPress done;
+    try {
+      done = await press(edits);
+    } catch (e) {
+      debugPrint('needs_you: a press failed: ${e.runtimeType}');
+      return null;
+    }
+    await load(syncFirst: false);
+    return done;
+  }
+
+  /// The Undo of a Needs You press: its labels deleted and every message
+  /// that took its answer from them decided again — the pressed thread and
+  /// every thread its sweep took — then the list read again
+  /// ([NeedsYouEdits.retract]). Never the opposite press. Throws what the
+  /// decision client throws, after reloading whatever did come back.
+  Future<void> undoNeedsYouPress(NeedsYouPress press) async {
+    final edits = _needsYouEdits?.call();
+    if (edits == null || press.isEmpty) return;
+    try {
+      await edits.retract(press);
+    } finally {
+      await load(syncFirst: false);
+    }
+  }
+
   /// Gives a thread that has just left Later the Needs You chips its messages
   /// were denied while it was there.
   ///
   /// `message_progress.needs_you` is a snapshot, and a message that settled
   /// while its thread sat in Later took a 0 on the strength of the bucket
-  /// alone. The snapshot follows the VERDICT afterwards, and lifting a bucket
-  /// moves no verdict — so without this the message is back in the inbox with
-  /// a judged yes one table over and no chip, for good. Raise-only, through
+  /// alone. The snapshot follows the PROBABILITY afterwards, and lifting a
+  /// bucket moves no probability — so without this the message is back in the
+  /// inbox needing the owner and with no chip, for good. Raise-only, through
   /// the pipeline's own statement and guards, so what earns a chip here is
   /// exactly what earns one at settle.
   Future<void> _raiseNeedsYou(String source, String conversationKey) async {
     await _pipeline.raiseNeedsYouForThread(
       source,
       conversationKey,
-      threshold: await _attentionThreshold(),
+      threshold: await _needsYouThreshold(),
     );
   }
 
@@ -1097,6 +1160,7 @@ final conversationsProvider =
     readAcks: ref.watch(readAckQueueProvider),
     notify: ref.watch(notificationCoordinatorProvider),
     progress: ref.watch(pipelineProgressProvider),
+    needsYouEdits: () => ref.read(needsYouEditsProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(authSessionProvider).storedAccount.then(

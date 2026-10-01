@@ -45,6 +45,11 @@ void main() {
         heads: syntheticHeads,
         onCall: records.add,
         client: MockClient((request) async {
+          // The heads pairing's one listing GET: a server naming no file is
+          // skipped and kept like a pass.
+          if (request.url.path.endsWith('/v1/models')) {
+            return http.Response(jsonEncode({'models': <Object>[]}), 200);
+          }
           final body = jsonDecode(request.body) as Map<String, dynamic>;
           if (request.url.path.endsWith('/tokenize')) {
             return http.Response(jsonEncode({'tokens': modernBertA}), 200);

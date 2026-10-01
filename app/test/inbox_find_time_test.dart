@@ -67,6 +67,12 @@ class _FakeSync implements MailSync {
   Future<void> ensureBodies(String conversationKey) async {}
 
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
@@ -186,6 +192,9 @@ void main() {
     });
     await writeTriaged(store, 'email', 'ask-m1',
         status: 'triaged', replyExpected: true);
+    // Needs You is the decision model's probability against the slider since
+    // the needs-you signals round; the ask sits there by it.
+    await store.writeNeedsYouP('email', 'ask-m1', p: 0.9);
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': 'c-ask',

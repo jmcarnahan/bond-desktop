@@ -642,11 +642,15 @@ void main() {
         'body_text': 'Body for $key',
         'triage_status': 'triaged',
       });
+      // Hashed over the card the assign pass would build now, so the vector
+      // reads as current and the pass embeds nothing.
+      final row = await store.getConversationRow('email', key);
+      final card = await clusteringCardFor(store, 'email', key, row!);
       await store.upsertConversationAi(
         'email',
         key,
         embedding: encodeEmbedding(vector),
-        embeddedHash: 'h-$key',
+        embeddedHash: cardHash(card),
         embedModel: EmbeddingsClient.modelTag,
       );
     }
@@ -657,7 +661,12 @@ void main() {
         store,
         handlers: [
           StorylineAssignHandler(
-            StorylineService(store, llm, activityLog: log),
+            StorylineService(
+              store,
+              llm,
+              judge: scriptedJudge(store, llm),
+              activityLog: log,
+            ),
             activityLog: log,
           ),
         ],
@@ -687,16 +696,8 @@ void main() {
       );
       await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
 
-      await pumpStoryline(
-        'c1',
-        scriptedLlm(
-          {
-            'evidence': 'Different project.',
-            'belongs': false,
-            'confidence': 'high',
-          },
-        ),
-      );
+      // The decision model's `member_of`, well under the bar.
+      await pumpStoryline('c1', scriptedLlm({'p': 0.1}));
 
       final row = (await rows('storyline')).single;
       // A model call happened and its answer was no. `skipped` rather than

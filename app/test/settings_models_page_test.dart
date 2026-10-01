@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:bond_inbox/providers/app_providers.dart' show ParkedFact;
 import 'package:bond_inbox/services/decision/decision_client.dart'
-    show noTokenizeText, notDecisionModelText;
+    show DecisionServerKind, noTokenizeText, notDecisionModelText;
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/managed_model_status.dart';
@@ -97,6 +97,7 @@ void main() {
     bool processingOn = true,
     ServerState serverState = const ServerStopped(),
     bool decisionKeyStored = false,
+    DecisionServerKind? decisionKind,
     bool generativeKeyStored = false,
     String generativeUrl = _generativeUrl,
     List<ManagedModelStatus>? statuses,
@@ -124,6 +125,7 @@ void main() {
             decisionUrl: _decisionUrl,
             decisionModel: 'bond-decide-fixture',
             decisionKeyStored: decisionKeyStored,
+            decisionKind: decisionKind,
             generativeUrl: generativeUrl,
             generativeModel: 'qwen3.8-27b',
             generativeKeyStored: generativeKeyStored,
@@ -377,12 +379,13 @@ void main() {
   });
 
   group('the decision model on your server', () {
-    testWidgets('without the heads file on this Mac is not installed, '
-        'whatever the server says', (tester) async {
+    testWidgets('ModernBERT without the heads file on this Mac is not '
+        'installed, whatever the server says', (tester) async {
       await open(
         tester,
         decision: ModelPlacement.box,
         decisionKeyStored: true,
+        decisionKind: DecisionServerKind.encoderHeads,
         statuses: [
           _row('decision',
               onDisk: false, local: true, inUse: false, headsOnDisk: false),
@@ -396,9 +399,87 @@ void main() {
         tester,
         decision: ModelPlacement.box,
         decisionKeyStored: true,
+        decisionKind: DecisionServerKind.encoderHeads,
         statuses: [
           _row('decision', onDisk: false, local: true, inUse: false),
         ],
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Connected · bond-decide-fixture at box.example.com');
+    });
+
+    testWidgets('says which kind of server it is, once that is known',
+        (tester) async {
+      await open(tester, decision: ModelPlacement.box, decisionKeyStored: true);
+      expect(find.byKey(SettingsModelsPage.decisionKindKey), findsNothing);
+
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        decisionKind: DecisionServerKind.systemOne,
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionKindKey),
+          'Kev 4B on your server (answers there; no files needed on this Mac)');
+
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        decisionKind: DecisionServerKind.encoderHeads,
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionKindKey),
+          "ModernBERT on your server (uses this Mac's heads file)");
+
+      // Under This Mac there is no form, and no kind line.
+      await open(tester, decisionKind: DecisionServerKind.systemOne);
+      expect(find.byKey(SettingsModelsPage.decisionKindKey), findsNothing);
+    });
+
+    testWidgets('a Kev server needs no heads file on this Mac, where '
+        'ModernBERT still does, and a server not yet asked is not told to '
+        'install one', (tester) async {
+      final noHeads = [
+        _row('decision',
+            onDisk: false, local: true, inUse: false, headsOnDisk: false),
+      ];
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        decisionKind: DecisionServerKind.systemOne,
+        statuses: noHeads,
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Connected · bond-decide-fixture at box.example.com');
+
+      // A not-installed park from before the move is stale on Kev.
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        decisionKind: DecisionServerKind.systemOne,
+        statuses: noHeads,
+        parked: const ParkedFact(reason: 'decision_not_installed', waiting: 2),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Connected · bond-decide-fixture at box.example.com');
+
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        decisionKind: DecisionServerKind.encoderHeads,
+        statuses: noHeads,
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionNotInstalledText);
+
+      await open(
+        tester,
+        decision: ModelPlacement.box,
+        decisionKeyStored: true,
+        statuses: noHeads,
       );
       expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
           'Connected · bond-decide-fixture at box.example.com');
@@ -600,6 +681,7 @@ void main() {
       // The managed generative model, said on this Mac's server line.
       'not_installed': SettingsModelsPage.statusKey,
       'decision_not_installed': SettingsModelsPage.decisionStatusKey,
+      'decision_older_model': SettingsModelsPage.decisionStatusKey,
       'decision_misconfigured': SettingsModelsPage.decisionStatusKey,
       'decision_unauthorized': SettingsModelsPage.decisionStatusKey,
     };
@@ -610,6 +692,7 @@ void main() {
       'unauthorized': SettingsModelsPage.serverUnauthorizedText,
       'not_installed': SettingsModelsPage.notInstalledText,
       'decision_not_installed': SettingsModelsPage.decisionNotInstalledText,
+      'decision_older_model': SettingsModelsPage.decisionOlderModelText,
       'decision_misconfigured': SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized': SettingsModelsPage.decisionUnauthorizedText,
     };
@@ -630,6 +713,30 @@ void main() {
         }
       });
     }
+
+    testWidgets('the older decision model says it plainly, with the command '
+        'on a quieter line of its own', (tester) async {
+      await open(
+        tester,
+        parked: const ParkedFact(reason: 'decision_older_model', waiting: 3),
+      );
+
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionOlderModelText);
+      expect(SettingsModelsPage.decisionOlderModelText,
+          isNot(contains('make')));
+      expect(textOf(tester, SettingsModelsPage.decisionOlderHintKey),
+          'For developers: make decide-install');
+    });
+
+    testWidgets('no other park shows the developer line', (tester) async {
+      await open(
+        tester,
+        parked: const ParkedFact(reason: 'decision_misconfigured', waiting: 3),
+      );
+
+      expect(find.byKey(SettingsModelsPage.decisionOlderHintKey), findsNothing);
+    });
 
     testWidgets('on this Mac the generative model leaves a server park to the '
         'server line', (tester) async {
@@ -774,6 +881,8 @@ void main() {
       SettingsModelsPage.decisionNotInstalledText,
       SettingsModelsPage.decisionNotInstalledIn('/Volumes/Models/x'),
       SettingsModelsPage.decisionMisconfiguredText,
+      SettingsModelsPage.systemOneKindText,
+      SettingsModelsPage.encoderKindText,
       SettingsModelsPage.installedLoadingText,
       SettingsModelsPage.notInstalledText,
       SettingsModelsPage.notDownloadedText,

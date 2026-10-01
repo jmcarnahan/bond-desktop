@@ -8,11 +8,13 @@ import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
 import '../services/calendar/event_view.dart' show isCancellationCard;
+import '../services/decision/needs_you_predicate.dart';
 import '../services/external_sender.dart';
 import '../services/mention_index.dart';
 import '../services/profile_photos.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
+import 'app_rail.dart' show isNeedsYou;
 import 'attachment_card.dart';
 import 'attachment_format.dart';
 import 'bot_run_row.dart';
@@ -166,6 +168,12 @@ class ThreadDetailPanel extends StatefulWidget {
   /// sender-wide [onSendToLater] stays in the ⋯, where the corrections about
   /// a sender live. Null hides the button.
   final VoidCallback? onLaterThread;
+
+  /// The owner's "Remove from Needs You" / "Add to Needs You" on this thread
+  /// — the action bar draws whichever the thread's place calls for, by the
+  /// rail's own rule ([isNeedsYou] at [needsYouThreshold]). Null hides it.
+  final VoidCallback? onRemoveFromNeedsYou;
+  final VoidCallback? onAddToNeedsYou;
 
   /// Takes one label off this thread (the chip's ✕). Null draws chips with no
   /// ✕.
@@ -348,6 +356,11 @@ class ThreadDetailPanel extends StatefulWidget {
   /// [Conversation.isExternalTo] for what it is and why nothing stores it.
   final Set<String> ownerDomains;
 
+  /// The owner's Needs You slider, for the mention navigator: an action item
+  /// on a message the decision model placed below it names nobody
+  /// ([namesOwner]). A host with no slider gets the default.
+  final double needsYouThreshold;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -356,10 +369,13 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onReopen,
     this.onBack,
     this.onAddToStoryline,
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
     this.onSendToLater,
     this.onDropSender,
     this.onKeepInInbox,
     this.onLaterThread,
+    this.onRemoveFromNeedsYou,
+    this.onAddToNeedsYou,
     this.onRemoveLabel,
     this.onFindLabel,
     this.afterTranscript,
@@ -544,7 +560,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       _rowKeys.putIfAbsent(messageId, GlobalKey.new);
 
   /// The ids of the messages that name the owner, in transcript order.
-  List<String> get _mentions => mentionIndexOf(widget.messages);
+  List<String> get _mentions => mentionIndexOf(
+        widget.messages,
+        threshold: widget.needsYouThreshold,
+      );
 
   /// One step along that index, and the jump that follows it.
   ///
@@ -1083,6 +1102,8 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
             NeedsYouWhyLine(
               reason: widget.conversation.needsYouReason,
               at: widget.conversation.needsYouReasonAt,
+              p: widget.conversation.needsYouP,
+              decidedNow: widget.conversation.needsYouDecidedNow,
               onTap: _toReasonMessage,
             ),
           Expanded(
@@ -1344,6 +1365,10 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       onReopen: widget.onReopen,
       onLater: widget.onLaterThread,
       onKeepInInbox: widget.onKeepInInbox,
+      inNeedsYou: isNeedsYou(c, threshold: widget.needsYouThreshold),
+      needsYouDecided: c.needsYouP != null,
+      onRemoveFromNeedsYou: widget.onRemoveFromNeedsYou,
+      onAddToNeedsYou: widget.onAddToNeedsYou,
       onStoryline: widget.onAddToStoryline,
       onContext: widget.onContext,
       contextLinked: widget.contextLinked,

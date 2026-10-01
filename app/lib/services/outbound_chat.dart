@@ -56,7 +56,8 @@ Future<Map<String, Object?>?> writeOutboundChatRow(
 /// That catch-up is what covers every OTHER outbound row: a reply sent from
 /// Outlook or from Teams itself arrives on a pull, and every sync ends by
 /// requeueing `storyline_sweep`, whose recap handler drains later in the same
-/// pass. Wiring a per-message requeue into the mail ingest would buy nothing
+/// pass once the mailbox has settled (during a cold start the catch-up and
+/// the recap both wait for it). Wiring a per-message requeue into the mail ingest would buy nothing
 /// and would cost a query per message inside the page transaction, on first
 /// syncs that can run to six figures.
 ///

@@ -375,12 +375,12 @@ void main() {
           system: 's',
           user: 'u',
           schema: const {'type': 'object'},
-          schemaName: 'storyline_membership',
+          schemaName: 'storyline_name',
         ),
         throwsA(isA<LlmFormatException>()),
       );
 
-      expect(seen.single.label, 'storyline_membership');
+      expect(seen.single.label, 'storyline_name');
       expect(seen.single.outcome, 'format');
       // The category, never the sentence: it quotes the answer, and the
       // record becomes a stored row (rowErrorFor).

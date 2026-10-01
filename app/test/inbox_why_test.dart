@@ -34,6 +34,12 @@ import 'fixtures/test_db.dart';
 
 class _FakeSync implements MailSync {
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> syncNow() async {}
 
   @override
@@ -81,10 +87,10 @@ void main() {
       'received_at': receivedAt,
       'body_text': body,
     });
-    await store.writeNeedsYouVerdict(
+    await store.writeNeedsYouP(
       'email',
       '$key-m1',
-      verdict: true,
+      p: 0.9,
       reason: 'She asked you to confirm the closing date.',
     );
     await store.upsertConversation({
@@ -111,9 +117,6 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    // The scoring pass lands a few pumps in, so a row asserted on before then
-    // must not be gated on a score it does not have yet.
-    await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
@@ -179,7 +182,8 @@ void main() {
     }
 
     expect(whyPanel(), findsOneWidget);
-    expect(find.text('Needs you'), findsOneWidget);
+    // The message's probability as the percentage the slider is set in.
+    expect(find.text('Needs you: 90%'), findsOneWidget);
     expect(
       find.text('She asked you to confirm the closing date.'),
       findsOneWidget,

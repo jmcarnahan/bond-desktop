@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../data/message_store.dart' show MessageStore;
+import '../data/message_store.dart' show MessageStore, needsYouRulesKey;
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/context_provider.dart';
@@ -17,14 +17,29 @@ import '../providers/recipient_search_provider.dart';
 import '../providers/setup_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/attachments/file_dialogs.dart';
+import '../services/decision/decision_client.dart' show DecisionServerKind;
 import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; the placement enum is not re-exported.
 import '../services/llm/model_slots.dart'
-    show MachineTier, ModelPlacement, managedGenerativeIdFor;
-import '../services/llm/needs_you_task.dart'
-    show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
+    show MachineTier, ModelPlacement, boxDecideId, managedGenerativeIdFor;
 import '../widgets/settings_screen.dart';
+
+/// Whether an older build left Needs You rules text in `needs_you_rules`. The
+/// pref is inert — the slider is the one control — so Settings only says so,
+/// once, rather than leaving an owner to wonder where their rules went.
+final _oldNeedsYouRulesProvider = FutureProvider.autoDispose<bool>((ref) async {
+  final text = await ref.watch(messageStoreProvider).getPref(needsYouRulesKey);
+  return (text ?? '').trim().isNotEmpty;
+});
+
+/// The owner's Needs You presses, counted for the section's "Your answers"
+/// line. Re-read when the pane opens and after a Forget; a press made with
+/// the pane open lands on the next open.
+final _needsYouAnswersProvider =
+    FutureProvider.autoDispose<({int removed, int added})>(
+  (ref) => ref.watch(messageStoreProvider).needsYouPressCounts(),
+);
 
 /// The settings surface, and every mutator only settings calls.
 ///
@@ -69,6 +84,9 @@ class SettingsHost extends ConsumerStatefulWidget {
 
   /// The list AND whatever thread is open, handed over as the future it is so
   /// the Sync section's button can hold 'Refreshing…' until both pulls land.
+  /// Also how Forget everything and re-sync starts its pulls: it is the
+  /// inbox's own path, so both pull flags go up and [waitForPullsToSettle]
+  /// sees them.
   final Future<void> Function() onRefreshNow;
 
   /// The rail's Sign out, the whole wipe.
@@ -119,16 +137,48 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// one that is closed.
   late final ModelServerProbe _probe = widget.probe ?? ModelServerProbe();
 
+  /// The decision remote whose kind this screen last asked for, as
+  /// `url|model`: asked once per address, so a server that does not say is
+  /// not asked again on every rebuild.
+  String? _kindAsked;
+
+  /// The Models page's kind line for Your server, from the decision client's
+  /// cache; when this run has not seen the address yet, one listing GET
+  /// ([DecisionClient.detectKind]) with the stored key, and a redraw when it
+  /// answers. Null until then, which the page reads as "not known yet".
+  DecisionServerKind? _decisionKind(AppPrefs prefs) {
+    if (prefs.decisionPlacement != ModelPlacement.box) return null;
+    final url = prefs.effectiveDecisionUrl;
+    final model = prefs.effectiveDecisionModel;
+    final client = ref.read(decisionClientProvider);
+    final known = client.kindOf(url: url, model: model);
+    if (known != null || url.isEmpty) return known;
+    final key = '$url|$model';
+    if (_kindAsked != key) {
+      _kindAsked = key;
+      unawaited(client
+          .detectKind(
+        url: url,
+        model: model,
+        bearer: ref.read(appPrefsProvider.notifier).bearerFor(boxDecideId),
+      )
+          .then((kind) {
+        if (kind != null && mounted) setState(() {});
+      }));
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     _probe.close();
     super.dispose();
   }
 
-  /// The tuning controls, the two owner texts, and what Microsoft granted. The
-  /// threshold reloads the list as it changes — the whole point of the slider
-  /// is watching Needs You grow and shrink under it — while about me and the
-  /// Needs You rules are each saved by their own Save.
+  /// The tuning controls, the owner's about-me text, and what Microsoft
+  /// granted. The threshold reloads the list as it changes — the whole point
+  /// of the slider is watching Needs You grow and shrink under it — while
+  /// about me is saved by its own Save.
   ///
   /// It is also where SESSIONS are managed. The screen shows whether the
   /// backend it is currently pointing at is signed in, and signs in and out of
@@ -141,9 +191,10 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// beside the state it fixes.
   ///
   /// `ref.watch` rather than the `ref.read` the dialog used: this is a build
-  /// method now, and the Needs You summary reads the STORED rules to say
-  /// whether they are custom — a Save from inside the screen only moves that
-  /// line because this host rebuilds. Do not "optimise" it to `ref.read`.
+  /// method now, and the section summaries read the STORED prefs — the Needs
+  /// You threshold, the about-me text — so a write from inside the screen
+  /// only moves those lines because this host rebuilds. Do not "optimise" it
+  /// to `ref.read`.
   ///
   /// [scope] is what tells the two rungs apart: the avatar menu's Settings
   /// opens all of it, the AI stop opens the model half under the title 'AI'.
@@ -194,23 +245,21 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       scope: widget.scope,
       onBack: widget.onBack,
       onHome: widget.onHome,
-      threshold: prefs.attentionThreshold,
+      threshold: prefs.needsYouThreshold,
+      oldNeedsYouRules:
+          ref.watch(_oldNeedsYouRulesProvider).valueOrNull ?? false,
+      needsYouAnswers: ref.watch(_needsYouAnswersProvider).valueOrNull,
+      onForgetNeedsYouAnswers: forgetNeedsYouAnswers,
       aboutMe: prefs.aboutMe,
       // The prefs setters update state first and persist behind the caller's
       // back on purpose (see AppPrefsNotifier) — `unawaited` says the discard
       // is that contract, not an oversight.
       onThresholdChanged: (value) {
-        unawaited(notifier.setAttentionThreshold(value));
+        unawaited(notifier.setNeedsYouThreshold(value));
         if (!mounted) return;
         ref.read(conversationsProvider.notifier).load(syncFirst: false);
       },
       onAboutMeChanged: (text) => unawaited(notifier.setAboutMe(text)),
-      needsYouRules: prefs.needsYouRules,
-      needsYouDefaultRules: needsYouDefaultRules,
-      needsYouFixedTail: needsYouOutputContract,
-      needsYouRulesMaxLength: needsYouRulesCap,
-      onNeedsYouRulesSaved: (text) => unawaited(_saveNeedsYouRules(text)),
-      needsYouRejudging: ref.watch(needsYouPendingProvider).valueOrNull ?? 0,
       showActivityLog: prefs.showActivityLog,
       onShowActivityLogChanged: (on) =>
           unawaited(notifier.setShowActivityLog(on)),
@@ -299,12 +348,11 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
           ref.invalidate(threadProvider);
           ref.invalidate(draftProvider);
           ref.invalidate(storylineTimelineProvider);
-          // And the previous person's about-me text and needs-you rules,
-          // which the notifier still holds in memory — same reason
-          // SignInScreen clears them. Both editors adopt the wipe only if
-          // their own field is clean, so an unsaved edit survives it.
+          // And the previous person's about-me text, which the notifier
+          // still holds in memory — same reason SignInScreen clears it. The
+          // editor adopts the wipe only if its own field is clean, so an
+          // unsaved edit survives it.
           unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
-          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(''));
         }
         _reloadAfterBackendChange();
       },
@@ -338,6 +386,11 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       decisionUrl: prefs.effectiveDecisionUrl,
       decisionModel: prefs.effectiveDecisionModel,
       decisionKeyStored: prefs.decisionKeyStored,
+      // The client's cache, filled by a Connect, a decision, or the one
+      // listing GET this screen asks when it opens on an address this run
+      // has not seen; read again on every rebuild, which a Connect's prefs
+      // write is.
+      decisionKind: _decisionKind(prefs),
       generativeUrl: prefs.effectiveGenerativeUrl,
       generativeModel: prefs.effectiveGenerativeModel,
       generativeKeyStored: prefs.boxBigKeyStored,
@@ -559,6 +612,24 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     );
   }
 
+  /// Settings' **Forget all Needs You answers**: every Remove and Add press
+  /// the owner made, undone at once (`NeedsYouEdits.retractAll`), so each
+  /// message they answered for takes the model's own number back, with no
+  /// model call; then the list and the section's count are read again.
+  /// Throws what the undo throws — processing off — after reloading
+  /// whatever did change.
+  Future<void> forgetNeedsYouAnswers() async {
+    if (!mounted) return;
+    final edits = ref.read(needsYouEditsProvider);
+    final conversations = ref.read(conversationsProvider.notifier);
+    try {
+      await edits.retractAll();
+    } finally {
+      await conversations.load(syncFirst: false);
+      if (mounted) ref.invalidate(_needsYouAnswersProvider);
+    }
+  }
+
   /// The Decision model's **Check** on This Mac.
   ///
   /// `make decide-install` can land while the app runs, and nothing else
@@ -579,55 +650,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     unawaited(ref.read(modelServerSupervisorProvider).ensurePreset());
     ref.invalidate(managedModelsStatusProvider);
     await ref.read(managedModelsStatusProvider.future);
-  }
-
-  /// Saves the Needs You rules and re-asks the recent window under them.
-  ///
-  /// The editor replaces the WHOLE prompt body, so a Save changes how every
-  /// message is judged — and every verdict already on disk was written under
-  /// the words the owner has just replaced. The last week is re-asked so the
-  /// chip and the tile follow what the new rules say (the needs-you handler's
-  /// tail rewrites the flag when a verdict moves); anything older is history
-  /// rather than a mistake, because those rules were the rules at the time.
-  ///
-  /// It lives here rather than on [AppPrefsNotifier] because the notifier
-  /// holds a store and nothing else: the activity log and the worker pump are
-  /// this host's, and a pref writer that reached for them would be a pref
-  /// writer that could not be tested without them.
-  Future<void> _saveNeedsYouRules(String text) async {
-    // The editor already stores default-equal text as the empty string, so the
-    // two strings compared here are in the same normal form and an unchanged
-    // Save re-judges nothing.
-    final before = ref.read(appPrefsProvider).needsYouRules;
-    final notifier = ref.read(appPrefsProvider.notifier);
-    unawaited(notifier.setNeedsYouRules(text));
-    if (text == before) return;
-
-    // Everything the rest of this needs is read BEFORE the first await, so a
-    // Settings pane closed while the requeue is on disk still gets its log
-    // row and its wake — the work is queued by then, and a queue nobody
-    // pumped would sit until the next sync. Nothing below touches `ref`.
-    final store = ref.read(messageStoreProvider);
-    final log = ref.read(activityLogProvider);
-    final worker = ref.read(aiWorkerProvider);
-    final since = DateTime.now()
-        .toUtc()
-        .subtract(const Duration(days: 7))
-        .toIso8601String();
-    final queued = await store.requeueNeedsYouRejudge(
-      sinceIso: since,
-      sources: inboxSources,
-    );
-    if (queued == 0) return;
-    await log.record(
-      'needs_you_rejudge',
-      count: queued,
-      detail: {'since': since},
-    );
-    // The same wake the attachment digest's requeue relies on: on a running
-    // drain this only sets the re-pump flag, and the future it returns is that
-    // drain's.
-    unawaited(worker.pump());
   }
 
   /// Settings' **Clear AI results**: every verdict, summary, storyline, draft
@@ -664,6 +686,16 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     // a resumed cursor over an empty mailbox is the re-sync quietly not
     // happening.
     await store.clearSyncCursors();
+    // Both pulls now rather than at the next poll, and Teams with mail: the
+    // poll fetches mail only, and Teams waits for a refresh press or a
+    // resume, so a cold start's chats landed minutes behind its mail and took
+    // the fast lane from the text it was writing. The press is the owner's,
+    // which is the one thing that may start a Teams pull. Through the inbox's
+    // own refresh rather than the notifier, so both pull flags go up and a
+    // second reset pressed while this pull is still paging waits for it like
+    // any other — up to the settle timeout; see [_resetPipeline].
+    if (!mounted) return;
+    unawaited(widget.onRefreshNow());
   }
 
   /// What both resets do around the one statement that differs.
@@ -692,8 +724,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// millisecond after the delete is simply `pending`, which is where the
   /// next drain wants it anyway.
   ///
-  /// Everything below the switch check is read BEFORE the first await, on
-  /// [_saveNeedsYouRules]'s rule: this runs off a button press, a reset takes
+  /// Everything below the switch check is read BEFORE the first await, and
+  /// nothing after it touches `ref` but the invalidates: this runs off a
+  /// button press, a reset takes
   /// as long as the item at the server does, and a Settings pane closed in
   /// the middle of it must still get the delete it asked for. Only the
   /// invalidates need a live host, and they check for one.
@@ -709,11 +742,18 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// is the inbox's own two pull flags, which every pull that screen starts
   /// raises, polled a quarter-second at a time and given up on after the
   /// inbox's own settle timeout — see [SettingsHost.waitForPullsToSettle],
-  /// which is the seam this awaits. **The window it does not close** is a
-  /// pull started somewhere other than that screen, and a pull that outlasts
-  /// the timeout: for the mail rows that is harmless, since a message landing
-  /// a moment after the delete is simply `pending`, and for the cursor it is
-  /// why [_forgetAndResync] clears the cursors a second time on the way out.
+  /// which is the seam this awaits. [_forgetAndResync] starts its own pulls
+  /// through that screen too ([SettingsHost.onRefreshNow]), so they raise the
+  /// same flags. **The window it does not close** is a pull started somewhere
+  /// other than that screen, and a pull that outlasts the timeout: for the
+  /// mail rows that is harmless, since a message landing a moment after the
+  /// delete is simply `pending`, and for the cursor it is why
+  /// [_forgetAndResync] clears the cursors a second time on the way out. That
+  /// second clear covers only a pass that lands BEFORE it: a cold-start pull
+  /// still paging past the timeout (a second Forget pressed early in the
+  /// first one's re-sync) writes its cursor after the clear, and its own
+  /// re-sync joins that pass rather than starting a fresh one — the next
+  /// Forget, pressed once the pull is done, is the remedy.
   ///
   /// Throws rather than returning quietly when processing is on. The buttons
   /// are already inert, so this is unreachable from the UI, and a caller that
@@ -770,7 +810,6 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       // Settings line keeps the pre-clear count until the next recorded event.
       cloudDraftsTodayProvider,
       syncStampsProvider,
-      needsYouPendingProvider,
       contextDirectoriesProvider,
       homeMetricsProvider,
       pipelinePulseProvider,

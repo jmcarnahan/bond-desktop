@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 21;
+  int get schemaVersion => 25;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -733,7 +733,100 @@ WHERE needs_you_reason LIKE 'label_rule:%' ''');
                   await m.createTable(schema.messageDecisions);
                 }
               },
-              // v21 — the calendar mirror. One SYNCED table,
+              // v21 — Needs You is one probability against the owner's
+              // slider. `messages.needs_you_p` carries the decision model's
+              // p(needs_you = yes) on the row every Needs You query already
+              // reads, so no reader joins `message_decisions` for it.
+              //
+              // Backfilled from the stored decision where there is one, else
+              // from the old verdict (1 → 1.0, 0 → 0.0; a NULL verdict stays
+              // NULL, undecided). Only NULL rows are touched, so a replay
+              // (db_adoption_test) never overwrites a probability; it does
+              // fill any `needs_you_p` still NULL from a decision row that
+              // has one, which is correct — that row's number IS the
+              // message's p. The verdict is then cleared: the column is
+              // INERT from here on, so a replay finds no verdict to carry
+              // into a `needs_you_p` a later re-decision set back to NULL.
+              from20To21: (m, schema) async {
+                if (!await _columnExists('messages', 'needs_you_p')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.needsYouP,
+                  );
+                }
+                await customStatement('''
+UPDATE messages SET needs_you_p = COALESCE(
+    (SELECT d.needs_you_p FROM message_decisions d
+     WHERE d.source = messages.source
+       AND d.source_message_id = messages.source_message_id),
+    CASE needs_you_verdict WHEN 1 THEN 1.0 WHEN 0 THEN 0.0 END)
+WHERE needs_you_p IS NULL''');
+                await customStatement(
+                  'UPDATE messages SET needs_you_verdict = NULL '
+                  'WHERE needs_you_verdict IS NOT NULL',
+                );
+              },
+              // v22 — the decision-questions round. One KEPT table,
+              // `decision_labels`: the owner's storyline presses logged as
+              // labels for the decision model's storyline questions, so Clear
+              // AI results no longer erases them.
+              //
+              // Nothing to backfill: a press made before this version was not
+              // recorded as a label, and the storyline tables that remember it
+              // are derived.
+              //
+              // Guarded like every step here (db_adoption_test replays them).
+              from21To22: (m, schema) async {
+                if (!await _tableExists('decision_labels')) {
+                  await m.createTable(schema.decisionLabels);
+                }
+              },
+              // v23 — the owner's Needs You answers. `decision_labels` gains
+              // the message a `needs_you` label answers and the decision
+              // model's vector of it (with the model tag the vector came
+              // from), so a press generalises to near-duplicate mail.
+              //
+              // Nothing to backfill: every existing row is a storyline label,
+              // which has neither a message nor a vector.
+              from22To23: (m, schema) async {
+                if (!await _columnExists(
+                  'decision_labels',
+                  'source_message_id',
+                )) {
+                  await m.addColumn(
+                    schema.decisionLabels,
+                    schema.decisionLabels.sourceMessageId,
+                  );
+                }
+                if (!await _columnExists('decision_labels', 'vector')) {
+                  await m.addColumn(
+                    schema.decisionLabels,
+                    schema.decisionLabels.vector,
+                  );
+                }
+                if (!await _columnExists('decision_labels', 'vector_model')) {
+                  await m.addColumn(
+                    schema.decisionLabels,
+                    schema.decisionLabels.vectorModel,
+                  );
+                }
+              },
+              // v24 — the decision model's vector on the decision row, so
+              // the owner's Needs You presses and their sweeps compare stored
+              // vectors instead of asking the model again.
+              //
+              // Nothing to backfill here: an old row's vector is NULL, and the
+              // `decision_vectors_backfill` one-shot in the sync requeues the
+              // needs-you pass, which decides those messages again.
+              from23To24: (m, schema) async {
+                if (!await _columnExists('message_decisions', 'vector')) {
+                  await m.addColumn(
+                    schema.messageDecisions,
+                    schema.messageDecisions.vector,
+                  );
+                }
+              },
+              // v25 — the calendar mirror. One SYNCED table,
               // `calendar_events`, the primary calendar as `sync_calendar`
               // reports it, and one DERIVED table, `event_briefs`, for the
               // pre-meeting briefs a later phase writes.
@@ -744,7 +837,7 @@ WHERE needs_you_reason LIKE 'label_rule:%' ''');
               // Indexes as IF NOT EXISTS statements rather than
               // `m.createIndex`, so a replay over a torn state is a no-op
               // (db_adoption_test re-runs every step over one file).
-              from20To21: (m, schema) async {
+              from24To25: (m, schema) async {
                 if (!await _tableExists('calendar_events')) {
                   await m.createTable(schema.calendarEvents);
                 }
@@ -809,15 +902,17 @@ WHERE needs_you_reason LIKE 'label_rule:%' ''');
 /// - A gated message lands fully resolved and dropped, keyed on `gate_reason`
 ///   rather than on `triage_status` alone: `skipped` with no reason is the
 ///   legacy Teams tolerance, not a verdict about the message.
-/// - `needs_you` is judged against a literal threshold ([needsYouSql]) because
-///   a migration must not read preferences; rows still open when the app
-///   launches are restated by the first settle sweep.
-/// - That SQL is also frozen at its v8 SHAPE, which is what `verdict: false`
-///   asks for. This migration replays whenever a v1..v7 database is opened by a
-///   build at v10 or beyond, and `messages.needs_you_verdict` does not exist
-///   until v10 — widening the predicate here would make `from7To8` throw
-///   "no such column" on exactly those upgrades. `test/migration_test.dart` is
-///   the detector.
+/// - `needs_you` is judged against a literal threshold
+///   ([needsYouSqlV8Frozen]) because a migration must not read preferences;
+///   rows still open when the app launches are restated by the first settle
+///   sweep.
+/// - That SQL is frozen at its v8 SHAPE, which is why it is its own function
+///   and not the live [needsYouSql]. This migration replays whenever a v1..v7
+///   database is opened by a newer build, and the needs-you columns
+///   (`needs_you_verdict` at v10, `needs_you_p` at v21) do not exist yet when
+///   it runs — widening the predicate here would make `from7To8` throw "no
+///   such column" on exactly those upgrades. `test/migration_test.dart` is
+///   the detector, and `progress_sql_test` pins the text.
 final String _backfillProgress = '''
 INSERT OR IGNORE INTO message_progress (
   source, source_message_id, conversation_key, received_at,
@@ -927,7 +1022,7 @@ FROM (
       (SELECT n.reason FROM message_notify n
         WHERE n.source = m.source
           AND n.source_message_id = m.source_message_id) AS notify_reason,
-      ${needsYouSql(threshold: backfillNeedsYouThreshold, verdict: false)} AS needs_you
+      ${needsYouSqlV8Frozen(backfillNeedsYouThreshold)} AS needs_you
     FROM messages m
   ) d
 ) e

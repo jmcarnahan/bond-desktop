@@ -1,5 +1,6 @@
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart';
+import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
 import 'package:bond_inbox/services/reply_policy.dart'
     show automatedGateReasons;
 import 'package:bond_inbox/widgets/home_result.dart';
@@ -11,9 +12,6 @@ void main() {
   group('the constants', () {
     test('are the values fitted on the golden set', () {
       expect(DecisionPolicy.gateDrop, 0.70);
-      expect(DecisionPolicy.needsYouYes, 0.65);
-      expect(DecisionPolicy.needsYouYesCold, 0.85);
-      expect(DecisionPolicy.needsYouNo, 0.35);
       expect(DecisionPolicy.booleanYes, 0.50);
       expect(DecisionPolicy.replyYes, 0.50);
     });
@@ -128,8 +126,52 @@ void main() {
       );
     });
 
-    test('the no reason', () {
-      expect(needsYouNoReason, 'Nothing here asks for you.');
+    test("the owner's answer is worded before any intent", () {
+      final model = fakeAnswers(intent: 'approval', needsYou: 0.9);
+      expect(needsYouYesReason(model.withNeedsYou('no')),
+          'You removed a message like this from Needs You.');
+      expect(needsYouYesReason(model.withNeedsYou('no', exact: true)),
+          'You removed this message from Needs You.');
+      expect(needsYouYesReason(model.withNeedsYou('yes')),
+          'You added a message like this to Needs You.');
+      expect(needsYouYesReason(model.withNeedsYou('yes', exact: true)),
+          'You added this message to Needs You.');
+    });
+
+    test("the four owner sentences are known by their answer, and no model "
+        'sentence is', () {
+      expect(ownerNeedsYouReasons, {
+        'You added this message to Needs You.': 'yes',
+        'You added a message like this to Needs You.': 'yes',
+        'You removed this message from Needs You.': 'no',
+        'You removed a message like this from Needs You.': 'no',
+      });
+      expect(ownerNeedsYouReasons['Asks you to do something.'], isNull);
+    });
+
+    test("the owner's answer survives the stored blob's round trip", () {
+      final json = {
+        ...fakeAnswers(needsYou: 0.9).withNeedsYou('no').toJson(),
+        'owner_known': true,
+        'owner_answer': 'no',
+        'owner_label_id': 3,
+        'owner_cosine': 0.99,
+        'owner_exact': false,
+      };
+      final back = DecisionAnswers.fromJson(json);
+      expect(back.fields.keys, isNot(contains('owner_answer')));
+      expect(back.ownerAnswer, 'no');
+      expect(back.ownerExact, isFalse);
+      expect(back.p('needs_you', 'yes'), 0.0);
+      expect(needsYouYesReason(back),
+          'You removed a message like this from Needs You.');
+      expect(DecisionAnswers.fromJson(fakeAnswers().toJson()).ownerAnswer,
+          isNull);
+    });
+
+    test('needsYouP is the decision\'s p(yes), or null with no head', () {
+      expect(needsYouP(fakeAnswers(needsYou: 0.37)), closeTo(0.37, 1e-9));
+      expect(needsYouP(DecisionAnswers(const {})), isNull);
     });
   });
 }

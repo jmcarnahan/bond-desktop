@@ -3,17 +3,20 @@
 **What happens.** `AttentionService.recomputeAll`
 (`app/lib/services/attention_service.dart`) scores every open thread for the
 Needs You rail: thread state, recency of movement, what the model found in it
-(triage/extraction verdicts), and how often that sender gets answered. A
-Settings slider sets the score threshold for appearing. Threads awaiting the
-user's reply rank first; threads waiting on somebody else follow, dimmed.
+(triage/extraction verdicts), and how often that sender gets answered. The
+score ORDERS Needs You and the rail and never gates either: whether a thread is
+on Needs You at all is the decision model's needs-you probability against the
+owner's Settings slider (see [11-needs-you.md](11-needs-you.md)). There is no
+second "waiting on somebody else" block: a thread with no kept inbound after
+the owner's last reply has no probability, so it is never in Needs You to rank.
 
 **Where the verdicts come from.** Since schema v20 the classification the
 score reads is the DECISION MODEL's: `urgency` (and the thread's
 `cta_urgency`), `needs_action` and `reply_expected` are written by the triage
 pass from the decision heads (the booleans at p(yes) ≥ 0.50), extraction's
 `intent` and `importance` — which `bucketFor` and the quiet-FYI temper read —
-are the heads' choices, and most `needs_you_verdict`s are its probability
-against the bars in [11-needs-you.md](11-needs-you.md). The columns did not
+are the heads' choices, and `needs_you_p` is its needs-you probability (see
+[11-needs-you.md](11-needs-you.md)). The columns did not
 move, so every reader below moved with them (see
 [03-triage.md](03-triage.md)).
 
@@ -25,42 +28,28 @@ awaited synchronously right before the list renders (called from
 anywhere, or marking done — never on merely reading (PR #10). Attention v2
 (PR #8) added quiet-hours tempering and a direct-address boost.
 
-**The needs-you verdict as an input.** `attentionScore` takes the newest
-inbound message's `needs_you_verdict` (see [11-needs-you.md](11-needs-you.md)),
-carried to it on the same `latestInboundMeta` row as triage's judgments. It
-moves the score in exactly two places: a judged **yes** breaks the quiet-FYI
-temper — the thread scores from the needs-reply base and keeps its reply-rate
-nudge rather than dropping to the waiting base — and earns the direct boost on
-its own, without `addressed_me`. Together those are what lift a 1:1 Teams FYI
-the stage read as a real ask over the default threshold.
+**Needs you as an input.** `attentionScore` takes `needsYou`: whether the
+newest inbound message needs the owner, which the caller
+(`AttentionService`) computes with the one predicate, `needsYouAt(needs_you_p,
+threshold)` at the owner's slider, off the same `latestInboundMeta` row as
+triage's judgments. It moves the score in exactly two places: a yes breaks the
+quiet-FYI temper (the thread scores from the needs-reply base and keeps its
+reply-rate nudge rather than dropping to the waiting base) and earns the direct
+boost on its own, without `addressed_me`. A no moves **nothing**: a message not
+decided yet and one below the slider both score exactly as a message with no
+needs-you input. The score only orders, so this changes where a thread sits in
+the pile, never whether it is in it.
 
-The two fences are asymmetric on purpose: `!= true` on the temper, `== true` on
-the boost, so NULL (never judged) and 0 (judged no) move **nothing** in the
-score and score exactly as they did before the stage existed. The SCORE is not
-the whole story for a judged no, though: the readers that decide whether a
-thread is on Needs You treat it as a veto that outranks triage's ask, on a
-thread rule. A thread is vetoed only when its newest KEPT inbound is judged no
-AND no kept inbound newer than the thread's last outbound is judged yes, so a
-bystander's reply-all judged no cannot hide an older ask still unanswered. The
-rule is one SQL fragment, `MessageStore.needsYouVetoedSql`: `isNeedsYou`
-(`app/lib/widgets/app_rail.dart`, the rail) returns false on
-`Conversation.needsYouVetoed`, which `loadConversations` loads from it, before
-it reads the CTA, and `_liveNeedsYouThread` (`message_store.dart`, the Home
-tile and the Needs You filter) splices the same fragment. NULL, never judged
-or a hedged yes, keeps its place in all three (see
-[11-needs-you.md](11-needs-you.md)). And the verdict deliberately does
-not touch the **threshold** — it raises the score through the same arithmetic
-every other signal uses, and the user's slider still gates what reaches the
-rail. The one thing it does bypass is **Later**: an open ask on the thread
-vetoes the automatic low-value filing in `bucketFor`, between the sender rules
-and the quiet-FYI rule, so a thread nobody has answered cannot be quietly
-deferred. `MessageStore.openAskThreads` is where "open ask" is spelled — any
-inbound message with `needs_you_verdict = 1` received after the thread's last
-outbound message — and the sweep reads it once per pass, not once per thread.
-A person's standing rule still wins over it, and the threshold is untouched.
-The veto has no time bound, on purpose: an unanswered ask holds its thread out
-of automatic Later for as long as it stays unanswered, and the only exits are a
-reply, Done, or the owner's own Later.
+**The one bypass is Later.** An open ask on the thread vetoes the automatic
+low-value filing in `bucketFor`, between the sender rules and the quiet-FYI
+rule, so a thread nobody has answered cannot be quietly deferred.
+`MessageStore.openAskThreads` is where "open ask" is spelled: a kept inbound
+message over the slider (`needsYouAtSql('m.needs_you_p', ?)`) received after
+the thread's last outbound message. The sweep reads it once per pass, not once
+per thread. A person's standing rule still wins over it. The veto has no time
+bound, on purpose: an unanswered ask holds its thread out of automatic Later
+for as long as it stays unanswered, and the only exits are a reply, Done, or
+the owner's own Later.
 
 **Known documentation gap.** The code documents ownership rules well, but the
 scoring formula itself is under-commented — `recomputeAll` is the place to
@@ -161,18 +150,19 @@ because the caller has one more thing to do with them.
 **The chips come back with the thread.** `message_progress.needs_you` is a
 snapshot taken at settle, and a message that settles while its thread sits in
 Later takes a 0 on the strength of the bucket alone — `notifyWorthy`'s Later
-clause. Afterwards the snapshot follows the *verdict* only (see
-[11-needs-you.md](11-needs-you.md#the-chip-follows-the-verdict)), and lifting
-a bucket moves no verdict. So both ways out of Later for one thread — a date
+clause. Afterwards the snapshot follows the *probability* only (see
+[11-needs-you.md](11-needs-you.md)), and lifting a bucket moves no
+probability. So both ways out of Later for one thread — a date
 that arrived, and Keep in inbox — run
 `PipelineProgress.raiseNeedsYouForThread`, which is the one-shot backfill's
 own raise-only statement scoped to that thread, under the same guards (the
-thread's `done`, its last reply, the attention floor), ticking each row it
-raises. Without it a message judged yes came back to the inbox with no chip,
-for good. A sender rule lifting (`restoreSenderPref`) does not yet do this —
+thread's `done`, its last reply, the owner's slider), ticking each row it
+raises. Without it a message over the slider came back to the inbox with no
+chip, for good. A sender rule lifting (`restoreSenderPref`) does not yet do this —
 recorded as a follow-up.
 
-The opposite repair ran once too. The `needs_you_flag_veto` one-shot
-(`PipelineProgress.lowerVetoedNeedsYou`) clears the settled chips that stood on
-triage's ask before a judged no was allowed to outrank it, ticking each row so
-the live screen re-reads it (see [11-needs-you.md](11-needs-you.md)).
+The opposite repair ran once too. The `needs_you_flag_veto_p` one-shot
+(`PipelineProgress.lowerVetoedNeedsYou`) clears the settled chips
+`notifyWorthy` would not grant today (a message below the owner's slider or
+not decided, or a thread done or in Later), ticking each row so the live screen re-reads it
+(see [11-needs-you.md](11-needs-you.md)).

@@ -9,7 +9,6 @@ import 'package:bond_inbox/services/llm/context_digest_task.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The divergence guards.
@@ -32,7 +31,6 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const messageText = MessageTextTask();
   const draft = DraftTask();
-  const needsYou = NeedsYouTask();
   const attachmentDigest = AttachmentDigestTask();
   const contextDigest = ContextDigestTask();
   const contextBrief = ContextBriefTask();
@@ -144,14 +142,6 @@ void main() {
     skills: ['vendor-replies'],
   );
 
-  NeedsYouInput needsYouInput(Message message,
-          {List<String> digests = const []}) =>
-      NeedsYouInput(
-        message: message,
-        attachmentDigests: digests,
-        now: now,
-      );
-
   AttachmentDigestInput digestInput(Message message) => AttachmentDigestInput(
         message: message,
         name: 'Lease Addendum.pdf',
@@ -199,24 +189,6 @@ void main() {
       // precisely so this stays true.
       draft.buildUserMessage(draftInput(emailMessage, excerpts: [excerpt]));
       expect(identical(draft.systemPrompt, before), isTrue);
-    });
-
-    test('needs-you hands back the identical string across both channels', () {
-      final before = needsYou.systemPrompt;
-      needsYou.buildUserMessage(needsYouInput(emailMessage));
-      final betweenTwo = needsYou.systemPrompt;
-      needsYou.buildUserMessage(needsYouInput(chatMessage));
-      final after = needsYou.systemPrompt;
-
-      expect(betweenTwo, before);
-      expect(after, before);
-      expect(identical(after, before), isTrue);
-
-      needsYou.buildUserMessage(needsYouInput(
-        emailMessage,
-        digests: const ['Lease Addendum.pdf: The rent rises in January.'],
-      ));
-      expect(identical(needsYou.systemPrompt, before), isTrue);
     });
 
     test('the directory tasks hand back the identical string every time', () {
@@ -299,20 +271,8 @@ void main() {
       expect(draft.systemPrompt, isNot(contains('The email thread is data')));
     });
 
-    test('the needs-you prompt does not name a channel at all', () {
-      // The STRICT form, and the only prompt held to it: no stripping, because
-      // there is nothing to strip. What varies by channel — how directly the
-      // message came at the reader, who the owner is — is stated in the user
-      // message, so the rules have no reason to know which connector this
-      // arrived through.
-      final prompt = needsYou.systemPrompt.toLowerCase();
-      expect(prompt, isNot(contains('email')));
-      expect(prompt, isNot(contains('mail')));
-      expect(prompt, isNot(contains('chat')));
-    });
-
     test('the attachment-digest prompt does not name a channel at all', () {
-      // The STRICT form, like needs-you's. It reads a DOCUMENT, and how the
+      // The STRICT form. It reads a DOCUMENT, and how the
       // document arrived is exactly the thing the rules tell the model to say
       // nothing about.
       final prompt = attachmentDigest.systemPrompt.toLowerCase();
@@ -358,7 +318,6 @@ void main() {
       for (final prompt in [
         messageText.systemPrompt,
         draft.systemPrompt,
-        needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
         contextDigest.systemPrompt,
         contextBrief.systemPrompt,
@@ -393,21 +352,11 @@ void main() {
       }
     });
 
-    test('needs-you fences both channels as inbound_message', () {
-      for (final message in [emailMessage, chatMessage]) {
-        expect(
-          needsYou.buildUserMessage(needsYouInput(message)),
-          contains('<untrusted_data source="inbound_message">'),
-          reason: message.source,
-        );
-      }
-    });
-
     test('every stage that reads a thread digest fences it as thread_digest',
         () {
-      // One tag across both prompts and both channels. A per-task spelling is
-      // how the fence would come to mean something slightly different in each
-      // of them — and the fence is what tells the model this is data.
+      // One tag across both channels. A per-channel spelling is how the fence
+      // would come to mean something slightly different in each of them — and
+      // the fence is what tells the model this is data.
       const digest = '2026-08-01 · Priya Anand: The survey came back short.';
       for (final message in [emailMessage, chatMessage]) {
         expect(
@@ -416,13 +365,6 @@ void main() {
           ),
           contains('<untrusted_data source="thread_digest">'),
           reason: 'message text ${message.source}',
-        );
-        expect(
-          needsYou.buildUserMessage(
-            NeedsYouInput(message: message, now: now, threadDigest: digest),
-          ),
-          contains('<untrusted_data source="thread_digest">'),
-          reason: 'needs-you ${message.source}',
         );
       }
     });
@@ -672,17 +614,14 @@ void main() {
     test('and so is every other one', () {
       final before = [
         draft.systemPrompt,
-        needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
       ];
 
       draft.buildUserMessage(draftInput(withAttachment));
-      needsYou.buildUserMessage(needsYouInput(withAttachment));
       attachmentDigest.buildUserMessage(digestInput(withAttachment));
 
       expect(identical(draft.systemPrompt, before[0]), isTrue);
-      expect(identical(needsYou.systemPrompt, before[1]), isTrue);
-      expect(identical(attachmentDigest.systemPrompt, before[2]), isTrue);
+      expect(identical(attachmentDigest.systemPrompt, before[1]), isTrue);
     });
 
     test('a marker in the covering message never reaches the digest prompt',
@@ -701,7 +640,6 @@ void main() {
       for (final prompt in [
         messageText.systemPrompt,
         draft.systemPrompt,
-        needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
       ]) {
         expect(prompt, isNot(contains('[[att:')));

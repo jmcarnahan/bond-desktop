@@ -18,9 +18,10 @@ import 'golden_set.dart';
 /// which the Makefile fills) and the committed tests read the small fictional
 /// fixture beside this file instead.
 ///
-/// The job here is the same narrow one `golden_set.dart` has: rebuild what the
-/// app would have handed `ConfirmMembershipTask`, so a replay puts the SAME
-/// prompt in front of a model that the pipeline puts there. Nothing here scores
+/// The job here is the same narrow one `golden_set.dart` has: rebuild the
+/// storyline the app would have asked the decision model's `member_of` about,
+/// so a replay puts the SAME state in front of a model that the pipeline puts
+/// there. Nothing here scores
 /// anything — `golden/tools/score_run.py` is the scorer of record.
 
 /// One registry storyline, as the registry writes it.
@@ -62,10 +63,10 @@ class RegistryStoryline {
   /// by a hand rather than by the sweep — and nothing in the prompt reads
   /// either.
   ///
-  /// The summary stays NULL on purpose. `ConfirmMembershipTask.buildUserMessage`
-  /// renders the charter when there is one and the summary when there is not,
-  /// never both, so a summary here could only be dead weight — or, worse, the
-  /// line a charterless storyline would have been judged on.
+  /// The summary stays NULL on purpose. `StorylineJudge.memberOf` renders the
+  /// charter when there is one and the summary when there is not, never both,
+  /// so a summary here could only be dead weight — or, worse, the line a
+  /// charterless storyline would have been judged on.
   Storyline toAppStoryline() => Storyline(
         id: slug,
         title: title,
@@ -149,59 +150,6 @@ Future<GoldenRegistry> loadGoldenRegistry(String path) async {
     );
   }
   return GoldenRegistry.fromJson(decoded.cast<String, dynamic>());
-}
-
-/// Everyone on any thread the set files under [slug] — except the thread named
-/// by [excludingConversation] — de-duplicated, in first-seen order.
-///
-/// Mirrors `_participantsOfStoryline` in
-/// `lib/services/storyline_service.dart:2554`, which walks the storyline's
-/// member rows and unions the display names of each member's conversation:
-/// same union, same first-seen order, same case-insensitive de-duplication,
-/// same rule that an empty display name is not a person. The list is the
-/// strongest signal a confirm prompt carries, so a replay that built it any
-/// other way would be judging a storyline the app never describes.
-///
-/// [excludingConversation] is what makes it the app's list rather than a
-/// leak. The app asks about a CANDIDATE, which by construction is not yet a
-/// member, so the storyline it is judged against never contains it. Unioning
-/// the whole set would put the candidate's own people into the `People:` line
-/// of every gold storyline it is asked about — the candidate card's
-/// participants segment, handed back as evidence — and the gold-accept rate,
-/// which is the headline number of the whole run, would be measuring that
-/// hint. The exclusion is by CONVERSATION rather than by item id because two
-/// golden items drawn from one conversation are one thread, and the app files
-/// threads.
-///
-/// The trade is honest and goes the safe way. A storyline whose only golden
-/// item is the candidate arrives with an empty `People:` line, which is
-/// THINNER than the prompt the app would send for a storyline that already
-/// had members — so the replay penalises the model rather than flattering it,
-/// and the run counts how many gold candidates were judged that way.
-///
-/// The SET is the source rather than the registry's own member list because
-/// the registry records conversation keys and no names: the golden items are
-/// the only place a name and a slug meet. Four of the thirty slugs carry no
-/// golden item at all and come back empty whatever is excluded.
-List<String> participantsFor(
-  String slug,
-  GoldenSet set, {
-  String? excludingConversation,
-}) {
-  final seen = <String>{};
-  final displays = <String>[];
-  for (final item in set.items) {
-    if (item.gold.storylineId != slug) continue;
-    if (excludingConversation != null &&
-        item.conversationKey == excludingConversation) {
-      continue;
-    }
-    for (final display in item.conversationParticipants) {
-      if (display.isEmpty) continue;
-      if (seen.add(display.toLowerCase())) displays.add(display);
-    }
-  }
-  return displays;
 }
 
 /// The storylines [item] is asked about, in the order they are asked.

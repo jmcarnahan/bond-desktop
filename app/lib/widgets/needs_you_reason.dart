@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../services/decision/decision_policy.dart'
+    show ownerNeedsYouReason, ownerNeedsYouReasons;
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'time_format.dart';
@@ -12,19 +14,21 @@ import 'time_format.dart';
 /// second copy of the token map is how the two start disagreeing about what
 /// `teams_direct` means.
 ///
-/// The reason arrives on [Conversation] off the newest kept inbound whose
-/// verdict was YES (`message_store.dart`'s `loadConversations`), so anything
-/// drawn here is an answer to "why does this want you", never to the opposite
-/// question.
+/// The reason arrives on [Conversation] off the kept inbound message, since the
+/// owner's last reply, with the HIGHEST needs-you probability
+/// (`message_store.dart`'s `loadConversations`), and that probability is
+/// [Conversation.needsYouP]. So the percentage drawn beside the reason is the
+/// number the owner's slider was compared against, from the message the reason
+/// names.
 
 /// The reason slug as words, or null when there is nothing honest to say.
 ///
 /// Two kinds of value reach here and each is treated differently:
 ///
-///  * `teams_direct` — the deterministic floor's token, and the one token the
-///    needs-you pass writes instead of a sentence. Translated.
-///  * anything else — the model's `evidence` line, already a sentence in the
-///    judge's own words. Passed through with its whitespace collapsed and
+///  * `teams_direct` — the old deterministic floor's token, which rows written
+///    before the decision model may still carry. Translated.
+///  * anything else — a sentence: the decision model's templated reason, or
+///    the evidence line an older build wrote. Passed through with its whitespace collapsed and
 ///    clamped to [maxChars]; paraphrasing it would be the app putting words in
 ///    its own mouth, and the same rule holds in `why_panel.dart`.
 ///
@@ -37,6 +41,60 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
   final collapsed = text.replaceAll(RegExp(r'\s+'), ' ');
   if (collapsed.length <= maxChars) return collapsed;
   return '${collapsed.substring(0, maxChars).trimRight()}…';
+}
+
+/// The owner's own Needs You answer, when [reason] is one of its sentences
+/// (`ownerNeedsYouReason`): `yes` or `no`, else null. The number beside such
+/// a reason is the owner's 1.0 or 0.0, not a model's confidence, so neither
+/// surface below draws it as a percentage.
+String? ownerAnswerOf(String? reason) =>
+    ownerNeedsYouReasons[reason?.trim() ?? ''];
+
+/// Whether [reason] is the owner's answer about that very message ("You
+/// removed this message…") rather than about one like it ("…a message like
+/// this…"); false for any other reason.
+bool ownerAnswerExact(String? reason) {
+  final answer = ownerAnswerOf(reason);
+  return answer != null &&
+      reason!.trim() == ownerNeedsYouReason(answer, exact: true);
+}
+
+/// Whether [p] is an EARLIER model's verdict rather than a probability.
+///
+/// v21 carried the old yes/no verdicts across as `needs_you_p` 1.0 and 0.0, so
+/// a message nothing has re-decided since holds a number no model said. It
+/// still counts by the predicate — the verdict is the best answer the app has
+/// — but it is never drawn as `100%` or `0%`.
+///
+/// [decidedNow] is whether the message has a `message_decisions` row under the
+/// question set this build reads: true shows the number whatever it is, and a
+/// reader that cannot know cheaply passes null, which leaves only the two
+/// exact values in question.
+bool needsYouFromEarlierModel(double? p, {bool? decidedNow}) =>
+    decidedNow != true && (p == 0.0 || p == 1.0);
+
+/// [p] as the whole percentage every needs-you surface shows, or null when the
+/// message has not been decided or holds an earlier model's verdict
+/// ([needsYouFromEarlierModel]). The Settings slider is set in the same unit,
+/// so the two read as one number.
+///
+/// FLOORED, not rounded: 0.296 against a 30% line is below it, and `30%`
+/// beside "below your 30% line" would be the app contradicting itself. For a
+/// line on a slider notch the number shown is at or above the line's exactly
+/// when `needsYouAt` says yes. The 1e-9 is for the binary fractions: 0.57 is
+/// stored as 0.56999…, and it is 57%.
+String? needsYouPercentWords(double? p, {bool? decidedNow}) {
+  if (p == null || needsYouFromEarlierModel(p, decidedNow: decidedNow)) {
+    return null;
+  }
+  return '${((p + 1e-9) * 100).floor()}%';
+}
+
+/// [words] with the thread's probability after it, `<words> · 72%`, or
+/// [words] alone when there is no probability to show.
+String _withPercent(String words, double? p, bool? decidedNow) {
+  final percent = needsYouPercentWords(p, decidedNow: decidedNow);
+  return percent == null ? words : '$words · $percent';
 }
 
 /// Whether [c] has a reason worth drawing: it is asking for a reply AND the
@@ -57,16 +115,41 @@ const Key needsYouWhyLineKey = ValueKey('needs-you-why-line');
 ///
 /// Clamped far shorter than the panel's line ([maxChars]): this sits on one
 /// line of metadata beside the label chips and the message count, and the full
-/// sentence is a click away in the thread.
+/// sentence is a click away in the thread. The clamp is on the reason alone;
+/// the thread's percentage ([Conversation.needsYouP]) is appended after it
+/// and never cut.
+///
+/// The owner's own answer is the chip's one short form: `You removed it` /
+/// `You added it` for a press on this thread, `Like one you removed` /
+/// `Like one you added` for a thread a press's sweep moved, with no
+/// percentage — the full sentence would be clamped mid-word, and the 0% or
+/// 100% under it is the owner's, not a model's.
 List<Widget> needsYouReasonChips(Conversation c, {int maxChars = 36}) {
   if (c.state != ConversationState.needsReply) return const [];
+  final exact = ownerAnswerExact(c.needsYouReason);
+  switch (ownerAnswerOf(c.needsYouReason)) {
+    case 'no':
+      return [
+        BondChip.metric(exact ? 'You removed it' : 'Like one you removed',
+            key: needsYouReasonChipKey),
+      ];
+    case 'yes':
+      return [
+        BondChip.metric(exact ? 'You added it' : 'Like one you added',
+            key: needsYouReasonChipKey),
+      ];
+  }
   final words = needsYouReasonWords(c.needsYouReason, maxChars: maxChars);
   if (words == null) return const [];
-  return [BondChip.metric(words, key: needsYouReasonChipKey)];
+  return [
+    BondChip.metric(_withPercent(words, c.needsYouP, c.needsYouDecidedNow),
+        key: needsYouReasonChipKey),
+  ];
 }
 
-/// `Why: <reason> · <when>` — the line under a thread's header that says which
-/// message made it ask for you, and when that message arrived.
+/// `Why: <reason> · 72% · <when>` — the line under a thread's header that says
+/// which message made it ask for you, how sure the decision model was of it,
+/// and when that message arrived.
 ///
 /// With [onTap] wired the line is also the way THERE: it scrolls the transcript
 /// to that message and flashes it, which is the half of entry 8a naming the
@@ -83,6 +166,14 @@ class NeedsYouWhyLine extends StatelessWidget {
   /// read that did not ask for it — drops the stamp and keeps the reason.
   final String? at;
 
+  /// The thread's needs-you probability ([Conversation.needsYouP]), drawn as
+  /// a percentage after the reason. Null draws no percentage.
+  final double? p;
+
+  /// Whether [p] was decided under the current question set
+  /// ([Conversation.needsYouDecidedNow]); see [needsYouFromEarlierModel].
+  final bool? decidedNow;
+
   /// Jump to the message the reason came from. Resolved by the host from
   /// `needs_you_reason_message_id`, so this widget never learns which message
   /// that is. Null leaves the line inert.
@@ -92,13 +183,19 @@ class NeedsYouWhyLine extends StatelessWidget {
     super.key,
     required this.reason,
     this.at,
+    this.p,
+    this.decidedNow,
     this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final words = needsYouReasonWords(reason);
-    if (words == null) return const SizedBox.shrink();
+    final reasonWords = needsYouReasonWords(reason);
+    if (reasonWords == null) return const SizedBox.shrink();
+    // The owner's answer is its own sentence, with no percentage after it.
+    final words = ownerAnswerOf(reason) != null
+        ? reasonWords
+        : _withPercent(reasonWords, p, decidedNow);
     final stamp = formatTimestamp(at);
     final line = Text(
       stamp == null ? 'Why: $words' : 'Why: $words · $stamp',

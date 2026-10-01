@@ -28,6 +28,11 @@ void main() {
   late http.Response Function(Map<String, dynamic> body)? onEmbed;
 
   MockClient server() => MockClient((request) async {
+        // The heads pairing's one listing GET: a server naming no file is
+        // skipped and kept like a pass, so the pairing asks nothing more.
+        if (request.url.path.endsWith('/v1/models')) {
+          return http.Response(jsonEncode({'models': <Object>[]}), 200);
+        }
         final body = jsonDecode(request.body) as Map<String, dynamic>;
         if (request.url.path.endsWith('/tokenize')) {
           probes++;

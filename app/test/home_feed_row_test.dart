@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/source_glyph.dart';
@@ -42,6 +43,7 @@ HomeFeedRow _row({
   String? fromAddress,
   String? updatedAt,
   String? needsYouReason,
+  double? needsYouP,
   String? gateReason,
   String? bucket,
   String? bucketReason,
@@ -74,6 +76,7 @@ HomeFeedRow _row({
       // A minute ago, so the ordinary row is neither stuck nor about to be.
       updatedAt: updatedAt ?? '2026-09-03T11:59:00Z',
       needsYouReason: needsYouReason,
+      needsYouP: needsYouP,
       gateReason: gateReason,
       bucket: bucket,
       bucketReason: bucketReason,
@@ -100,6 +103,7 @@ Future<void> _pump(
   bool animateIn = false,
   bool compact = false,
   bool threadNeedsYou = false,
+  double? needsYouThreshold,
   DateTime? now,
 }) async {
   // A desktop pane's width. The row is a fixed grid with three flexible cells,
@@ -112,6 +116,8 @@ Future<void> _pump(
     animateIn: animateIn,
     compact: compact,
     threadNeedsYou: threadNeedsYou,
+    needsYouThreshold:
+        needsYouThreshold ?? NeedsYouTuning.defaultThreshold,
     onOpenThread: onOpenThread ?? (_, _) {},
     onOpenStoryline: onOpenStoryline ?? (_) {},
     onRetry: onRetry,
@@ -198,7 +204,7 @@ void main() {
           outcome: 'dropped',
           // Both of these would render on a row that was not dropped. Neither
           // may argue with the drop.
-          needsYou: true,
+          needsYouP: 0.9,
           storylineId: 's1',
           storylineTitle: 'Website redesign',
         ),
@@ -232,7 +238,7 @@ void main() {
         tester,
         _row(
           outcome: 'done',
-          needsYou: true,
+          needsYouP: 0.9,
           storylineId: 's1',
           storylineTitle: 'Website redesign',
         ),
@@ -271,6 +277,31 @@ void main() {
 
       expect(find.text('Website redesign'), findsNothing);
       expect(find.text('Nothing to do'), findsOneWidget);
+    });
+
+    testWidgets("the Result cell reads the row's p against the owner's slider",
+        (tester) async {
+      // 0.4 is under a 0.5 slider, so the decision's reason is the answer;
+      // under the 0.3 default it clears the slider, and the cell says the
+      // slider stood higher when it settled.
+      final row = _row(
+        outcome: 'dropped',
+        dropped: true,
+        dropReason: 'not_worthy',
+        needsYouP: 0.4,
+        needsYouReason: 'Asks you a question.',
+      );
+
+      await _pump(tester, row, needsYouThreshold: 0.5);
+      expect(find.byTooltip('Dropped: Nothing to do — Asks you a question.'),
+          findsOneWidget);
+
+      await _pump(tester, row);
+      expect(
+        find.byTooltip('Dropped: Nothing to do — '
+            'below the Needs You slider when it settled'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the sentence carries a tooltip with the full reason',
@@ -341,7 +372,7 @@ void main() {
         (tester) async {
       final row = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         needsYouReason: 'asks you to confirm Thursday',
         ctaText: 'Confirm Thursday with Sarah',
         summary: 'Sarah proposes moving the launch',
@@ -391,7 +422,7 @@ void main() {
         outcome: 'dropped',
         dropped: true,
         dropReason: 'newsletter',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Reply to the newsletter',
         summary: 'This week in widgets',
       );
@@ -526,7 +557,7 @@ void main() {
     testWidgets('is one line: who, what, the ask, and when', (tester) async {
       final row = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Confirm Thursday with Sarah',
         storylineId: 's1',
         storylineTitle: 'Website redesign',
@@ -570,7 +601,7 @@ void main() {
 
       final asking = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Confirm Thursday with Sarah',
       );
       await _pump(tester, asking, compact: true);
@@ -591,7 +622,7 @@ void main() {
         (tester) async {
       final row = _row(
         outcome: 'done',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Confirm Thursday with Sarah',
       );
       await _pump(tester, row);

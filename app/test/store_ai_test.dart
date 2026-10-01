@@ -683,14 +683,14 @@ void main() {
   });
 
   group('reviveUnjudgedNeedsYou', () {
-    /// A finished needs-you item over a message with no verdict on it —
+    /// A finished needs-you item over a message with no probability on it —
     /// exactly what the build that judged only the floor left behind.
-    Future<void> seedFinished(String id, {bool? verdict}) async {
+    Future<void> seedFinished(String id, {double? p}) async {
       await store.upsertMessage(messageRow(id: id));
       await store.enqueueWork('needs_you', 'email', id);
       await store.writeWork('needs_you', 'email', id, status: 'done');
-      if (verdict != null) {
-        await store.writeNeedsYouVerdict('email', id, verdict: verdict);
+      if (p != null) {
+        await store.writeNeedsYouP('email', id, p: p);
       }
     }
 
@@ -708,11 +708,11 @@ void main() {
       expect(row['error'], isNull);
     });
 
-    test('a message that has been judged is left finished', () async {
-      // Both verdicts count as judged: 0 is an answer, and re-asking would
-      // spend model time to reproduce it.
-      await seedFinished('yes', verdict: true);
-      await seedFinished('no', verdict: false);
+    test('a message that has been decided is left finished', () async {
+      // A low probability counts as decided too: 0 is an answer, and
+      // re-asking would spend model time to reproduce it.
+      await seedFinished('yes', p: 0.9);
+      await seedFinished('no', p: 0.0);
 
       expect(await store.reviveUnjudgedNeedsYou(), 0);
 
@@ -750,7 +750,7 @@ void main() {
     test('the count is how many it revived', () async {
       await seedFinished('m1');
       await seedFinished('m2');
-      await seedFinished('m3', verdict: true);
+      await seedFinished('m3', p: 0.9);
 
       expect(await store.reviveUnjudgedNeedsYou(), 2);
       // And nothing is left to revive on a second call, which is what makes

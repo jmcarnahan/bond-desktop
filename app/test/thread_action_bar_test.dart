@@ -17,8 +17,10 @@ void main() {
   late int kept;
   late List<String> found;
   late List<String> removed;
+  late List<String> needsYou;
 
   setUp(() {
+    needsYou = [];
     done = 0;
     reason = 0;
     reopened = 0;
@@ -39,6 +41,9 @@ void main() {
     bool withFind = true,
     int contextLinked = 0,
     VoidCallback? onFindTime,
+    bool inNeedsYou = false,
+    bool withNeedsYou = false,
+    bool needsYouDecided = true,
   }) async {
     await tester.binding.setSurfaceSize(Size(width, 400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -56,6 +61,11 @@ void main() {
               onReopen: () => reopened++,
               onLater: fullBar ? () {} : null,
               onKeepInInbox: () => kept++,
+              inNeedsYou: inNeedsYou,
+              needsYouDecided: needsYouDecided,
+              onRemoveFromNeedsYou:
+                  withNeedsYou ? () => needsYou.add('remove') : null,
+              onAddToNeedsYou: withNeedsYou ? () => needsYou.add('add') : null,
               onStoryline: fullBar ? () {} : null,
               onContext: fullBar ? () {} : null,
               contextLinked: contextLinked,
@@ -419,6 +429,11 @@ void main() {
                       onDoneWithReason: () {},
                       onReopen: () {},
                       onLater: () {},
+                      // The longest word the row can carry: an open thread
+                      // in Needs You draws "Remove from Needs You".
+                      inNeedsYou: !isDone,
+                      onRemoveFromNeedsYou: () {},
+                      onAddToNeedsYou: () {},
                       onStoryline: () {},
                       onContext: () {},
                       contextLinked: 12,
@@ -721,6 +736,69 @@ void main() {
 
       expect(find.byKey(ThreadActionBar.reopenKey), findsOneWidget);
       expect(find.byKey(ThreadActionBar.laterKey), findsNothing);
+    });
+  });
+
+  group('Needs You', () {
+    testWidgets('a thread in Needs You offers Remove, and only Remove',
+        (tester) async {
+      await pump(tester, inNeedsYou: true, withNeedsYou: true);
+
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+      expect(find.text('Remove from Needs You'), findsOneWidget);
+      await tester.tap(find.byKey(ThreadActionBar.needsYouRemoveKey));
+      expect(needsYou, ['remove']);
+    });
+
+    testWidgets('a thread outside it offers Add, and only Add',
+        (tester) async {
+      await pump(tester, withNeedsYou: true);
+
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+      expect(find.text('Add to Needs You'), findsOneWidget);
+      await tester.tap(find.byKey(ThreadActionBar.needsYouAddKey));
+      expect(needsYou, ['add']);
+    });
+
+    testWidgets('a callback nobody wired draws neither', (tester) async {
+      await pump(tester, inNeedsYou: true);
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+
+      await pump(tester);
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+    });
+
+    testWidgets('a done thread or one in Later is offered no Add',
+        (tester) async {
+      await pump(tester, isDone: true, withNeedsYou: true);
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+
+      await pump(tester, inLater: true, withNeedsYou: true);
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+    });
+
+    testWidgets('a thread with nothing decided waiting on the owner is '
+        'offered no Add', (tester) async {
+      await pump(tester, withNeedsYou: true, needsYouDecided: false);
+
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+    });
+
+    testWidgets('too narrow for its word, it keeps its icon and its name',
+        (tester) async {
+      await pump(tester, width: 360, inNeedsYou: true, withNeedsYou: true);
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsOneWidget);
+      expect(find.text('Remove from Needs You'), findsNothing);
+      expect(
+        find.byTooltip('Remove from Needs You — and anything like it'),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel('Remove from Needs You'), findsOneWidget);
     });
   });
 }

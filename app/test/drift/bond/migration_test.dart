@@ -1241,6 +1241,125 @@ void main() {
     expect([for (final r in messages) r.data['triage_status']], ['triaged']);
   });
 
+  test('v20 to v21 backfills needs_you_p from the decision, else the verdict',
+      () async {
+    // Four messages: one with a decision row (its p wins over the verdict it
+    // also carries), a yes and a no with only the old verdict (1.0 and 0.0),
+    // and one with neither (still undecided, NULL).
+    final schema = await verifier.schemaAt(20);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, created_at, updated_at, triage_status, needs_you_verdict)
+      VALUES
+        ('email', 'm-decided', 'c1', 'inbound', 't', 't', 'triaged', 0),
+        ('email', 'm-yes', 'c2', 'inbound', 't', 't', 'triaged', 1),
+        ('email', 'm-no', 'c3', 'inbound', 't', 't', 'triaged', 0),
+        ('email', 'm-none', 'c4', 'inbound', 't', 't', 'triaged', NULL);
+      INSERT INTO message_decisions (source, source_message_id, model, qhash,
+        answers_json, needs_you_p, decided_at) VALUES
+        ('email', 'm-decided', 'bond-decide', 'q', '{}', 0.42, 't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 21);
+    addTearDown(db.close);
+
+    Future<Object?> pOf(String id) async => (await db
+            .customSelect(
+                'SELECT needs_you_p FROM messages WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data['needs_you_p'];
+
+    expect(await pOf('m-decided'), 0.42);
+    expect(await pOf('m-yes'), 1.0);
+    expect(await pOf('m-no'), 0.0);
+    expect(await pOf('m-none'), null);
+
+    // The verdict is inert from v21: every one is cleared once carried
+    // across, so a replay of the step cannot resurrect an old answer.
+    final verdicts = await db
+        .customSelect('SELECT COUNT(*) AS n FROM messages '
+            'WHERE needs_you_verdict IS NOT NULL')
+        .getSingle();
+    expect(verdicts.data['n'], 0);
+  });
+
+  test('v21 to v22 adds decision_labels empty and keeps the storyline',
+      () async {
+    // Nothing to backfill: a press made before this version was never a
+    // label, and the storyline tables that remember it are derived.
+    final schema = await verifier.schemaAt(21);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, created_at,
+        updated_at) VALUES
+        ('sl-1', 'Lisbon offsite', 'active', 'user', 't', 't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 22);
+    addTearDown(db.close);
+
+    expect(await db.customSelect('SELECT * FROM decision_labels').get(),
+        isEmpty);
+    final storylines =
+        await db.customSelect('SELECT title FROM storylines').get();
+    expect([for (final r in storylines) r.data['title']], ['Lisbon offsite']);
+  });
+
+  test('v22 to v23 gives decision_labels a message and a vector, NULL on '
+      'the storyline labels already there', () async {
+    // Nothing to backfill: every v22 row is a storyline label, which answers
+    // about a thread and carries no vector.
+    final schema = await verifier.schemaAt(22);
+    schema.rawDatabase.execute("""
+      INSERT INTO decision_labels (question, answer, storyline_id, source,
+        conversation_key, title, origin, created_at) VALUES
+        ('member_of', 'yes', 'sl-1', 'email', 'c1', 'Lisbon offsite', 'keep',
+         't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 23);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT question, title, source_message_id, vector, '
+            'vector_model FROM decision_labels')
+        .get();
+    expect(rows, hasLength(1));
+    expect(rows.single.data, {
+      'question': 'member_of',
+      'title': 'Lisbon offsite',
+      'source_message_id': null,
+      'vector': null,
+      'vector_model': null,
+    });
+  });
+
+  test('v23 to v24 gives message_decisions a vector, NULL on the decisions '
+      'already there', () async {
+    // Nothing to backfill in the step: the sync's one-shot requeues the
+    // needs-you pass, which decides those messages again with a vector.
+    final schema = await verifier.schemaAt(23);
+    schema.rawDatabase.execute("""
+      INSERT INTO message_decisions (source, source_message_id, model, qhash,
+        answers_json, needs_you_p, decided_at) VALUES
+        ('email', 'm1', 'bond-decide', 'q', '{}', 0.8, 't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 24);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT source_message_id, needs_you_p, vector '
+            'FROM message_decisions')
+        .get();
+    expect(rows, hasLength(1));
+    expect(rows.single.data, {
+      'source_message_id': 'm1',
+      'needs_you_p': 0.8,
+      'vector': null,
+    });
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

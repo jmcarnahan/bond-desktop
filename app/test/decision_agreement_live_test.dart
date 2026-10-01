@@ -11,6 +11,7 @@ import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:flutter_test/flutter_test.dart';
@@ -69,7 +70,6 @@ void main() {
       final db = sqlite3.open(_dbPath, mode: OpenMode.readOnly);
       final inputs = <DecisionInput>[];
       final stored = <Message>[];
-      final floor = <bool>[];
       try {
         final rows = db.select(
           "SELECT * FROM messages WHERE direction = 'inbound' "
@@ -113,7 +113,6 @@ void main() {
             ),
           );
           stored.add(message);
-          floor.add(data['needs_you_reason'] == 'teams_direct');
         }
       } finally {
         db.close();
@@ -148,10 +147,8 @@ void main() {
 
       final tally = _Tally();
       var wouldDrop = 0;
-      var band = 0;
       var nyYes = 0;
       var nyNo = 0;
-      var floorRows = 0;
       for (var i = 0; i < results.length; i++) {
         final a = results[i];
         final m = stored[i];
@@ -171,31 +168,23 @@ void main() {
             '${m.replyExpected}',
           );
         }
-        final cold = a['drop_reason'].choice == 'cold_outreach';
         if (learnedGateReason(a) != null) wouldDrop++;
 
         final p = a.p('needs_you', 'yes');
-        if (floor[i]) {
-          // The floor decided these, not a model; they stay floor-decided.
-          floorRows++;
+        // The app's one rule: the probability against the slider, here at
+        // the shipped default. No band, no floor, no cold bar.
+        if (needsYouAt(p, NeedsYouTuning.defaultThreshold)) {
+          nyYes++;
         } else {
-          final yesBar = cold
-              ? DecisionPolicy.needsYouYesCold
-              : DecisionPolicy.needsYouYes;
-          if (p >= yesBar) {
-            nyYes++;
-          } else if (p < DecisionPolicy.needsYouNo) {
-            nyNo++;
-          } else {
-            band++;
-          }
-          if (m.needsYouVerdict != null) {
-            tally.add(
-              'needs_you_verdict',
-              '${p >= 0.5}',
-              '${m.needsYouVerdict}',
-            );
-          }
+          nyNo++;
+        }
+        // Against the probability stored on the row, through the same cut.
+        if (m.needsYouP != null) {
+          tally.add(
+            'needs_you',
+            '${needsYouAt(p, NeedsYouTuning.defaultThreshold)}',
+            '${needsYouAt(m.needsYouP, NeedsYouTuning.defaultThreshold)}',
+          );
         }
       }
 
@@ -210,13 +199,10 @@ void main() {
         'gate: $n kept by the rules; the learned gate '
         '(p(drop) >= ${DecisionPolicy.gateDrop}, not cold outreach) would '
         'drop $wouldDrop\n'
-        'needs_you (app bands, floor rows excluded): yes $nyYes, no $nyNo, '
-        'band [${DecisionPolicy.needsYouNo}, ${DecisionPolicy.needsYouYes}) '
-        '$band -> generative model; '
-        'floor $floorRows\n'
-        'needs_you_verdict agreement above reads p(yes) >= 0.5\n'
-        'cold here = drop_reason cold_outreach; the app uses sender history '
-        '(_coldOutreach), so the band split is approximate\n'
+        'needs_you at p(yes) >= ${NeedsYouTuning.defaultThreshold}: '
+        'yes $nyYes, no $nyNo\n'
+        'needs_you agreement above reads the stored probability at the '
+        'same cut\n'
         '\n${tally.confusion('urgency')}\n'
         '\n${tally.confusion('category')}\n',
       );

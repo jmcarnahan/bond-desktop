@@ -52,6 +52,12 @@ class _CountingMcp implements BondMcpClient {
 }
 
 class _FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   int syncCalls = 0;
 
   @override

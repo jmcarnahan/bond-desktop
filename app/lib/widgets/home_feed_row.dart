@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/home_models.dart';
+import '../services/decision/needs_you_predicate.dart' show NeedsYouTuning;
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
@@ -147,6 +148,12 @@ class HomeFeedRowTile extends StatefulWidget {
   /// about the list it landed in says its thread owes anything.
   final bool threadNeedsYou;
 
+  /// The owner's Needs You slider, so a row's Result cell reads its
+  /// probability against the line they actually set (`resultLine`'s
+  /// `threshold`). Defaulted to the slider's own default for a host that has
+  /// no prefs to read.
+  final double needsYouThreshold;
+
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
 
@@ -174,6 +181,7 @@ class HomeFeedRowTile extends StatefulWidget {
     this.muteBar = false,
     this.compact = false,
     this.threadNeedsYou = false,
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
     this.onRetry,
     this.onOpenHistory,
   });
@@ -275,6 +283,7 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
         row,
         now: widget.now,
         threadNeedsYou: widget.threadNeedsYou,
+        threshold: widget.needsYouThreshold,
       );
 
   /// Seven columns, the way the header names them.
@@ -392,7 +401,12 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   /// table the reader is on the hook for would look like every other row.
   /// A summary gets no dot: it is not a verdict about anything.
   Widget _ask(HomeFeedRow row, HomeResult result) {
-    final ask = askLine(row, result, threadNeedsYou: widget.threadNeedsYou);
+    final ask = askLine(
+      row,
+      result,
+      threadNeedsYou: widget.threadNeedsYou,
+      threshold: widget.needsYouThreshold,
+    );
     final style = BondType.small.copyWith(
       color: ask.ask ? BondColors.ink : BondColors.inkSecondary,
       fontWeight: ask.ask ? FontWeight.w600 : null,

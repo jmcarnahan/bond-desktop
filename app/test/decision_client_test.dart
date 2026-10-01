@@ -1,10 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HandshakeException, SocketException;
+import 'dart:math' as math;
 
 import 'package:bond_inbox/services/decision/decision_client.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/decision/decision_state.dart';
+import 'package:bond_inbox/services/decision/storyline_state.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
 import 'package:flutter_test/flutter_test.dart';
@@ -68,6 +72,23 @@ class _FakeDecide {
   /// Never answers, when true.
   bool hang = false;
 
+  /// The listing's HTTP status, when not 200.
+  int? listingStatus;
+
+  /// Every `GET …/v1/models` (a kind check), in order. Not in [requests].
+  final List<http.Request> listings = [];
+
+  /// What the listing answers: llama-server's shape, no `qhash`.
+  Map<String, Object?> listing = const {
+    'models': [
+      {'name': 'bond-decide', 'model': 'bond-decide'},
+    ],
+    'object': 'list',
+    'data': [
+      {'id': 'bond-decide', 'object': 'model'},
+    ],
+  };
+
   List<http.Request> get embeds => [
         for (final r in requests)
           if (r.url.path.endsWith('/embeddings')) r,
@@ -110,6 +131,12 @@ class _FakeDecide {
       r.url.path.endsWith('/tokenize') && bodyOf(r)['add_special'] == true;
 
   MockClient get client => MockClient((request) async {
+        if (request.method == 'GET') {
+          listings.add(request);
+          final status = listingStatus;
+          if (status != null) return http.Response('Not Found', status);
+          return http.Response(jsonEncode(listing), 200);
+        }
         if (isProbe(request)) {
           probes.add(request);
           if (probeError != null) throw probeError!;
@@ -225,6 +252,10 @@ void main() {
       expect(result.model, 'bond-decide-synthetic');
       expect(result.truncated, false);
       expect(result.latencyMs, greaterThanOrEqualTo(0));
+      // The raw vector rides on the result, for the owner's Needs You labels.
+      final state = renderDecisionState(input, toLocal: _pacific);
+      expect(result.vector, hasLength(1024));
+      expect(result.vector, _vectorForText(state));
 
       expect(records, hasLength(1));
       expect(records.single.label, 'decision');
@@ -310,6 +341,17 @@ void main() {
       );
     });
 
+    test('a batch result carries each message its own raw vector', () async {
+      final inputs = [_input('First note.'), _input('Please DROP this one.')];
+      final results = await client().decideBatch(inputs);
+      for (var i = 0; i < inputs.length; i++) {
+        expect(
+          results[i].vector,
+          _vectorForText(renderDecisionState(inputs[i], toLocal: _pacific)),
+        );
+      }
+    });
+
     test('a batch answered with the wrong number of vectors is refused',
         () async {
       server.onEmbed = (body) => _FakeDecide.vectors(
@@ -377,10 +419,32 @@ void main() {
     });
 
     test('any other 4xx is this request', () async {
-      for (final status in [400, 404]) {
+      for (final status in [400, 422]) {
         expect(await failure(status: status), isA<LlmFormatException>(),
             reason: '$status');
       }
+    });
+
+    test('no /v1/embeddings is the server, and its passes are forgotten',
+        () async {
+      final c = client();
+      for (final status in [404, 405]) {
+        server.onEmbed = (_) => http.Response('Not Found', status);
+        try {
+          await c.decide(_input('a'));
+          fail('expected a throw');
+        } catch (e) {
+          expect(e, isA<DecisionMisconfiguredException>(), reason: '$status');
+          expect(parkReasonFor(e), 'decision_misconfigured');
+          expect((e as LlmException).message,
+              contains('does not offer /v1/embeddings'));
+        }
+      }
+      // A park, so the identity probe's pass went with it: the server that
+      // answers next is probed again, once per failed call and once more.
+      server.onEmbed = null;
+      await c.decide(_input('a'));
+      expect(server.probes, hasLength(3));
     });
 
     test('a dead socket, a dropped client and a timeout all park', () async {
@@ -643,6 +707,142 @@ void main() {
     });
   });
 
+  group('the heads pairing', () {
+    DecisionClient paired({String? Function(LlmTarget)? servedFile}) =>
+        DecisionClient(
+          resolveTarget: () => target,
+          heads: syntheticHeads,
+          client: server.client,
+          onCall: records.add,
+          toLocal: _pacific,
+          servedFile: servedFile,
+        );
+
+    Map<String, Object?> listingOf(String path) => {
+          'models': [
+            {'name': path, 'model': path},
+          ],
+          'object': 'list',
+          'data': [
+            {'id': path, 'object': 'model'},
+          ],
+        };
+
+    test("a served file whose name carries the heads' model passes, once",
+        () async {
+      server.listing = listingOf(
+          '/Users/sam/models/local_bond-decide/bond-decide-synthetic-f16.gguf');
+      final c = paired();
+
+      await c.decide(_input('a'));
+      await c.decide(_input('b'));
+
+      expect(server.listings, hasLength(1));
+      expect(server.embeds, hasLength(2));
+    });
+
+    test('a file of another model is refused, parks, and names the file only',
+        () async {
+      server.listing = listingOf(
+          '/Users/sam/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf');
+
+      final e = await paired().decide(_input('a')).then<Object>(
+          (_) => fail('expected a throw'),
+          onError: (Object e) => e);
+
+      expect(e, isA<DecisionModelMismatchException>());
+      expect(e, isA<DecisionMisconfiguredException>());
+      expect(parkReasonFor(e), 'decision_misconfigured');
+      expect(
+        (e as LlmException).message,
+        'The decision model file (bond-decide-mbl-v2swap-f16.gguf) does not '
+        'match its heads file (bond-decide-synthetic). Install them together.',
+      );
+      expect(server.embeds, isEmpty);
+    });
+
+    test('a sibling run whose name only STARTS with the heads model is '
+        'refused', () async {
+      // Another fine-tune of the same line: a substring or prefix match would
+      // pass it, and its vectors are not the ones these heads were fitted on.
+      server.listing = listingOf('/Users/sam/models/local_bond-decide/'
+          'bond-decide-synthetic-cont2-f16.gguf');
+      await expectLater(
+        paired().decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>()),
+      );
+      expect(server.embeds, isEmpty);
+    });
+
+    test('the pairing rule: the model, at most one quant, then .gguf', () {
+      const model = 'bond-decide-mbl-v3';
+      for (final file in [
+        'bond-decide-mbl-v3',
+        'bond-decide-mbl-v3.gguf',
+        'bond-decide-mbl-v3-f16.gguf',
+        'bond-decide-mbl-v3-BF16.gguf',
+        'bond-decide-mbl-v3-q8_0.gguf',
+      ]) {
+        expect(DecisionClient.servesHeadsModel(file, model), isTrue,
+            reason: file);
+      }
+      for (final file in [
+        'bond-decide-mbl-v3-cont2-f16.gguf',
+        'bond-decide-mbl-v3-cont2',
+        'bond-decide-mbl-v31-f16.gguf',
+        'x-bond-decide-mbl-v3-f16.gguf',
+        'bond-decide-mbl-v2-f16.gguf',
+      ]) {
+        expect(DecisionClient.servesHeadsModel(file, model), isFalse,
+            reason: file);
+      }
+    });
+
+    test("a served bond-decide- alias is paired like a file: the heads' "
+        'model passes', () async {
+      server.listing = listingOf('bond-decide-synthetic');
+      await paired().decide(_input('a'));
+      expect(server.embeds, hasLength(1));
+    });
+
+    test('a served bond-decide- alias of another model is refused', () async {
+      server.listing = listingOf('bond-decide-mbl-v3');
+      await expectLater(
+        paired().decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>().having(
+            (e) => e.message,
+            'message',
+            'The decision model file (bond-decide-mbl-v3) does not match its '
+                'heads file (bond-decide-synthetic). Install them together.')),
+      );
+      expect(server.embeds, isEmpty);
+    });
+
+    test('a listing that names no file skips the check', () async {
+      // The default listing: an alias, no path.
+      final c = paired();
+      await c.decide(_input('a'));
+      expect(server.embeds, hasLength(1));
+
+      // No listing at all.
+      server.listingStatus = 404;
+      await paired().decide(_input('a'));
+      expect(server.embeds, hasLength(2));
+    });
+
+    test("a managed target's file is the manifest's, and no listing is asked",
+        () async {
+      await expectLater(
+        paired(servedFile: (_) => 'bond-decide-mbl-v3-f16.gguf')
+            .decide(_input('a')),
+        throwsA(isA<DecisionModelMismatchException>()),
+      );
+      await paired(servedFile: (_) => 'bond-decide-synthetic-f16.gguf')
+          .decide(_input('a'));
+      expect(server.listings, isEmpty);
+    });
+  });
+
   group('truncation', () {
     test('a refused text becomes tokenize, then ids — once each, no retry',
         () async {
@@ -749,6 +949,8 @@ void main() {
           resolveTarget: () => target,
           heads: syntheticHeads,
           client: MockClient((request) async {
+            // No listing: the heads pairing is skipped.
+            if (request.method == 'GET') return http.Response('', 404);
             if (_FakeDecide.isProbe(request)) {
               return http.Response(jsonEncode({'tokens': _modernBertA}), 200);
             }
@@ -783,7 +985,9 @@ void main() {
         final c = DecisionClient(
           resolveTarget: () => target,
           heads: syntheticHeads,
-          client: MockClient((request) async => _FakeDecide.isProbe(request)
+          client: MockClient((request) async => request.method == 'GET'
+              ? http.Response('', 404)
+              : _FakeDecide.isProbe(request)
               ? http.Response(jsonEncode({'tokens': _modernBertA}), 200)
               : request.url.path.endsWith('/tokenize')
                   ? http.Response('nope', status)
@@ -943,6 +1147,281 @@ void main() {
     });
   });
 
+  group('storyline questions', () {
+    /// Answers every text with `yes` logit 2.0 on [question] when the text
+    /// STARTS with [yesPrefix], and an untouched (tied) head otherwise; an id
+    /// list gets the tie too.
+    void answerYesFor(StorylineQuestion question, String yesPrefix) {
+      server.onEmbed = (body) {
+        final inputs = _FakeDecide.inputsOf(body);
+        return http.Response(
+          jsonEncode({
+            'data': [
+              for (final (i, input) in inputs.indexed)
+                {
+                  'index': i,
+                  'embedding': syntheticVector({
+                    if (input is String && input.startsWith(yesPrefix))
+                      yesAxisOf(question): 2.0,
+                  }),
+                },
+            ],
+          }),
+          200,
+        );
+      };
+    }
+
+    /// p(yes) for a `yes` logit of 2.0 at [question]'s synthetic temperature.
+    double pHigh(StorylineQuestion question) {
+      final t = syntheticTemperature(question.id);
+      final e = math.exp(2.0 / t);
+      return e / (e + 1);
+    }
+
+    test('ask sends the states as one raw-vector array, and reads p(yes) off '
+        "the question's head", () async {
+      answerYesFor(StorylineQuestion.memberOf, 'Storyline title: Lisbon');
+      final states = [
+        renderStorylineMembership(
+          title: 'Lisbon offsite',
+          charter: 'Plan the Q3 Lisbon offsite',
+          threadText: 'Subject: Venue list',
+        ),
+        renderStorylineMembership(
+          title: 'Quarterly invoices',
+          charter: null,
+          threadText: 'Subject: Venue list',
+        ),
+      ];
+
+      final p = await client().ask(StorylineQuestion.memberOf, states);
+
+      expect(server.probes, hasLength(1));
+      expect(server.requests, hasLength(1));
+      expect(_FakeDecide.bodyOf(server.requests.single), {
+        'model': 'bond-decide',
+        'input': states,
+        'embd_normalize': -1,
+      });
+      expect(p[0], closeTo(pHigh(StorylineQuestion.memberOf), 1e-9));
+      expect(p[1], closeTo(0.5, 1e-12));
+      expect(records.single.label, 'decision:member_of');
+      expect(records.single.outcome, 'ok');
+    });
+
+    test('a single state goes as one string, as decide sends it', () async {
+      final state = renderStorylineCharter(title: 'Lisbon offsite');
+      await client().ask(StorylineQuestion.charterSpecific, [state]);
+      expect(_FakeDecide.bodyOf(server.requests.single)['input'], state);
+      expect(records.single.label, 'decision:charter_specific');
+    });
+
+    test('nothing to ask sends nothing', () async {
+      expect(await client().ask(StorylineQuestion.sameEffort, []), isEmpty);
+      expect(await client().askPairs([]), isEmpty);
+      expect(server.probes, isEmpty);
+      expect(server.requests, isEmpty);
+      expect(records, isEmpty);
+    });
+
+    test('askPairs asks both orders together and averages them', () async {
+      // Only the order with ALPHA first says yes, so the mean is between.
+      answerYesFor(StorylineQuestion.sameEffort, 'Thread A:\nALPHA');
+      final pairs = [
+        ('ALPHA thread', 'BETA thread'),
+        ('GAMMA thread', 'DELTA thread'),
+      ];
+
+      final p = await client().askPairs(pairs);
+
+      expect(server.requests, hasLength(1));
+      expect(_FakeDecide.bodyOf(server.requests.single)['input'], [
+        renderStorylinePair('ALPHA thread', 'BETA thread'),
+        renderStorylinePair('BETA thread', 'ALPHA thread'),
+        renderStorylinePair('GAMMA thread', 'DELTA thread'),
+        renderStorylinePair('DELTA thread', 'GAMMA thread'),
+      ]);
+      expect(p, hasLength(2));
+      expect(p[0],
+          closeTo((pHigh(StorylineQuestion.sameEffort) + 0.5) / 2, 1e-9));
+      expect(p[1], closeTo(0.5, 1e-12));
+      expect(records.single.label, 'decision:same_effort');
+    });
+
+    test('pairs are batched at sixteen inputs, order kept', () async {
+      answerYesFor(StorylineQuestion.sameEffort, 'Thread A:\nALPHA');
+      final pairs = [
+        for (var i = 0; i < 9; i++)
+          (i.isEven ? 'ALPHA $i' : 'other $i', 'BETA $i'),
+      ];
+
+      final p = await client().askPairs(pairs);
+
+      expect(
+        [
+          for (final r in server.requests)
+            (_FakeDecide.bodyOf(r)['input'] as List).length,
+        ],
+        [16, 2],
+      );
+      for (var i = 0; i < 9; i++) {
+        expect(
+          p[i],
+          closeTo(
+            i.isEven
+                ? (pHigh(StorylineQuestion.sameEffort) + 0.5) / 2
+                : 0.5,
+            1e-9,
+          ),
+          reason: 'pair $i',
+        );
+      }
+      expect(records, hasLength(1));
+    });
+
+    test('a pair too long in tokens is truncated on its own, and the rest '
+        'still answers', () async {
+      server.onEmbed = (body) {
+        final input = body['input'];
+        if (input is List && input.first is String) {
+          return http.Response(_tooLargeBody, 500);
+        }
+        if (input is String && input.contains('LONG')) {
+          return http.Response(_tooLargeBody, 500);
+        }
+        return _FakeDecide.vectors(_FakeDecide.inputsOf(body));
+      };
+
+      final p = await client().askPairs([('LONG thread', 'short thread')]);
+
+      expect(server.requests.map((r) => r.url.path), [
+        '/v1/embeddings', // both orders, refused
+        '/v1/embeddings', // A-then-B, refused
+        '/tokenize',
+        '/v1/embeddings', // its ids
+        '/v1/embeddings', // B-then-A, refused
+        '/tokenize',
+        '/v1/embeddings', // its ids
+      ]);
+      final ids = _FakeDecide.bodyOf(server.requests[3])['input'] as List;
+      expect(ids.first, DecisionClient.clsId);
+      expect(ids.last, DecisionClient.sepId);
+      expect(ids, hasLength(2048));
+      // The id vectors carry nothing on same_effort's axes: a tie.
+      expect(p.single, closeTo(0.5, 1e-12));
+      expect(records.single.outcome, 'ok');
+    });
+
+    group('failures map as decide maps them', () {
+      Future<Object> failure({
+        int? status,
+        http.Response Function(Map<String, dynamic>)? onEmbed,
+        DecisionClient? using,
+      }) async {
+        if (status != null) {
+          server.onEmbed = (_) => http.Response('nope', status);
+        }
+        if (onEmbed != null) server.onEmbed = onEmbed;
+        try {
+          await (using ?? client())
+              .ask(StorylineQuestion.memberOf, ['a state']);
+        } catch (e) {
+          return e;
+        }
+        fail('expected a throw');
+      }
+
+      test('401 and 403 are the key', () async {
+        for (final status in [401, 403]) {
+          final e = await failure(status: status);
+          expect(e, isA<DecisionUnauthorizedException>(), reason: '$status');
+          expect(parkReasonFor(e), 'decision_unauthorized');
+        }
+        expect(records.map((r) => r.label), everyElement('decision:member_of'));
+        expect(records.map((r) => r.outcome), everyElement('unavailable'));
+      });
+
+      test('429 and every 5xx park as unavailable', () async {
+        for (final status in [429, 500, 503]) {
+          final e = await failure(status: status);
+          expect(e, isA<DecisionUnavailableException>(), reason: '$status');
+          expect(parkReasonFor(e), 'decision_unavailable');
+        }
+      });
+
+      test('any other 4xx is this request', () async {
+        expect(await failure(status: 400), isA<LlmFormatException>());
+        expect(records.single.outcome, 'format');
+      });
+
+      test('a dead socket parks', () async {
+        server.transportError = const SocketException('refused');
+        expect(await failure(), isA<DecisionUnavailableException>());
+      });
+
+      test('a normalised vector or the wrong width is misconfigured', () async {
+        final unit = List<double>.filled(syntheticHidden, 0.0)..[0] = 1.0;
+        for (final embedding in [unit, List<double>.filled(768, 2.0)]) {
+          final e = await failure(
+            onEmbed: (_) => http.Response(
+              jsonEncode({
+                'data': [
+                  {'index': 0, 'embedding': embedding},
+                ],
+              }),
+              200,
+            ),
+          );
+          expect(e, isA<DecisionMisconfiguredException>());
+          expect(parkReasonFor(e), 'decision_misconfigured');
+        }
+      });
+
+      test('a server that is not the decision model is misconfigured',
+          () async {
+        server.probeTokens = [101, 64, 102];
+        final e = await failure();
+        expect(e, isA<DecisionMisconfiguredException>());
+        expect(server.requests, isEmpty);
+      });
+
+      test('a refused heads file parks before anything is sent', () async {
+        final e = await failure(
+          using: DecisionClient(
+            resolveTarget: () => target,
+            heads: () => throw const DecisionMisconfiguredException(
+                DecisionHeads.olderModelText),
+            client: server.client,
+            onCall: records.add,
+          ),
+        );
+        expect(e, isA<DecisionMisconfiguredException>());
+        expect(parkReasonFor(e), 'decision_misconfigured');
+        expect(server.probes, isEmpty);
+        expect(records.single.label, 'decision:member_of');
+      });
+
+      test('an unavailable target is not installed, and sends nothing',
+          () async {
+        final e = await failure(
+          using: DecisionClient(
+            resolveTarget: () => const LlmTarget(
+              baseUrl: _url,
+              model: 'bond-decide',
+              unavailable: 'The decision model is not installed.',
+            ),
+            heads: syntheticHeads,
+            client: server.client,
+          ),
+        );
+        expect(e, isA<DecisionNotInstalledException>());
+        expect(parkReasonFor(e), 'decision_not_installed');
+        expect(server.probes, isEmpty);
+      });
+    });
+  });
+
   test('a target that says it cannot answer throws '
       'DecisionUnavailableException and sends nothing', () async {
     final c = DecisionClient(
@@ -975,5 +1454,98 @@ void main() {
       c.decide(_longInput()),
       throwsA(isA<DecisionUnavailableException>()),
     );
+  });
+
+  group('modelTag', () {
+    DecisionClient tagged({
+      LlmTarget Function()? resolve,
+      DecisionHeads Function()? heads,
+      bool yourServer = false,
+    }) =>
+        DecisionClient(
+          resolveTarget: resolve ?? () => target,
+          heads: heads ?? syntheticHeads,
+          client: server.client,
+          onCall: records.add,
+          toLocal: _pacific,
+          isYourServer: yourServer ? (_) => true : null,
+        );
+
+    test("on the encoder kind it is the tag a fresh decision's vector "
+        'carries', () async {
+      final c = tagged();
+
+      expect(c.modelTag, 'bond-decide-synthetic');
+      expect(await c.resolvedModelTag(), 'bond-decide-synthetic');
+      // Neither asked anything: the GET a decide makes is its heads pairing.
+      expect(server.listings, isEmpty);
+      expect((await c.decide(_input('a'))).model, c.modelTag);
+    });
+
+    test('an unavailable target has none, and asks nothing', () async {
+      final c = tagged(
+        resolve: () => const LlmTarget(
+          baseUrl: _url,
+          model: 'bond-decide',
+          unavailable: 'The decision model is not installed.',
+        ),
+        yourServer: true,
+      );
+
+      expect(c.modelTag, isNull);
+      expect(await c.resolvedModelTag(), isNull);
+      expect(server.listings, isEmpty);
+    });
+
+    test('heads that cannot be read give none', () async {
+      final c = tagged(heads: () => throw StateError('no heads file'));
+
+      expect(c.modelTag, isNull);
+      expect(await c.resolvedModelTag(), isNull);
+    });
+
+    test("Your server: none until its kind is learned; the resolver learns "
+        'it with one listing and answers the heads model', () async {
+      final c = tagged(yourServer: true);
+
+      expect(c.modelTag, isNull);
+      expect(server.listings, isEmpty, reason: 'the getter never asks');
+
+      expect(await c.resolvedModelTag(), 'bond-decide-synthetic');
+      expect(server.listings, hasLength(1));
+      expect(c.modelTag, 'bond-decide-synthetic');
+      // Cached: no second listing.
+      expect(await c.resolvedModelTag(), 'bond-decide-synthetic');
+      expect(server.listings, hasLength(1));
+    });
+
+    test('a systemone server has none, before and after its kind is known',
+        () async {
+      server.listing = {
+        'models': [
+          {
+            'name': 'kev',
+            'qhash': decisionQhash,
+            'renderer': decisionRendererVersion,
+          },
+        ],
+      };
+      final c = tagged(yourServer: true);
+
+      expect(c.modelTag, isNull);
+      expect(await c.resolvedModelTag(), isNull);
+      expect(server.listings, hasLength(1));
+      expect(c.kindOf(url: _url, model: 'bond-decide'),
+          DecisionServerKind.systemOne);
+      expect(c.modelTag, isNull);
+    });
+
+    test('a kind that cannot be learned answers none rather than throwing',
+        () async {
+      server.listingStatus = 503;
+      final c = tagged(yourServer: true);
+
+      expect(await c.resolvedModelTag(), isNull);
+    });
   });
 }

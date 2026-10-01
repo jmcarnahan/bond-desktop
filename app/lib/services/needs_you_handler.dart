@@ -1,61 +1,41 @@
-import 'package:flutter/foundation.dart' show debugPrint;
-
 import '../data/message_store.dart';
-import '../models/attachment_models.dart' show decodeAttachmentDigest;
 import '../models/message_models.dart';
 import 'activity_log.dart';
-import 'attachments/attachment_digest_lines.dart';
 import 'ai_worker.dart';
-import 'external_sender.dart';
-import 'llm/json_task.dart';
-import 'llm/llm_client.dart';
-import 'attention.dart';
+import 'decision/decision_client.dart';
+import 'decision/decision_input.dart' show decisionOwnerString;
 import 'decision/decision_policy.dart';
-import 'llm/needs_you_task.dart';
-import 'needs_you.dart';
+import 'decision/needs_you_exemplars.dart';
 import 'owner_lookup.dart';
 import 'pipeline_progress.dart';
+import 'triage_queue.dart'
+    show applyDecision, decisionInputFor, followNeedsYouChip;
 
-/// Decides whether ONE message needs the owner, and writes the verdict onto
-/// its row.
+/// Settles ONE message's needs-you probability, `messages.needs_you_p`.
 ///
 /// `entity_id` is a source message id: this is a judgement about a thing
 /// somebody said, not about the thread it was said in, and a quiet thread that
 /// gets one direct question is exactly the case a per-thread verdict would
 /// lose.
 ///
-/// The verdict is TRI-STATE on `messages`, and the third state is the point.
-/// NULL means this pass has never judged the row, or judged it a HEDGE, a yes
-/// below the confidence bar, which buys neither an interruption nor a veto;
-/// 0 is a judgement that the message does not need the owner, and 1 that it
-/// does. The work row, not the NULL, is what says whether a message was
-/// judged. The deterministic floor
-/// ([needsYouFloor]) only ever RAISES it. What the floor is silent about is
-/// settled by the decision model's stored p(needs_you = yes) against
-/// [DecisionPolicy]'s bars (yes at 0.65, 0.85 for a cold approach; no below
-/// 0.35), with a templated reason; the band between, a message whose owner
-/// saved custom rules, one with an attachment digest that carries an ask (a
-/// digest that asks nothing adds nothing), one decided with no owner line in
-/// its state and one decided before the decision model existed are read by
-/// [NeedsYouTask]. Those two are the
-/// only things here that can write a 0.
+/// The probability is the decision model's calibrated p(needs_you = yes), and
+/// the owner's slider is the cut on it (`needsYouAt`). The triage pass
+/// writes it for every kept message it decided with the owner known, so for
+/// most messages this pass finds it already there and does nothing. It
+/// decides a message AGAIN, with the decision model, when the stored decision
+/// is missing or was made without an owner line (the head was trained with
+/// that line, so its number is not trusted without it) or has no vector under
+/// the model the client answers with now ([DecisionClient.modelTag]; the
+/// owner's Needs You presses compare stored vectors), and then it writes
+/// the whole state that decision determines through [applyDecision], the
+/// triage claim's writer: the triage fields, the extraction's intent and
+/// importance and the thread fold move with the p. NULL on the row means
+/// not decided yet, never a low probability.
 ///
-/// The owner's `needs_you_rules` pref REPLACES the default body of the system
-/// prompt outright — an empty pref is the default body. It is read per item,
-/// so an edit mid-drain reaches the rest of the drain, and memoized on its own
-/// text, so an unchanged pref costs no rebuilt prompt.
-///
-/// It reads the message, never triage's verdicts — and that is a choice, not
-/// an accident of timing. The queue in front of this handler now hands over
-/// only rows triage has finished with (`MessageStore.claimPendingWork` holds
-/// a `needs_you` item back while its message is `pending` or `processing`, so
-/// what arrives here is `triaged`, `skipped`, `error`, or a message that has
-/// been deleted), which means `reply_expected` and `needs_action` are usually
-/// sitting right there. This pass still does not read them: a verdict built
-/// on another model's verdict inherits its mistakes, and the one case a
-/// per-message needs-you judgement exists for — a busy thread where the owner
-/// gets one direct question — is the case triage's thread-level answer loses.
-/// The body is what this pass judges.
+/// No language model is asked about needs-you, on any path, and there is no
+/// band, bar or floor: the slider is the owner's control over the cut, and
+/// the owner's Needs You answers (`NeedsYouExemplars`, applied inside
+/// [applyDecision]) are already in the stored number this pass copies.
 ///
 /// This handler deliberately has NO arm in [AiWorker]'s `_park` and
 /// `_recordFailure` per-kind ladders. Those ladders exist for one reason: a
@@ -63,26 +43,21 @@ import 'pipeline_progress.dart';
 /// worker, not the handler, decides how an exception ended. Needs-you has no
 /// stage column, so an arm here would write nothing and read as an oversight
 /// to the next person who "fixes" it. The generic parking above those ladders
-/// still applies: a model that is not running parks the whole kind.
+/// still applies: a decision server or a model that is not running parks the
+/// whole kind, and nothing here falls back from one to the other.
 ///
 /// It does move ONE `message_progress` column, and it is not a stage. The
-/// `needs_you` flag on a settled row is a snapshot of the verdict taken at
-/// settle time, so a verdict this pass CHANGES leaves the chip beside it
-/// showing the old answer — a home screen disagreeing with the row it reads
-/// from. When, and only when, the stored verdict moves, the tail below hands
-/// the message to [PipelineProgress.refreshNeedsYou], which re-asks
-/// `notifyWorthy` and rewrites the flag. A re-verdict that returns the SAME
-/// answer writes nothing, which is what keeps a chip cleared by a reply or by
-/// a Done from coming back.
+/// `needs_you` flag on a settled row is a snapshot taken at settle time, so a
+/// probability this pass CHANGES across the slider leaves the chip beside it
+/// showing the old answer. When, and only when, the answer at the owner's
+/// threshold moves, [followNeedsYouChip] hands the message to
+/// [PipelineProgress.refreshNeedsYou], which rewrites the flag. A pass that
+/// leaves the answer where it was writes nothing, which is what keeps a chip
+/// cleared by a reply or by a Done from coming back.
 class NeedsYouHandler extends WorkHandler {
   static const String _source = 'email';
 
-  /// A sentence, a boolean and an enum. No room for the model to start
-  /// drafting inside a judgement.
-  static const int _maxTokens = 256;
-
   final MessageStore _store;
-  final LlmClient _client;
 
   /// Where a pass that deliberately did nothing gets to say so. Defaulted to
   /// the disabled log, so a test that builds this handler writes nothing extra.
@@ -92,64 +67,68 @@ class NeedsYouHandler extends WorkHandler {
   /// [memoizedOwner]. It is a keychain read, and the answer only changes on
   /// sign-out — which disposes the provider that built this handler and so
   /// builds a new one. Only a lookup that ANSWERED is kept, so a keychain
-  /// hiccup is forgotten and this prompt simply names no owner, which the
-  /// line's own contract already allows.
+  /// hiccup is forgotten and the decision input simply names no owner, which
+  /// the line's own contract already allows.
   final OwnerLookup _owner;
 
-  /// The task, memoized on the rules text it was built from. The pref is read
-  /// per item so a mid-drain edit takes effect on the next message, but an
-  /// UNCHANGED pref must reuse the same task — same string object, same KV
-  /// prefix — rather than rebuild the prompt per item.
-  String? _rulesText;
-  NeedsYouTask _task = const NeedsYouTask();
-
-  /// Where a changed verdict goes. Defaulted to the disabled recorder, like
+  /// Where a changed answer goes. Defaulted to the disabled recorder, like
   /// every instrumented constructor in this app, so the tests that only care
-  /// about the verdict build this handler unchanged.
+  /// about the probability build this handler unchanged.
   final PipelineProgress _pipeline;
 
-  /// The user's attention floor, read the same way the settle machine reads
-  /// it. A callback rather than a value because the slider moves under a
+  /// The owner's Needs You slider, read the same way every other reader of
+  /// it does. A callback rather than a value because the slider moves under a
   /// handler that is built once, and the flag this writes has to mean what the
   /// tiles elsewhere mean.
   final Future<double> Function()? _threshold;
 
-  /// The owner's own mail domains, for [isExternalAddress].
-  ///
-  /// A closure asked ONCE per handler, cached in [_domains] on the same terms
-  /// [memoizedOwner] caches its answer: it comes from the signed-in account, it
-  /// only changes on sign-out, and sign-out disposes the provider that built this
-  /// handler. A read that THREW is forgotten rather than kept, so one hiccup does
-  /// not turn every external sender internal for the life of the session.
-  ///
-  /// Null — the default, and what every existing test gets — means the app does
-  /// not know whose inbox this is, so nobody reads as external and the floor
-  /// behaves exactly as it did before this parameter existed. [isExternalAddress]
-  /// keeps the same discipline for an empty set.
-  final Future<Set<String>> Function()? _ownerDomains;
+  /// The decision model, for a message whose stored decision is missing or
+  /// was made without the owner known. It THROWS when it cannot answer, and
+  /// the throw is left to the worker, which parks the kind: there is no
+  /// language-model fallback for the default prompt.
+  final DecisionClient _decision;
 
-  Future<Set<String>>? _domains;
+  /// The owner's Needs You answers, which [applyDecision] lets replace the
+  /// model's on a re-decide. The copy step needs none: it copies the stored
+  /// decision's `needs_you_p`, which already carries the owner's answer, and
+  /// its reason from the stored answers, which say so. Null in a test that
+  /// wires none.
+  final NeedsYouExemplars? _exemplars;
+
+  /// The tag a fresh decision's vector carries now
+  /// ([DecisionClient.resolvedModelTag], which learns Your server's kind
+  /// first rather than answering null for it). A stored decision with no
+  /// vector under it is decided again instead of copied (once the owner is
+  /// known), so the owner's Needs You presses can compare it without a model
+  /// call: how rows decided before v24, or under another model, heal as they
+  /// pass. Null, or unwired, means the backend has no vector to keep and
+  /// nothing is owed. Asked only when there is a stored decision to judge.
+  final Future<String?> Function()? _modelTag;
 
   NeedsYouHandler(
-    this._store,
-    this._client, {
+    this._store, {
+    required DecisionClient decisionClient,
     ActivityLog? activityLog,
     OwnerLookup? owner,
     PipelineProgress progress = const PipelineProgress.disabled(),
-    Future<double> Function()? attentionThreshold,
-    this._ownerDomains,
-  })  : _log = activityLog ?? ActivityLog.disabled(),
+    Future<double> Function()? needsYouThreshold,
+    this._exemplars,
+    this._modelTag,
+  })  : _decision = decisionClient,
+        _log = activityLog ?? ActivityLog.disabled(),
         _owner = memoizedOwner(owner ?? (() async => null)),
         _pipeline = progress,
-        _threshold = attentionThreshold;
+        _threshold = needsYouThreshold;
 
   @override
   String get kind => 'needs_you';
 
-  /// Three at once. An item touches nothing shared — it reads one row and
-  /// writes that same row's two columns — so items of this kind are genuinely
-  /// independent of each other, which is the bar [WorkHandler.concurrency]
-  /// sets for raising it.
+  /// Three at once. An item writes its own row, its own decision row and
+  /// extraction, and at most its thread's CTA fold, which only the thread's
+  /// newest inbound message moves (`foldCtaUp`'s own guard) — the same fold
+  /// three triage claims already run side by side — so items of this kind
+  /// are independent of each other, which is the bar
+  /// [WorkHandler.concurrency] sets for raising it.
   @override
   int get concurrency => 3;
 
@@ -190,282 +169,98 @@ class NeedsYouHandler extends WorkHandler {
       return;
     }
 
-    // Read BEFORE either branch writes, because "did the verdict move" is the
+    // Read BEFORE any branch writes, because "did the answer move" is the
     // whole condition on the chip rewrite below and there is no other record
-    // of what it was. Stored shape, not Dart's: 0, 1 or null, where null is
-    // "never judged" and differs from both.
-    final previous = _int(row['needs_you_verdict']);
+    // of what it was. NULL is "not decided yet".
+    final previous = (row['needs_you_p'] as num?)?.toDouble();
 
-    // A stranger's first approach, read before the floor because it is the one
-    // thing that can switch the floor off. Costs a query only for a sender who
-    // is actually external, and nothing at all while the app does not know
-    // whose inbox this is.
-    final cold = await _coldOutreach(source, row);
-
-    if (needsYouFloor(row, coldOutreach: cold)) {
-      await _store.writeNeedsYouVerdict(
+    // A decision made with the owner known is trusted as it stands. One made
+    // WITHOUT the owner line is shown but untrusted (the head was trained with
+    // that line): it is decided again here once the owner is known, and kept
+    // as it is while the owner is still unknown, so a pass run before the
+    // keychain answers does not re-decide the same message over and over.
+    // Either way a kept p is copied onto the row only when the row does not
+    // already carry it.
+    final found = await _store.decisionFor(source, id);
+    final storedP = found?.needsYouP;
+    final stored =
+        found != null && storedP != null && found.answers.fields.isNotEmpty
+            ? found
+            : null;
+    // A stored decision with no vector under the model the client answers
+    // with now is decided again for one, once the owner is known — never
+    // traded for an ownerless decision, so with the owner unknown it is
+    // copied as before.
+    final tag = stored == null ? null : await _modelTag?.call();
+    final vectorOwed = stored != null &&
+        tag != null &&
+        (stored.vector == null || stored.vectorModel != tag);
+    final owner = stored != null && stored.ownerKnown && !vectorOwed
+        ? null
+        : decisionOwnerString(await _owner());
+    if (stored != null &&
+        storedP != null &&
+        (vectorOwed ? owner == null : stored.ownerKnown || owner == null)) {
+      if (previous == storedP) {
+        _log.note({
+          'source': 'decision',
+          'p': storedP,
+          'reason': stored.ownerKnown ? 'decided' : 'owner_unknown',
+        });
+        return;
+      }
+      await _store.writeNeedsYouP(
         source,
         id,
-        verdict: true,
-        reason: 'teams_direct',
+        p: storedP,
+        reason: needsYouYesReason(stored.answers),
       );
-      _log.note({'verdict': true, 'reason': 'teams_direct'});
-      await _followChip(source, id, previous: previous, verdict: true);
+      _log.note({'source': 'decision', 'p': storedP});
+      await followNeedsYouChip(
+        _pipeline,
+        source,
+        id,
+        previous: previous,
+        p: storedP,
+        threshold: _threshold,
+      );
       return;
     }
 
-    // What the files on this message say, when any of them have been read.
-    // Keyed on this message alone and not the thread: the judgement is about
-    // what THIS message asks of the owner, and a contract attached three turns
-    // ago is context the thread text already carries.
-    //
-    // The digest handler requeues this kind once a document lands an ask, so a
-    // message judged before its attachments were read is judged again with
-    // this block filled in.
-    final digests = (await _store.digestsForMessages(source, [id]))[id] ??
-        const <Map<String, Object?>>[];
-
-    // Read per item rather than held, like [DraftHandler]'s about-me: someone
-    // who edits their rules mid-drain wants the rest of the drain to use them.
-    final rules = await _store.getPref(needsYouRulesKey);
-
-    // Below the floor, the decision model's probability settles everything
-    // outside the band — unless something the model never read has a say.
-    // Owner-written rules (a trained head cannot follow them) and an
-    // attachment digest WITH an ask (the model read the message, not its
-    // files; a digest that asks nothing has nothing to add, per D6) both send
-    // the message to the language model, as does a message decided before
-    // the decision model existed and one decided with no owner line in its
-    // state (the head was trained with that line, so its number is not
-    // trusted without it).
-    final filesAsk = digests.any(
-      (row) =>
-          (decodeAttachmentDigest(row['digest_json'] as String?)
-                  ?.asks
-                  .isNotEmpty ??
-              false),
-    );
-    if (!_hasCustomRules(rules) && !filesAsk) {
-      final stored = await _store.decisionFor(source, id);
-      final p = stored?.needsYouP;
-      if (stored != null &&
-          stored.ownerKnown &&
-          p != null &&
-          stored.answers.fields.isNotEmpty) {
-        // A stranger's first approach is held to the higher bar, for the
-        // reason the language model's confidence bar moves below.
-        final bar =
-            cold ? DecisionPolicy.needsYouYesCold : DecisionPolicy.needsYouYes;
-        final bool? decided = p >= bar
-            ? true
-            : (p < DecisionPolicy.needsYouNo ? false : null);
-        if (decided != null) {
-          await _store.writeNeedsYouVerdict(
-            source,
-            id,
-            verdict: decided,
-            reason: decided
-                ? needsYouYesReason(stored.answers)
-                : needsYouNoReason,
-          );
-          _log.note({'verdict': decided, 'source': 'decision', 'p': p});
-          await _followChip(source, id, previous: previous, verdict: decided);
-          return;
-        }
-        // The band: the language model reads it, exactly as before.
-      }
-    }
-
-    // The model reads the text.
-    var message = Message.fromRow(row);
-    final key = row['conversation_key'] as String? ?? '';
-    // Hydrated only when the row says there is something to hydrate —
-    // `loadThread` does this for a whole thread; a single-row read has to ask.
-    if (row['has_attachments'] == 1) {
-      message = message.withAttachments(
-        await _store.attachmentRefsFor(source, id, conversationKey: key),
-      );
-    }
-    // The thread AS IT WAS when this message landed, so the verdict on a
-    // message does not change with how far behind the queue was.
-    final thread = await _store.loadThread(
-      key,
-      sources: [source],
-      untilIso: row['received_at'] as String? ?? row['created_at'] as String?,
-    );
-    final context = [
-      for (final earlier in thread)
-        if (earlier.id != message.id) earlier,
-    ];
-    final owner = await _owner();
-
-    final result = await runTask(
-      _client,
-      _taskFor(rules),
-      NeedsYouInput(
-        message: message,
-        thread: context,
-        attachmentDigests: attachmentDigestLines(digests),
-        ownerName: owner?.name,
-        ownerAddress: owner?.address,
-        now: DateTime.now(),
-      ),
-      // Zero, like every judgement in this app: the same message must get the
-      // same verdict twice, or a re-drain would flip rows under the user.
-      temperature: 0,
-      maxTokens: _maxTokens,
-    );
-
-    // Three answers, not two. A real no (`needsYou == false`) is written 0,
-    // and 0 is a veto: it outranks triage's ask on the chip, the toast, the
-    // rail and the tile. A yes that clears the confidence bar is written 1.
-    // A yes that does NOT clear it is a HEDGE, written NULL with the evidence
-    // kept as the reason: a hedge buys no interruption, since "possibly" is
-    // not grounds for one, and no veto either, since the model did not say
-    // no. Triage decides such a message, exactly as it decides an unjudged
-    // one. Writing a hedge as 0 let a medium yes on a new customer's "please
-    // send the signed contract by Friday" take the thread off every Needs You
-    // surface over triage's own ask.
-    //
-    // A cold approach ([isColdOutreach]) is held to the top of that scale rather
-    // than to the middle of it. Unsolicited outreach is WRITTEN to read as an
-    // ask — "confirm your interest", "please approve if you would like to
-    // proceed" — so `medium` on a stranger's first message is the model agreeing
-    // with the sales copy, and on the thread that prompted this it produced a
-    // drafted reply to a vendor nobody had heard of. A real ask from a real
-    // counterparty comes back `high`, which is what "can still qualify" means
-    // here: the bar moved, the door did not close. Below the bar is a hedge
-    // like any other, so a stranger's medium yes neither raises nor vetoes.
-    final clearsBar =
-        cold ? result.confidence == 'high' : result.confidence != 'low';
-    final bool? verdict = !result.needsYou ? false : (clearsBar ? true : null);
-
-    // A throw from the call above — the model being down included — is left to
-    // propagate. The verdict stays NULL, the row stays on the worklist, and
-    // the worker's park-and-retry machinery owns what happens next.
-    await _store.writeNeedsYouVerdict(
+    // No decision, or an ownerless one now that the owner is known: decide
+    // again, with the decision model and the same input the triage pass
+    // builds. With no decision at all and the owner still unknown the message
+    // is decided ownerless anyway and its p written, because an undecided row
+    // is a message nobody sees; a later pass decides it again once the owner
+    // is known (see above). A throw — the decision server down, its heads
+    // refused — is left to the worker, which parks the kind.
+    final decided = await _decision.decide(await decisionInputFor(
+      _store,
       source,
-      id,
-      verdict: verdict,
-      reason: result.evidence,
-    );
-    _log.note({'verdict': verdict, 'confidence': result.confidence});
-    await _followChip(source, id, previous: previous, verdict: verdict);
-  }
-
-  /// Moves the settled row's Needs You chip when — and only when — this pass
-  /// changed the answer.
-  ///
-  /// The comparison is against the STORED shape, so a first verdict (`null` →
-  /// 0 or 1) counts as a change and a repeat of any answer does not. A hedge
-  /// is stored NULL, so an old 0 becoming a hedge is a change too, and the
-  /// chip is recomputed through `notifyWorthy`, which reads NULL as no veto
-  /// and lets triage's ask decide. That
-  /// asymmetry is the point: a repeat must write nothing, or a chip the user
-  /// cleared by replying would come back every time the row was re-judged.
-  ///
-  /// Nothing here can fail the item. The recorder swallows its own errors, and
-  /// the threshold read below degrades to the default: a chip that did not
-  /// follow is a stale square on the home screen, and re-running a model call
-  /// over it would be the more expensive mistake.
-  Future<void> _followChip(
-    String source,
-    String id, {
-    required int? previous,
-    required bool? verdict,
-  }) async {
-    if (previous == (verdict == null ? null : (verdict ? 1 : 0))) return;
-    await _pipeline.refreshNeedsYou(
+      Message.fromRow(row),
+      conversationKey: row['conversation_key'] as String?,
+      owner: owner,
+    ));
+    // The whole state the decision determines, through the writer the triage
+    // claim uses, so a message decided here reads exactly as one triage
+    // decided: its urgency, category, booleans, extraction intent and thread
+    // fold move with its p, and its chip follows the p across the slider.
+    await applyDecision(
+      _store,
       source,
-      id,
-      threshold: await _thresholdOrDefault(),
+      row,
+      decided,
+      ownerKnown: owner != null,
+      progress: _pipeline,
+      threshold: _threshold,
+      exemplars: _exemplars,
     );
-  }
-
-  /// Whether this row is a stranger's first approach — [isColdOutreach] over the
-  /// two facts this handler can reach.
-  ///
-  /// Ordered so the cheap half runs first. The address test is arithmetic on a
-  /// string the row already carries, and only a sender who passes it costs the
-  /// one indexed read of the conversation row that says whether the owner has
-  /// ever written here. Ordinary internal mail therefore adds no query at all,
-  /// which matters because this runs per item at K=3.
-  ///
-  /// Every way this cannot answer answers FALSE — no domains wired, a read that
-  /// threw, a row with no conversation key, a conversation row that has gone. The
-  /// reason is [isColdOutreach]'s: a true takes a message off the rail, so an
-  /// unknown must never round up into one.
-  Future<bool> _coldOutreach(String source, Map<String, Object?> row) async {
-    final read = _ownerDomains;
-    if (read == null) return false;
-    Set<String> domains;
-    try {
-      domains = await (_domains ??= read());
-    } catch (e) {
-      _domains = null;
-      debugPrint('needs_you: reading the owner domains failed: $e');
-      return false;
-    }
-    if (!isExternalAddress(row['from_address'] as String?, domains)) {
-      return false;
-    }
-    final key = row['conversation_key'] as String? ?? '';
-    if (key.isEmpty) return false;
-    final conversation = await _store.getConversationRow(source, key);
-    if (conversation == null) return false;
-    return isColdOutreach(
-      external: true,
-      lastOutboundAt: conversation['last_outbound_at'] as String?,
-    );
-  }
-
-  /// The settle machine's own reader, degraded the settle machine's way — see
-  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot
-  /// be read is a default, never a failed item.
-  Future<double> _thresholdOrDefault() async {
-    final read = _threshold;
-    if (read == null) return AttentionTuning.defaultThreshold;
-    try {
-      return await read();
-    } catch (e) {
-      debugPrint('needs_you: reading the attention threshold failed: $e');
-      return AttentionTuning.defaultThreshold;
-    }
-  }
-
-  /// The stored verdict as it sits on the row: 0, 1, or null for never judged.
-  static int? _int(Object? value) => (value as num?)?.toInt();
-
-  /// Whether the owner saved rules of their own — the same reading
-  /// [_taskFor] makes: blank or the default text is no rules.
-  static bool _hasCustomRules(String? rules) {
-    final body = rules?.trim() ?? '';
-    return body.isNotEmpty && body != needsYouDefaultRules.trim();
-  }
-
-  /// The task for one pref reading, built at most once per distinct text.
-  ///
-  /// Empty and default-equal both take the const default path. The pane
-  /// normalizes a default-equal save back to '', but a pref written by hand
-  /// must not silently fork the prompt into a non-const copy of the same
-  /// words — that would cost a cache re-prime for no change in what is asked.
-  ///
-  /// The clamp mirrors the editor's `maxLength`, for the same case: a pref
-  /// that reached the store through something other than the pane.
-  NeedsYouTask _taskFor(String? rules) {
-    var body = rules?.trim() ?? '';
-    if (body.length > needsYouRulesCap) body = body.substring(0, needsYouRulesCap);
-    if (body.isEmpty || body == needsYouDefaultRules.trim()) {
-      if (_rulesText != null) {
-        _rulesText = null;
-        _task = const NeedsYouTask();
-      }
-      return _task;
-    }
-    if (body != _rulesText) {
-      _rulesText = body;
-      _task = NeedsYouTask.withRules(body);
-    }
-    return _task;
+    _log.note({
+      'source': 'decision',
+      'p': needsYouP(decided.answers),
+      'redecided': true,
+      'owner_known': owner != null,
+      if (vectorOwed) 'vector_owed': true,
+    });
   }
 }

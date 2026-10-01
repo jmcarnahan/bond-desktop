@@ -7,6 +7,7 @@ import 'package:bond_inbox/models/draft_request.dart';
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/cloud_drafts.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
@@ -120,13 +121,15 @@ void main() {
       'body_text': 'Does Thursday still work for the review?',
       'triage_status': 'pending',
     });
-    // The needs-you pass writes these, not the ingest — so they are set the
-    // way the pass sets them rather than squeezed into the upsert.
+    // The decision pass writes these, not the ingest — so they are set the
+    // way the pass sets them rather than squeezed into the upsert. Needing
+    // the owner is a probability over the default slider; not needing them,
+    // one under it.
     await db.customUpdate(
-      'UPDATE messages SET needs_you_verdict = ?, urgency = ? '
+      'UPDATE messages SET needs_you_p = ?, urgency = ? '
       'WHERE source = ? AND source_message_id = ?',
       variables: [
-        Variable(needsYou ? 1 : 0),
+        Variable(needsYou ? 0.9 : 0.1),
         Variable(urgency),
         Variable('email'),
         Variable(id),
@@ -738,7 +741,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(replyExpected: 0.1)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       var capReads = 0;

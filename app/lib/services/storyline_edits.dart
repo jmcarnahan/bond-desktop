@@ -1,4 +1,5 @@
 import '../data/message_store.dart';
+import '../models/storyline_models.dart';
 import 'activity_log.dart';
 import 'pipeline_progress.dart';
 import 'storyline_service.dart';
@@ -17,6 +18,14 @@ import 'storyline_service.dart';
 /// [memberHashOf] is the one thing that crosses back: four other callers in the
 /// service compute the same hash, so it is shared as a callback rather than
 /// copied into a second recipe that could drift.
+///
+/// Every press here that answers a storyline question — Keep and Dismiss of a
+/// question the app asked, a thread filed or taken out by hand, and a
+/// charter the owner wrote — is also logged as a DECISION LABEL
+/// (`decision_labels`, [MessageStore.writeDecisionLabels]) with the
+/// storyline's words at the moment of the press. Only here: an automatic pass
+/// (the expiry, the audit, a gate's eviction) is not the owner's word and
+/// writes none.
 class StorylineEdits {
   StorylineEdits(
     this._store, {
@@ -80,6 +89,7 @@ class StorylineEdits {
     );
     await addThread(id, source, conversationKey);
     if (trimmed.isNotEmpty) {
+      await _labelCharter(id, title: title, charter: trimmed);
       await _store.requeueWork(
         'storyline_recruit',
         _workSource,
@@ -116,6 +126,7 @@ class StorylineEdits {
       createdBy: 'user',
     );
     await _store.updateStoryline(id, titleLocked: true, charterLocked: true);
+    await _labelCharter(id, title: title, charter: charter.trim());
     await _store.requeueWork(
       'storyline_recruit',
       _workSource,
@@ -155,14 +166,24 @@ class StorylineEdits {
   /// Nothing is blocked on the way out. A block records a PERSON saying a
   /// thread does not belong here; this is bookkeeping, and the thread left
   /// only because something else reached it first.
+  ///
+  /// The members the owner kept are labelled `member_of` yes — every member of
+  /// a suggestion, the survivors of a possible row — including when too few
+  /// survive and the row is dismissed: the owner still said those threads
+  /// belong to what they were shown.
   Future<void> keepSuggestion(String id) async {
     final storyline = await _store.getStoryline(id);
     // A suggestion needs none of the reconciliation below: its members left
     // the pool the moment it was proposed, so nothing can have taken them.
     if (storyline?.status != 'possible') {
       await _store.updateStoryline(id, status: 'active');
+      if (storyline?.status == 'suggested') {
+        await _labelMembers(storyline!, await _threadsOf(id),
+            answer: 'yes', origin: 'keep');
+      }
       return;
     }
+    final survivors = <({String source, String key})>[];
     await _store.db.transaction(() async {
       final members = await _store.membersOf(id);
       // One read per source the members span, not one per member: the answer
@@ -183,6 +204,7 @@ class StorylineEdits {
           continue;
         }
         kept++;
+        survivors.add((source: member.source, key: member.conversationKey));
       }
       await _store.updateStoryline(
         id,
@@ -190,6 +212,11 @@ class StorylineEdits {
         memberHash: await _memberHashOf(id),
       );
     });
+    // After the transaction, not inside it: `writeDecisionLabels` opens its
+    // own, and the labels are a log of the press rather than part of the
+    // reconciliation — a crash between the two loses a label, never leaves
+    // a storyline half kept.
+    await _labelMembers(storyline!, survivors, answer: 'yes', origin: 'keep');
   }
 
   /// Retires a storyline — a suggestion the user never wanted, a possible one
@@ -199,8 +226,22 @@ class StorylineEdits {
   /// rebuilds the same cluster, and the member rows stay as the record of what
   /// the user was actually shown — which is also what keeps the row in the
   /// rail's Dismissed fold, since that list shows rows with members only.
-  Future<void> dismissSuggestion(String id) =>
-      _store.updateStoryline(id, status: 'dismissed');
+  ///
+  /// Dismissing a QUESTION the app asked — a suggestion or a possible row —
+  /// labels every member `member_of` no. Retiring a storyline the owner kept
+  /// writes no label: "done with it" says nothing about whether its threads
+  /// belonged, and the automatic expiry writes the same status without a
+  /// press at all.
+  Future<void> dismissSuggestion(String id) async {
+    final storyline = await _store.getStoryline(id);
+    await _store.updateStoryline(id, status: 'dismissed');
+    if (storyline == null ||
+        (storyline.status != 'suggested' && storyline.status != 'possible')) {
+      return;
+    }
+    await _labelMembers(storyline, await _threadsOf(id),
+        answer: 'no', origin: 'dismiss');
+  }
 
   /// Brings a dismissed storyline back as a suggestion, so the same Keep /
   /// Dismiss question is asked again. The hash check reads `dismissed` and
@@ -251,6 +292,13 @@ class StorylineEdits {
       charterLocked: true,
       charterSuggestion: null,
     );
+    // A cleared charter is no label: the owner withdrew words, and said
+    // nothing about what a specific effort is.
+    await _labelCharter(
+      id,
+      title: (await _store.getStoryline(id))?.title,
+      charter: trimmed,
+    );
     await _store.requeueWork('storyline_recruit', _workSource, id);
   }
 
@@ -283,11 +331,9 @@ class StorylineEdits {
   /// these too, but only when it gets past its own gate — and a hand-filed
   /// thread is the case where the user is watching.
   Future<void> addThread(String id, String source, String key) async {
-    // Evidence, on a `user` row, and it is not decoration: this membership is
-    // read back as an EXAMPLE by the confirm prompt (see
-    // `StorylineService._examplesFor`), and a removal copies the member's
-    // evidence onto its block. A row with none would hand a later removal a
-    // negative example that says nothing.
+    // Evidence, on a `user` row, and it is not decoration: a removal copies
+    // the member's evidence onto its block, and a row with none would leave
+    // that block saying nothing about how the thread got here.
     await _store.addStorylineMember(
       id,
       source,
@@ -296,6 +342,10 @@ class StorylineEdits {
       evidence: 'Filed by you',
     );
     final storyline = await _store.getStoryline(id);
+    if (storyline != null) {
+      await _labelMembers(storyline, [(source: source, key: key)],
+          answer: 'yes', origin: 'add');
+    }
     await _store.updateStoryline(
       id,
       memberHash: await _memberHashOf(id),
@@ -352,8 +402,13 @@ class StorylineEdits {
   /// the two run in that order within one drain and the audit judges against
   /// the charter the refresh has just narrowed.
   Future<void> removeThread(String id, String source, String key) async {
-    // `blocked_by: 'user'` — the owner's own "no", which is the only kind the
-    // confirm prompt ever learns from. The evidence is copied off the member
+    final storyline = await _store.getStoryline(id);
+    if (storyline != null) {
+      await _labelMembers(storyline, [(source: source, key: key)],
+          answer: 'no', origin: 'remove');
+    }
+    // `blocked_by: 'user'` — the owner's own "no", which the refresh prompt
+    // reads as a removed example. The evidence is copied off the member
     // row by the store, so the block records what the model thought when it
     // filed the thread the owner is now taking out.
     await _store.removeStorylineMember(
@@ -464,6 +519,9 @@ class StorylineEdits {
   /// Nothing is queued. There is no membership change to re-describe and
   /// nothing new to recap — the storyline is exactly as it was a moment ago,
   /// and only the set of threads a future pass may look at has widened.
+  ///
+  /// No label: lifting a veto is not a yes. The owner's `remove` label stands
+  /// as the answer they gave; whether the thread belongs is open again.
   Future<void> unblockThread(String id, String source, String key) async {
     await _store.unblockStorylineMember(id, source, key);
     await _log.record(
@@ -491,4 +549,56 @@ class StorylineEdits {
       await _store.stampStorylineId(source, key, storylineId: ids.first),
     );
   }
+
+  /// Every member thread of [id], as the member rows name them.
+  Future<List<({String source, String key})>> _threadsOf(String id) async => [
+        for (final member in await _store.membersOf(id))
+          (source: member.source, key: member.conversationKey),
+      ];
+
+  /// One `member_of` label per thread, with [storyline]'s words as they stood
+  /// when the owner pressed.
+  Future<void> _labelMembers(
+    Storyline storyline,
+    List<({String source, String key})> threads, {
+    required String answer,
+    required String origin,
+  }) =>
+      _store.writeDecisionLabels([
+        for (final thread in threads)
+          (
+            question: 'member_of',
+            answer: answer,
+            storylineId: storyline.id,
+            source: thread.source,
+            conversationKey: thread.key,
+            otherSource: null,
+            otherConversationKey: null,
+            title: storyline.title,
+            charter: storyline.charter,
+            origin: origin,
+          ),
+      ]);
+
+  /// One `charter_specific` yes for words the owner wrote: a person naming
+  /// what belongs in a storyline is saying it is one specific effort.
+  Future<void> _labelCharter(
+    String id, {
+    required String? title,
+    required String charter,
+  }) =>
+      _store.writeDecisionLabels([
+        (
+          question: 'charter_specific',
+          answer: 'yes',
+          storylineId: id,
+          source: null,
+          conversationKey: null,
+          otherSource: null,
+          otherConversationKey: null,
+          title: title,
+          charter: charter,
+          origin: 'charter_edit',
+        ),
+      ]);
 }

@@ -169,9 +169,6 @@ class _SignInBodyState extends ConsumerState<SignInBody>
     // to the new identity and steer their triage. Cleared through the setter
     // so memory and table agree.
     ref.read(appPrefsProvider.notifier).setAboutMe('');
-    // And their needs-you rules, on the same reasoning: held in memory, they
-    // would decide what the new identity gets interrupted about.
-    ref.read(appPrefsProvider.notifier).setNeedsYouRules('');
   }
 
   Future<void> _openConnect() async {

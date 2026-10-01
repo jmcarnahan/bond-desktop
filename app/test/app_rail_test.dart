@@ -36,6 +36,13 @@ Storyline _storyline({
 /// The account every room in this file is grouped against.
 const Owner _owner = (name: 'Dana Whitfield', address: 'dana@example.com');
 
+/// [_conv]'s default needs-you probability: over the slider for a thread
+/// awaiting a reply, undecided otherwise — a thread the owner answered last
+/// has no kept inbound to carry a probability. It is what the
+/// rendering tests below mean by a row "in Needs You"; the predicate tests
+/// pass `p` explicitly, `null` included.
+const double _pFromState = -1;
+
 Conversation _conv({
   required String id,
   String? who,
@@ -50,7 +57,7 @@ Conversation _conv({
   String source = 'email',
   String? reason,
   bool? replyExpected,
-  bool vetoed = false,
+  double? p = _pFromState,
 }) {
   return Conversation(
     id: id,
@@ -66,7 +73,9 @@ Conversation _conv({
     aiPendingCount: pending,
     needsYouReason: reason,
     replyExpected: replyExpected,
-    needsYouVetoed: vetoed,
+    needsYouP: p != _pFromState
+        ? p
+        : (state == ConversationState.needsReply ? 0.9 : null),
   );
 }
 
@@ -81,214 +90,115 @@ Widget _host(Widget rail) => MaterialApp(
 
 void main() {
   group('needsYouRows', () {
-    test('includes anything awaiting a reply', () {
+    test('includes a thread whose probability clears the slider', () {
       final rows = needsYouRows([
-        _conv(id: 'a', state: ConversationState.needsReply),
+        _conv(id: 'a', state: ConversationState.needsReply, p: 0.9),
+        _conv(id: 'b', state: ConversationState.needsReply, p: 0.4),
       ]);
-      expect(rows.map((c) => c.id), ['a']);
+      expect(rows.map((c) => c.id), ['a', 'b']);
     });
 
-    test('includes a waiting thread the model left an ask on', () {
-      final rows = needsYouRows([
-        _conv(id: 'a', state: ConversationState.waiting, cta: 'Send the doc'),
-      ]);
-      expect(rows.map((c) => c.id), ['a']);
-    });
-
-    test('excludes a done thread even with an ask on it', () {
-      final rows = needsYouRows([
-        _conv(id: 'a', state: ConversationState.done, cta: 'Send the doc'),
-      ]);
-      expect(rows, isEmpty);
-    });
-
-    test('excludes a waiting thread with no ask', () {
-      final rows = needsYouRows([
-        _conv(id: 'a', state: ConversationState.waiting),
-      ]);
-      expect(rows, isEmpty);
-    });
-
-    test('preserves input order among equals', () {
-      final rows = needsYouRows([
-        _conv(id: 'a', state: ConversationState.needsReply),
-        _conv(id: 'b', state: ConversationState.waiting),
-        _conv(id: 'c', state: ConversationState.needsReply),
-      ]);
-      expect(rows.map((c) => c.id), ['a', 'c']);
-    });
-
-    test('excludes anything deferred to Later', () {
-      final rows = needsYouRows([
-        _conv(id: 'a', state: ConversationState.needsReply, bucket: 'later'),
-        _conv(id: 'b', state: ConversationState.needsReply),
-      ]);
-      expect(rows.map((c) => c.id), ['b']);
-    });
-
-    test('sorts needs-reply first, then by score', () {
-      final rows = needsYouRows([
-        _conv(id: 'quiet', state: ConversationState.needsReply, score: 0.4),
-        _conv(
-          id: 'loud-waiting',
-          state: ConversationState.waiting,
-          cta: 'ask',
-          score: 1.9,
-        ),
-        _conv(id: 'loud', state: ConversationState.needsReply, score: 1.5),
-      ]);
-      // A waiting thread never outranks a reply the LO owes, however loudly
-      // it scores.
-      expect(rows.map((c) => c.id), ['loud', 'quiet', 'loud-waiting']);
-    });
-
-    test('ties keep input order rather than shuffling between reads', () {
-      final rows = needsYouRows([
-        for (final id in ['a', 'b', 'c', 'd', 'e'])
-          _conv(id: id, state: ConversationState.needsReply, score: 1),
-      ]);
-      expect(rows.map((c) => c.id), ['a', 'b', 'c', 'd', 'e']);
-    });
-
-    test('a missing score sorts as zero rather than throwing', () {
-      final rows = needsYouRows([
-        _conv(id: 'unscored', state: ConversationState.needsReply),
-        _conv(id: 'scored', state: ConversationState.needsReply, score: 1),
-      ]);
-      expect(rows.map((c) => c.id), ['scored', 'unscored']);
-    });
-
-    test('the threshold cuts anything below it, needs-reply included', () {
-      final rows = needsYouRows(
-        [
-          _conv(id: 'over', state: ConversationState.needsReply, score: 0.9),
-          _conv(id: 'under', state: ConversationState.needsReply, score: 0.1),
-        ],
-        threshold: 0.5,
-      );
-      expect(rows.map((c) => c.id), ['over']);
-    });
-
-    test('a row exactly at the threshold is in', () {
-      final rows = needsYouRows(
-        [_conv(id: 'a', state: ConversationState.needsReply, score: 0.5)],
-        threshold: 0.5,
-      );
-      expect(rows.map((c) => c.id), ['a']);
-    });
-
-    // The section only claims what it can explain: a thread reaches Needs You
-    // on a reason, an ask, or a judgement that a reply is owed — and a thread
-    // carrying none of the three is dropped rather than shown with nothing to
-    // say for itself.
-    test('drops a needs-reply thread that can explain nothing', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'mute',
-          state: ConversationState.needsReply,
-          replyExpected: false,
-        ),
-      ]);
-      expect(rows, isEmpty);
-    });
-
-    test('keeps it when the pass named a reason', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'named',
-          state: ConversationState.needsReply,
-          replyExpected: false,
-          reason: 'Asks you to confirm the date.',
-        ),
-      ]);
-      expect(rows.map((c) => c.id), ['named']);
-    });
-
-    test('keeps it when the thread carries an ask', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'asked',
-          state: ConversationState.needsReply,
-          replyExpected: false,
-          cta: 'Send the signed copy',
-        ),
-      ]);
-      expect(rows.map((c) => c.id), ['asked']);
-    });
-
-    test('keeps it when the pass judged a reply is expected', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'owed',
-          state: ConversationState.needsReply,
-          replyExpected: true,
-        ),
-      ]);
-      expect(rows.map((c) => c.id), ['owed']);
-    });
-
-    // NULL is "never judged", not "no": brand new mail, an install with the
-    // processing switch off, and every read that does not ask for the column
-    // all arrive here, and hiding them would empty the section.
-    test('keeps it when nothing has judged the thread yet', () {
-      final rows = needsYouRows([
-        _conv(id: 'fresh', state: ConversationState.needsReply),
-      ]);
-      expect(rows.map((c) => c.id), ['fresh']);
-    });
-
-    // The judge outranks triage: an ask folded out of a broadcast about
-    // somebody else's ticket, on a thread nobody answered, is still not the
-    // owner's once the needs-you pass has read it and said so.
-    test('drops an asked, reply-expected thread the judge vetoed', () {
+    test('excludes a thread below the slider, whatever else it carries', () {
+      // Triage's ask, a reply expected, a reason and a loud score are no part
+      // of the rule: the probability is.
       final rows = needsYouRows([
         _conv(
           id: 'broadcast',
           state: ConversationState.needsReply,
           cta: 'Review the issue description',
           replyExpected: true,
-          vetoed: true,
+          reason: 'Names the owner.',
+          score: 1.9,
+          p: 0.1,
         ),
       ]);
       expect(rows, isEmpty);
     });
 
-    test('an unvetoed thread, judged or not, keeps its place', () {
-      // What counts as a veto is the store's one SQL fragment; the rail reads
-      // only its answer. The store tests drive the verdict shapes.
+    test('excludes a thread nothing has decided yet', () {
       final rows = needsYouRows([
         _conv(
           id: 'fresh',
           state: ConversationState.needsReply,
-          cta: 'Review the issue description',
-        ),
-      ]);
-      expect(rows.map((c) => c.id), ['fresh']);
-    });
-
-    test('an empty reason is no reason at all', () {
-      final rows = needsYouRows([
-        _conv(
-          id: 'blank',
-          state: ConversationState.needsReply,
-          replyExpected: false,
-          reason: '',
+          cta: 'Send the doc',
+          replyExpected: true,
+          p: null,
         ),
       ]);
       expect(rows, isEmpty);
     });
-  });
 
-  group('isWaitingRow', () {
-    test('is the second block of Needs You', () {
-      expect(
-        isWaitingRow(_conv(id: 'a', state: ConversationState.needsReply)),
-        isFalse,
+    test('excludes a done thread even at a high probability', () {
+      final rows = needsYouRows([
+        _conv(id: 'a', state: ConversationState.done, p: 0.9),
+      ]);
+      expect(rows, isEmpty);
+    });
+
+    test('excludes anything deferred to Later', () {
+      final rows = needsYouRows([
+        _conv(
+          id: 'a',
+          state: ConversationState.needsReply,
+          bucket: 'later',
+          p: 0.9,
+        ),
+        _conv(id: 'b', state: ConversationState.needsReply, p: 0.9),
+      ]);
+      expect(rows.map((c) => c.id), ['b']);
+    });
+
+    test('the slider cuts anything below it, needs-reply included', () {
+      final rows = needsYouRows(
+        [
+          _conv(id: 'over', state: ConversationState.needsReply, p: 0.9),
+          _conv(id: 'under', state: ConversationState.needsReply, p: 0.4),
+        ],
+        threshold: 0.5,
       );
-      expect(
-        isWaitingRow(_conv(id: 'a', state: ConversationState.waiting)),
-        isTrue,
+      expect(rows.map((c) => c.id), ['over']);
+    });
+
+    test('a row exactly at the slider is in', () {
+      final rows = needsYouRows(
+        [_conv(id: 'a', state: ConversationState.needsReply, p: 0.5)],
+        threshold: 0.5,
       );
+      expect(rows.map((c) => c.id), ['a']);
+    });
+
+    test('the attention score orders and never gates', () {
+      final rows = needsYouRows([
+        _conv(id: 'unscored', state: ConversationState.needsReply, p: 0.9),
+        _conv(
+          id: 'quiet',
+          state: ConversationState.needsReply,
+          score: 0.01,
+          p: 0.9,
+        ),
+      ]);
+      expect(rows.map((c) => c.id), ['quiet', 'unscored']);
+    });
+
+    test('ties keep input order rather than shuffling between reads', () {
+      final rows = needsYouRows([
+        for (final id in ['a', 'b', 'c', 'd', 'e'])
+          _conv(id: id, state: ConversationState.needsReply, score: 1, p: 0.9),
+      ]);
+      expect(rows.map((c) => c.id), ['a', 'b', 'c', 'd', 'e']);
+    });
+
+    test('a missing score sorts as zero rather than throwing', () {
+      final rows = needsYouRows([
+        _conv(id: 'unscored', state: ConversationState.needsReply, p: 0.9),
+        _conv(
+          id: 'scored',
+          state: ConversationState.needsReply,
+          score: 1,
+          p: 0.9,
+        ),
+      ]);
+      expect(rows.map((c) => c.id), ['scored', 'unscored']);
     });
   });
 
@@ -312,8 +222,8 @@ void main() {
 
     test('drops what Needs You claimed, and keeps what its threshold cut', () {
       final all = [
-        _conv(id: 'loud', state: ConversationState.needsReply, score: 0.9),
-        _conv(id: 'quiet', state: ConversationState.needsReply, score: 0.1),
+        _conv(id: 'loud', state: ConversationState.needsReply, p: 0.9),
+        _conv(id: 'quiet', state: ConversationState.needsReply, p: 0.4),
       ];
 
       expect(conversationRows(all), isEmpty);
@@ -327,28 +237,30 @@ void main() {
 
   group('the two sections partition', () {
     final mixed = [
-      _conv(id: 'loud-reply', state: ConversationState.needsReply, score: 0.9),
-      _conv(id: 'quiet-reply', state: ConversationState.needsReply, score: 0.1),
+      _conv(id: 'loud-reply', state: ConversationState.needsReply, p: 0.9),
+      _conv(id: 'quiet-reply', state: ConversationState.needsReply, p: 0.4),
       _conv(
         id: 'cta',
-        state: ConversationState.waiting,
+        state: ConversationState.needsReply,
         cta: 'Send the homepage copy',
-        score: 0.8,
+        p: 0.8,
       ),
-      _conv(id: 'waiting', state: ConversationState.waiting, score: 0.7),
-      _conv(id: 'done', state: ConversationState.done, cta: 'Ignored'),
+      _conv(id: 'waiting', state: ConversationState.waiting, p: 0.1),
+      _conv(id: 'undecided', state: ConversationState.needsReply, p: null),
+      _conv(id: 'done', state: ConversationState.done, cta: 'Ignored', p: 0.9),
       _conv(
         id: 'deferred',
         state: ConversationState.needsReply,
         bucket: 'later',
+        p: 0.9,
       ),
     ];
 
     /// Everything neither closed nor deferred — what the two sections have to
     /// account for between them, whatever the slider is set to.
-    final live = {'loud-reply', 'quiet-reply', 'cta', 'waiting'};
+    final live = {'loud-reply', 'quiet-reply', 'cta', 'waiting', 'undecided'};
 
-    for (final threshold in [0.0, 0.5]) {
+    for (final threshold in [0.05, 0.3, 0.5]) {
       test('at threshold $threshold each live thread is in exactly one', () {
         final needsYou =
             needsYouRows(mixed, threshold: threshold).map((c) => c.id).toSet();
@@ -517,7 +429,7 @@ void main() {
       _conv(
         id: 'c',
         who: 'Cleo',
-        state: ConversationState.waiting,
+        state: ConversationState.needsReply,
         cta: 'Send the homepage copy',
       ),
       _conv(id: 'd', who: 'Dev', state: ConversationState.done),
@@ -810,7 +722,7 @@ void main() {
         conversations: conversations,
         selectedId: null,
         selectedSection: RailSection.needsYou,
-        attentionThreshold: threshold,
+        needsYouThreshold: threshold,
         needsYouSort: needsYouSort,
         onSelectConversation: (_, _) {},
         onSelectSection: onSelectSection ?? (_) {},
@@ -913,13 +825,13 @@ void main() {
             id: 'a',
             who: 'Loud',
             state: ConversationState.needsReply,
-            score: 1.5,
+            p: 0.9,
           ),
           _conv(
             id: 'b',
             who: 'Quiet',
             state: ConversationState.needsReply,
-            score: 0.1,
+            p: 0.4,
           ),
         ],
       );
@@ -936,7 +848,7 @@ void main() {
               id: 'b',
               who: 'Quiet',
               state: ConversationState.needsReply,
-              score: 0.1,
+              p: 0.4,
             ),
           ],
           owner: _owner,
@@ -944,43 +856,6 @@ void main() {
         ).single.title,
         'Quiet',
       );
-    });
-
-    testWidgets('a waiting row renders dimmed below the needs-reply block',
-        (tester) async {
-      await pumpRail(tester, conversations: [
-        _conv(
-          id: 'a',
-          who: 'Owed',
-          state: ConversationState.needsReply,
-          unread: 1,
-          score: 1,
-        ),
-        _conv(
-          id: 'b',
-          who: 'Waiting',
-          state: ConversationState.waiting,
-          cta: 'Send the homepage copy',
-          unread: 1,
-          score: 1.9,
-        ),
-      ]);
-
-      // Present, titled by its ask, with the person after it — and quieter
-      // than the row above.
-      // One Text, rich: the ask in the row's own ink and the person after it
-      // in the muted one. `find.text` reads the whole span.
-      final row = find.text('Send the homepage copy · Waiting');
-      expect(row, findsOneWidget);
-      expect(
-        tester.widget<Text>(row).textSpan!.style?.color,
-        BondColors.onDarkMuted,
-      );
-
-      // 'Owed' has no ask and no subject, so its row IS the person and stays
-      // a plain Text with no suffix.
-      final loud = tester.widget<Text>(find.text('Owed'));
-      expect(loud.style?.color, BondColors.onDarkPrimary);
     });
   });
 
@@ -1243,6 +1118,10 @@ void main() {
           ctaText: cta,
           unreadCount: unread,
           lastMessageAt: '2026-09-01T09:00:00Z',
+          // [_conv]'s default: over the slider when the thread is owed a
+          // reply or carries an ask.
+          needsYouP:
+              state == ConversationState.needsReply || cta != null ? 0.9 : null,
         );
 
     testWidgets('one row per person, titled by them', (tester) async {

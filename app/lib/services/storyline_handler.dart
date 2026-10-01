@@ -10,7 +10,9 @@ import 'storyline_service.dart';
 /// the worker can no longer see.
 
 /// Considers one conversation for the storylines that already exist. Queued by
-/// the extraction handler whenever a thread's embedding changes.
+/// the extraction handler whenever a thread's clustering card hash (or the
+/// embedding model's tag) changes; the embedding comes after, inside this
+/// pass (`StorylineService.assignConversation`).
 class StorylineAssignHandler extends WorkHandler {
   static const String _source = 'email';
 
@@ -81,7 +83,11 @@ class StorylineAssignHandler extends WorkHandler {
       // message in the conversation was thrown out by the gates, so no card
       // was built, no vector was written and no model was asked. A bar that
       // said `done` would claim a judgement nobody made.
+      //
+      // `unembedded` is the same: the embedding server refused a vector for
+      // the card, so no card was embedded and no model was asked.
       case AssignOutcome.gated:
+      case AssignOutcome.unembedded:
         await _pipeline.noteStoryline(source, key, state: 'skipped');
         _log
           ..noteStatus('skipped')
@@ -149,7 +155,7 @@ class StorylineRefreshHandler extends WorkHandler {
 }
 
 /// Re-judges the members one storyline's automatic passes filed, against the
-/// charter and the owner's own examples. Queued by
+/// charter, on the decision model's `member_of`. Queued by
 /// `StorylineService.removeThread` — a removal says the reasoning that filled
 /// this group was wrong, and the threads that reasoning filed are still in it
 /// — and by the About section's "Re-check members".

@@ -8,6 +8,7 @@ import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
+import '../services/decision/needs_you_predicate.dart';
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
 import '../services/sender_display.dart';
@@ -103,84 +104,37 @@ String _stripReplyPrefixes(String subject) {
 /// the symptom is mail in both sections, or in neither.
 ///
 /// Three tests: nothing deferred to Later, which is the whole point of Later;
-/// nothing already closed; nothing scoring below [threshold], which is what
-/// the volume slider moves.
+/// nothing already closed; and the thread's needs-you probability
+/// ([Conversation.needsYouP], the decision model's highest p over the kept
+/// inbound the owner has not answered) at or above [threshold], the owner's
+/// slider ([needsYouAt]). Nothing else gates: not triage's ask, not the
+/// thread's `needs_reply` state, not the attention score, which only ORDERS
+/// the rows ([needsYouRows]). An undecided thread (a null probability) needs
+/// nobody until the model has read it.
 ///
-/// A thread with nothing kept cannot reach here saying `needs_reply`, because
-/// the ingest and the gates keep the state honest — the fold takes only the
-/// messages the gate kept, and every later gate drop refolds the thread down
-/// (see `docs/pipeline/02-gates.md`). So there is no fourth test: the state
-/// this reads is already the answer.
-///
-/// There is a fourth test, and [_canExplainItself] is it — requirement 8a's
-/// honesty rule. STORED STATE IS UNTOUCHED: the thread still says `needs_reply`
-/// and every other reader still sees it; what changes is that the rail stops
-/// claiming a thread it cannot say one true sentence about.
-///
-/// And a fifth, which outranks the ask: the needs-you pass vetoed the thread
-/// ([Conversation.needsYouVetoed]). Triage folds an ask up out of any message
-/// with an action in it — a Jira broadcast to four people describing somebody
-/// else's ticket reads as "Review the issue…" — and the thread says
-/// `needs_reply` for any unanswered inbound at all. Neither is the question
-/// the rail asks. The veto needs the newest kept inbound judged an explicit
-/// no AND no unanswered yes before it: the judge rates one message, so a later
-/// bystander no must not hide an older ask still open. An unjudged message
-/// keeps its place, on [_canExplainItself]'s rule for null. The store spells
-/// the veto once and the tile and the Needs You filter read the same SQL.
-bool isNeedsYou(Conversation c, {double threshold = 0}) {
+/// The store spells the same rule once in SQL for the tile and the Needs You
+/// filter, over the same probability expression, so the rail and the tile
+/// cannot count different threads.
+bool isNeedsYou(
+  Conversation c, {
+  double threshold = NeedsYouTuning.defaultThreshold,
+}) {
   if (c.bucket == 'later') return false;
   if (c.state == ConversationState.done) return false;
-  if ((c.attentionScore ?? 0) < threshold) return false;
-  if (c.needsYouVetoed) return false;
-  if (c.ctaText?.isNotEmpty == true) return true;
-  return c.state == ConversationState.needsReply && _canExplainItself(c);
+  return needsYouAt(c.needsYouP, threshold);
 }
-
-/// Whether anything on this thread can say WHY it needs the owner.
-///
-/// The rail's promise, made good: every Needs You row shows a reason (the ask
-/// banner, the ask chip, or the `Why:` line this round added), so a row with
-/// none of the three was the rail asserting something no surface could back up.
-/// Requirement 8a says such a thread "probably shouldn't be Needs reply", and
-/// this is the read-side half of that — the write side is the pipeline's, and it
-/// is not asked to change.
-///
-/// Three things can explain a thread, and any one of them is enough:
-/// - a needs-you REASON, off the newest kept inbound the pass judged yes. The
-///   `Why:` line and the row's chip draw exactly this.
-/// - an ASK — `cta_text`, folded up from the newest inbound's action items, and
-///   tested by the caller before this is reached because it is also the banner.
-/// - `reply_expected`, triage v2 saying the sender is waiting even where no ask
-///   could be extracted. "Somebody is waiting on you" is a sentence.
-///
-/// The `reply_expected` arm is where the tri-state earns its keep, and it is
-/// read STRICTLY: only an explicit `false` — v2 has judged this message and says
-/// nobody is waiting — lets a thread fall out. NULL is "never judged", which
-/// `schema.drift` is emphatic about and which nothing here may round down: a
-/// message that landed a second ago, and every message in an install with the
-/// processing switch off, reads NULL, and a rail that hid those would hide the
-/// newest mail in the mailbox. So an unjudged thread keeps its place until
-/// something has actually read it. This is deliberately narrower than "reply
-/// expected ≠ 1".
-///
-/// It follows that a read which does not run `loadConversations`' subqueries —
-/// every service read that builds a card out of a conversation row — carries a
-/// null reason and a null `reply_expected` and therefore explains itself here.
-/// That is the right way round: absent data must never look like a verdict.
-bool _canExplainItself(Conversation c) =>
-    (c.needsYouReason?.isNotEmpty == true) || c.replyExpected != false;
 
 /// What the user is on the hook for, loudest first — [isNeedsYou], sorted.
 ///
-/// The sort is needs-reply first, then score. Two blocks rather than one
-/// ordering because they answer different questions: the top block is work the
-/// user is holding up, the bottom is work someone else is, and a waiting thread
-/// with an urgent ask must not outrank a reply the user owes however loudly it
-/// scores. Ties keep input order, so the store's newest-first ordering shows
-/// through and the list does not reshuffle between reads.
+/// The sort is the attention score, which ORDERS here and nowhere gates. There
+/// is no second "waiting on somebody else" block: a thread with no kept
+/// inbound after the owner's last reply has no probability
+/// ([Conversation.needsYouP] is NULL), so it can never be here to rank. Ties
+/// keep input order, so the store's newest-first ordering shows through and
+/// the list does not reshuffle between reads.
 List<Conversation> needsYouRows(
   List<Conversation> all, {
-  double threshold = 0,
+  double threshold = NeedsYouTuning.defaultThreshold,
 }) {
   final rows = <(int, Conversation)>[];
   var index = 0;
@@ -190,8 +144,6 @@ List<Conversation> needsYouRows(
   }
 
   rows.sort((a, b) {
-    final byBlock = _needsReplyRank(a.$2).compareTo(_needsReplyRank(b.$2));
-    if (byBlock != 0) return byBlock;
     final byScore =
         (b.$2.attentionScore ?? 0).compareTo(a.$2.attentionScore ?? 0);
     if (byScore != 0) return byScore;
@@ -201,13 +153,6 @@ List<Conversation> needsYouRows(
   });
   return [for (final (_, c) in rows) c];
 }
-
-int _needsReplyRank(Conversation c) =>
-    c.state == ConversationState.needsReply ? 0 : 1;
-
-/// Whether a Needs You row belongs to the quieter second block — waiting on
-/// somebody else, and rendered dimmed so the two halves read apart at a glance.
-bool isWaitingRow(Conversation c) => c.state != ConversationState.needsReply;
 
 /// Every live thread the user does not owe an answer: resolved ones dropped,
 /// deferred ones dropped, and everything Needs You claimed dropped.
@@ -220,7 +165,7 @@ bool isWaitingRow(Conversation c) => c.state != ConversationState.needsReply;
 /// and into its sender's room, it never disappears.
 List<Conversation> conversationRows(
   List<Conversation> all, {
-  double threshold = 0,
+  double threshold = NeedsYouTuning.defaultThreshold,
 }) =>
     [
       for (final c in all)
@@ -441,10 +386,10 @@ class AppRail extends StatefulWidget {
   /// break the pile down; the section still badges.
   final List<(String, int)> laterDays;
 
-  /// Score a thread must reach to appear in Needs You. Zero — the default —
-  /// lets everything eligible through, which is what a host with no slider
-  /// wants.
-  final double attentionThreshold;
+  /// The owner's Needs You slider: the needs-you probability a thread must
+  /// reach to appear in Needs You ([isNeedsYou]). A host with no slider gets
+  /// the default.
+  final double needsYouThreshold;
 
   /// When this session started. A row whose last message arrived after it and
   /// whose thread still has work queued renders quiet — see [showsProcessing].
@@ -612,7 +557,7 @@ class AppRail extends StatefulWidget {
     this.selectedLaterDay,
     this.laterCount = 0,
     this.laterDays = const [],
-    this.attentionThreshold = 0,
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
     this.processingSince,
     this.onSelectStoryline,
     this.onSelectLaterDay,
@@ -749,7 +694,7 @@ class _AppRailState extends State<AppRail> {
       widget.needsYouSort,
       needsYouRows(
         widget.conversations,
-        threshold: widget.attentionThreshold,
+        threshold: widget.needsYouThreshold,
       ),
     );
 
@@ -784,7 +729,6 @@ class _AppRailState extends State<AppRail> {
         for (final c in shown)
           _item(
             c,
-            dimmed: isWaitingRow(c),
             // Bold is unread here as everywhere (D5). What makes a Needs You
             // row loud is the badge over the section, the accent dot on the
             // row and the ask in its own words — three signals that say
@@ -1210,18 +1154,13 @@ class _AppRailState extends State<AppRail> {
   /// One Needs You thread, titled by the ASK — see [needsYouTitleFor] — with
   /// the person after it in quieter ink.
   ///
-  /// [dimmed] drops the whole row to the muted ink used for the quieter half
-  /// of Needs You — a thread on the list because someone else is late, not
-  /// because the user is.
-  ///
   /// [processing] says the model has not finished with this thread yet, and it
-  /// overrides both of those: whatever the row would otherwise claim about
+  /// overrides the ink: whatever the row would otherwise claim about
   /// itself is a half-formed answer, so it reads quiet — muted ink and a
   /// hollow dot — until the answer is whole.
   Widget _item(
     Conversation c, {
     required bool bold,
-    bool dimmed = false,
     bool processing = false,
   }) {
     final selected = widget.selectedId == c.id &&
@@ -1235,9 +1174,9 @@ class _AppRailState extends State<AppRail> {
     // by the accent dot on the row, and by the ask the row is titled with.
     final color = processing
         ? BondColors.onDarkMuted
-        : (selected || (bold && !dimmed))
+        : (selected || bold)
             ? BondColors.onDarkPrimary
-            : (dimmed ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
+            : BondColors.onDarkSecondary;
 
     final title = needsYouTitleFor(c);
     final who = needsYouWhoFor(c);
@@ -1310,7 +1249,7 @@ class _AppRailState extends State<AppRail> {
                             // hook, hollow grey for one merely being watched.
                             color: isNeedsYou(
                               c,
-                              threshold: widget.attentionThreshold,
+                              threshold: widget.needsYouThreshold,
                             )
                                 ? BondColors.railAccent
                                 : BondColors.onDarkBorder,

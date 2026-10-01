@@ -7,14 +7,14 @@ Message _msg({
   bool outbound = false,
   bool addressedMe = false,
   List<String> actionItems = const [],
-  bool? needsYouVerdict,
+  double? needsYouP,
 }) {
   return Message(
     id: id,
     outbound: outbound,
     addressedMe: addressedMe,
     actionItems: actionItems,
-    needsYouVerdict: needsYouVerdict,
+    needsYouP: needsYouP,
   );
 }
 
@@ -54,18 +54,22 @@ void main() {
         _msg(actionItems: ['  ', 'send the deck']),
         true,
       ),
-      // The Jira broadcast: an extracted task on a message the judge read and
-      // said is somebody else's.
-      'an action item on a message the judge said no to': (
-        _msg(actionItems: ['Review the issue'], needsYouVerdict: false),
+      // The Jira broadcast: an extracted task on a message the decision
+      // model placed below the slider.
+      'an action item on a message below the slider': (
+        _msg(actionItems: ['Review the issue'], needsYouP: 0.1),
         false,
       ),
-      'an action item the judge agreed with': (
-        _msg(actionItems: ['send the deck'], needsYouVerdict: true),
+      'an action item on a message over the slider': (
+        _msg(actionItems: ['send the deck'], needsYouP: 0.9),
         true,
       ),
-      'a real mention the judge said no to is still a mention': (
-        _msg(addressedMe: true, needsYouVerdict: false),
+      'an action item on a message not decided yet': (
+        _msg(actionItems: ['send the deck']),
+        true,
+      ),
+      'a real mention below the slider is still a mention': (
+        _msg(addressedMe: true, needsYouP: 0.1),
         true,
       ),
     };
@@ -80,6 +84,13 @@ void main() {
       // The extraction pass writes an empty list for "nothing asked of you",
       // which is most messages in a busy thread.
       expect(namesOwner(_msg(actionItems: const [])), isFalse);
+    });
+
+    test("the owner's slider is the cut", () {
+      final m = _msg(actionItems: ['send the deck'], needsYouP: 0.4);
+      expect(namesOwner(m, threshold: 0.3), isTrue);
+      expect(namesOwner(m, threshold: 0.5), isFalse);
+      expect(mentionIndexOf([m], threshold: 0.5), isEmpty);
     });
   });
 

@@ -4,17 +4,20 @@ import 'dart:convert';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_policy.dart'
+    show needsYouYesReason;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
+import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart'
-    show NeedsYouTask, needsYouDefaultRules, needsYouOutputContract;
+import 'package:bond_inbox/services/llm/llm_client.dart'
+    show DecisionMisconfiguredException, DecisionUnavailableException;
 import 'package:bond_inbox/services/needs_you_handler.dart';
-import 'package:bond_inbox/services/notify_worthy.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
+import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -26,33 +29,17 @@ import 'fixtures/test_db.dart';
 
 /// One answer for one task, with a hook that runs at the moment of the call —
 /// which is how the drain-order test below observes the mailbox as extraction
-/// found it.
-///
-/// Every call is kept, because half of what this handler does happens on the
-/// way IN: which rules it read, whether it knew who the owner was, whether it
-/// waited on triage. `systems.last` and `users.last` are the two halves of
-/// the last prompt.
-///
-/// An [answer] that is an exception is thrown instead, which is the model
-/// server that is there and answers badly. Not [LlmUnavailableException] on
-/// purpose: the worker parks on that one, and what the handler owes either
-/// way is the same — leave the verdict NULL and let the exception out.
+/// found it. The needs-you handler takes no language model at all, so the
+/// only calls this ever sees are extraction's.
 ScriptedLlm scriptedLlm(
   Object answer, {
-  String schemaName = 'needs_you',
+  required String schemaName,
   FutureOr<void> Function()? onCall,
 }) =>
     ScriptedLlm(
       answers: {schemaName: answer},
       onCall: onCall == null ? null : (_) => onCall(),
     );
-
-/// What the model says about a message that names the owner.
-const Map<String, dynamic> needsYouYes = {
-  'evidence': 'Priya asks Alex to sign off on the wayfinding sheet.',
-  'needs_you': true,
-  'confidence': 'high',
-};
 
 /// An [EmbeddingsClient] over a scripted socket, so extraction can finish
 /// without a server.
@@ -93,16 +80,16 @@ void main() {
   tearDown(() async => db.close());
 
   Future<void> seed({
-    String source = 'teams',
-    String id = 't1',
+    String source = 'email',
+    String id = 'm1',
     String direction = 'inbound',
     int addressedMe = 1,
-    String triageStatus = 'pending',
+    String triageStatus = 'triaged',
     String? gateReason,
-    String body = 'Legal wants a look at the DPA.',
+    String body = 'Alex, can you sign off on the wayfinding sheet?',
     String receivedAt = '2026-08-29T10:00:00Z',
     int hasAttachments = 0,
-    String fromAddress = 'teams:u-1',
+    String fromAddress = 'dana@northwind.example.com',
   }) async {
     await store.upsertMessage({
       'has_attachments': hasAttachments,
@@ -121,25 +108,45 @@ void main() {
     });
   }
 
-  /// The shape the model actually gets: mail, below the floor, so the floor
-  /// says nothing and the judgement passes to the model branch.
-  Future<void> seedAmbiguousMail({
+  /// A stored decision, as the triage pass writes it.
+  Future<void> decide(
+    double needsYou, {
+    String source = 'email',
     String id = 'm1',
-    String triageStatus = 'pending',
-    String body = 'Alex, can you sign off on the wayfinding sheet?',
+    bool ownerKnown = true,
+    String intent = 'question',
   }) =>
-      seed(
-        source: 'email',
-        id: id,
-        addressedMe: 1,
-        triageStatus: triageStatus,
-        body: body,
+      store.writeDecision(
+        source,
+        id,
+        fakeDecision(fakeAnswers(needsYou: needsYou, intent: intent)),
+        qhash: decisionQhash,
+        ownerKnown: ownerKnown,
+      );
+
+  /// The probability as triage writes it onto the row.
+  Future<void> writeP(double? p, {String source = 'email', String id = 'm1'}) =>
+      store.writeNeedsYouP(source, id, p: p, reason: 'Asks you a question.');
+
+  NeedsYouHandler handler({
+    FakeDecisionClient? decision,
+    Future<({String? name, String? address})?> Function()? owner,
+    PipelineProgress progress = const PipelineProgress.disabled(),
+    String? tag,
+    Future<String?> Function()? modelTag,
+  }) =>
+      NeedsYouHandler(
+        store,
+        decisionClient: decision ?? FakeDecisionClient.never(),
+        owner: owner,
+        progress: progress,
+        modelTag: modelTag ?? (tag == null ? null : () async => tag),
       );
 
   Future<void> runOne(
     NeedsYouHandler handler, {
-    String source = 'teams',
-    String id = 't1',
+    String source = 'email',
+    String id = 'm1',
   }) =>
       handler.run({
         'task_kind': 'needs_you',
@@ -147,52 +154,105 @@ void main() {
         'entity_id': id,
       });
 
-  Future<Map<String, Object?>> verdictOf(String source, String id) async {
+  Future<Map<String, Object?>> answerOf(
+    String source,
+    String id,
+  ) async {
     final row = (await store.getMessageRow(source, id))!;
-    return {
-      'verdict': row['needs_you_verdict'],
-      'reason': row['needs_you_reason'],
-    };
+    return {'p': row['needs_you_p'], 'reason': row['needs_you_reason']};
   }
 
-  group('what the model is shown', () {
-    test('a file-only chat message reaches the model as what was shared',
-        () async {
-      // Below the floor, so the model is actually asked — and what it is asked
-      // about is a body that is nothing but a marker. `loadThread` hydrates a
-      // thread's attachments; the row this handler judges came from
-      // `getMessageRow` and has to ask for its own.
-      await seed(addressedMe: 0, body: '[[att:a1]]', hasAttachments: 1);
-      await store.upsertAttachments('teams', 't1', [
-        {
-          'attachment_id': 'a1',
-          'ordinal': 0,
-          'kind': 'file',
-          'name': 'Contract-v2.docx',
-          'size': 0,
-        },
-      ]);
-      final llm = scriptedLlm(needsYouYes);
+  Future<bool> ownerKnownOf(String source, String id) async =>
+      (await store.decisionFor(source, id))!.ownerKnown;
 
-      await runOne(NeedsYouHandler(store, llm));
+  group('guards', () {
+    test('a message gated after the enqueue is left undecided', () async {
+      await seed(triageStatus: 'skipped', gateReason: 'newsletter');
 
-      expect(llm.users.last, contains('Shared a file: Contract-v2.docx'));
-      expect(llm.users.last, isNot(contains('[[att:')));
+      await runOne(handler());
+
+      expect((await answerOf('email', 'm1'))['p'], isNull);
     });
 
-    test('a re-run reads the digests the first pass could not see', () async {
-      // The whole point of the digest handler's requeue. The first judgement
-      // ran while the file was still being read; this one is the same message
-      // with the record of it in front of the model.
-      await seedAmbiguousMail(body: 'See attached.');
+    test('a chat skipped-by-birth is still decided', () async {
+      await seed(
+        source: 'teams',
+        id: 't1',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+      );
+      final decision = FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.7));
+
+      await runOne(handler(decision: decision),
+          source: 'teams', id: 't1');
+
+      expect(decision.calls, hasLength(1));
+      expect((await answerOf('teams', 't1'))['p'], closeTo(0.7, 1e-9));
+    });
+
+    test('the owner writing in their own chat is left undecided', () async {
+      await seed(direction: 'outbound');
+
+      await runOne(handler());
+
+      expect((await answerOf('email', 'm1'))['p'], isNull);
+    });
+
+    test('a message deleted before the worker reached it completes', () async {
+      await runOne(handler(), id: 'gone');
+    });
+  });
+
+  group('a trusted decision', () {
+    for (final p in const [0.05, 0.3, 0.5, 0.65, 0.95]) {
+      test('a message decided with the owner known at p=$p is left as it is',
+          () async {
+        // No band: whatever the probability, the slider reads it as it stands.
+        await seed();
+        await decide(p);
+        await writeP(p);
+        final decision = FakeDecisionClient.never();
+
+        await runOne(handler(decision: decision));
+
+        expect(decision.calls, isEmpty);
+        expect(await answerOf('email', 'm1'),
+            {'p': p, 'reason': 'Asks you a question.'});
+      });
+    }
+
+    test('a Teams direct chat gets no floor: its probability is its answer',
+        () async {
+      await seed(source: 'teams', id: 't1', fromAddress: 'teams:u-1');
+      await decide(0.1, source: 'teams', id: 't1');
+      await writeP(0.1, source: 'teams', id: 't1');
+
+      await runOne(handler(), source: 'teams', id: 't1');
+
+      expect((await answerOf('teams', 't1'))['p'], 0.1);
+    });
+
+    test("a row that lost the decision's p gets it back, with the template",
+        () async {
+      // A row an older build wrote 1.0 on: the trusted decision is what the
+      // row reads again, and no model is asked.
+      await seed();
+      await decide(0.42, intent: 'approval');
+      await writeP(1.0);
+
+      await runOne(handler());
+
+      final answer = await answerOf('email', 'm1');
+      expect(answer['p'], closeTo(0.42, 1e-9));
+      expect(answer['reason'], 'Asks you to approve something.');
+    });
+
+    test('an attachment digest with an ask sends nothing to a model', () async {
+      // The digest's asks stay on the file card; the probability is the
+      // decision model's.
+      await seed(body: 'See attached.', hasAttachments: 1);
       await store.upsertAttachments('email', 'm1', [
-        {
-          'attachment_id': 'a1',
-          'ordinal': 0,
-          'kind': 'file',
-          'name': 'Lease Addendum.pdf',
-          'size': 4096,
-        },
+        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
       ]);
       await store.setAttachmentDigest(
         'email',
@@ -200,866 +260,539 @@ void main() {
         'a1',
         status: 'done',
         digestJson: jsonEncode(const AttachmentDigest(
-          evidence: 'A lease addendum sent for signature.',
-          kind: 'contract',
-          summary: 'The rent rises to 2,600 in January.',
+          summary: 'A lease addendum.',
           asks: ['Sign and return by Thursday'],
         ).toJson()),
       );
-      final llm = scriptedLlm(needsYouYes);
+      await decide(0.2);
+      await writeP(0.2);
 
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+      await runOne(handler());
 
-      final sent = llm.users.last;
-      expect(sent, contains('What the documents attached to this message '
-          'say:'));
-      expect(sent, contains('<untrusted_data source="attachment_digests">'));
-      expect(sent, contains('Lease Addendum.pdf: The rent rises to 2,600 '
-          'in January. Asks: Sign and return by Thursday'));
+      expect((await answerOf('email', 'm1'))['p'], 0.2);
     });
 
-    test('the digest fence sits before the message being judged', () async {
-      await seedAmbiguousMail(body: 'See attached.');
-      await store.upsertAttachments('email', 'm1', [
-        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
-      ]);
-      await store.setAttachmentDigest(
+    test('a needs-you text an older build saved is never read', () async {
+      // The slider is the one control; the stored text is inert.
+      await seed();
+      await decide(0.5);
+      await writeP(0.5);
+      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], 0.5);
+    });
+  });
+
+  group("the owner's Needs You answer", () {
+    // `applyDecision` stores the owner's answer in the decision row; the
+    // copy step copies that COLUMN, so it can never write the model's p back.
+    Future<void> decideOverridden({String answer = 'no', bool exact = false}) =>
+        store.writeDecision(
+          'email',
+          'm1',
+          fakeDecision(fakeAnswers(needsYou: 0.9, intent: 'request')
+              .withNeedsYou(answer, exact: exact)),
+          qhash: decisionQhash,
+          ownerKnown: true,
+          extraKeys: {
+            'owner_answer': answer,
+            'owner_label_id': 7,
+            'owner_cosine': exact ? 1.0 : 0.99,
+            'owner_exact': exact,
+          },
+        );
+
+    test('the copy step keeps an overridden 0.0 and words it', () async {
+      await seed();
+      await decideOverridden();
+      await writeP(0.9);
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision));
+
+      expect(decision.calls, isEmpty);
+      expect(await answerOf('email', 'm1'), {
+        'p': 0.0,
+        'reason': 'You removed a message like this from Needs You.',
+      });
+    });
+
+    test('an exact addition copies as 1.0 with its own sentence', () async {
+      await seed();
+      await decideOverridden(answer: 'yes', exact: true);
+      await writeP(null);
+
+      await runOne(handler());
+
+      expect(await answerOf('email', 'm1'), {
+        'p': 1.0,
+        'reason': 'You added this message to Needs You.',
+      });
+    });
+
+    test('a re-decide applies the label through the handler', () async {
+      await seed();
+      final exemplars = NeedsYouExemplars(store);
+      await store.writeNeedsYouLabel(
+        source: 'email',
+        conversationKey: 'chat-1',
+        sourceMessageId: 'm1',
+        answer: 'no',
+        origin: 'remove',
+      );
+
+      await runOne(NeedsYouHandler(
+        store,
+        decisionClient:
+            FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+        exemplars: exemplars,
+      ));
+
+      expect(await answerOf('email', 'm1'), {
+        'p': 0.0,
+        'reason': 'You removed this message from Needs You.',
+      });
+    });
+  });
+
+  group('deciding again', () {
+    test('a message with no decision is decided by the decision model',
+        () async {
+      await seed();
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(needsYou: 0.8, intent: 'request'),
+      );
+
+      await runOne(handler(
+        decision: decision,
+        owner: () async =>
+            (name: 'Alex Rivera', address: 'alex.rivera@rivermail.example.com'),
+      ));
+
+      expect(decision.calls, hasLength(1));
+      expect(decision.calls.single.owner,
+          'Alex Rivera <alex.rivera@rivermail.example.com>');
+      expect(await answerOf('email', 'm1'),
+          {'p': closeTo(0.8, 1e-9), 'reason': 'Asks you to do something.'});
+      // And the decision is stored, as the triage pass would have stored it.
+      final stored = await store.decisionFor('email', 'm1');
+      expect(stored!.needsYouP, closeTo(0.8, 1e-9));
+      expect(stored.ownerKnown, isTrue);
+    });
+
+    test('a decision stored under another question set is undecided, and is '
+        'decided again', () async {
+      // The first decision model's row (qhash 6eba…): it answered other
+      // questions, so decisionFor reads it as no decision at all.
+      await seed();
+      await store.writeDecision(
         'email',
         'm1',
-        'a1',
-        status: 'done',
-        digestJson: jsonEncode(
-          const AttachmentDigest(summary: 'It rises.').toJson(),
-        ),
+        fakeDecision(fakeAnswers(needsYou: 0.1)),
+        qhash: '6eba387492208260',
+        ownerKnown: true,
       );
-      final llm = scriptedLlm(needsYouYes);
+      await writeP(0.1);
+      expect(await store.decisionFor('email', 'm1'), isNull);
+      final decision = FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.7));
 
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+      await runOne(handler(
+        decision: decision,
+        owner: () async =>
+            (name: 'Alex Rivera', address: 'alex.rivera@rivermail.example.com'),
+      ));
 
-      final sent = llm.users.last;
-      expect(
-        sent.indexOf('source="attachment_digests"'),
-        lessThan(sent.indexOf('Judge ONLY this message:')),
-      );
+      expect(decision.calls, hasLength(1));
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.7, 1e-9));
+      final stored = await store.decisionFor('email', 'm1');
+      expect(stored!.needsYouP, closeTo(0.7, 1e-9));
     });
 
-    test('a document nobody has read yet contributes no line', () async {
-      await seedAmbiguousMail(body: 'See attached.');
-      await store.upsertAttachments('email', 'm1', [
-        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
-      ]);
-      final llm = scriptedLlm(needsYouYes);
+    test('a re-decide writes the whole state, exactly as the install-time '
+        're-decide writes it', () async {
+      // Two identical triaged messages in two threads, each with its text,
+      // an extraction and a thread whose CTA the old decision folded.
+      final moved = fakeAnswers(
+        urgency: 'high',
+        category: 'personal',
+        needsAction: 0.8,
+        replyExpected: 0.7,
+        needsYou: 0.66,
+        intent: 'request',
+        importance: 'high',
+      );
+      for (final id in ['m1', 'm2']) {
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': id,
+          'conversation_key': 'conv-$id',
+          'direction': 'inbound',
+          'from_name': 'Dana',
+          'from_address': 'dana@northwind.example.com',
+          'to_json': '["lo@x.com"]',
+          'received_at': '2026-08-29T10:00:00Z',
+          'body_text': 'Alex, can you sign off on the wayfinding sheet?',
+          'addressed_me': 1,
+          'triage_status': 'triaged',
+        });
+        await store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'conv-$id',
+          'subject': 'Wayfinding',
+          'state': 'needs_reply',
+          'last_message_at': '2026-08-29T10:00:00Z',
+          'last_inbound_at': '2026-08-29T10:00:00Z',
+        });
+        await store.updateConversationTriage(
+          'email',
+          'conv-$id',
+          ctaUrgency: 'low',
+          category: 'work',
+          keepCtaText: true,
+        );
+        await store.writeTriage(
+          'email',
+          id,
+          status: 'triaged',
+          result: const TriageResult(
+            urgency: 'low',
+            category: 'work',
+            needsAction: false,
+            replyExpected: false,
+          ),
+        );
+        await store.writeMessageText(
+          'email',
+          id,
+          summary: 'Dana asks for a sign-off.',
+          actionItems: const ['Sign off'],
+          deadline: '',
+        );
+        await store.writeExtraction(
+          'email',
+          id,
+          jsonEncode({
+            'topics': ['wayfinding'],
+            'project': 'Signage',
+            'intent': 'fyi',
+            'importance': 'low',
+          }),
+        );
+      }
 
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+      // m1 through this handler (no decision stored), m2 through the
+      // install-time re-decide.
+      await runOne(handler(decision: FakeDecisionClient.fixed(moved)));
+      await TriageQueue(store, decisionClient: FakeDecisionClient.fixed(moved))
+          .redecide([(source: 'email', id: 'm2')]);
 
-      // "Not read yet" and "says nothing" are different states, and only the
-      // second is worth putting in front of a judgement.
-      expect(llm.users.last, isNot(contains('attachment_digests')));
+      Future<Map<String, Object?>> stateOf(String id) async {
+        final row = (await store.getMessageRow('email', id))!;
+        final conversation =
+            (await store.getConversationRow('email', 'conv-$id'))!;
+        final extraction =
+            jsonDecode((await store.getExtraction('email', id))!) as Map;
+        return {
+          for (final k in [
+            'urgency',
+            'category',
+            'needs_action',
+            'reply_expected',
+            'needs_you_p',
+            'needs_you_reason',
+            'triage_status',
+          ])
+            k: row[k],
+          'intent': extraction['intent'],
+          'importance': extraction['importance'],
+          'topics': extraction['topics'],
+          'cta_urgency': conversation['cta_urgency'],
+          'thread_category': conversation['category'],
+        };
+      }
+
+      final viaHandler = await stateOf('m1');
+      expect(viaHandler, {
+        'urgency': 'high',
+        'category': 'personal',
+        'needs_action': 1,
+        'reply_expected': 1,
+        'needs_you_p': closeTo(0.66, 1e-9),
+        'needs_you_reason': 'Asks you to do something.',
+        'triage_status': 'triaged',
+        'intent': 'request',
+        'importance': 'high',
+        'topics': ['wayfinding'],
+        'cta_urgency': 'high',
+        'thread_category': 'personal',
+      });
+      expect(viaHandler, await stateOf('m2'));
     });
 
-    test('needs-you sends the thread and never a digest', () async {
-      // The context ladder measured on 2026-09-16/17 left needs-you on the
-      // thread tail: the digest read verdict 92 against the tail's 93 and lost
-      // judged evidence 34 -> 30, so it ships to no stage. `NeedsYouInput`
-      // still carries a `threadDigest` field; this pins that the handler never
-      // fills it in.
+    test('the input carries the thread before the message, as triage builds it',
+        () async {
       await seed(
-        source: 'email',
         id: 'earlier',
         body: 'Alex, the wayfinding sheet is ready for you.',
         receivedAt: '2026-08-29T09:00:00Z',
       );
       await seed(
-        source: 'email',
-        id: 'latest',
-        body: 'Any word on that sign-off?',
-        receivedAt: '2026-08-29T10:00:00Z',
+        id: 'later',
+        body: 'Following up on this.',
+        receivedAt: '2026-08-29T11:00:00Z',
       );
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'latest');
-
-      expect(llm.users.last, contains('<untrusted_data source="thread">'));
-      expect(
-        llm.users.last,
-        contains('Alex, the wayfinding sheet is ready for you.'),
-      );
-      expect(llm.users.last, isNot(contains('thread_digest')));
-    });
-  });
-
-  group('the deterministic floor', () {
-    test('a direct chat is written down as a yes, with its reason', () async {
       await seed();
-      final llm = scriptedLlm(needsYouYes);
+      final decision = FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.6));
 
-      await runOne(NeedsYouHandler(store, llm));
+      await runOne(handler(decision: decision));
 
-      expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
-      expect(llm.calls.length, 0, reason: 'the floor settled it');
+      final input = decision.calls.single;
+      expect(input.tail, hasLength(1));
+      expect(input.tail.single.text,
+          contains('the wayfinding sheet is ready for you'));
     });
 
-    test('the floor short-circuits the model, whatever the model would say',
+    test('an ownerless decision is decided again once the owner is known',
         () async {
-      // Raise-only in the direction that matters here: the floor runs first
-      // and the model is never asked, so a model that would have answered no
-      // cannot take a direct chat off the list.
       await seed();
-      final llm = scriptedLlm(const {
-        'evidence': 'nothing here points at the owner',
-        'needs_you': false,
-        'confidence': 'high',
-      });
+      await decide(0.9, ownerKnown: false);
+      final decision = FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.2));
 
-      await runOne(NeedsYouHandler(store, llm));
+      await runOne(handler(
+        decision: decision,
+        owner: () async => (name: 'Alex Rivera', address: null),
+      ));
 
-      expect(llm.calls.length, 0);
-      expect((await verdictOf('teams', 't1'))['verdict'], 1);
+      expect(decision.calls.single.owner, 'Alex Rivera');
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.2, 1e-9));
+      expect(await ownerKnownOf('email', 'm1'), isTrue);
     });
 
-    test('sole-recipient mail is nothing the floor has an opinion about',
-        () async {
-      // The floor says nothing about mail, and it must not write when it says
-      // nothing: this row's verdict is the model's, which the reason it
-      // carries is what proves — `teams_direct` here would be the floor
-      // reading "the only address on the envelope" as an answer.
-      await seed(source: 'email', id: 'm1', addressedMe: 1);
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls.length, 1);
-      expect((await verdictOf('email', 'm1'))['reason'],
-          isNot('teams_direct'));
-    });
-
-    test('a group chat nobody named goes to the model too', () async {
-      await seed(addressedMe: 0);
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm));
-
-      expect(llm.calls.length, 1);
-      expect((await verdictOf('teams', 't1'))['reason'], isNot('teams_direct'));
-    });
-  });
-
-  group("a stranger's first approach", () {
-    // The owner works at `northwind.example.com` throughout — one fictional
-    // domain, which is all the app can derive from a signed-in account today.
-    // Every other domain below is somebody else's.
-    Future<Set<String>> owned() async => {'northwind.example.com'};
-
-    /// Mail from [fromAddress], with the thread row this rule reads the owner's
-    /// own history off. `lastOutboundAt` null is a thread the owner has never
-    /// written on; [thread] false writes no conversation row at all.
-    Future<void> seedMail({
-      String fromAddress = 'sales@vendor.example.net',
-      String? lastOutboundAt,
-      bool thread = true,
-    }) async {
-      await seed(
-        source: 'email',
-        id: 'm1',
-        fromAddress: fromAddress,
-        body: 'Confirm your interest and we will send the proposal over.',
-      );
-      if (thread) {
-        await store.upsertConversation({
-          'source': 'email',
-          'conversation_key': 'chat-1',
-          'subject': 'An introduction',
-          'last_inbound_at': '2026-08-29T10:00:00Z',
-          'last_outbound_at': lastOutboundAt,
-        });
-      }
-    }
-
-    /// The model agreeing with the sales copy: a yes it is not sure about. This
-    /// is the answer the whole rule turns on — `high` and `low` already mean the
-    /// same thing on every sender.
-    const hedged = {
-      'evidence': 'It asks the reader to confirm their interest.',
-      'needs_you': true,
-      'confidence': 'medium',
-    };
-
-    test('a hedged yes from an outsider nobody has written to is a hedge',
-        () async {
-      await seedMail();
-      final llm = scriptedLlm(hedged);
-
-      await runOne(
-        NeedsYouHandler(store, llm, ownerDomains: owned),
-        source: 'email',
-        id: 'm1',
-      );
-
-      // A RANKING, not a drop: the model was still asked, and the reason is
-      // still the model's own sentence. The verdict is NULL, not 0: a medium
-      // yes on a stranger's mail buys no interruption, and it is no veto
-      // either, so the message sits in the inbox like any other.
-      expect(llm.calls.length, 1);
-      expect(await verdictOf('email', 'm1'), {
-        'verdict': null,
-        'reason': 'It asks the reader to confirm their interest.',
-      });
-
-      // So triage's own ask still reaches the chip and the toast: a new
-      // customer's "please send the signed contract by Friday" is not taken
-      // off every Needs You surface by the cold bar.
-      await db.customUpdate(
-        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
-      );
-      await db.customUpdate(
-        "UPDATE conversations SET state = 'needs_reply' "
-        "WHERE conversation_key = 'chat-1'",
-      );
-      final row = await store.notifyRowFor('email', 'm1');
-      expect(notifyWorthy(row!, threshold: 0), isTrue);
-    });
-
-    test('the same hedged yes from a colleague still raises', () async {
-      // The half that keeps this from being a bar on everybody: internal mail
-      // is judged on exactly the scale it was before.
-      await seedMail(fromAddress: 'sam@northwind.example.com');
-      final llm = scriptedLlm(hedged);
-
-      await runOne(
-        NeedsYouHandler(store, llm, ownerDomains: owned),
-        source: 'email',
-        id: 'm1',
-      );
-
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-    });
-
-    test('an outsider the owner HAS written to is judged like anyone else',
-        () async {
-      // Customers, counsel, candidates and suppliers are all external, and one
-      // reply from the owner is the evidence that this correspondent is theirs.
-      await seedMail(lastOutboundAt: '2026-08-20T09:00:00Z');
-      final llm = scriptedLlm(hedged);
-
-      await runOne(
-        NeedsYouHandler(store, llm, ownerDomains: owned),
-        source: 'email',
-        id: 'm1',
-      );
-
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-    });
-
-    test('a confident yes from a stranger still lands on the rail', () async {
-      // The bar moved; the door did not close. A real ask from a real
-      // counterparty comes back `high`.
-      await seedMail();
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(
-        NeedsYouHandler(store, llm, ownerDomains: owned),
-        source: 'email',
-        id: 'm1',
-      );
-
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-    });
-
-    test('with no owner domains wired nothing reads as cold', () async {
-      // The default, and what every other test in this file gets: an app that
-      // cannot say whose inbox this is judges on the old scale.
-      await seedMail();
-      final llm = scriptedLlm(hedged);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-    });
-
-    test('a domain read that throws is forgotten, not believed', () async {
-      // A keychain hiccup must not quietly move the bar for the session, and it
-      // must not cost the item either.
-      await seedMail();
-      final llm = scriptedLlm(hedged);
-
-      await runOne(
-        NeedsYouHandler(
-          store,
-          llm,
-          ownerDomains: () async => throw StateError('no account'),
-        ),
-        source: 'email',
-        id: 'm1',
-      );
-
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-    });
-
-    test('mail with no thread row yet is not a stranger', () async {
-      // The sweep writes the conversation row, and a message judged before it
-      // lands has no history to read. Unknown answers false, like every other
-      // unknown on this path.
-      await seedMail(thread: false);
-      final llm = scriptedLlm(hedged);
-
-      await runOne(
-        NeedsYouHandler(store, llm, ownerDomains: owned),
-        source: 'email',
-        id: 'm1',
-      );
-
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-    });
-
-    test('a chat that named the owner is untouched by any of this', () async {
-      // The floor is Teams-only and a Teams sender is `teams:<id>`, which names
-      // no domain at all — so no chat can ever read as a stranger's approach,
-      // however the owner's domains are set. This is the regression the rule
-      // most needs pinned: an @mention still costs no model call.
+    test('an ownerless decision is kept, not re-decided, while the owner is '
+        'still unknown', () async {
+      // Without this a pass run before the keychain answers would decide the
+      // same message again on every requeue.
       await seed();
-      final llm = scriptedLlm(needsYouYes);
+      await decide(0.6, ownerKnown: false);
+      await writeP(0.6);
+      final decision = FakeDecisionClient.never();
 
-      await runOne(NeedsYouHandler(store, llm, ownerDomains: owned));
+      await runOne(handler(decision: decision));
 
-      expect(llm.calls.length, 0);
-      expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
-    });
-  });
-
-  group('guards', () {
-    test('a message gated after the enqueue is left unjudged', () async {
-      // The race this pins: the judgement is queued at sync time while the
-      // message is still `pending`; triage then gates it. A newsletter must
-      // not come back carrying a verdict.
-      await seed(
-        source: 'email',
-        id: 'm1',
-        triageStatus: 'skipped',
-        gateReason: 'newsletter',
-      );
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect((await verdictOf('email', 'm1'))['verdict'], isNull);
-      expect(llm.calls.length, 0,
-          reason: 'a gated message costs no model time');
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], 0.6);
+      expect(await ownerKnownOf('email', 'm1'), isFalse);
     });
 
-    test('a chat skipped-by-birth is still judged', () async {
-      // `teams_source` is the legacy tolerance for chats stored before chats
-      // were triaged — not a verdict, so it must not gate this pass either.
-      await seed(triageStatus: 'skipped', gateReason: 'teams_source');
-
-      await runOne(NeedsYouHandler(store, scriptedLlm(needsYouYes)));
-
-      expect((await verdictOf('teams', 't1'))['verdict'], 1);
-    });
-
-    test('the owner writing in their own chat is left unjudged', () async {
-      await seed(direction: 'outbound');
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm));
-
-      expect((await verdictOf('teams', 't1'))['verdict'], isNull);
-      expect(llm.calls.length, 0);
-    });
-
-    test('a message deleted before the worker reached it completes', () async {
-      // Nothing to judge and nothing wrong: the item is done, not failed.
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'gone');
-
-      expect(await store.getMessageRow('email', 'gone'), isNull);
-      expect(llm.calls.length, 0);
-    });
-  });
-
-  group('the decision model', () {
-    Future<void> decide(DecisionAnswers answers,
-            {String source = 'email',
-            String id = 'm1',
-            bool ownerKnown = true}) =>
-        store.writeDecision(source, id, fakeDecision(answers),
-            qhash: 'test', ownerKnown: ownerKnown);
-
-    test('the floor still answers first', () async {
+    test('an ownerless decision the row lost is copied back while the owner '
+        'is unknown', () async {
       await seed();
-      await decide(fakeAnswers(needsYou: 0.1), source: 'teams', id: 't1');
-      final llm = scriptedLlm(needsYouYes);
+      await decide(0.6, ownerKnown: false, intent: 'approval');
+      final decision = FakeDecisionClient.never();
 
-      await runOne(NeedsYouHandler(store, llm));
+      await runOne(handler(decision: decision));
 
-      expect(llm.calls, isEmpty);
-      expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
+      expect(decision.calls, isEmpty);
+      expect(await answerOf('email', 'm1'),
+          {'p': closeTo(0.6, 1e-9), 'reason': 'Asks you to approve something.'});
     });
 
-    test('a sure yes is written without the language model, with a reason',
+    test('an owner still unknown is decided ownerless, and written anyway',
         () async {
-      await seedAmbiguousMail();
-      await decide(fakeAnswers(needsYou: 0.7, intent: 'question'));
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, isEmpty);
-      expect(await verdictOf('email', 'm1'),
-          {'verdict': 1, 'reason': 'Asks you a question.'});
-    });
-
-    test('a sure no is written as a no', () async {
-      await seedAmbiguousMail();
-      await decide(fakeAnswers(needsYou: 0.2));
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, isEmpty);
-      expect(await verdictOf('email', 'm1'),
-          {'verdict': 0, 'reason': 'Nothing here asks for you.'});
-    });
-
-    test('the band goes to the language model exactly as before', () async {
-      await seedAmbiguousMail();
-      await decide(fakeAnswers(needsYou: 0.5));
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, hasLength(1));
-      expect(await verdictOf('email', 'm1'), {
-        'verdict': 1,
-        'reason': 'Priya asks Alex to sign off on the wayfinding sheet.',
-      });
-    });
-
-    test('a decision made with no owner line goes to the language model',
-        () async {
-      // The needs-you head was trained with the owner line; a sure yes read
-      // without it is not trusted.
-      await seedAmbiguousMail();
-      await decide(fakeAnswers(needsYou: 0.95), ownerKnown: false);
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, hasLength(1));
-      expect((await verdictOf('email', 'm1'))['reason'],
-          'Priya asks Alex to sign off on the wayfinding sheet.');
-    });
-
-    test('a message decided before the model existed goes to the language '
-        'model', () async {
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, hasLength(1));
-    });
-
-    test("the owner's own rules send every message to the language model",
-        () async {
-      await seedAmbiguousMail();
-      await decide(fakeAnswers(needsYou: 0.95));
-      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, hasLength(1));
-    });
-
-    test('rules that retype the defaults are no rules', () async {
-      await seedAmbiguousMail();
-      await decide(fakeAnswers(needsYou: 0.95, intent: 'approval'));
-      await store.setPref(needsYouRulesKey, needsYouDefaultRules);
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, isEmpty);
-      expect((await verdictOf('email', 'm1'))['reason'],
-          'Asks you to approve something.');
-    });
-
-    test('an attachment digest sends the message to the language model',
-        () async {
-      await seedAmbiguousMail(body: 'See attached.');
-      await store.upsertAttachments('email', 'm1', [
-        {
-          'attachment_id': 'a1',
-          'ordinal': 0,
-          'kind': 'file',
-          'name': 'Lease Addendum.pdf',
-          'size': 4096,
-        },
-      ]);
-      await store.setAttachmentDigest(
-        'email',
-        'm1',
-        'a1',
-        status: 'done',
-        digestJson: jsonEncode(const AttachmentDigest(
-          evidence: 'A lease addendum sent for signature.',
-          kind: 'contract',
-          summary: 'The rent rises to 2,600 in January.',
-          asks: ['Sign and return by Thursday'],
-        ).toJson()),
+      // An undecided row is a message nobody sees; an ownerless probability
+      // is better than that, and the next requeue decides it again.
+      await seed();
+      final decision = FakeDecisionClient.fixed(
+        fakeAnswers(needsYou: 0.7, intent: 'question'),
       );
-      await decide(fakeAnswers(needsYou: 0.1));
-      final llm = scriptedLlm(needsYouYes);
 
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+      await runOne(handler(decision: decision));
 
-      expect(llm.calls, hasLength(1));
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+      expect(decision.calls.single.owner, isNull);
+      expect(await answerOf('email', 'm1'),
+          {'p': closeTo(0.7, 1e-9), 'reason': 'Asks you a question.'});
+      expect(await ownerKnownOf('email', 'm1'), isFalse);
     });
 
-    test('a digest that asks nothing leaves the decision model to settle it',
+    test('a decision server that is down propagates, and nothing falls back',
         () async {
-      // D6: only a file with an ask can move the verdict, so a digest with
-      // none is no reason to pay for a language-model call.
-      await seedAmbiguousMail(body: 'See attached.');
-      await store.upsertAttachments('email', 'm1', [
-        {
-          'attachment_id': 'a1',
-          'ordinal': 0,
-          'kind': 'file',
-          'name': 'Quarterly Report.pdf',
-          'size': 4096,
-        },
-      ]);
-      await store.setAttachmentDigest(
-        'email',
-        'm1',
-        'a1',
-        status: 'done',
-        digestJson: jsonEncode(const AttachmentDigest(
-          evidence: 'The quarterly report, for reading.',
-          kind: 'report',
-          summary: 'Revenue rose four percent.',
-        ).toJson()),
+      await seed();
+      final decision = FakeDecisionClient(
+        (_) => throw const DecisionUnavailableException('decide is down'),
       );
-      await decide(fakeAnswers(needsYou: 0.1));
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls, isEmpty);
-      expect((await verdictOf('email', 'm1'))['verdict'], 0);
-    });
-
-    group('a cold approach', () {
-      Future<Set<String>> owned() async => {'northwind.example.com'};
-
-      Future<void> seedCold() async {
-        await seed(
-          source: 'email',
-          id: 'm1',
-          fromAddress: 'sales@vendor.example.net',
-          body: 'Confirm your interest and we will send the proposal over.',
-        );
-        await store.upsertConversation({
-          'source': 'email',
-          'conversation_key': 'chat-1',
-          'subject': 'An introduction',
-          'last_inbound_at': '2026-08-29T10:00:00Z',
-        });
-      }
-
-      test('at 0.70 is in the band, so the language model reads it',
-          () async {
-        await seedCold();
-        await decide(fakeAnswers(needsYou: 0.7));
-        final llm = scriptedLlm(needsYouYes);
-
-        await runOne(NeedsYouHandler(store, llm, ownerDomains: owned),
-            source: 'email', id: 'm1');
-
-        expect(llm.calls, hasLength(1));
-      });
-
-      test('at 0.90 clears the higher bar', () async {
-        await seedCold();
-        await decide(fakeAnswers(needsYou: 0.9, replyExpected: 0.8));
-        final llm = scriptedLlm(needsYouYes);
-
-        await runOne(NeedsYouHandler(store, llm, ownerDomains: owned),
-            source: 'email', id: 'm1');
-
-        expect(llm.calls, isEmpty);
-        expect(await verdictOf('email', 'm1'),
-            {'verdict': 1, 'reason': 'Expects a reply from you.'});
-      });
-    });
-  });
-
-  group('the model branch', () {
-    test('an ambiguous message is judged, and the evidence is the reason',
-        () async {
-      // Sole-recipient mail: the floor says nothing about it, which is not a
-      // verdict, so the model reads the text.
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.calls.length, 1);
-      expect(await verdictOf('email', 'm1'), {
-        'verdict': 1,
-        'reason': 'Priya asks Alex to sign off on the wayfinding sheet.',
-      });
-    });
-
-    test('a no is written down as a no, not left as silence', () async {
-      // The whole reason this branch exists: NULL is "never judged" and keeps
-      // the row on the worklist forever. Only the model may write the 0.
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(const {
-        'evidence': 'A newsletter; nothing in it asks the owner for anything.',
-        'needs_you': false,
-        'confidence': 'high',
-      });
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(await verdictOf('email', 'm1'), {
-        'verdict': 0,
-        'reason': 'A newsletter; nothing in it asks the owner for anything.',
-      });
-    });
-
-    test('a hesitant yes is a hedge: no raise and no veto', () async {
-      // The raise policy. The verdict buys an interruption, and "possibly" is
-      // not grounds for one. Nor is it a no, so it is stored NULL with its
-      // evidence and triage decides.
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(const {
-        'evidence': 'It might be asking the owner to look at the numbers.',
-        'needs_you': true,
-        'confidence': 'low',
-      });
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(await verdictOf('email', 'm1'), {
-        'verdict': null,
-        'reason': 'It might be asking the owner to look at the numbers.',
-      });
-      await db.customUpdate(
-        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
-      );
-      final row = await store.notifyRowFor('email', 'm1');
-      expect(notifyWorthy(row!, threshold: 0), isTrue,
-          reason: "triage's ask decides a hedged message");
-    });
-
-
-
-    test('a model that fails leaves the verdict unjudged and throws', () async {
-      // The row stays on the worklist and the worker's retry machinery owns
-      // what happens next. A handler that swallowed this would write a 0 the
-      // model never said.
-      await seedAmbiguousMail();
 
       await expectLater(
-        runOne(
-          NeedsYouHandler(
-            store,
-            scriptedLlm(const LlmFormatException('nothing that parses')),
-          ),
-          source: 'email',
-          id: 'm1',
-        ),
-        throwsA(isA<LlmFormatException>()),
+        runOne(handler(decision: decision)),
+        throwsA(isA<DecisionUnavailableException>()),
       );
-      expect((await verdictOf('email', 'm1'))['verdict'], isNull);
+      expect((await answerOf('email', 'm1'))['p'], isNull);
+      expect(await store.decisionFor('email', 'm1'), isNull);
     });
 
-    test('it judges a message triage has not finished with', () async {
-      // This stage reads the body, never triage's verdicts: the queue hands
-      // over rows whose `triage_status` is still `pending`, and waiting on
-      // them would make the verdict depend on which drain got there first.
-      await seedAmbiguousMail(triageStatus: 'pending');
-      final llm = scriptedLlm(needsYouYes);
+    test('a refused heads file propagates the same way', () async {
+      await seed();
+      final decision = FakeDecisionClient(
+        (_) => throw const DecisionMisconfiguredException('heads refused'),
+      );
 
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+      await expectLater(
+        runOne(handler(decision: decision)),
+        throwsA(isA<DecisionMisconfiguredException>()),
+      );
+      expect((await answerOf('email', 'm1'))['p'], isNull);
+    });
 
-      expect(llm.calls.length, 1);
-      expect(llm.users.last, contains('Alex, can you sign off'));
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
+    test('the template reason is the one triage writes', () async {
+      await seed();
+      final answers = fakeAnswers(needsYou: 0.4, intent: 'scheduling');
+
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(answers),
+      ));
+
+      expect((await answerOf('email', 'm1'))['reason'],
+          needsYouYesReason(answers));
     });
   });
 
-  group('what the model is told', () {
-    test("the owner's rules replace the system prompt's body", () async {
-      await seedAmbiguousMail();
-      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.systems.last, contains('Invoices always need me.'));
-      // The body is theirs; the answer's shape never is.
-      expect(llm.systems.last, contains(needsYouOutputContract));
-      expect(llm.systems.last, isNot(contains(needsYouDefaultRules)));
-      // And nothing about the rules is in the user message any more.
-      expect(llm.users.last, isNot(contains('needs_you_rules')));
-    });
-
-    test('and an empty pref means the default prompt', () async {
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.systems.last, const NeedsYouTask().systemPrompt);
-    });
-
-    test('an unchanged pref reuses the very same prompt string', () async {
-      // Identity, not equality: llama-server caches the KV prefix on the bytes,
-      // so a prompt rebuilt per item would pay to re-prime it every message
-      // even though nobody edited anything.
-      await seedAmbiguousMail();
-      await seedAmbiguousMail(id: 'm2');
-      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = scriptedLlm(needsYouYes);
-      final handler = NeedsYouHandler(store, llm);
-
-      await runOne(handler, source: 'email', id: 'm1');
-      final first = llm.systems.last;
-      await runOne(handler, source: 'email', id: 'm2');
-      final second = llm.systems.last;
-
-      expect(identical(first, second), isTrue);
-    });
-
-    test('a pref edited mid-drain reaches the next item', () async {
-      // Read per item for exactly this: someone who rewrites their rules while
-      // the drain is running wants the rest of the drain to use them.
-      await seedAmbiguousMail();
-      await seedAmbiguousMail(id: 'm2');
-      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
-      final llm = scriptedLlm(needsYouYes);
-      final handler = NeedsYouHandler(store, llm);
-
-      await runOne(handler, source: 'email', id: 'm1');
-      await store.setPref(needsYouRulesKey, 'Only the studio lease needs me.');
-      await runOne(handler, source: 'email', id: 'm2');
-
-      expect(llm.systems.last, contains('Only the studio lease needs me.'));
-      expect(llm.systems.last, isNot(contains('Invoices always need me.')));
-    });
-
-    test('a pref that just retypes the defaults stays on the default prompt',
-        () async {
-      // The pane normalizes a default-equal save back to the empty pref, but a
-      // pref written any other way must not fork the prompt into a
-      // non-const copy of the same words.
-      await seedAmbiguousMail();
-      await store.setPref(needsYouRulesKey, needsYouDefaultRules);
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(
-        identical(llm.systems.last, const NeedsYouTask().systemPrompt),
-        isTrue,
-      );
-    });
-
-    test('the owner is named, from the lookup', () async {
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(needsYouYes);
-      final handler = NeedsYouHandler(
-        store,
-        llm,
-        owner: () async =>
-            (name: 'Alex Rivera', address: 'alex.rivera@rivermail.example.com'),
-      );
-
-      await runOne(handler, source: 'email', id: 'm1');
-
-      expect(
-        llm.users.last,
-        contains('The owner of this inbox is Alex Rivera '
-            '<alex.rivera@rivermail.example.com>.'),
-      );
-    });
-
-    test('and the lookup is asked once, however many messages it judges',
-        () async {
-      // It is a keychain read, and the answer only changes on sign-out — which
-      // disposes the provider that built the handler.
-      await seedAmbiguousMail();
-      await seedAmbiguousMail(id: 'm2');
-      final llm = scriptedLlm(needsYouYes);
-      var lookups = 0;
-      final handler = NeedsYouHandler(
-        store,
-        llm,
-        owner: () async {
-          lookups++;
-          return (name: 'Alex Rivera', address: null);
-        },
-      );
-
-      await runOne(handler, source: 'email', id: 'm1');
-      await runOne(handler, source: 'email', id: 'm2');
-
-      expect(llm.calls.length, 2);
-      expect(lookups, 1);
-    });
-
-    test('a lookup that failed is not the answer forever', () async {
-      // A keychain hiccup on the first read must not be memoized: the item it
-      // happened under is judged with no owner named, and the NEXT item asks
-      // again rather than inheriting the failure until the app restarts.
-      await seedAmbiguousMail();
-      await seedAmbiguousMail(id: 'm2');
-      final llm = scriptedLlm(needsYouYes);
-      var lookups = 0;
-      final handler = NeedsYouHandler(
-        store,
-        llm,
-        owner: () async {
-          lookups++;
-          if (lookups == 1) throw StateError('keychain unavailable');
-          return (name: 'Alex Rivera', address: null);
-        },
-      );
-
-      await runOne(handler, source: 'email', id: 'm1');
-      expect(llm.users.last, isNot(contains('The owner of this inbox is')));
-      expect((await verdictOf('email', 'm1'))['verdict'], 1);
-
-      await runOne(handler, source: 'email', id: 'm2');
-      expect(lookups, 2);
-      expect(
-          llm.users.last, contains('The owner of this inbox is Alex Rivera.'));
-    });
-
-    test('a prompt with no owner to name says nothing about one', () async {
-      await seedAmbiguousMail();
-      final llm = scriptedLlm(needsYouYes);
-
-      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
-
-      expect(llm.users.last, isNot(contains('The owner of this inbox is')));
-    });
-  });
-
-  // The verdict is not the only thing a moved answer has to reach. The Needs
-  // You chip on the home screen is a snapshot taken at settle time, and
-  // nothing else in the app would ever reconcile it with a verdict written
+  // The Needs You chip on the home screen is a snapshot taken at settle time,
+  // and nothing else in the app would reconcile it with an answer written
   // afterwards.
-  group('the chip that follows the verdict', () {
+  group('the decision vector', () {
+    const tag = 'bond-decide-fake';
+    Future<({String? name, String? address})?> known() async =>
+        (name: 'Alex Rivera', address: null);
+
+    FakeDecisionClient withVector() => FakeDecisionClient(
+          (_) => fakeDecision(fakeAnswers(needsYou: 0.3),
+              vector: const [1.0, 0.0, 0.0, 0.0]),
+        );
+
+    test('a decision with no vector under the current model is decided '
+        'again for one', () async {
+      await seed();
+      await decide(0.6);
+      await writeP(0.6);
+      final decision = withVector();
+
+      await runOne(handler(decision: decision, owner: known, tag: tag));
+
+      expect(decision.calls, hasLength(1));
+      final stored = (await store.decisionFor('email', 'm1'))!;
+      expect(stored.vector, [1.0, 0.0, 0.0, 0.0]);
+      expect(stored.vectorModel, tag);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.3, 1e-9));
+    });
+
+    test("the tag is asked when there is a stored decision: Your server's "
+        'kind learned there is the tag the row is owed under', () async {
+      await seed();
+      await decide(0.6);
+      await writeP(0.6);
+      // The sync getter would still answer null here (kind not cached); the
+      // resolver learns the kind and answers the encoder's tag.
+      var asked = 0;
+      final decision = withVector();
+
+      await runOne(handler(
+        decision: decision,
+        owner: known,
+        modelTag: () async {
+          asked++;
+          return tag;
+        },
+      ));
+
+      expect(asked, 1);
+      expect(decision.calls, hasLength(1));
+      expect((await store.decisionFor('email', 'm1'))!.vector, isNotNull);
+    });
+
+    test('a message with no stored decision never asks for the tag',
+        () async {
+      await seed();
+      var asked = 0;
+
+      await runOne(handler(
+        decision: withVector(),
+        owner: known,
+        modelTag: () async {
+          asked++;
+          return tag;
+        },
+      ));
+
+      expect(asked, 0);
+    });
+
+    test('a vector under another model is decided again', () async {
+      await seed();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.6),
+            vector: const [0.0, 1.0, 0.0, 0.0], model: 'an-older-model'),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+      await writeP(0.6);
+      final decision = withVector();
+
+      await runOne(handler(decision: decision, owner: known, tag: tag));
+
+      expect(decision.calls, hasLength(1));
+      expect((await store.decisionFor('email', 'm1'))!.vectorModel, tag);
+    });
+
+    test('a vector under the current model is copied, never decided again',
+        () async {
+      await seed();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.6),
+            vector: const [0.0, 1.0, 0.0, 0.0]),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision, owner: known, tag: tag));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.6, 1e-9));
+    });
+
+    test('on a backend with no vector (no tag) nothing is owed', () async {
+      await seed();
+      await decide(0.6);
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision, owner: known));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.6, 1e-9));
+    });
+
+    test('with the owner unknown it is copied, never traded for an '
+        'ownerless decision', () async {
+      await seed();
+      await decide(0.6);
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision, tag: tag));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.6, 1e-9));
+      expect(await ownerKnownOf('email', 'm1'), isTrue);
+    });
+  });
+
+  group('the chip that follows the answer', () {
     late ProgressBus bus;
     late PipelineProgress progress;
     late List<ProgressTick> ticks;
@@ -1073,192 +806,182 @@ void main() {
 
     tearDown(() => bus.dispose());
 
-    /// A message the coordinator already settled as needing nobody, on a loud
-    /// thread the user has not answered — the shape a re-verdict has to move.
-    Future<void> seedSettled({
-      String source = 'teams',
-      String id = 't1',
-      int addressedMe = 1,
-      String? lastOutboundAt,
-    }) async {
+    /// A message the coordinator already settled as needing nobody, on a
+    /// thread the user has not answered — the shape a new answer has to move.
+    /// `reply_expected` is set so the chip's own reader agrees that an ask is
+    /// there whichever signal it reads.
+    Future<void> seedSettled({String? lastOutboundAt}) async {
       await store.upsertConversation({
-        'source': source,
+        'source': 'email',
         'conversation_key': 'chat-1',
         'subject': 'The DPA',
         'state': 'needs_reply',
         'last_message_at': '2026-08-29T10:00:00Z',
         'last_outbound_at': lastOutboundAt,
       });
-      await seed(source: source, id: id, addressedMe: addressedMe);
+      await seed();
+      await db.customUpdate(
+        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
+      );
       await progress.noteSettled(
-        source,
-        id,
+        'email',
+        'm1',
         needsYou: false,
         reason: 'not_worthy',
         dropped: false,
       );
-      await store.writeAttentionScore(source, 'chat-1', 0.9);
+      await store.writeAttentionScore('email', 'chat-1', 0.9);
     }
 
-    Future<Object?> flagOf(String source, String id) async => (await db
+    Future<Object?> flagOf(String id) async => (await db
             .customSelect(
               'SELECT needs_you FROM message_progress '
               'WHERE source = ? AND source_message_id = ?',
-              variables: [Variable(source), Variable(id)],
+              variables: [Variable('email'), Variable(id)],
             )
             .getSingle())
         .data['needs_you'];
 
-    test('a model yes on a settled row raises the chip and says so', () async {
-      await seedSettled(source: 'email', id: 'm1', addressedMe: 1);
+    test('an answer that crosses the slider raises the chip and says so',
+        () async {
+      await seedSettled();
       ticks.clear();
 
-      await runOne(
-        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
-        source: 'email',
-        id: 'm1',
-      );
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+        progress: progress,
+      ));
 
-      expect(await flagOf('email', 'm1'), 1);
+      expect(await flagOf('m1'), 1);
       await pumpEventQueue();
       expect(ticks.single.sourceMessageId, 'm1');
       expect(ticks.single.stage, 'settle');
     });
 
-    test('the deterministic floor moves it too', () async {
-      // The floor short-circuits the model, but it writes a verdict all the
-      // same — and a verdict that moved is a verdict that moved.
+    test('an answer below the slider moves nothing', () async {
       await seedSettled();
-
-      await runOne(
-        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
-      );
-
-      expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
-      expect(await flagOf('teams', 't1'), 1);
-    });
-
-    test('the same answer twice writes nothing the second time', () async {
-      // The whole guard against a chip the user cleared coming back: a
-      // re-judge that agrees with itself must be silent.
-      await seedSettled();
-      await runOne(
-        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
-      );
-      await pumpEventQueue();
       ticks.clear();
 
-      await runOne(
-        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
-      );
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.1)),
+        progress: progress,
+      ));
 
       await pumpEventQueue();
       expect(ticks, isEmpty);
-      expect(await flagOf('teams', 't1'), 1);
+      expect(await flagOf('m1'), 0);
+    });
+
+    test('the same answer twice writes nothing the second time', () async {
+      await seedSettled();
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+        progress: progress,
+      ));
+      await pumpEventQueue();
+      ticks.clear();
+
+      // Decided now, with the owner unknown; deciding again lands on the same
+      // side of the slider.
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.85)),
+        progress: progress,
+      ));
+
+      await pumpEventQueue();
+      expect(ticks, isEmpty);
+      expect(await flagOf('m1'), 1);
     });
 
     test('a thread the user already answered is not re-chipped', () async {
-      // `notifyWorthy` has no outbound clause — the coordinator settles before
-      // any reply can exist — so this path carries the guard itself.
       await seedSettled(lastOutboundAt: '2026-08-29T12:00:00Z');
 
-      await runOne(
-        NeedsYouHandler(store, scriptedLlm(needsYouYes), progress: progress),
-      );
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+        progress: progress,
+      ));
 
-      expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
-      expect(await flagOf('teams', 't1'), 0);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.9, 1e-9));
+      expect(await flagOf('m1'), 0);
     });
 
-    test('a hedge over an old no is a change the chip follows', () async {
-      // Old hedges were stored 0, and 0 vetoed triage's ask. Re-judged, the
-      // NULL that replaces it is a different stored answer, so the chip is
-      // recomputed and triage's ask raises it.
-      await seedSettled(source: 'email', id: 'm1', addressedMe: 1);
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: false, reason: 'It might be asking.');
-      await db.customUpdate(
-        "UPDATE messages SET reply_expected = 1 WHERE source_message_id = 'm1'",
-      );
-
-      await runOne(
-        NeedsYouHandler(
-          store,
-          scriptedLlm(const {
-            'evidence': 'It might be asking the owner to look at the numbers.',
-            'needs_you': true,
-            'confidence': 'low',
-          }),
-          progress: progress,
-        ),
-        source: 'email',
-        id: 'm1',
-      );
-
-      expect((await verdictOf('email', 'm1'))['verdict'], isNull);
-      expect(await flagOf('email', 'm1'), 1);
-    });
-
-    test('and a handler with no recorder judges exactly as before', () async {
+    test('and a handler with no recorder decides exactly as before', () async {
       await seedSettled();
 
-      await runOne(NeedsYouHandler(store, scriptedLlm(needsYouYes)));
+      await runOne(handler(
+        decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.9)),
+      ));
 
-      expect(await verdictOf('teams', 't1'),
-          {'verdict': 1, 'reason': 'teams_direct'});
-      expect(await flagOf('teams', 't1'), 0);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.9, 1e-9));
+      expect(await flagOf('m1'), 0);
     });
   });
 
   group('drain order', () {
-    test('the verdict is on the row before extraction reads it', () async {
+    test('the probability is on the row before extraction reads it', () async {
       // Triaged, and it has to be: the worker is not handed a `needs_you` or
       // an `extract` item while its message is still `pending`
-      // (`MessageStore.claimPendingWork`). The drain this test is about only
-      // happens after triage has spoken.
-      await seed(triageStatus: 'triaged');
+      // (`MessageStore.claimPendingWork`).
+      await seed();
       await store.upsertConversation({
-        'source': 'teams',
+        'source': 'email',
         'conversation_key': 'chat-1',
         'subject': 'Acme renewal',
         'state': 'needs_reply',
         'last_message_at': '2026-08-29T10:00:00Z',
       });
-      await store.enqueueWork('extract', 'teams', 't1');
-      await store.enqueueWork('needs_you', 'teams', 't1');
+      await store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('needs_you', 'email', 'm1');
 
-      Object? verdictWhenExtractRan;
+      Object? pWhenExtractRan;
       final llm = scriptedLlm(
         messageText,
         schemaName: 'message_text',
         onCall: () async {
-          verdictWhenExtractRan =
-              (await store.getMessageRow('teams', 't1'))!['needs_you_verdict'];
+          pWhenExtractRan =
+              (await store.getMessageRow('email', 'm1'))!['needs_you_p'];
         },
       );
-      // Provider order: needs-you, then extraction. The whole reason for it is
-      // this assertion — extraction's pre-gate reads the row as it stands, so
-      // a verdict written after it would be a verdict extraction never saw.
-      // The seeded row is a direct chat, so the floor settles it and the one
-      // model call this drain makes is extraction's.
+      // Provider order: needs-you, then extraction. The row has no decision,
+      // so the needs-you pass decides it, and the one language-model call this
+      // drain makes is extraction's.
       final worker = AiWorker(
         store,
         handlers: [
-          NeedsYouHandler(store, llm),
+          NeedsYouHandler(
+            store,
+            decisionClient:
+                FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.75)),
+          ),
           ExtractHandler(store, llm, fakeEmbeddings()),
         ],
       );
+      addTearDown(worker.dispose);
 
       await worker.pump();
 
       expect(llm.calls.length, 1, reason: 'extraction really ran');
-      expect(verdictWhenExtractRan, 1);
-      expect(await store.workCounts('needs_you', sources: const ['teams']),
+      expect(pWhenExtractRan, closeTo(0.75, 1e-9));
+      expect(await store.workCounts('needs_you', sources: const ['email']),
           {'done': 1});
-      expect(await store.workCounts('extract', sources: const ['teams']),
+      expect(await store.workCounts('extract', sources: const ['email']),
           {'done': 1});
     });
+  });
+
+  test('the qhash stored on a re-decision is the heads file the app expects',
+      () async {
+    await seed();
+
+    await runOne(handler(
+      decision: FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.5)),
+    ));
+
+    final row = (await db
+            .customSelect("SELECT qhash FROM message_decisions "
+                "WHERE source_message_id = 'm1'")
+            .getSingle())
+        .data;
+    expect(row['qhash'], decisionQhash);
   });
 }

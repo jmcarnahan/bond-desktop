@@ -1,62 +1,67 @@
-/// The one SQL spelling of "did this message need the user", shared by the two
-/// statements that have to write `message_progress.needs_you` without a Dart
-/// verdict to copy: the v8 backfill and the settle sweep.
+import '../services/decision/needs_you_predicate.dart';
+
+/// The one SQL spelling of "did this message need the user", for the one
+/// statement that has to write `message_progress.needs_you` without a Dart
+/// answer to copy: the settle sweep.
 ///
 /// The live path does not use this. A message the notification coordinator
 /// settled gets its snapshot from `notifyWorthy` — the same call that decided
 /// whether to interrupt the user — because a tile that disagreed with the
 /// toast it came from is the failure this whole column exists to avoid. What
-/// is left for SQL is the rows the coordinator never saw: history at migration
-/// time, and messages that were never admitted as candidates at all.
+/// is left for SQL is the rows the coordinator never saw: messages that were
+/// never admitted as candidates at all.
+///
+/// Term for term with `notifyWorthy`: the message's `needs_you_p` at or above
+/// [threshold] (`needsYouAtSql`), its thread not `done`, and its thread not
+/// filed `later`. The attention score orders Needs You and gates nothing, so
+/// it is not here.
 ///
 /// Written against a `messages` row aliased `m`, and reaching everything else
-/// through scalar subqueries rather than joins so that both call sites can
-/// drop it in unchanged — one has `messages` in its FROM, the other correlates
-/// it back to a `message_progress` row being updated.
+/// through scalar subqueries rather than joins so that the caller can drop it
+/// in unchanged — it correlates back to a `message_progress` row being
+/// updated.
 ///
-/// [threshold] is the SQL text of the attention floor: a bound parameter at a
-/// caller that knows the user's setting, a literal at the migration, which
-/// must not read preferences.
+/// [threshold] is the SQL text of the owner's Needs You slider, a bound
+/// parameter.
 ///
 /// The `is_read = 0` clause has no counterpart in `notifyWorthy` and is not a
 /// divergence: the coordinator's decision table suppresses a read message
 /// before worthiness is ever asked, so this is where that guard has to live
 /// instead.
+String needsYouSql({required String threshold}) => '''
+CASE WHEN ${needsYouAtSql('m.needs_you_p', threshold)}
+  AND m.is_read = 0
+  AND COALESCE((
+        SELECT c.state FROM conversations c
+         WHERE c.source = m.source AND c.conversation_key = m.conversation_key
+      ), '') <> 'done'
+  AND COALESCE((
+        SELECT ai.bucket FROM conversation_ai ai
+         WHERE ai.source = m.source AND ai.conversation_key = m.conversation_key
+      ), '') <> 'later'
+THEN 1 ELSE 0 END''';
+
+/// The v8 backfill's needs-you SQL, FROZEN: `from7To8` in `database.dart`
+/// interpolates it and nothing else may.
 ///
-/// [verdict] exists for ONE caller: the v8 backfill in `database.dart`, which
-/// interpolates this SQL from inside `from7To8`. That migration replays on any
-/// v1..v7 database being brought up to v10 or beyond, and at the moment it runs
-/// the `needs_you_verdict` column does not exist yet — it arrives in v10. So the
-/// migration keeps the spelling it originally ran with, frozen at `false`, and
-/// every live caller takes the default and reads the verdict.
-String needsYouSql({required String threshold, bool verdict = true}) {
-  // Carries its own indentation, and the `false` arm carries the indentation
-  // the first clause used to have, so that arm renders byte-for-byte what the
-  // migration ran before this parameter existed.
-  final verdictClause =
-      verdict ? '       m.needs_you_verdict = 1\n    OR ' : '       ';
-  // The judge's explicit no, which outranks every ask in the CASE — the
-  // `notifyWorthy` rule, spelled for the rows the coordinator never saw. The
-  // frozen arm renders nothing here, for the reason the clause above gives.
-  final vetoClause =
-      verdict ? '\n  AND COALESCE(m.needs_you_verdict, -1) <> 0' : '';
-  // The thread's CTA is this message's ask only once its OWN text has
-  // landed: triage writes the row from the decision model and leaves the
-  // thread's older ask in place until the message-text stage refolds it, so a
-  // triaged row with no summary yet must not claim that older ask. The frozen
-  // arm renders nothing, for the migration's reason above.
-  final textClause = verdict ? ' AND m.summary IS NOT NULL' : '';
-  return '''
+/// That migration replays on every v1..v7 database a newer build opens, and
+/// it must bring one up to the `message_progress` every earlier build
+/// produced, so this text never follows the live rule ([needsYouSql]). It
+/// predates the needs-you columns entirely — `needs_you_verdict` arrived in
+/// v10 and `needs_you_p` in v21 — and reads only triage's asks against the
+/// attention floor, which is what needs you meant at v8.
+/// `progress_sql_test` pins it byte for byte.
+String needsYouSqlV8Frozen(String threshold) => '''
 CASE WHEN (
-${verdictClause}m.reply_expected = 1
+       m.reply_expected = 1
     OR m.needs_action = 1
     OR m.urgency IN ('urgent', 'high')
     OR COALESCE(m.deadline, '') <> ''
-    OR (m.triage_status = 'triaged'$textClause AND COALESCE((
+    OR (m.triage_status = 'triaged' AND COALESCE((
          SELECT c.cta_text FROM conversations c
           WHERE c.source = m.source AND c.conversation_key = m.conversation_key
        ), '') <> '')
-  )$vetoClause
+  )
   AND m.is_read = 0
   AND COALESCE((
         SELECT c.state FROM conversations c
@@ -71,13 +76,13 @@ ${verdictClause}m.reply_expected = 1
          WHERE ai.source = m.source AND ai.conversation_key = m.conversation_key
       ), 0) >= $threshold
 THEN 1 ELSE 0 END''';
-}
 
-/// The attention floor the v8 backfill judges history against.
+/// The attention floor the v8 backfill judges history against — the v8
+/// backfill's floor ONLY ([needsYouSqlV8Frozen]); nothing live reads it.
 ///
 /// A literal because a migration runs before anything has read a preference,
 /// and the alternative — leaving every backfilled row at 0 — would tell a user
-/// upgrading that nothing had ever needed them. It is the same number
-/// `AttentionTuning.defaultThreshold` carries; rows still open when the app
-/// launches are restated by the first settle sweep against the real setting.
+/// upgrading that nothing had ever needed them. It was the attention slider's
+/// default when v8 shipped; rows still open when the app launches are restated
+/// by the first settle sweep against the owner's Needs You slider.
 const String backfillNeedsYouThreshold = '0.5';

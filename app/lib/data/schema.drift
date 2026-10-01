@@ -58,19 +58,14 @@ CREATE TABLE messages (
   addressed_me INTEGER NOT NULL DEFAULT 0,
   reply_expected INTEGER,
   deadline TEXT,
-  -- `needs_you_verdict` is the needs-you pass's answer to the only question
-  -- the rail exists to ask: does this one want the owner? NULL means the pass
-  -- has never judged this row, which is NOT the same as "no" — the unjudged
-  -- rows ARE the worklist, so nothing may read NULL as 0. 0 is a judgement
-  -- that the message does not need the owner; 1 is a judgement that it does.
+  -- `needs_you_verdict` is INERT since v21: the pre-probability needs-you
+  -- verdict (NULL never judged, 0 no, 1 yes). Nothing writes it any more;
+  -- v21 mapped it into `needs_you_p` below, which is what Needs You reads.
   --
-  -- Written by the `needs_you` work handler and by nobody else — the
-  -- deterministic floor or, later, the model. Ingest never touches it: what a
-  -- connector knows lands in `addressed_me`, which is a fact about the
-  -- message, while this is a verdict about it.
-  --
-  -- `needs_you_reason` says why: 'teams_direct' from the floor, or the
-  -- model's own evidence sentence.
+  -- `needs_you_reason` says why the message's probability is what it is: the
+  -- decision model's templated sentence. Rows from before v21 may still carry
+  -- 'teams_direct', the retired Teams floor's token, or a language model's
+  -- evidence line from the builds that asked one.
   needs_you_verdict INTEGER,
   needs_you_reason TEXT,
   -- `gate_override` is the owner's hand on the gates, and it is tri-state in
@@ -85,6 +80,12 @@ CREATE TABLE messages (
   -- `MessageStore.stampStorylineId`): the user is telling the app what the
   -- old messages were always about, and that word outlives the passes.
   gate_override TEXT,
+  -- `needs_you_p` is the decision model's calibrated p(needs_you = yes) for
+  -- this message, written by the triage pass (and by the needs-you handler
+  -- when it re-decides). It is the ONE number Needs You reads, against the
+  -- owner's slider (`needs_you_threshold`). NULL means not decided yet, which
+  -- is NOT a low probability: an undecided message needs nobody until it is.
+  needs_you_p REAL,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 
@@ -792,6 +793,12 @@ CREATE INDEX ix_conv_labels_label
 -- state carried an owner line rides in `answers_json` as `owner_known`: the
 -- needs-you head was trained WITH that line, so an ownerless row's needs-you
 -- probability is not trusted and that pass asks the language model.
+--
+-- `vector` (v24) is the decision model's raw pooled vector of the message
+-- (float32 LE, `encodeEmbedding`), under the row's `model` tag; NULL on a
+-- backend with no vector (Kev) and on a row decided before v24. The owner's
+-- Needs You presses and their sweeps compare it against their labels with no
+-- model call (`NeedsYouEdits`).
 CREATE TABLE message_decisions (
   source TEXT NOT NULL,
   source_message_id TEXT NOT NULL,
@@ -805,7 +812,55 @@ CREATE TABLE message_decisions (
   latency_ms REAL,
   truncated INTEGER NOT NULL DEFAULT 0,
   decided_at TEXT NOT NULL,
+  vector BLOB,
   PRIMARY KEY (source, source_message_id)
+) STRICT;
+
+-- The owner's own storyline presses, as labels for the decision model's
+-- storyline questions: an append-only log, written at the press and never by
+-- an automatic pass (auto-expiry, the audit and the gates write none). KEPT —
+-- Clear AI results must not erase it, because nothing re-derives a person's
+-- word; it is what a later calibration of `member_of` and `charter_specific`
+-- reads.
+--
+-- `question` is `member_of` or `charter_specific`; `answer` is `yes` or `no`.
+-- The thread is (`source`, `conversation_key`). `same_effort` and a pair's
+-- second thread (`other_*`) are RESERVED: nothing writes them yet, so
+-- `other_*` is NULL on every row. `title` and
+-- `charter` are the storyline's words at the moment of the press, because the
+-- storyline itself can be renamed, re-chartered or cleared afterwards and the
+-- label must still say what it answered. `origin` names the press: keep,
+-- dismiss, add, remove or charter_edit.
+--
+-- `question = 'needs_you'` rows (v23) are the owner's Needs You presses:
+-- `answer` yes/no, `origin` remove/add, the message in `source_message_id`,
+-- and the decision model's vector of that message in `vector` (float32 LE,
+-- `encodeEmbedding`) under `vector_model` (the `DecisionResult.model` tag it
+-- came from). A vector is compared only under its own model; NULL on a
+-- backend with no vector (Kev), and on every storyline row.
+--
+-- `INTEGER PRIMARY KEY` for feedback_events' reason (AUTOINCREMENT drags in
+-- sqlite_sequence, which is not STRICT); nothing is deleted but a wipe and
+-- the undo or Forget of Needs You presses (`deleteNeedsYouLabels`,
+-- `deleteAllNeedsYouLabels`), and without AUTOINCREMENT a deleted highest id
+-- is handed out again — which is why the undo's delete also matches
+-- `created_at`.
+CREATE TABLE decision_labels (
+  id INTEGER PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  storyline_id TEXT,
+  source TEXT,
+  conversation_key TEXT,
+  other_source TEXT,
+  other_conversation_key TEXT,
+  title TEXT,
+  charter TEXT,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  source_message_id TEXT,
+  vector BLOB,
+  vector_model TEXT
 ) STRICT;
 
 -- The calendar mirror: the owner's PRIMARY calendar, read through bond-mcps

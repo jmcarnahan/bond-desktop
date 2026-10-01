@@ -169,6 +169,10 @@ class ScriptedLlm extends LlmClient {
   /// what most tests want.
   void answer(String schemaName, Object step) => scriptFor(schemaName, [step]);
 
+  /// Whether [schemaName] has a script of its own — how a helper adds a
+  /// default step without overriding one the test wrote.
+  bool isScripted(String schemaName) => _scripts.containsKey(schemaName);
+
   /// Which task each call was, in order. Two names for one list because that
   /// is what the doubles this replaces called it.
   List<String> get schemas => [for (final c in calls) c.schemaName];

@@ -9,14 +9,15 @@ import '../models/draft_policy.dart';
 import '../models/home_sort.dart';
 import '../models/needs_you_sort.dart';
 import '../models/people_sort.dart';
-import '../services/attention.dart';
+import '../services/decision/needs_you_predicate.dart';
 import '../services/llm/embeddings_client.dart' show EmbeddingsClient;
 import '../services/llm/model_slots.dart';
 import '../services/sync_service.dart';
 import '../services/token_store.dart';
 import 'app_providers.dart';
 
-export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
+export '../data/message_store.dart'
+    show aboutMeKey, needsYouThresholdKey;
 
 /// The setter below takes a [NeedsYouSort], so whoever reads this file for the
 /// preference has the vocabulary to change it in the same import.
@@ -95,20 +96,16 @@ enum NotifyStyle { off, inApp, native }
 /// everywhere above here.
 @immutable
 class AppPrefs {
-  /// The score a thread must reach to appear in Needs You. Below it, a thread
-  /// is still in Conversations — the slider changes what gets promoted, never
-  /// what exists.
-  final double attentionThreshold;
+  /// The Needs You slider: the cut on the decision model's p(needs_you = yes)
+  /// at or above which a message needs the owner (`needsYouAt`). Always
+  /// within [NeedsYouTuning.minThreshold]..[NeedsYouTuning.maxThreshold] and
+  /// on a [NeedsYouTuning.step] notch. Below it a thread is still in
+  /// Conversations: the slider changes what gets promoted, never what exists.
+  final double needsYouThreshold;
 
   /// What the user says about themselves and their role. Written here, read by
   /// the next phase's prompts.
   final String aboutMe;
-
-  /// The user's extra criteria for the needs-you judgement, fed fenced into
-  /// `NeedsYouTask` on top of the rules the prompt already carries. Empty is
-  /// the normal state: the defaults are meant to work for somebody who never
-  /// opens this field.
-  final String needsYouRules;
 
   /// [backendModeMcp] or [backendModeSdk]. Nothing above here parses it: the
   /// providers compare it against those two constants.
@@ -380,9 +377,8 @@ class AppPrefs {
   static const int defaultProseParallel = 1;
 
   const AppPrefs({
-    this.attentionThreshold = AttentionTuning.defaultThreshold,
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
     this.aboutMe = '',
-    this.needsYouRules = '',
     this.backendMode = backendModeMcp,
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
@@ -486,11 +482,29 @@ class AppPrefs {
   ///
   /// Your server when the placement says so and there is an address to dial;
   /// else this Mac: the managed router with the tier's chosen model, or the
-  /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The remote
-  /// is four requests wide only when its URL FOLLOWS THE BUILD (the compiled
-  /// box is vLLM with four sequences); a stored address is one at a time,
-  /// because a one-slot llama-server queues the rest past the prose client's
-  /// ceiling. The wire is read off the host.
+  /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The wire is
+  /// read off the host.
+  ///
+  /// The widths are sized to what is known about the server. Message text
+  /// runs eight wide on Your server whether or not the address follows the
+  /// build: it is the owner's own server either way (a third-party host is
+  /// refused for this role), and a server with fewer slots queues the extra
+  /// requests rather than failing them. The compiled box
+  /// (`tools/inference.sh`) runs its PROSE-ONLY profile at vLLM
+  /// `--max-num-seqs 16`, which leaves the rest to the storyline lane; with a
+  /// bulk slot (`--bulk-model`) the prose slot has 8 sequences and vLLM
+  /// queues the extra requests, their wait counting against the client's
+  /// 90 s timeout (`LlmClient.proseTimeout`, every generative stage's). The
+  /// bound is conscious: on a one-slot server the eighth text waits about
+  /// seven calls, so a server slower than ~11 s per text would time out;
+  /// the box is ~4 s. The attachment digests share extraction's eight: they
+  /// drain after it on the same lane, one kind at a time. A typed address ran
+  /// three wide until the 2026-10-01 replay, where ~730 texts took ~15 min.
+  /// Drafts keep the split: four wide on an address that follows the build,
+  /// one at a time on a stored one, because drafts stream and a stored
+  /// address may be a laptop's one-slot llama-server, which would queue the
+  /// rest past the prose client's ceiling. This Mac's server gives message
+  /// text its [proseParallel] slots, never fewer than three.
   LlmTargetSpec get generativeSpec {
     final url = effectiveGenerativeUrl;
     if (modelPlacement == ModelPlacement.box &&
@@ -504,6 +518,7 @@ class AppPrefs {
         wire: wireForHost(url),
         hasBearer: boxBigKeyStored,
         parallel: boxBigUrl.isEmpty ? 4 : 1,
+        textParallel: 8,
       );
     }
     if (managedServer) {
@@ -513,6 +528,7 @@ class AppPrefs {
         url: '$routerBase/v1/chat/completions',
         model: managedGenerativeId,
         parallel: proseParallel,
+        textParallel: proseParallel < 3 ? 3 : proseParallel,
       );
     }
     return LlmTargetSpec(
@@ -521,6 +537,7 @@ class AppPrefs {
       url: generativeUrlDefault,
       model: generativeModelDefault,
       parallel: proseParallel,
+      textParallel: proseParallel < 3 ? 3 : proseParallel,
     );
   }
 
@@ -653,9 +670,8 @@ class AppPrefs {
   bool get notifyRibbon => notifyStyle != NotifyStyle.off;
 
   AppPrefs copyWith({
-    double? attentionThreshold,
+    double? needsYouThreshold,
     String? aboutMe,
-    String? needsYouRules,
     String? backendMode,
     String? mcpServerUrl,
     bool? showActivityLog,
@@ -694,9 +710,8 @@ class AppPrefs {
     int? cloudDraftsDailyCap,
   }) =>
       AppPrefs(
-        attentionThreshold: attentionThreshold ?? this.attentionThreshold,
+        needsYouThreshold: needsYouThreshold ?? this.needsYouThreshold,
         aboutMe: aboutMe ?? this.aboutMe,
-        needsYouRules: needsYouRules ?? this.needsYouRules,
         backendMode: backendMode ?? this.backendMode,
         mcpServerUrl: mcpServerUrl ?? this.mcpServerUrl,
         showActivityLog: showActivityLog ?? this.showActivityLog,
@@ -742,8 +757,8 @@ class AppPrefs {
 /// read below and the tests that assert what landed in the table.
 /// [aboutMeKey] lives in `message_store.dart` — `wipeAll` has to clear it and
 /// that layer imports nothing above itself — and is re-exported here so this
-/// file stays where prefs keys are found.
-const String attentionThresholdKey = 'attention_threshold';
+/// file stays where prefs keys are found. So does [needsYouThresholdKey],
+/// which the store reads itself for the extraction claim's order.
 const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
@@ -1154,12 +1169,10 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _splitBoxServers(store);
     await _clearStageTargets(store);
     await _deriveModelRoles(store, tokens);
-    final raw = await store.getPref(attentionThresholdKey);
     return AppPrefs(
-      attentionThreshold: (raw == null ? null : double.tryParse(raw)) ??
-          AttentionTuning.defaultThreshold,
+      needsYouThreshold:
+          parseNeedsYouThreshold(await store.getPref(needsYouThresholdKey)),
       aboutMe: await store.getPref(aboutMeKey) ?? '',
-      needsYouRules: await store.getPref(needsYouRulesKey) ?? '',
       backendMode: _mode(await store.getPref(backendModeKey)),
       mcpServerUrl: _serverUrl(await store.getPref(mcpServerUrlKey)),
       // Anything that is not the string this notifier writes reads as off,
@@ -1616,7 +1629,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     return trimmed == null || trimmed.isEmpty ? defaultMcpServerUrl : trimmed;
   }
 
-  /// Clamped to the slider's own range, so a value that somehow arrived from
+  /// The Needs You slider's writer. Clamped to the slider's range and rounded
+  /// to its notch ([normalizeNeedsYouThreshold]), so what is stored is exactly
+  /// a number the slider can show, and a value that somehow arrived from
   /// outside it cannot make Needs You permanently empty.
   ///
   /// State first, then the write — the reverse of the order this had while the
@@ -1625,23 +1640,15 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// of lag on the one control whose whole point is watching the list change
   /// under it. The returned future is the write; the setters below are the
   /// same shape.
-  Future<void> setAttentionThreshold(double value) async {
-    final clamped = value.clamp(0.0, 1.0);
-    state = state.copyWith(attentionThreshold: clamped);
-    await _store.setPref(attentionThresholdKey, clamped.toString());
+  Future<void> setNeedsYouThreshold(double value) async {
+    final normalized = normalizeNeedsYouThreshold(value);
+    state = state.copyWith(needsYouThreshold: normalized);
+    await _store.setPref(needsYouThresholdKey, normalized.toString());
   }
 
   Future<void> setAboutMe(String value) async {
     state = state.copyWith(aboutMe: value);
     await _store.setPref(aboutMeKey, value);
-  }
-
-  /// Stored VERBATIM — the pane trims before it calls, and trimming again here
-  /// would mean the text in the field and the text the model reads are not the
-  /// same string.
-  Future<void> setNeedsYouRules(String value) async {
-    state = state.copyWith(needsYouRules: value);
-    await _store.setPref(needsYouRulesKey, value);
   }
 
   /// Switches which backend the app talks through.

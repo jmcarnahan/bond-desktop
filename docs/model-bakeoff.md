@@ -1,8 +1,14 @@
 # The model bakeoff
 
-The app runs two model slots: a **bulk** slot that does triage, extraction and
-storyline membership, and a **prose** slot that names storylines, recaps them,
-and drafts replies. Both are served locally, and both are choices rather than
+The app runs two model slots: a **bulk** slot that writes each message's text
+(`message_text`), and a **prose** slot that names storylines, recaps them,
+and drafts replies. Every classification (the gate, the triage fields,
+needs-you, the reply decision) and every storyline judgement (`member_of`,
+`same_effort`, `charter_specific`) is the decision model's, benched by `make
+golden-decision`, `make golden-storyline` and `make golden-sweep`; the slots
+below measure only the generative work. (Before the decision-model and
+decision-questions rounds the bulk slot also did triage, extraction, needs-you
+and membership, which is what the older rows measure.) Both are served locally, and both are choices rather than
 conclusions — a different model or a different runtime could be faster, more
 accurate, or cheaper in RAM, and until it is measured nobody knows which. The
 bakeoff is the apparatus for measuring it: accuracy, throughput (tokens/sec)
@@ -21,7 +27,6 @@ depends on a server being up, and each `make` target below runs it with
 | `make bench` | The bulk slot: the fixture corpus through triage and extraction, with a latency and throughput table. |
 | `make bench-prose` | The prose slot: five storylines named, three recapped and five replies drafted, printed verbatim. The draft leg streams, so its row carries a `ttft p50` column — how long the box stayed empty, beside how long the whole call took. No scorecard — a title, a recap and a draft are judged by reading them. |
 | `make ab` | The same corpus through triage and extraction on **both** slots, printing where they disagree and what each cost. |
-| `make ab-membership` | The membership eval set through the confirm task on both slots, against the answer a person would give. |
 | `make drain` | The drain concurrency race: one round per concurrency in `BENCH_K` over the same backlog. The only bench that can see batching. |
 | `make bench-pipeline` | The backlog end to end through the real queues, in both drain shapes (`PIPE_SHAPE=single\|lanes`): wall to a usable inbox, wall to the drafts, and how long a message that arrives mid-backlog waits. Needs BOTH servers. |
 | `make bench-verify` | Not a measurement — a contract check. See "Protocol". |
@@ -29,7 +34,7 @@ depends on a server being up, and each `make` target below runs it with
 | `make golden-score R=…` | Scores a golden run file, keep-only first and all items second. See "The golden set". |
 | `make golden` | The golden set through triage, needs-you and extraction on the bulk slot — the run behind a golden-ledger row. Writes the run file and the timing/cost JSON. |
 | `make golden-prose` | Reply decisions for every gold-keep item — the decision model's `reply_expected` probability from the decide server (`make decide` or `DECIDE_URL`), as the app's draft lane reads it — and drafts for the reply-rubric items, on the prose slot. |
-| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep, the naming pass, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, bulk and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector. See "The golden set". |
+| `make golden-sweep GOLDEN_RUN=…` | The app's own filing path over the golden set: the sweep's grouping, the naming pass, the charter check, the per-member confirms and the assign shortlist, scored by membership against the gold registry. Needs the embed, decision (`charter_specific`, `member_of`) and prose servers. `SWEEP_CARD` picks whether the people on a thread are inside the clustering vector; `SWEEP_CHARTER` picks the charter check. See "The golden set". |
 | `make golden-vector GOLDEN_RUN=…` | The clustering vector alone, added 2026-09-19: the same seeding as `golden-sweep`, stopped the moment the mailbox is embedded. The clusters it WOULD form and their gold purity, every pool pair by cosine on two scales, by subject-word overlap and by shared people, and one separation line. Since Round F it also counts the series pre-pass it does not apply, printing `series` and `series_excluded` beside `folded`, which is how far its clusters could differ from a sweep's on the same pool. Needs only the embedding server, takes about a minute, asks no model anything and scores nothing. See "The golden set". |
 | `make golden-gate` | Offline, no server: the golden set through the app's own gates — direction, sender address and body. Tier 2 (headers) and the Teams ingest gates are not in the set and go unmeasured. `GOLDEN_RUN=` adds the model's `notification` proxy column. See "The golden set". |
 
@@ -70,8 +75,7 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   `--parallel` slots, so `SLOTS=2` at 16K is 8K a slot; `make model SLOTS=2
   MODEL_CTX=32768` is how a second slot is bought without narrowing either one.
 - `GOLDEN`, `GOLDEN_REGISTRY`, `GOLDEN_CTX`, `GOLDEN_K`,
-  `GOLDEN_CHARTER_CAP`, `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see
-  "The golden set".
+  `GOLDEN_OWNER_NAME` / `GOLDEN_OWNER_ADDRESS` — see "The golden set".
 - `SWEEP_CARD` — which clustering card `make golden-sweep` and `make
   golden-vector` embed. Five words since 2026-09-19: `topics`, the card the app
   ships since 2026-09-18 with its people segment left empty; `participants`,
@@ -79,6 +83,9 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   the durable half with the summary dropped; and `summary`, what the thread is
   about with no subject line. Defaults to `topics`, which is to say to the app.
   Anything else fails loudly rather than defaulting.
+- `SWEEP_CHARTER` — which check a named cluster's charter faces: `model` (the
+  decision model's `charter_specific`, what ships) or `lint` (the regex
+  charter lint). Defaults to `model`. Anything else fails loudly.
 - `SWEEP_STAGE` — how much of the sweep test runs: `full`, the whole filing
   path on three servers, or `vector`, which stops after the seeding and reads
   the geometry alone on one. Defaults to `full`; `make golden-vector` passes
@@ -281,15 +288,14 @@ of the set the rung actually touched.
 **What `make golden` runs since Phase 6.** Per item: the live decision model
 (`make decide`, `DECIDE_URL`; heads from `DECIDE_HEADS`) for gate, category,
 urgency, the booleans, intent and importance — the policy gate, the same
-answers `make golden-decision` scores; the app's needs-you ladder (the floor,
-then the decision's p(yes) against 0.65 / 0.35, and `NeedsYouTask` on the
-bulk slot only inside the band — the cold-outreach bar needs the owner's
-sender history, which a golden item does not carry, so the ordinary bar is
-used throughout); and ONE `MessageTextTask` call on the bulk slot for summary,
-action items, deadline, topics and project. One run file carries all of it,
-`label` and `evidence` absent. The per-item line prints `decision <ms>`,
-`needs_you <ms|floor|decided>`, `text <ms>` and counts; the summary line
-prints the decision p50/p95 and the band size. Rows before Phase 6 are the
+answers `make golden-decision` scores; the app's needs-you rule (the
+decision's p(yes) at or above the slider's default,
+`NeedsYouTuning.defaultThreshold`, with no floor and no language model; rows
+before 2026-09-29 ran the band on `NeedsYouTask`); and ONE `MessageTextTask`
+call on the bulk slot for summary, action items, deadline, topics and project.
+One run file carries all of it, `label` and `evidence` absent. The per-item
+line prints `decision <ms>`, `needs_you decided`, `text <ms>` and counts; the
+summary line prints the decision p50/p95. Rows before Phase 6 are the
 TriageTask + NeedsYouTask + ExtractTask pipeline on the bulk slot (the
 baseline for the Phase 6 comparison is `p6-baseline-4b`).
 
@@ -322,23 +328,23 @@ schema 1 like every other bench result, and carries `extra.run_file`,
 quoted from one file and scored from the other.
 
 The replay runs the app's own tasks with the HANDLERS' parameters, not a
-bench's: triage on the defaults, needs-you and extraction at temperature 0,
-and the deterministic needs-you floor applied FIRST — a floor item never calls
-the model at all and its row is marked `floor: true`, so a reader can tell the
-model's recall from the floor's. The owner line comes from `GOLDEN_OWNER_NAME`
+bench's: the message-text call at temperature 0, and needs-you as the slider
+rule with no floor (rows before 2026-09-29 applied the deterministic Teams
+floor first and marked a floor item `floor: true`; the run file keeps the
+field, always false now). The owner line comes from `GOLDEN_OWNER_NAME`
 / `GOLDEN_OWNER_ADDRESS`; a run with neither set says so in its banner, because
-needs-you then judges "does this name the owner" with no owner to name.
+the decision state then carries no owner to name.
 `msgs/min` is items over wall time for the whole run at the `GOLDEN_K` it was
 given, which is the throughput a backlog is felt in. Cost comes from the dated
 Bedrock price table in `app/test/fixtures/golden_prices.dart`: zero for a local
 server, and BLANK — never zero — for a remote model the table does not price,
 because an unpriced cloud call is unknown rather than free.
 
-Two things the needs-you replay leaves out, for the same reason the draft
-below leaves things out: the attachment digests the handler passes (the set
-carries none) and this machine's custom needs-you rules — the replay runs the
-default prompt, so a row measures the shipped prompt on the model rather than
-one machine's rules on it.
+The needs-you replay is the app's rule and nothing else: the decision model's
+p(needs_you = yes) at or above the slider's default. Since 2026-09-29 there is
+no needs-you prompt, so no attachment digests and no owner-written rules to
+leave out; rows before that date ran the band on the default `NeedsYouTask`
+prompt.
 
 One comparability caveat. The replay runs triage, needs-you and extraction on
 gold-DROP items too — the gate strata need reading — where the shipping app
@@ -563,63 +569,44 @@ evidence · extract evidence · draft`, as keep-only pass rates. The baseline
 appears once, carrying both judges' numbers side by side: the same stored
 output, read twice by two different readers.
 
-**Storyline membership.** Filing is the stage the golden set says has never
-once been right — the shipping app scores 42 of 99 on `storyline.id` with no
-correct positive — and the only model in it is `ConfirmMembershipTask`. So
-there is a third replay that asks that task alone, per item, against a BOUNDED
-candidate list: the item's gold storyline when it has one, every registry
-storyline gold marks forbidden on it, and three more drawn from the rest of the
-registry. That is three to six questions an item, about four and a half on
-average and 453 over the set, against the three thousand a full sweep of thirty
-storylines would ask. Each registry storyline arrives as the app's own
-`Storyline` with its charter as the membership criterion — clamped at 400
-characters at prompt time, exactly as in the app, which bites on most real
-charters — and with its people unioned out of the set's OTHER items filed
-under it. The candidate's own thread is never among the members it is judged
-against, as in the app, where a candidate is by construction not yet one; a
-whole-set union would hand the model the candidate card's own participants
-segment back as the storyline's people, on exactly the question the headline
-gold-accept rate is read from. A storyline whose only golden item IS the
-candidate therefore arrives with an empty People line, which is thinner than
-the prompt the app would send and so penalises rather than flatters — the run
-counts how many gold candidates were asked that way. The candidate card is
-built the way `enrichedCardForConversationRow` builds one: the subject
-stripped of its Re:/Fw: markers, the conversation's people, and the extraction
-topics and triage summary of a BULK RUN FILE, passed as `GOLDEN_RUN=`. The
-card is therefore the one the app would carry if the model that wrote that
-run file were the one shipping, which is the only honest way to card a thread
-the replay never triaged. The extras are drawn by a shuffle seeded with the
-item's id, so two candidates sit the same exam; the anti-storylines are never
-instantiated, because an anti-storyline has no charter to judge against and is
-scored through the real storylines' forbidden lists instead.
+**Storyline membership.** Since the decision-questions round every membership
+judgement is the decision model's `member_of` (`StorylineJudge`,
+`docs/pipeline/06-storylines.md`), and this replay asks exactly that, per item,
+against a BOUNDED candidate list: the item's gold storyline when it has one,
+every registry storyline gold marks forbidden on it, and three more drawn from
+the rest of the registry by a shuffle seeded with the item's id. That is three
+to six questions an item, 453 over the set. Each registry storyline arrives as
+the app's own `Storyline` with its charter as the criterion; each thread is the
+app's own thread text, read from the golden mailbox seeded exactly as
+`golden-sweep` seeds it (`GOLDEN_RUN=` supplies that mailbox's triage
+summaries and extraction topics; the embedding server is used if it is up and
+its vectors are not read). The anti-storylines are never instantiated, because
+an anti-storyline has no charter to judge against and is scored through the
+real storylines' forbidden lists instead.
 
-What this does NOT measure is most of the stage. The sweep that proposes
-storylines, the embeddings and thresholds that shortlist them, the recruit laps
-and the chaining are code, and this replay is blind to all of it: it hands the
-model a list a human wrote. The owner's kept and removed example fences ride
-in empty, because a gold storyline has no owner history to teach it. And the
-economics do not transfer — the app asks one confirmation per assignment and
-this asks four or five per message, so the `$/1K msgs` on a storyline row is
-per thousand messages FILED through the bounded list, not per thousand
-triaged.
+What this does NOT measure is most of the stage: the retrieval that shortlists
+storylines, the sweep, the recruit laps. It hands the model a list a human
+wrote. And the economics do not transfer — the app asks up to six judgements
+per assignment and this asks four or five per message.
 
 Scoring has two halves. The derived `storyline.id` is the accepted candidate
-with the highest confidence — `low` counts as a no, the service's own rule,
-and a tie at the top is broken alphabetically, blind to gold, with the ties
-counted so a reader knows how often the rule decided anything. That id goes
-into a run file and `make golden-score` applies the toolkit's
-must/should/may/forbidden rules to it, the same scorer as every other row. An
-item that lost a candidate call to a failure is left UNFILED, so the scorer
-reads it as not attempted rather than as a miss. Beside the scorer the run
-prints its own direct rates, which a single derived id cannot express:
-gold-accept on the `must` and `should` populations, forbidden-accept,
-extra-accept, how often a gold-`none` item was filed nowhere, and how many
-yeses were hedged into `low` and thrown away.
+(p at `StorylinePolicy.acceptActive` or above, the service's rule for a kept
+storyline) with the highest p, and a tie at the top is broken alphabetically,
+blind to gold, with the ties counted. That id goes into a run file and
+`make golden-score` applies the toolkit's must/should/may/forbidden rules to
+it. An item that lost a candidate call to a failure is left UNFILED, so the
+scorer reads it as not attempted rather than as a miss. Beside the scorer the
+run prints gold-accept on the `must` and `should` populations,
+forbidden-accept, extra-accept, how often a gold-`none` item was filed
+nowhere, and the gold candidate's p on every item line. Rows taken before the
+round asked `ConfirmMembershipTask` on the bulk slot, with a charter clamp
+(`GOLDEN_CHARTER_CAP`) that no longer exists; they stay in the ledger as
+history.
 
 ```sh
-make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json         # the shipping 4B
-make golden-storyline GOLDEN_RUN=… BENCH_URL=… BENCH_MODEL=… BENCH_LABEL=…  # a candidate on the bulk slot
-make golden-score R=tmp/bench/golden-run-<bulk>-storyline-….json           # storyline.id, must/should/forbidden rules
+make golden-storyline GOLDEN_RUN=tmp/bench/golden-run-<bulk>-….json   # member_of on make decide
+make golden-storyline GOLDEN_RUN=… DECIDE_URL=…                       # another decision server
+make golden-score R=tmp/bench/golden-run-decision-storyline-….json    # storyline.id, must/should/forbidden rules
 ```
 
 **The sweep, replayed.** The block above measures the model handed a
@@ -1577,8 +1564,10 @@ neighbours where the box's 4B accepts 22%, the loosest of the four, and that
 speed buys nothing a confirm needs. No candidate meets the roadmap's target of
 at or above 88% with neighbours at or below 10% after the prompt. The target
 stands unmet and the rows say so. For E1, where targets become settings, the
-confirm stage defaults to `Local fast`, and to the GPU 27B target whenever one
-is configured.
+confirm stage then defaulted to `Local fast`, and to the GPU 27B target
+whenever one was configured. (History: the decision-questions round, 2026-09-29,
+deleted the generative confirm stage; membership is now the decision model's
+`member_of` question.)
 
 
 **Phase 2 (2026-09-19): the vector moved, the grouping did not.** Neither
@@ -1592,7 +1581,7 @@ positives against five, declined clusters 75% pure against 54% — and the
 model-read grouping was built on top of it in the same phase. The grouping then
 grouped nothing: six calls over three passes, zero groups, four empty answers
 and six neighbourhoods judged unfit, on the box 27B and on the local 27B alike.
-It ships dark behind `GroupingMode.cosine`, with its rows above, because a pass
+It ships dark behind `GroupingMode.cosine` (since deleted), with its rows above, because a pass
 that abstains costs seven seconds and teaches the next round where to look.
 
 The namer is the lever the rows exposed by accident. The same two formed
@@ -1654,7 +1643,7 @@ naming no group, six pieces judged unfit, 6.9 s of wall and no wire failures.
 Two box passes and one local 27B pass were identical. `storyline.id` reads
 50 of 98 by abstention with no correct positive. Its ship rule wanted
 positives at or above 10, forbidden hits at or below 3, an id above 50 and a
-formed purity at or above 60%, so `GroupingMode.cosine` stays the default and
+formed purity at or above 60%, so `GroupingMode.cosine` (since deleted) stays the default and
 the task ships dark behind it. The reason is the base rate again: at the
 neighbourhood cosine the pool's linked pairs run about three cross-effort to
 one same-effort, and a model shown six such threads declines to call any two
@@ -1967,6 +1956,130 @@ reply_expected 49/55, needs_you 42/55 (p ≥ 0.5). Of the 29 category disagreeme
 17 are the 4B's `normal` read as `low` and 4 its `normal` read as `high`. The learned gate would add 2 drops to the rules' 55 keeps. Needs-you:
 41 yes, 11 no and 3 in the band, the only 3 of 55 that still cost a generative call.
 
+**Needs-you threshold sweep** (2026-09-29, the stored golden decision run, keep-only 76 items,
+`needs_you` scored at each threshold): 0.20→66, 0.25→67, 0.30→69 (fp1 fn6), 0.35→68, 0.40→67,
+0.45→68, 0.50→67 (fp0 fn9), 0.55→67, 0.60–0.75→66, 0.80→65 of 76. Default on v2 0.30 (moved to
+0.35 with v3, below), the low end of the 0.30–0.55 plateau (`NeedsYouTuning.defaultThreshold`, the owner's Needs You slider);
+the band and the 27B needs-you call removed.
+
+**The v2 models as they are, on the new questions** (2026-09-29, decision-questions round Phase 2, no training;
+jev-prototype `distill/eval_questions/`, golden eval sets rebuilt from the golden set with the app's bench rules:
+85 same-effort / 1,346 cross-effort pairs, 98 confirm items, 453 candidate calls; counts and metrics only):
+
+| Question (bar) | Kev 4B v2 | ModernBERT v2 | Baseline |
+|---|---|---|---|
+| same_effort, false links at 70% recall (≤ 5%) | 8.0% (AUC 0.919; 3.9% at 50% recall) | 68% (AUC 0.552: its vector carries no effort signal) | app cosine 15%; Qwen cosine on the thread text 36.7% |
+| member_of on the confirm bench (≥ 88/98, ≤ 10% forbidden) | 87/98 at 0.5 (88 at its best τ), 20.5% forbidden accepts | 69/98 (charter cosine, τ fitted on golden) | box 27B 84/98, 8%; Qwen charter cosine 78/98, 33% |
+| charter_specific (≥ the lint) | 94.1% golden (lint 91.2%), 87.5% on 40 synthetic (lint 80.0%) | no answer | the regex lint |
+| needs_you, default prompt, keep-only (≥ 88) | 94.7 | 89.5 at 0.50, 86.8 at 0.30 | trained path: ModernBERT 90.8 at 0.30, Kev 96.1 |
+| an edited needs-you prompt, teacher flips reproduced (≥ 70%) | 7.1% (agreement 91.1%) | 4.2% (agreement 88.7%) | Jev itself flips 4.2% of answers under edits and 5.0% under paraphrases |
+
+Reading: neither student follows an edited prompt, and the teacher barely does on random messages, so the owner
+chose the slider as the only Needs You control this round. ModernBERT cannot judge storylines without training;
+Kev is close but accepts too many threads that belong elsewhere. Both are being trained on storyline labels
+(jev-prototype `docs/PLAN-storyline-questions-training.md`); the v3 rows land here.
+
+**ModernBERT v3 (2026-09-30)**, `bond-decide-mbl-v3` on this Mac (`make decide`, heads schema 2,
+twelve questions), embeddings on this Mac, the box 27B (vLLM FP8, `qwen3.8`) as namer, `GOLDEN_RUN` =
+the shipped one-text-call run `golden-run-p6-candidate2-27b-box-20260928-150738.json`. Counts only.
+
+The message fields through the app's Dart path (`make golden-decision`, keep-only 76 items):
+
+| model | gate.verdict | category | urgency | needs_action | reply_expected | needs_you | intent | importance |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v2 (the row of record above) | 94 | 96 | 89 | 86 | 84 | 88 | 83 | 74 |
+| v3 | 94 | 95 | 87 | 87 | 84 | 88 | 83 | 75 |
+
+p50 42 ms, p95 283 ms per item; 16 of 100 states took the truncation path. Every field is within
+two points of v2.
+
+**Needs-you cut sweep on v3** (keep-only 76, correct of 76): 0.20→69 (fp4 fn3), 0.25→67,
+0.30→67 (fp3 fn6), **0.35→70 (fp0 fn6)**, 0.40→69, 0.45→69, 0.50–0.60→67, 0.65–0.80→66. The v2
+sweep above peaked at 0.30→69. The default moved with the model: `NeedsYouTuning.defaultThreshold`
+0.30 → **0.35**, the best cut and the only one with no false yes.
+
+**Storyline questions on v3:**
+
+| bench | reading | against |
+| --- | --- | --- |
+| `make golden-storyline` (member_of confirm, accept 0.50) | 89/98; must 40/48, should 5/15; forbidden 6/88 (7%); extra 1/300; derived gold 44 / none 54 / other 2; 453 calls in 17 s | box 27B confirm 84/98, 8%; the bar was ≥ 88/98 with ≤ 10% forbidden, met |
+| `make golden-pairs` (same_effort, 85 same / 1,346 cross, 71 threads) | AUC 0.888; false links 5% at 50% recall (p 0.01), 13% at 70% (p 0.002), 33% at 90%; 123 s | bar ≤ 5% at 70% recall, missed; Kev v2 as-is 8.0%, app cosine 15% |
+| `make golden-declared` (recruit via member_of), acceptActive 0.50 | 84/98, 39 correct positives, 4 forbidden, recruited 43 of 60 calls | box 27B 86/98, 42, 1 |
+| `make golden-declared`, acceptActive 0.60 | 84/98, 35 correct positives, 4 forbidden | — |
+
+The sweep (`make golden-sweep`; id score / correct positives / forbidden hits / formed / namer calls):
+
+| grouping | charter | knob | storyline.id | correct positives | forbidden hits | formed | namer calls | note | shipped |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cosine | lint | — | 54/98 | 17 | 3 | 7 | 9 | the NEW baseline (the namer no longer gatekeeps), not the old 59/98 configuration | no |
+| cosine | model | acceptSuggested 0.70 | 59/98 | 14 | 3 | 4 | 8 | charter refused 4 of 8 | no |
+| cosine | model | acceptSuggested 0.74 | 60/98 | 16 | 3 | 4 | 9 | charter refused 5 of 9 | **yes** |
+| decision | model | linkTau 0.0135, budget 400 | 50/98 | 0 | 0 | 0 | 0 | first pass hit the budget (400 scored, 166 deferred, 5 clusters deferred) and the loop ended after 1 pass | no |
+| decision | model | linkTau 0.0018, budget 400 | 57/98 | 13 | 5 | 6 | 10 | purity 55%; 828 scored / 2,011 cached over 6 passes | no |
+| decision | model | linkTau 0.004, budget 2000 | 55/98 | 13 | 4 | 8 | 14 | purity 39% | no |
+| decision | model | linkTau 0.008, budget 2000 | 51/98 | 18 | 7 | 10 | 11 | purity 53% | no |
+
+Reading it: the decision grouping (cosine proposed pairs, `same_effort` judged them, average
+linkage at `linkTau` formed the clusters) does not beat cosine on this set at any `linkTau` taken. Its
+`same_effort` signal on the golden pool is real (AUC 0.888) but weak where it matters, with p
+compressed near zero, so a tau low enough to link real pairs links wrong ones too. What ships is
+the cosine grouping with the model charter check (`CharterCheck.model`: 59 and 60 against the
+lint's 54) and `acceptSuggested` 0.74. `acceptActive` stays 0.50 (storyline 89/98; declared 84 at
+both 0.50 and 0.60, four more correct positives at 0.50 for no more forbidden). The decision
+grouping was REMOVED on 2026-09-30 because it did not beat cosine: the grouping, its pair cache
+(`pair_decisions`), `linkTau` and the pair budget are gone from the app, and the seven rows above
+stay as the record of what was measured. The budget-bound 0.0135 row was never re-measured.
+
+Run files, all under `tmp/bench/`: `golden-decision-golden-decision-20260930-145158.json`
+(with `golden-run-decision-argmax-…` and `golden-run-decision-policy-20260930-145158.json`);
+`golden-storyline-decision-20260930-145352.json`; `golden-pairs-decision-20260930-145633.json`;
+sweep rows in table order `golden-sweep-decision-20260930-145838.json`, `…-150350`, `…-151028`,
+`…-150003`, `…-150223`, `…-150649`, `…-150906`; declared `…-151127` (0.50) and `…-151225` (0.60),
+each with its `golden-run-decision-…` companion at the same stamp.
+
+**The sweep on the decision model.** The rows are taken (the v3 table above). Each command, from a
+clean `git archive` copy with the embed, decision and prose servers up:
+
+```
+make golden-sweep GOLDEN_RUN=<run>                                        # what ships: cosine grouping, model charter check
+make golden-sweep GOLDEN_RUN=<run> SWEEP_CHARTER=lint                     # the charter baseline, same grouping
+make golden-pairs GOLDEN_RUN=<run>                                        # same_effort alone over golden-vector's pool pairs: AUC, p at 70% recall, false links at 50/70/90% (DECIDE_URL=…/v1/systemone benches Kev v3 through the app's wire)
+```
+
+The shipped configuration is the cosine grouping with `SWEEP_CHARTER=model`,
+`StorylinePolicy.acceptSuggested` 0.74 and `acceptActive` 0.50. What would bring a pair grouping
+back: a `same_effort` student with false links at or under 5% at 70% recall on `make golden-pairs`,
+and then a grouping built on it scoring above 60/98 on `make golden-sweep` with no more than 3
+forbidden hits, taken on the same day and tree as a cosine row. A move of any `StorylinePolicy`
+number takes a row on each side.
+
+**Pre-extraction cards (2026-09-30, after the owner's sample-sandbox replay).** The question: can
+the clustering vector be built from the rows alone, so the storyline lane runs beside the
+message-text stage instead of behind it? Two cards were added as bench arms (`SWEEP_CARD=text`,
+the judge's own thread text from `storylineThreadTextFor`; `SWEEP_CARD=excerpt`, the subject and
+the newest kept message's first 300 code points, no topics), the rule written first: the one with
+the lower cross-effort rate at its recall-70 rung ships if its sweep row stays within four of
+60/98 with at most three forbidden hits. Same servers as the v3 rows (embed :8081, `make decide`
+:8083 serving v3, the box 27B as namer), same `GOLDEN_RUN`, the golden mailbox seeded with bodies.
+
+| card | `golden-vector` recall-70 cosine / cross | cross-5 cosine | `golden-sweep` storyline.id | correct positives | forbidden | items filed into a non-effort |
+|---|---|---|---|---|---|---|
+| `topics` (ships; the 27B's topics and summary) | 0.43 / 15% | 0.48 | **60/98** (reproduced on the same tree, 2 passes) | 16 | 3 | 0 |
+| `excerpt` | 0.42 / 20% | 0.49 | 47/98 (summary namer) · 45/98 (excerpt namer) | 5 · 6 | 2 · 0 | 24 · 32 |
+| `text` | 0.43 / 36% | 0.52 | 45/98 (summary namer) | 7 | 1 | 23 |
+| `topics`, namer reading the message excerpt instead of the summary | — | — | 55/98 | 19 | 2 | 18 |
+
+The vector read on `golden-vector` says the excerpt is nearly the topics card; the sweep says
+otherwise: every card built before extraction proposes junk — two dozen threads filed into
+storylines that are no effort at all, where the topics card files none. The 27B's abstraction is
+what makes a cluster clean, and the namer, too, reads a summary better than raw text (55 against
+60, with 18 junk filings). So nothing here ships: the card stays `topics`, the assign stays behind
+the message-text stage, the two cards stay as measured arms. What DID come out of the round is
+the width (message text and attachment digests eight wide on the build's box, `textParallel`) and
+the storyline lane being woken per queued assign rather than at the end of the whole fast drain.
+Run files `golden-vector-embed-local-{text,excerpt}-prefix-86-20260930-2241*.json` and
+`golden-sweep-decision-20260930-224520/224804/224912/225110/225221/225409/225511.json`.
+
 **The calendar command head** (Phase 9 of the calendar round; `make calendar-heads`, owner-run
 against `make decide`). A second linear head on the same encoder, fitted by
 `tools/calendar_heads/fit.py` on the raw pooled vector of a typed Day-bar command, over the
@@ -1984,7 +2097,7 @@ against the installed heads at every call; the qhash names only the question set
 
 | date | encoder_model (qhash) | head held-out acc (n) | lexicon held-out acc (n) | head hard acc (n) | lexicon hard acc (n) | above the 0.80 bar | l2 / T | adopted | note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-30 | pending owner run (qhash `6eba387492208260`; GGUF `bond-decide-mbl-v2swap-f16.gguf`) | pending owner run | pending owner run | pending owner run | pending owner run | pending owner run | pending | pending | serverless, the lexicon reads 0.710 (n=100) held-out and 0.140 (n=50) hard on this set; it read 0.830 held-out before fifteen template-sharing held-out and hard lines were rephrased |
+| 2026-09-30 | pending owner run (copied from the installed `decide-heads.json` at fit time — the v3 question set `f495a7dc48aa34d5` since the decision-questions round) | pending owner run | pending owner run | pending owner run | pending owner run | pending owner run | pending | pending | serverless, the lexicon reads 0.710 (n=100) held-out and 0.140 (n=50) hard on this set; it read 0.830 held-out before fifteen template-sharing held-out and hard lines were rephrased |
 
 To fill the pending cells, run `make calendar-heads` with the decision server live. Copy its
 four accuracies and its `adoption: go | no-go (…)` line into a new dated row, and run
@@ -2658,9 +2771,13 @@ budget is not the cause and neither is the wire. `GroupingMode.pool` ships dark
 behind `StorylineTuning.groupingMode = cosine`, beside `model`. Both dark modes
 now say the same thing: the base rate, 1,346 cross-effort pairs against 85, is
 not a prompt problem and no amount of context shown at once dissolves it.
+(History: both dark modes, `GroupThreadsTask` and the `storyline_group` stage
+were deleted in the decision-questions round, and the `same_effort` pair
+grouping that briefly replaced them was removed on 2026-09-30; the cosine
+grouping is the one left.)
 
 **The 1024-token budgets.** `NameStorylineTask.maxTokens` and
-`GroupThreadsTask.maxTokens` are task constants now rather than the generic 512.
+`GroupThreadsTask.maxTokens` became task constants then, rather than the generic 512.
 
 | pass | namer | storyline.id | correct positives | forbidden | naming calls / failures | wall |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -2804,6 +2921,65 @@ formable items, the sweep files 9 of those 35 correctly with the box namer and
 whole pool at once buys none. The re-based exit,
 70 of 98 on the declared path with forbidden hits at or below 3, is MET at 86
 of 98 with 1.
+
+### Needs You audit (2026-10-01)
+
+The owner judged the 321 threads the sample sandbox listed under Needs You on
+the v3 model at the 0.35 cut: 80 right, 185 wrong, 56 on the bubble (319
+matched to the database for the offline measurements; counts only, no mail
+leaves the scratchpad). Two templated families, of 79 and 46 threads, make up
+most of the wrong ones, and the teacher labels both as needs-you, so the fix
+is the owner's own answer rather than a refit. What shipped is the exemplar
+memory (`NeedsYouExemplars`, `docs/pipeline/11-needs-you.md`, "The owner's
+answer"): a press labels the message with its raw pooled v3 vector, and a
+message within cosine τ of a label takes the label's answer.
+
+Exemplar radius, leave-one-out over the 319 threads, one press suppressing
+every thread within τ (raw vectors; near-duplicates sit at 0.99 or above, the
+median unrelated pair at 0.27; centering changes nothing):
+
+| τ | presses to clear all 185 wrong | wrong with a same-verdict neighbour | correct caught | bubble caught |
+|---|---|---|---|---|
+| 0.90 | 49 | 144 | 0 | 2 |
+| 0.95 | 52 | 140 | 0 | 1 |
+| **0.97** (shipped, `matchCosine`) | 54 | 137 | 0 | 0 |
+| 0.99 | 56 | 135 | 0 | 0 |
+
+At 0.97 the greedy groups are 79, 46, 4, 4, 2 and 2 threads, then 48
+singletons: **two presses clear 125 of the 185 wrong threads with no correct
+or bubble thread caught**, ten presses 141.
+
+The refit that did not ship, a logistic needs_you head on the frozen v3
+encoder (train 38,391 / dev 5,956 / golden 100, temperature on dev):
+
+| targets | dev agreement | golden keep-only @0.35 | audit @0.35 (correct in / wrong in) | @0.5 golden / audit correct / audit wrong |
+|---|---|---|---|---|
+| shipped v3 head | 97.5% | 70/76 (fp0 fn6) | 78/79 / 181/185 | 67/76 / 77 / 170 |
+| defined framing only | 97.2–98.2% | 69–70/76 (fp1) | 77–78 / 170–171 | 66–68/76 / 75–77 / 83–161 |
+
+It clears at most 15 wrong threads at the cut, or costs up to four golden
+items at 0.5,
+because the round-two labels the model trained on say yes to both families.
+
+**Replay (2026-10-01).** Forget everything and re-sync on the sample sandbox,
+processing on (counts only). Triage decided 3,565 kept messages in ~6 min,
+every decision storing its vector. Message text then ran 3 wide (a typed
+Your-server address) at ~20 per 30 s, and no storyline formed within 15 min:
+the sweep deferred on the extraction floor every minute, and every assign was a
+no-op with no storyline to join. The progressive sweep
+(`sweepProgressStep` 40, `docs/pipeline/06-storylines.md`) and eight-wide
+message text on Your server followed, then refresh/recap deferral while
+unsettled and the Teams pull with mail on a Forget.
+
+| replay (same sandbox, cold start) | Teams arrival | triage | message text (625) | first storyline | assign backlog peak | refresh/recap calls while unsettled |
+|---|---|---|---|---|---|---|
+| 1 — settled-only sweep, text 3 wide | +8 min | 2.5 + 2.5 min, text paused between | ~12.5 min at ~20 per 30 s | none in 15 min | — | — |
+| 2 — progressive sweep, text 8 wide | +8 min | 2.5 + 2.5 min, text paused ~2 min | ~12.5 min at ~30 per 30 s (per-call latency ~2×: the L40S is the ceiling) | +90 s after text; 4 progressive passes, 7–26 s | 40–65 | ~15 (10–32 s each) |
+| 3 — + refresh/recap deferred, Teams with mail | with mail | one window, ~5.5 min | **9 min** | +90 s; passes 10–30 s | 3–13 | 0 (ran once settled) |
+
+Processing-on to the last text: ~21 min (replay 2) → ~14.5 min (replay 3).
+Progressive vs deferred sweep rows in replay 3: 5 progressive (2 of them rail
+full), 6 deferred, 1 settled. Eight wide buys ~1.5× on one L40S, not more.
 
 ## oMLX
 

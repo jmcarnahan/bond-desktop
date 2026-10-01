@@ -205,8 +205,8 @@ String _subjectLine(Message message) => switch (message.source) {
 /// the digest the packer builds (its own cap is 2000): the digest is CONTEXT
 /// sitting above the message being judged, and a context block that outweighs
 /// the message is how a loud older turn gets classified in place of the new
-/// one. One number, shared by every task that fences a digest, so the three
-/// prompts cannot come to disagree about how much history a stage reads.
+/// one. One number, shared by every task that fences a digest, so no two
+/// prompts can come to disagree about how much history a stage reads.
 const int threadDigestCap = 900;
 
 /// Trims [digest] to [cap] by WHOLE LINES, dropping from the OLD end.
@@ -331,8 +331,6 @@ String _requote(String header, int quoted) => header.replaceFirstMapped(
 /// Lives here rather than inside one task because two prompts render this
 /// tail — triage, and extraction at the rungs the replay prices — and a
 /// per-task copy is how the two would come to quote a thread differently.
-/// Needs-you is the deliberate exception: its `_contextText` quotes a
-/// `From:` / `Sent:` transcript of its own and is not meant to converge.
 /// [max] messages from the NEWEST end, each clipped at [cap].
 String buildThreadTailText(List<Message> thread, {int max = 3, int cap = 300}) {
   if (thread.isEmpty) return '';

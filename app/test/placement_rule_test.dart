@@ -74,11 +74,15 @@ void main() {
         expect(spec.url, 'http://127.0.0.1:8080/v1/chat/completions');
         expect(spec.model, routerProseId, reason: id);
       }
-      // Fifteen (triage and extraction became message_text, the reply
-      // decision became the decision model's, and the calendar round added
-      // meeting_brief and calendar_intent), so the list has not quietly
+      // Twelve (triage and extraction became message_text, the reply decision
+      // became the decision model's, and needs-you, storyline membership and
+      // storyline grouping ask no language model at all; the calendar round
+      // added meeting_brief and calendar_intent), so the list has not quietly
       // shrunk.
-      expect(generativeStages, hasLength(15));
+      expect(generativeStages, hasLength(12));
+      expect(generativeStages, isNot(contains('needs_you')));
+      expect(generativeStages, isNot(contains('storyline_membership')));
+      expect(generativeStages, isNot(contains('storyline_group')));
     });
 
     test('managed on the inbox tier: the 4B', () {
@@ -126,15 +130,6 @@ void main() {
       }
     });
 
-    test('the confirm is plain generative, on either placement', () {
-      // It was the one stage whose role depended on the placement.
-      expect(onBox.specForStage('storyline_membership')!.id, boxProseId);
-      expect(const AppPrefs().specForStage('storyline_membership')!.id,
-          localGenerativeId);
-      expect(onBox.specForStage('storyline_membership'),
-          onBox.specForStage('message_text'));
-    });
-
     test('the discovered model name is asked for, and the wire read off the '
         'host', () {
       const named = AppPrefs(
@@ -162,6 +157,28 @@ void main() {
     test('the width is the drafts-in-flight setting here', () {
       expect(const AppPrefs(proseParallel: 2).specForStage('draft_reply')!
           .parallel, 2);
+      expect(onBox.specForStage('draft_reply')!.parallel, 1);
+    });
+
+    test('the text width: this Mac at least three, Your server eight', () {
+      // Message text (extraction and the attachment digests) reads its own
+      // width. This Mac gives it the server's slots, never fewer than three;
+      // Your server runs it eight wide, a typed address included — it is the
+      // owner's own server either way. (An address that FOLLOWS the build
+      // takes the same branch with the same eight; `flutter test` cannot
+      // construct one, because `boxUrlDefault` is empty here.)
+      expect(const AppPrefs(proseParallel: 1)
+          .specForStage('message_text')!.textParallel, 3);
+      expect(const AppPrefs(proseParallel: 6)
+          .specForStage('message_text')!.textParallel, 6);
+      expect(const AppPrefs(proseParallel: 6, managedServer: false)
+          .specForStage('message_text')!.textParallel, 6);
+      expect(const AppPrefs(proseParallel: 2, managedServer: false)
+          .specForStage('message_text')!.textParallel, 3);
+      expect(onBox.specForStage('message_text')!.textParallel, 8);
+      expect(onBox.specForStage('attachment_digest')!.textParallel, 8);
+      // The drafts' width is not this one: a typed address still drafts one
+      // at a time.
       expect(onBox.specForStage('draft_reply')!.parallel, 1);
     });
   });

@@ -12,9 +12,8 @@ waits for a download.
 > **Live.** Every stage runs, and so does everything that uses them: the
 > metadata stage inside stage 1, then `attachment_text` (Graph plus the
 > embedding server, no chat model) and `attachment_digest` (one generative call
-> per document) — and then retrieval into replies, recap lines, and the
-> needs-you re-verdict on a document that asks for something. Each of those
-> three is documented further down this file.
+> per document) — and then retrieval into replies and recap lines. Both are
+> documented further down this file.
 
 ## The data model
 
@@ -48,8 +47,8 @@ counting **non-inline** rows over the thread's messages — the same pattern
 and a maintained counter would drift with nothing to correct it.
 `Message.attachments` is hydrated by `loadThread` with ONE query per thread,
 never one per message. A handler that read a SINGLE row with `getMessageRow`
-gets no such hydration, so needs-you, extraction, drafting and the digest
-handler each hydrate the message they judge — `MessageStore.attachmentRefsFor`,
+gets no such hydration, so extraction, drafting and the digest handler each
+hydrate the message they read — `MessageStore.attachmentRefsFor`,
 guarded on the row's own `has_attachments` — before it reaches a prompt
 builder. The message-text stage (which replaced triage's text call) does both:
 it hydrates the refs and reads `attachmentsForMessage` into
@@ -82,7 +81,7 @@ that:
 - **Every place a body reaches a model or an embedding calls
   `stripAttachmentMarkers`** (`app/lib/services/attachments/attachment_markers.dart`):
   `buildMessageBlock`, the triage thread tail, `DraftTask._formatMessage`,
-  `NeedsYouTask._body`, `_recapLine`, and
+  `_recapLine`, and
   `embedMessageRow` — which is the ONE place the shared search-card path is
   stripped, so `ExtractHandler` and `EmbedHandler` cannot produce different
   cards and different hashes for the same message. That change gives every
@@ -566,7 +565,7 @@ from `wipeAll`) is the eventual cleanup.
 
 ## The digest
 
-`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, generative model)
+`AttachmentDigestHandler` (kind `attachment_digest`, generative model)
 runs `AttachmentDigestTask` over one document and writes
 `AttachmentDigest` — five keys, always all five:
 
@@ -578,9 +577,26 @@ runs `AttachmentDigestTask` over one document and writes
 | `facts` | up to 6 things a person would quote back, copied exactly |
 | `asks` | up to 3 things it requires of the reader; empty is the common case |
 
+**How wide, and when.** Its width is the generative target's message-text
+width, `LlmTargetSpec.textParallel` — extraction's own eight on Your server
+following the build (they drain after it on the same lane, so they share it), 3
+on a stored address, this Mac's `prose_parallel` but never under 3), read on
+every claim through the `textParallel` closure the provider passes; a handler
+built without one (tests, benches) runs one at a time as before. Its items are
+independent — one document in, that document's own digest row out — so running
+several at once reorders nothing. Attachments run AFTER the message text: the
+fast lane drains kind by kind in list order (needs-you, `extract`,
+`embed_message`, `attachment_text`, `attachment_digest`, context…), and it
+reaches a kind only when every kind above it claims nothing, so the lane
+reaches digests only when no text is claimable. That is not "no text owed":
+an `extract` row whose message is still untriaged is not claimable
+(`claimPendingWork`'s guard), and text rows that arrive while digests drain
+wait for the pass to come back to the top (priority refs excepted). The
+status line's counters are queue depths, not work in flight, which is why a
+digest backlog can show beside a text backlog.
+
 The system prompt says "document" and "message" and **names no channel and no
-connector** — `prompt_parity_test` holds it to the strict form, like
-needs-you's. The user message puts the date anchor outside every fence, the
+connector** — `prompt_parity_test` holds it to the strict form. The user message puts the date anchor outside every fence, the
 covering message inside `<untrusted_data source="message">` for context, and
 the document last inside `<untrusted_data source="document">` — **with the file
 name inside that fence**, because a sender chooses the name and `Invoice —
@@ -602,13 +618,6 @@ renumber around it. An embedding server that is down here does **not** throw,
 unlike in the text handler: the model call is already paid for, and parking
 would risk spending it twice; the passage keeps a NULL embedding, invisible to
 the index until something re-reads the document.
-
-`MessageStore.attachmentsWithAsks(source, messageId)` counts the documents on
-one message whose digest asks for something, with a **LIKE over the encoded
-JSON** rather than a JSON1 extract: `AttachmentDigest.toJson` writes all five
-keys always and `jsonEncode` emits `"asks":[` with no spaces, so `"asks":["` is
-present exactly when the list has an entry. A test pins the encoding. It is
-the guard behind the **needs-you re-verdict** below.
 
 ## Search
 
@@ -1018,18 +1027,6 @@ date, text, and the `AttachmentRef` behind them.
 Where the excerpts land, what the payload carries and how provenance is
 recorded is in `07-replies.md`.
 
-## The needs-you re-verdict
-
-`AttachmentDigestHandler` requeues `needs_you` for a message once, when a
-digest lands asks on an inbound message that is not already judged `1` and
-`attachmentsWithAsks` returns exactly 1. The count is taken after this row's
-digest is written, so the first asking document sees 1 and every later one sees
-2 or more — one requeue per message, however many files it came with. The
-re-judgement runs in the same drain — the handler's `onRequeue` wakes the
-worker for one more pass, since needs-you drains ahead of this kind — and
-the activity row notes `requeued: needs_you`. The fence it reads is in
-`11-needs-you.md`.
-
 ## Recap lines
 
 A digested document adds its facts to its message's line in a storyline recap,
@@ -1194,17 +1191,16 @@ a regenerate whose spinner is off screen is not visible feedback.
   for `attachment_text` and `attachment_digest`.
 - `app/lib/services/attachments/attachment_retriever.dart` —
   `AttachmentExcerpt`, `AttachmentRetriever.excerptsFor` and
-  `renderAttachmentExcerpts`;
-  `app/lib/services/attachments/attachment_digest_lines.dart` —
-  `attachmentDigestLines`, the one-line-per-document form the needs-you fence
-  reads.
+  `renderAttachmentExcerpts`. (`attachment_digest_lines.dart`, the
+  one-line-per-document form the needs-you prompt read, was deleted in the
+  decision-questions round with the prompt.)
 - `app/lib/data/message_store.dart` — `messageVectorBlob` (tag-guarded, so a
   vector in an older space sends the caller to re-embed) and `requeueWork`'s
   `payloadJson`, which is overwritten on conflict including with null.
 - `app/lib/services/llm/draft_task.dart` — `attachmentExcerpts` and their
-  2,500 cap (the retired `reply_decision_task.dart` read them at 800);
-  `app/lib/services/llm/needs_you_task.dart` — `attachmentDigests` and its 600
-  cap. All three system prompts are unchanged and `const`.
+  2,500 cap (the retired `reply_decision_task.dart` read them at 800; the
+  retired needs-you task read the digests at 600). The system prompt is
+  unchanged and `const`.
 - `app/lib/services/draft_handler.dart` — the one retrieval both calls read,
   the `pinned_attachment_ids` payload decode, and the `documents` note;
   `app/lib/providers/draft_provider.dart` — `generate(pinnedAttachmentIds:)`;

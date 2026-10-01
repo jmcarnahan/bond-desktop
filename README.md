@@ -48,14 +48,33 @@ placed on its own (Settings → Models, or the first-run wizard):
   F16 GGUF plus a heads file) that sorts and flags every kept message in one
   forward pass of about 40 ms on this Mac: the learned gate, urgency,
   category, the asks, needs-you, intent, importance, and whether a reply is
-  expected. It is served as a mean-pooled embedding model, and the app applies
-  its nine heads itself, so the heads file is needed on this Mac even when the
-  model runs elsewhere. It is not published yet: `make decide-install` copies
+  expected — and judges storylines: which storyline a thread belongs to and
+  whether a charter is specific. Its heads answer twelve questions: nine
+  message fields and three storyline questions, the third (`same_effort`,
+  whether two threads are one effort) asked only by `make golden-pairs`. It is served
+  as a mean-pooled embedding model, and the app applies its heads itself from
+  the heads file on this Mac. It is not published yet: `make decide-install` copies
   it, sha256-checked, from the training project's export (`DECIDE_SRC`) into
   the app's models folder, where the app's own server (the managed router)
-  picks it up; `make decide` serves it by hand on `:8083`.
+  picks it up; `make decide` serves it by hand on `:8083`. It copies the v3
+  model (`bond-decide-mbl-v3`, a schema-2 heads file); an older v2 install,
+  whose nine-field heads file the app refuses, parks triage until
+  `make decide-install` is run again.
+
+  **Decision model on your server.** Under Settings → Models the Decision
+  role can instead be **Your server**, a URL, and what that URL serves decides
+  what this Mac needs. A URL to ModernBERT on llama-server (`…/v1/embeddings`)
+  returns vectors, and the app applies the heads itself, so this Mac still
+  needs the heads file. A URL to a Kev 4B wrapper (`…/v1/systemone`) answers
+  the questions there, and this Mac needs no decision files at all. The app
+  detects which one it is from the server's model listing when it checks the
+  address, and names it under the form: "ModernBERT on your server (uses this
+  Mac's heads file)" or "Kev 4B on your server (answers there; no files needed
+  on this Mac)".
 - **Generative** — ONE chat model for every piece of text: each message's
-  summary, action items and deadline, the needs-you band, storylines, drafts.
+  summary, action items and deadline, storylines, drafts. Whether a message
+  needs you is the decision model's probability against your Needs You slider,
+  never a chat model's call.
   By default the 27B on your box when the build names one (`BOND_BOX_URL`);
   otherwise the 27B above on this Mac, or Qwen3-4B on a Mac under 40 GiB.
 - **Embeddings** — Qwen3-Embedding-0.6B, always on this Mac.
@@ -199,7 +218,7 @@ generative model (see [The app's models](#the-apps-models)). A developer who
 would rather start them by hand sets `BOND_DEV_HAND_SERVERS = 1` in `local.mk`
 and runs three servers, all optional: `make decide` on `:8083` (the decision
 model, after `make decide-install`), `make model` on `:8080` (the generative
-model: the message text, the needs-you band, storylines and drafts) and
+model: the message text, storylines and drafts) and
 `make embed` on `:8081` (`Qwen3-Embedding-0.6B`, which turns conversations
 into vectors so they can be clustered and searched). `make fast` on `:8082` is
 the benches' bulk slot; the app does not use it. With none of them running the
@@ -215,16 +234,20 @@ one place a third-party service may be used, for drafting only.
 
 The left rail has four sections:
 
-**Needs You** ranks what the signed-in user is actually on the hook for. Every open thread
-gets an attention score from its state, how recently it moved, what the model
-found in it, and how often that sender gets answered; a slider in Settings sets
-how high a thread must score to appear. Threads awaiting a reply come first,
-then threads waiting on somebody else, dimmed.
+**Needs You** is what the signed-in user is actually on the hook for. The
+decision model gives every kept inbound message a probability that it needs
+the user, and a thread is in Needs You when its highest unanswered probability
+is at or above the Needs You slider in Settings (35% by default); every row
+shows its own percentage. An attention score (the thread's state, how recently
+it moved, how often that sender gets answered) only orders the list. The Home
+feed's "Needs you" label follows the slider live too, so moving it relabels
+Home without re-running anything.
 
 **Storylines** are groups of threads about the same thing — one project, one
 trip, one event — proposed by the model and kept or dismissed by the user. A
-clustering sweep compares conversation embeddings, a confirmation call decides
-whether a candidate really belongs, and the result opens as a single merged
+clustering sweep forms clusters by conversation-embedding cosine, the
+decision model judges each cluster's charter and whether each member really
+belongs, a chat model only writes the title, summary and charter, and the result opens as a single merged
 transcript with a chip at each seam naming the thread it just crossed into.
 Removing a thread by hand blocks it, so the model cannot put it straight back.
 
@@ -234,8 +257,9 @@ a message decides it, a standing per-sender rule overrides that, and an explicit
 person. It is grouped by day and nothing is hidden: the rail shows a count per
 day and one click opens all of it.
 
-**Drafts** are suggested replies. Threads that need an answer and score high
-enough get one written in the background, shown above the reply box with the
+**Drafts** are suggested replies. Messages in Needs You (at or above the
+slider) whose reply the decision model expects get one written in the
+background, shown above the reply box with the
 model's own sentence about what it drew on. Nothing sends on its own: a draft is
 text in a box until somebody presses Send, and what gets sent is what is on
 screen. Depending on what the tenant granted, Send either sends, saves to
@@ -435,7 +459,6 @@ make bench-verify-prose     # the same, for the prose slot
 make bench                  # the corpus through the message-text call, timed
 make bench-prose            # storyline names + drafted replies, verbatim
 make ab                     # the same corpus on both servers, compared
-make ab-membership          # the membership eval set on both servers
 make drain                  # the drain concurrency race (needs FAST_SLOTS=4)
 make bench-compare A=… B=…  # diff two runs
 ```
@@ -453,8 +476,8 @@ nuance, because the queues treat an HTTP 400 as fatal and drop the message.
 `BENCH_VERIFY=0` skips it.
 
 A bench points wherever you tell it, so trying a candidate runtime is one
-command and no code edit. `BENCH_*` is the bulk slot (the message text, the
-needs-you band, membership); `PROSE_*` is the drafting slot `make bench-prose`
+command and no code edit. `BENCH_*` is the bulk slot (the message text);
+`PROSE_*` is the drafting slot `make bench-prose`
 and the A/B use; the decision model is benched by `make golden-decision`
 against `make decide` (`DECIDE_URL`):
 

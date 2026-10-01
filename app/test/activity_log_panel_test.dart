@@ -1174,6 +1174,14 @@ void main() {
         ActivityLogPanel.describe(_event(
           kind: 'triage',
           status: 'parked',
+          detail: const {'reason': 'decision_older_model'},
+        )),
+        'Triage parked — decision model is an older version',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'triage',
+          status: 'parked',
           detail: const {'reason': 'decision_unauthorized'},
         )),
         'Triage parked — the decision server refused the access key',

@@ -628,10 +628,11 @@ Needs You is the eighth. It stands FIRST, before a vertical rule, counts ALL
 TIME, and draws its count in the attention colour when there is one: it is a
 pile to burn down to zero rather than a reading of activity, and a week around
 it would hide the work owed longest. It also counts THREADS by the rail's own
-rule (`isNeedsYou`, spelled in SQL and bound to the same attention threshold),
+rule (`isNeedsYou`, spelled in SQL and bound to the same Needs You slider),
 and shows one row per thread under its filter; the rest count messages. That
-rule has three tests — not in Later, not done, and not under the attention
-threshold. There is no fourth, because the pipeline keeps the thread's own
+rule has three tests — not in Later, not done, and the thread's needs-you
+probability at or above the slider (see `docs/pipeline/11-needs-you.md`).
+There is no fourth, because the pipeline keeps the thread's own
 state honest: the fold reads only the messages the gate KEPT, and every later
 gate drop refolds the thread down (`MessageStore.refoldThreadState`, see
 `docs/pipeline/02-gates.md`), so a self-addressed test mail or an auto-reply
@@ -804,10 +805,11 @@ the person room's header `AvatarStack`.
 - `DraftsPane.draftKeyFor(source, messageId)` / `dismissKeyFor(...)` /
   `sentKeyFor(source, messageId)` reach the Drafts & sent rows. The list column
   row is `find.text('DRAFTS & SENT')`, scoped to `AppRail`.
-- A screen test about which rows reach the rail should write
-  `attentionThresholdKey` to `'0'` before reading prefs. The scoring pass lands
-  a few pumps in, and the default 0.5 slider will cut a quiet row out from under
-  an assertion that was true on the first frame.
+- A screen test about which rows reach Needs You seeds each row's
+  `messages.needs_you_p` at or above the slider (`needsYouThresholdKey`,
+  default 0.35), or builds its triage queue on `keepingDecisionClient()`
+  (p 0.5). The attention score only ORDERS the rail; it no longer cuts a row
+  out, so there is no score threshold to zero.
 - **The People directory**: `PeopleDirectoryPane.rowKeyFor(roomKey)` is one
   person's row (the room key is their lowercased name), `filterPillsKey` the
   pills, `sortKey` / `sortItemKeyFor(sort)` the order menu, and `emptyKey` both

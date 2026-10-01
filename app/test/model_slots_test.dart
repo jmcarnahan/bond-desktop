@@ -10,7 +10,6 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -25,14 +24,11 @@ import 'package:flutter_test/flutter_test.dart';
 /// The `schemaName` of every task that makes a model call, built from real
 /// instances so a renamed schema fails this file rather than drifting.
 Set<String> taskSchemaNames() => {
-      const NeedsYouTask().schemaName,
       const MessageTextTask().schemaName,
       const AttachmentDigestTask().schemaName,
       const ContextDigestTask().schemaName,
       const ContextBriefTask().schemaName,
       const ContextSelectTask().schemaName,
-      const ConfirmMembershipTask().schemaName,
-      const GroupThreadsTask().schemaName,
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
       const StorylineRecapTask().schemaName,
@@ -98,14 +94,11 @@ void main() {
     // round (the fast and prose slots merged), and the decision model is a
     // role of its own.
     expect(idsOn(ModelSlot.generative), {
-      'needs_you',
       'message_text',
       'attachment_digest',
       'context_file_digest',
       'context_brief',
       'context_select',
-      'storyline_membership',
-      'storyline_group',
       'storyline_name',
       'storyline_refresh',
       'storyline_recap',
@@ -168,9 +161,9 @@ void main() {
       };
       expect(roleOfStage(stage.id), expected, reason: stage.id);
     }
-    // The storyline confirm is plain generative now; it was the one stage
-    // whose role depended on the placement.
-    expect(roleOfStage('storyline_membership'), StageRole.generative);
+    // Storyline membership is the decision model's `member_of`, not a stage
+    // of its own: no language model is asked whether a thread belongs.
+    expect(roleOfStage('storyline_membership'), isNull);
     expect(roleOfStage('decision'), StageRole.decision);
     expect(roleOfStage('embeddings'), StageRole.embed);
     // An id the stage table does not name has no role at all.
@@ -262,10 +255,14 @@ void main() {
       model: 'qwen3.8',
       hasBearer: true,
       parallel: 4,
+      textParallel: 8,
       streams: false,
     );
 
     expect(LlmTargetSpec.tryParse(spec.toJson()), spec);
+    expect(LlmTargetSpec.tryParse(spec.toJson())!.textParallel, 8);
+    expect(spec.copyWith(textParallel: 5).textParallel, 5);
+    expect(spec.copyWith(textParallel: 5), isNot(spec));
     // The presence flag and NEVER the token — the JSON lands in a database
     // table that anything with the file can read.
     expect(spec.toJson()['bearer'], isTrue);
@@ -286,10 +283,12 @@ void main() {
       'model': 'm',
       'wire': 'a wire nobody ships',
       'parallel': 99,
+      'text_parallel': 99,
       'streams': 'yes please',
     })!;
     expect(defaulted.wire, LlmWire.openAi);
     expect(defaulted.parallel, 8);
+    expect(defaulted.textParallel, 8);
     expect(defaulted.streams, isTrue);
     expect(defaulted.hasBearer, isFalse);
 
@@ -302,6 +301,24 @@ void main() {
         'parallel': 0,
       })!.parallel,
       1,
+    );
+    final textClamped = LlmTargetSpec.tryParse({
+      'id': 'x',
+      'name': 'n',
+      'url': 'http://example.com/v1',
+      'model': 'm',
+      'text_parallel': 0,
+    })!;
+    expect(textClamped.textParallel, 1);
+    // A row an older build wrote has no text width: it reads today's three.
+    expect(
+      LlmTargetSpec.tryParse({
+        'id': 'x',
+        'name': 'n',
+        'url': 'http://example.com/v1',
+        'model': 'm',
+      })!.textParallel,
+      3,
     );
   });
 
@@ -427,7 +444,7 @@ void main() {
       expect(localGenerativeId, 'local-generative');
       expect(localDecisionId, 'local-decision');
       expect(boxProseModel, 'qwen3.8');
-      expect(boxDecideModel, 'bond-decide-mbl-v2swap');
+      expect(boxDecideModel, 'bond-decide-mbl-v3');
       expect(localGenerativeName, 'This Mac · generative');
       expect(boxProseName, 'Your server · generative');
       expect(localDecisionName, 'This Mac · decision');

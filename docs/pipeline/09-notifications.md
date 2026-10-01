@@ -25,35 +25,22 @@ lands the CTA on the thread is an older message's. The text write stamps
 refresh right after it re-stamps `conversation_ai`, so the freshness check
 below is met as it was when triage stamped the row.
 
-**No model call.** Worthiness is computed from stored verdicts: a
-message-level ask AND thread-level volume. `needs_you_verdict = 1` is one of
-the asks — the only one decided about the whole message rather than read off a
-triage field — and it is the ask half **only**: a judged yes is still gated by
-the attention threshold, the `later` bucket and the `done` state, like every
-other ask. NULL adds nothing: never judged is not a yes, and neither is a
-hedge, a yes below the needs-you pass's confidence bar, which is now stored
-NULL and so no longer vetoes (see [11-needs-you.md](11-needs-you.md)). A 0 is
-a VETO that outranks every ask: `notifyWorthy`
-(`app/lib/services/notify_worthy.dart`) returns false on a judged no before it
-reads any other field, so the chip and the toast cannot disagree about one
-message. The rail and the tile apply a thread-level form of the veto,
-`MessageStore.needsYouVetoedSql`, which also asks that no kept inbound newer
-than the last outbound was judged yes; this per-message rule is unchanged.
-Triage folds an ask out of any message with a task
-in it, and the needs-you pass, which reads the thread first, is the one that
-can say the task is somebody else's. A message settled before the judge
-answers is corrected by `refreshNeedsYou` when it does.
+**No model call.** Worthiness is ONE predicate over stored rows, and the toast
+rule is exactly it: `notifyWorthy` (`app/lib/services/notify_worthy.dart`) is
+true when the message's `needs_you_p` is at or above the owner's Needs You
+slider (`needsYouAt`), AND its thread is not `done`, AND its thread is not
+bucketed `later`. Nothing else asks: not triage's `reply_expected` or action
+item, not an urgency word, not a deadline, not the thread's CTA, and the
+attention score, which orders Needs You, gates nothing (see
+[11-needs-you.md](11-needs-you.md)). A NULL probability is a message not
+decided yet, which needs nobody. A message settled before it is decided is
+corrected by `refreshNeedsYou` when the probability lands.
 
-The deadline ask goes through `showableDeadline`
-(`app/lib/services/deadline_parse.dart`): plan-relative wording such as
-"Day 1" has not earned an interruption (see
-[08-attention.md](08-attention.md)).
-
-**Waiting for the verdict — from the record, not the queue.** `_isComplete`
-reads `message_progress.extract_state` and `storyline_state` (terminal =
-`done`/`skipped`/`error`) plus a `needs_you_judged` flag that
-`openNotifyCandidates` projects as "a verdict is written, or a `needs_you` work
-row reached `done`/`error`". The work-row EXISTS flags this replaced were the
+**Waiting for the probability — from the record, not the queue.**
+`_isComplete` reads `message_progress.extract_state` and `storyline_state`
+(terminal = `done`/`skipped`/`error`) plus a `needs_you_judged` flag that
+`openNotifyCandidates` projects as "`needs_you_p` is written, or a `needs_you`
+work row reached `done`/`error`". The work-row EXISTS flags this replaced were the
 wrong answer: extract, needs-you and embed rows are enqueued *after both
 drains* of a sync while triage claims `messages.triage_status` the instant a
 page commits, and a sweep can land at any instant of a sync. In that gap a
@@ -66,10 +53,10 @@ now reads as open**, so a message past the 150-per-pass backlog cap settles on
 the six-minute deadline rather than immediately. A re-drain is not news. The
 second arm of `needs_you_judged` is not redundant either — the handler ends an
 item `done` on each of its own guards (deleted, outbound, gated) without
-writing a verdict, and waiting past that would be waiting on nobody. A verdict
-left *stale* by a re-judge also reads as judged, so a candidate can settle on
-the old answer; `PipelineProgress.refreshNeedsYou` moves the chip when the new
-one lands (see [11-needs-you.md](11-needs-you.md)).
+writing a probability, and waiting past that would be waiting on nobody. A
+probability left *stale* by a re-decision also reads as judged, so a candidate
+can settle on the old answer; `PipelineProgress.refreshNeedsYou` moves the chip
+when the new one crosses the slider (see [11-needs-you.md](11-needs-you.md)).
 
 `MessageStore.writeStorylineProgress` is guarded `(settle_state <> 'done' OR
 storyline_state = 'pending')` so a stage that was still **owed** at settle time
@@ -77,10 +64,10 @@ finishes normally; only a stage already terminal when the row settled is frozen
 as history. `MessageStore.reviveOwedStorylineStages`, called by both syncs,
 hands the rows the old rule stranded back to the queue.
 
-`needs_you` also joins the debounce's wake set, so a drain that finishes
-verdicts sweeps in 750 ms rather than waiting out the 30-second timer.
+`needs_you` also joins the debounce's wake set, so a drain that settles
+probabilities sweeps in 750 ms rather than waiting out the 30-second timer.
 
-The sweep re-reads the row it is about to settle, so a verdict that landed
+The sweep re-reads the row it is about to settle, so a probability that landed
 between the candidate capture and the settle is the one the snapshot takes.
 
 **Waiting on a score.** A deadline settle with no `attention_score` would score
@@ -119,20 +106,11 @@ in `pipeline_progress.dart` states the store/stream separation rule.
 **The tile and the toast are one predicate.** `notifyWorthy` (Dart) decides the
 toast and stores the `needs_you` that goes with it; `needsYouSql`
 (`app/lib/data/progress_sql.dart`) writes the same column for the rows no
-coordinator ever saw — the settle sweep's backstop and the v8 backfill. Both
-read the verdict, and `test/needs_you_settle_test.dart` pins that they agree.
-The live SQL arm carries the veto too (`COALESCE(m.needs_you_verdict, -1) <>
-0`, ahead of the other guards). The documented divergence stays: only the SQL
-carries `is_read = 0`, because the decision table suppresses a read message
-before worthiness is asked. The **v8 backfill is the exception** — it
-interpolates the SQL with
-`verdict: false`, frozen at the shape it ran with, because `from7To8` replays
-on v1..v7 databases where `needs_you_verdict` (v10) does not exist yet. The
-frozen arm renders neither the verdict clause nor the veto, byte-for-byte what
-the migration ran.
-
-**A known divergence, not yet fixed.** The SQL deadline arm still grants on
-any non-empty `deadline` (`COALESCE(m.deadline, '') <> ''`), including a
-plan-relative "Day 1", while `notifyWorthy` asks `showableDeadline`. So the
-settle sweep's backstop can raise a chip on a row the Dart path would refuse.
-It is recorded as a follow-up of the 2026-09 round.
+coordinator ever saw, the settle sweep's backstop. Both are the predicate
+(`needsYouAtSql('m.needs_you_p', threshold)` in the SQL) plus not `done` and not
+`later`, and `test/needs_you_settle_test.dart` pins that they agree. The
+documented divergence stays: only the SQL carries `is_read = 0`, because the
+decision table suppresses a read message before worthiness is asked. The **v8
+backfill is the exception**: `from7To8` interpolates `needsYouSqlV8Frozen`, the
+text it ran with, byte for byte (`progress_sql_test` pins it), because it
+replays on v1..v7 databases where neither needs-you column exists yet.

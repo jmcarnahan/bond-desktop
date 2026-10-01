@@ -4,6 +4,7 @@ import '../models/message_models.dart';
 import '../providers/conversations_provider.dart' show ThreadTarget;
 import '../services/calendar/command/command_types.dart'
     show KnownPerson, knownPeopleFrom;
+import '../services/decision/needs_you_predicate.dart';
 import 'app_rail.dart' show isNeedsYou;
 
 /// The signed-in account, as much of it as the grouping needs.
@@ -259,7 +260,7 @@ int _byLatestDesc(String? a, String? b) {
 List<PersonRoom> peopleRooms(
   List<Conversation> all, {
   required Owner owner,
-  double threshold = 0,
+  double threshold = NeedsYouTuning.defaultThreshold,
 }) {
   // Built once, over the whole list, and handed to every key and every member
   // walk below: a name resolved differently in two of them would file one

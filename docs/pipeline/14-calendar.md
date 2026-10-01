@@ -7,7 +7,7 @@ a day, the invites still owed an answer, the meeting before and after a
 person, the messages that carried an invite — reads that mirror, never the
 server, so a slow or failing calendar costs the screen nothing.
 
-Built in the calendar round (2026-09, schema v21). The open owner checks and
+Built in the calendar round (2026-09, schema v25 once merged over the needs-you rounds' v21–v24). The open owner checks and
 the follow-ups are listed [at the end](#owner-checks-and-follow-ups).
 
 ## How it fits together
@@ -83,7 +83,7 @@ answers `sdkMode` before any call, and `calendarAvailabilityProvider` starts at
 
 ## The data model
 
-Two tables (`app/lib/data/schema.drift`, schema v21).
+Two tables (`app/lib/data/schema.drift`, schema v25, `from24To25`).
 
 | Table | Holds | Class | Written by |
 |---|---|---|---|
@@ -857,7 +857,8 @@ reads only, no model):
 - **Open asks** (§1.1 point 1) — in a kept thread whose state is
   `needs_reply`, an inbound message from an attendee that came AFTER the
   owner's last message there (an ask before a reply is taken as answered),
-  whose stored decision has `needs_you_p ≥ DecisionPolicy.needsYouYes` (0.65)
+  whose stored decision has `needs_you_p` at or above the owner's Needs You
+  slider (`needsYouAt`, the one rule the Needs You stop reads; default 0.35)
   or `reply_expected_p ≥ DecisionPolicy.replyYes` (0.50), and whose `intent`
   is `question`, `request` or `approval` (`scheduling` is left out: the
   meeting is usually its answer). The newest such message per thread, at most

@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../data/message_store.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
@@ -8,6 +10,16 @@ import 'decision/decision_client.dart';
 import 'decision/decision_heads.dart';
 import 'decision/decision_input.dart';
 import 'decision/decision_policy.dart';
+import 'decision/needs_you_exemplars.dart';
+import 'decision/needs_you_predicate.dart';
+import 'decision/stored_decision.dart'
+    show
+        decisionOwnerAnswerKey,
+        decisionOwnerCosineKey,
+        decisionModelNeedsYouKey,
+        decisionOwnerExactKey,
+        decisionOwnerLabelIdKey;
+import 'decision/decision_questions.dart' show decisionQhash;
 import 'drain_gate.dart';
 import 'gates.dart';
 import 'backend/backend_types.dart';
@@ -265,6 +277,15 @@ class TriageQueue {
   /// How long a claim waits for an owner lookup still in flight.
   static const Duration _ownerWait = Duration(milliseconds: 300);
 
+  /// The owner's Needs You slider, for [applyDecision]'s chip rule: a
+  /// settled row whose answer at the slider a decision moves has its chip
+  /// moved with it. Null in a test that wires none, which reads the default.
+  final Future<double> Function()? _threshold;
+
+  /// The owner's Needs You answers, which [applyDecision] lets replace the
+  /// model's. Null in a test that wires none: the model's answer stands.
+  final NeedsYouExemplars? _exemplars;
+
   TriageQueue(
     this._store, {
     required this._decisionClient,
@@ -278,9 +299,12 @@ class TriageQueue {
     this._onDrained,
     this._onGated,
     this._owner,
+    Future<double> Function()? needsYouThreshold,
+    this._exemplars,
   })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
-        _pipeline = progress;
+        _pipeline = progress,
+        _threshold = needsYouThreshold;
 
   /// The signed-in mailbox, for the gate that skips the user's own mail. Set
   /// after sign-in resolves; until then that one gate is simply off.
@@ -699,37 +723,19 @@ class TriageQueue {
       return true;
     }
 
-    // The decision state's inputs. The attachment rows are metadata the
-    // connector already wrote — a local query, no network: here by now for
-    // mail because the detail fetch above wrote them, and for chat because
-    // the ingest loop did; a failed fetch leaves the list empty. They are
-    // hydrated onto the message because the state renders an empty body as
-    // "Shared a file: …" from them, so a chat message that is nothing but a
-    // dropped contract is not judged as blank.
-    final attachments = await _store.attachmentsForMessage(source, id);
-    final key = current['conversation_key'] as String?;
-    if (attachments.isNotEmpty) {
-      message = message.withAttachments([
-        for (final row in attachments)
-          AttachmentRef.fromRow(row, conversationKey: key),
-      ]);
-    }
-
-    // The thread is context for `reply_expected` and needs-you: an unanswered
-    // question a few messages back still expects an answer. Only what came
-    // BEFORE this message — a later one is not context for a judgement about
-    // it. The decision state takes the last three.
-    var thread = const <Message>[];
-    if (key != null && key.isNotEmpty) {
-      final loaded = await _store.loadThread(key, sources: [source]);
-      final receivedAt = message.receivedAt ?? '';
-      thread = [
-        for (final m in loaded)
-          if (m.id != message.id &&
-              (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
-            m,
-      ];
-    }
+    // The owner line, then the decision state's inputs. Waiting on the owner
+    // first (see [_owner]) costs at most [_ownerWait], and a lookup that has
+    // not answered by then leaves the state ownerless, which the needs-you
+    // pass reads as a probability to decide again rather than to trust.
+    await _awaitOwner();
+    final owner = decisionOwnerString(_ownerKnown);
+    final input = await decisionInputFor(
+      _store,
+      source,
+      message,
+      conversationKey: current['conversation_key'] as String?,
+      owner: owner,
+    );
 
     try {
       // The decision pass: one forward pass of the decision model answers
@@ -745,21 +751,7 @@ class TriageQueue {
       // the next pump, so a fixed address or a fresh install recovers with
       // nobody pressing anything. Only a 4xx the server gives this one
       // request is a failure that spends an attempt.
-      await _awaitOwner();
-      final owner = decisionOwnerString(_ownerKnown);
-      final decided = await _decisionClient.decide(DecisionInput.fromRows(
-        message: message,
-        thread: thread,
-        attachments: message.attachments,
-        owner: owner,
-      ));
-      await _store.writeDecision(
-        source,
-        id,
-        decided,
-        qhash: DecisionHeads.expectedQhash,
-        ownerKnown: owner != null,
-      );
+      final decided = await _decisionClient.decide(input);
 
       // The learned gate, after the rules gates and under the same escape
       // hatch: a message the owner restored is never gated again. Shaped
@@ -772,6 +764,17 @@ class TriageQueue {
           ? null
           : learnedGateReason(decided.answers);
       if (learned != null) {
+        // The drop's decision row, and nothing else of [applyDecision]: a
+        // gated message carries no triage fields and no needs-you number.
+        // Clear AI results tells a learned drop from an ingest verdict by
+        // this row (`clearDerived`'s `keptGate`).
+        await _store.writeDecision(
+          source,
+          id,
+          decided,
+          qhash: decisionQhash,
+          ownerKnown: owner != null,
+        );
         await _writeTriage(
           source,
           id,
@@ -799,31 +802,31 @@ class TriageQueue {
         return true;
       }
 
-      // The row, from the decision alone, written ONCE: the rail,
-      // notify-worthy and the bucket filing react now, and the text fills in
-      // when the message-text stage lands (it refolds the CTA then).
+      // Everything the decision determines, through the one writer the
+      // re-decide and the needs-you pass share. The row's verdict is written
+      // ONCE, with the four fields, between the decision row and the
+      // needs-you number: the rail, notify-worthy and the bucket filing
+      // react now, and the text fills in when the message-text stage lands
+      // (it refolds the CTA then). An ownerless decision's number is written
+      // too, and SHOWN, but it is untrusted (the head was trained with the
+      // owner line): `message_decisions.owner_known` records that, and the
+      // needs-you pass decides the message again once the owner is known.
       final result = decidedTriage(decided.answers);
-      await _writeTriage(
-        source,
-        id,
-        status: 'triaged',
-        result: result,
-      );
-      // The decision's urgency and category onto the thread now. The ask is
-      // the text's: on a new message (no summary yet) the thread's current
-      // ask is left alone until the text lands; a re-triaged message whose
-      // text already landed folds its ask from that text again.
-      await foldCtaUp(
+      await applyDecision(
         _store,
         source,
         current,
-        urgency: result.urgency,
-        category: result.category,
-        needsAction: result.needsAction,
-        summary: message.summary ?? '',
-        actionItems: message.actionItems,
-        deadline: message.deadline ?? '',
-        textLanded: message.summary != null,
+        decided,
+        ownerKnown: owner != null,
+        progress: _pipeline,
+        threshold: _threshold,
+        exemplars: _exemplars,
+        verdict: (fields) => _writeTriage(
+          source,
+          id,
+          status: 'triaged',
+          result: fields,
+        ),
       );
       // A kept message with no text yet is owed its message-text call. What
       // this is for is a revived errored or terminal triage row from before
@@ -961,6 +964,137 @@ class TriageQueue {
     _ownerWaiting = null;
     if (waiting != null && !waiting.isCompleted) waiting.complete();
   }
+
+  /// How far back the install-time re-decide reaches, in days.
+  static const int redecideDays = 30;
+
+  /// The most messages one re-decide takes, newest first. At about 40 ms a
+  /// decision that is under a minute and a half of the decision server.
+  static const int redecideCap = 2000;
+
+  /// Re-decides the recent kept inbound messages a decision model trained on
+  /// another question set decided — [redecide] over
+  /// [MessageStore.staleDecisionRefs], the last [redecideDays] days, newest
+  /// first, at most [redecideCap]. The install-time one-shot the mail sync
+  /// runs when this build's heads are new (`SyncService`'s
+  /// `redecide_qhash`): without it every message decided under the old model
+  /// reads as undecided to the Why panel, extraction and drafting, and keeps
+  /// the old model's numbers.
+  ///
+  /// `complete` is false when the switch is off or the decision model parked
+  /// on the way (see [redecide]); what was re-decided or settled as failed
+  /// stays so and drops out of the next run's list, so the next sync resumes
+  /// where this one stopped.
+  ///
+  /// While the triage drain itself is parked on the decision model (the heads
+  /// are an older model's, not installed, or the server is down), nothing is
+  /// asked at all: the answer is already known, and asking would only write
+  /// the same park again on every sync.
+  Future<({int redecided, bool complete})> redecideStale({
+    DateTime? now,
+  }) async {
+    if (_off) return (redecided: 0, complete: false);
+    if (_parkedReason?.startsWith('decision_') ?? false) {
+      return (redecided: 0, complete: false);
+    }
+    final since = MessageStore.isoStamp(
+      (now ?? DateTime.now())
+          .toUtc()
+          .subtract(const Duration(days: redecideDays)),
+    );
+    return redecide(await _store.staleDecisionRefs(
+      qhash: decisionQhash,
+      sinceIso: since,
+      limit: redecideCap,
+    ));
+  }
+
+  /// The DECISION pass again for [refs], and nothing else of triage: the
+  /// same state ([decisionInputFor]) and the same writer the claim uses,
+  /// [applyDecision]. It never touches the text, the gate verdict or
+  /// `triage_status`, and it never gates: a message kept once stays kept.
+  /// Nor does it revisit a message gated before: it reads only `triaged`
+  /// rows, so a drop the older model's learned gate made stays dropped, by
+  /// design — Restore is the owner's way back for one it got wrong.
+  ///
+  /// Outside the drain and its claims on purpose. A message re-pended
+  /// meanwhile is left to the triage that re-pended it.
+  ///
+  /// A decision server that is down, not installed, misconfigured or
+  /// refusing the key PARKS it the way it parks a triage claim: it stops at
+  /// that message and answers `complete: false`. The park is logged once per
+  /// question set and reason per app run ([_redecideParksLogged]), so a model
+  /// that stays parked for a week does not write a row on every sync.
+  ///
+  /// A per-message fault ([LlmFormatException]: a 4xx this one request
+  /// earned) SETTLES the message for this question set
+  /// ([MessageStore.settleFailedDecision]): it keeps its old numbers, reads
+  /// as undecided, and leaves the stale list, so the same bad message is
+  /// never asked again by this one-shot. A run that did not park is
+  /// therefore complete, however many messages it settled that way.
+  Future<({int redecided, bool complete})> redecide(
+    List<({String source, String id})> refs,
+  ) async {
+    _askOwner();
+    await _awaitOwner();
+    final owner = decisionOwnerString(_ownerKnown);
+    var redecided = 0;
+    for (final ref in refs) {
+      if (_off) return (redecided: redecided, complete: false);
+      final row = await _store.getMessageRow(ref.source, ref.id);
+      if (row == null || row['triage_status'] != 'triaged') continue;
+      final input = await decisionInputFor(
+        _store,
+        ref.source,
+        Message.fromRow(row),
+        conversationKey: row['conversation_key'] as String?,
+        owner: owner,
+      );
+      final DecisionResult decided;
+      try {
+        decided = await _decisionClient.decide(input);
+      } on LlmUnavailableException catch (e) {
+        final reason = parkReasonFor(e);
+        if (_redecideParksLogged.add('$decisionQhash|$reason')) {
+          await _log.record(
+            'triage',
+            status: 'parked',
+            source: ref.source,
+            entityId: ref.id,
+            detail: {'reason': reason, 'redecide': true},
+          );
+        }
+        return (redecided: redecided, complete: false);
+      } on LlmFormatException {
+        // The one per-message fault the client throws (a 4xx this request
+        // earned, a systemone answer to this state that did not validate).
+        // Everything that would fail every message alike is an
+        // [LlmUnavailableException] and parked above.
+        await _store.settleFailedDecision(
+          ref.source,
+          ref.id,
+          qhash: decisionQhash,
+        );
+        continue;
+      }
+      await applyDecision(
+        _store,
+        ref.source,
+        row,
+        decided,
+        ownerKnown: owner != null,
+        progress: _pipeline,
+        threshold: _threshold,
+        exemplars: _exemplars,
+      );
+      redecided++;
+    }
+    return (redecided: redecided, complete: true);
+  }
+
+  /// The re-decide parks already logged this app run, as
+  /// `'<qhash>|<park reason>'`.
+  final Set<String> _redecideParksLogged = {};
 
   /// The row state the decision model's answers make: urgency and category
   /// are the heads' choices, and the two booleans are their
@@ -1154,4 +1288,229 @@ class TriageQueue {
     _progress.add(TriageProgress(counts, parkedReason: _parkedReason));
     return counts;
   }
+}
+
+/// The decision model's input for one message: the message with its
+/// attachment rows hydrated, and the thread as it stood when it landed.
+///
+/// The ONE builder, shared by the triage pass and by the needs-you pass when
+/// it decides a message again, so the two cannot render different states for
+/// the same message. The attachment rows are metadata the connector already
+/// wrote — a local query, no network: for mail the detail fetch wrote them,
+/// for chat the ingest loop did, and a failed fetch leaves the list empty.
+/// They are hydrated because the state renders an empty body as "Shared a
+/// file: …" from them, so a chat message that is nothing but a dropped
+/// contract is not judged as blank.
+///
+/// The thread is context for `reply_expected` and needs-you: an unanswered
+/// question a few messages back still expects an answer. Only what came
+/// BEFORE this message — a later one is not context for a judgement about it.
+/// The decision state takes the last three.
+Future<DecisionInput> decisionInputFor(
+  MessageStore store,
+  String source,
+  Message message, {
+  required String? conversationKey,
+  String? owner,
+}) async {
+  final attachments = await store.attachmentsForMessage(source, message.id);
+  final key = conversationKey ?? '';
+  if (attachments.isNotEmpty) {
+    message = message.withAttachments([
+      for (final row in attachments)
+        AttachmentRef.fromRow(row, conversationKey: key),
+    ]);
+  }
+  var thread = const <Message>[];
+  if (key.isNotEmpty) {
+    final loaded = await store.loadThread(key, sources: [source]);
+    final receivedAt = message.receivedAt ?? '';
+    thread = [
+      for (final m in loaded)
+        if (m.id != message.id &&
+            (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
+          m,
+    ];
+  }
+  return DecisionInput.fromRows(
+    message: message,
+    thread: thread,
+    attachments: message.attachments,
+    owner: owner,
+  );
+}
+
+/// Writes everything one decision determines about a kept message, except
+/// its gate verdict and `triage_status`: the ONE writer the triage claim, the
+/// install-time re-decide ([TriageQueue.redecide]) and the needs-you pass's
+/// re-decide share, so no path can leave a message half decided.
+///
+/// In order: the decision row (with the question hash and whether the state
+/// had an owner line); the four triage fields ([TriageQueue.decidedTriage]);
+/// `needs_you_p` with its templated sentence; the intent and importance
+/// inside an extraction that already ran; the thread's CTA fold
+/// ([foldCtaUp], the ask from the text already on the row); and the Needs
+/// You chip ([followNeedsYouChip]) when the answer at the owner's slider
+/// moved from the p [row] carried.
+///
+/// [verdict] is the triage claim's own write of `triage_status` with the
+/// four fields; when it is given it takes the fields' place in the order, so
+/// the claim writes its row once. [row] is the message row as the caller
+/// read it BEFORE deciding: its `needs_you_p` is the "before" of the chip
+/// rule, and its text feeds the fold.
+///
+/// [exemplars] are the owner's Needs You answers. When one applies to this
+/// message — a label on it, or on a message whose vector is a near duplicate
+/// of [decided]'s ([NeedsYouExemplars.answerFor]) — the owner's answer
+/// replaces the model's `needs_you` BEFORE anything is written, so
+/// `message_decisions.needs_you_p`, `messages.needs_you_p`, the reason and the
+/// chip all carry 1.0 or 0.0, and `answers_json` records where it came from
+/// ([decisionOwnerAnswerKey] and its siblings), with the model's own p(yes)
+/// beside it ([decisionModelNeedsYouKey]) so the decision can be applied
+/// again once the labels are gone. This is the one place the
+/// override lives: every decision path passes through here. A label on this
+/// message taken under another model (or with no vector, Kev) has its vector
+/// refreshed from [decided] on the way through, so a model swap heals the
+/// labels as their messages are decided again.
+Future<void> applyDecision(
+  MessageStore store,
+  String source,
+  Map<String, Object?> row,
+  DecisionResult decided, {
+  required bool ownerKnown,
+  PipelineProgress progress = const PipelineProgress.disabled(),
+  Future<double> Function()? threshold,
+  Future<void> Function(TriageResult fields)? verdict,
+  NeedsYouExemplars? exemplars,
+}) async {
+  final id = row['source_message_id'] as String? ?? '';
+  final message = Message.fromRow(row);
+  final previous = (row['needs_you_p'] as num?)?.toDouble();
+  var extraKeys = const <String, Object?>{};
+  if (exemplars != null) {
+    final owner = await exemplars.answerFor(
+      source: source,
+      sourceMessageId: id,
+      vector: decided.vector,
+      model: decided.model,
+    );
+    if (owner != null) {
+      final modelP = needsYouP(decided.answers);
+      decided = decided.withAnswers(
+        decided.answers.withNeedsYou(owner.answer, exact: owner.exact),
+      );
+      extraKeys = {
+        decisionOwnerAnswerKey: owner.answer,
+        decisionOwnerLabelIdKey: owner.labelId,
+        decisionOwnerCosineKey: owner.cosine,
+        decisionOwnerExactKey: owner.exact,
+        decisionModelNeedsYouKey: ?modelP,
+      };
+      final vector = decided.vector;
+      if (owner.exact && vector != null) {
+        var healed = false;
+        for (final label in await exemplars.labelsOn(
+          source: source,
+          sourceMessageId: id,
+        )) {
+          if (label.vector != null && label.vectorModel == decided.model) {
+            continue;
+          }
+          await store.updateNeedsYouLabelVector(
+            label.id,
+            vector,
+            decided.model,
+          );
+          healed = true;
+        }
+        if (healed) exemplars.invalidate();
+      }
+    }
+  }
+  final answers = decided.answers;
+  await store.writeDecision(
+    source,
+    id,
+    decided,
+    qhash: decisionQhash,
+    ownerKnown: ownerKnown,
+    extraKeys: extraKeys,
+  );
+  final fields = TriageQueue.decidedTriage(answers);
+  if (verdict != null) {
+    await verdict(fields);
+  } else {
+    await store.writeDecidedTriage(source, id, fields);
+  }
+  final p = needsYouP(answers);
+  await store.writeNeedsYouP(
+    source,
+    id,
+    p: p,
+    reason: p == null ? null : needsYouYesReason(answers),
+  );
+  await store.rewriteExtractionDecision(
+    source,
+    id,
+    intent: answers['intent'].choice,
+    importance: answers['importance'].choice,
+  );
+  // The decision's urgency and category onto the thread now. The ask is the
+  // text's: on a message with no summary yet the thread's current ask is left
+  // alone until the text lands; one whose text already landed folds its ask
+  // from that text again.
+  await foldCtaUp(
+    store,
+    source,
+    row,
+    urgency: fields.urgency,
+    category: fields.category,
+    needsAction: fields.needsAction,
+    summary: message.summary ?? '',
+    actionItems: message.actionItems,
+    deadline: message.deadline ?? '',
+    textLanded: message.summary != null,
+  );
+  await followNeedsYouChip(
+    progress,
+    source,
+    id,
+    previous: previous,
+    p: p,
+    threshold: threshold,
+  );
+}
+
+/// Moves a settled row's Needs You chip when — and only when — a new
+/// probability changed the answer at the owner's threshold ([needsYouAt]),
+/// through [PipelineProgress.refreshNeedsYou].
+///
+/// A repeat must write nothing, or a chip the user cleared by replying would
+/// come back every time the row was re-judged; a probability that moved
+/// without crossing the slider is a repeat of the answer. A row not settled
+/// yet has no chip to move, and the store's write says so by writing nothing.
+///
+/// Nothing here can fail the caller. The recorder swallows its own errors,
+/// and a [threshold] read that throws degrades to the default: a chip that
+/// did not follow is a stale square on the home screen, and re-running a
+/// model call over it would be the more expensive mistake.
+Future<void> followNeedsYouChip(
+  PipelineProgress progress,
+  String source,
+  String id, {
+  required double? previous,
+  required double? p,
+  Future<double> Function()? threshold,
+}) async {
+  if (previous == p) return;
+  var cut = NeedsYouTuning.defaultThreshold;
+  if (threshold != null) {
+    try {
+      cut = await threshold();
+    } catch (e) {
+      debugPrint('needs_you: reading the needs-you threshold failed: $e');
+    }
+  }
+  if (needsYouAt(previous, cut) == needsYouAt(p, cut)) return;
+  await progress.refreshNeedsYou(source, id, threshold: cut);
 }

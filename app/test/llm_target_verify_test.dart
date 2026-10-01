@@ -15,7 +15,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
-import 'fixtures/membership_cases.dart';
 
 /// Whether a candidate server can be believed at all, checked before anything
 /// is measured against it.
@@ -62,17 +61,8 @@ class Probe {
 List<Probe> _bulkProbes() {
   final now = DateTime.now();
   final first = corpus.first;
-  final membership = membershipCases.first;
   return [
     Probe(const MessageTextTask(), MessageTextInput(first.message, now)),
-    Probe(
-      const ConfirmMembershipTask(),
-      ConfirmInput(
-        storyline: membership.storyline,
-        storylineParticipants: membership.participants,
-        candidateCard: membership.candidateCard,
-      ),
-    ),
   ];
 }
 

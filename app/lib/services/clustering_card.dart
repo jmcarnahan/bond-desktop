@@ -3,6 +3,9 @@ import 'dart:convert';
 import '../models/message_models.dart';
 import 'chat_roster.dart' show isTeamsNamesSubject;
 import 'conversation_state.dart';
+import 'decision/decision_input.dart' show stripDecisionMarkers;
+import 'decision/storyline_state.dart'
+    show storylineCollapse, storylineMessageCap;
 
 /// The text a conversation becomes before anything measures it against another
 /// conversation.
@@ -99,6 +102,25 @@ enum ClusteringCardVariant {
   /// EMPTY subject. The untitled rule alone, measured apart from the thread
   /// merge after `SWEEP_CARD=thread` cost one `storyline.id` point.
   topicsUntitled,
+
+  /// The thread's own text: exactly the bytes the decision model's storyline
+  /// questions read (`storylineThreadTextFor`, subject, participants and the
+  /// newest shown messages at the renderer's caps), so retrieval and
+  /// judgement read one text. Buildable BEFORE extraction — it needs no
+  /// summary and no topics — and measured on 2026-09-30 so the assign could
+  /// run at triage: 45/98 on `make golden-sweep` against [topics]' 60/98,
+  /// proposing junk storylines, so it is a bench arm and does not ship.
+  ///
+  /// It is not four segments and needs the store, so [buildClusteringCard]
+  /// refuses it and [clusteringCardForConversationRow] cannot build it:
+  /// `clusteringCardFor` in `storyline_cards.dart` is the one entry.
+  text,
+
+  /// `subject |  |  | <excerpt>` — the newest kept inbound message's own
+  /// words ([newestMessageExcerpt]) in the summary slot, and no topics. The
+  /// four-segment card also buildable before extraction; 47/98 on the same
+  /// bench, and it does not ship either.
+  excerpt,
 }
 
 /// How many of a thread's newest kept inbound messages the
@@ -124,6 +146,18 @@ const int threadCardTopicCap = 5;
 /// Round E Phase 1 measures the other three through `make golden-vector`,
 /// which reads the vector alone and needs no chat model to do it.
 ///
+/// `text` and `excerpt` (2026-09-30) are the two cards buildable BEFORE the
+/// message-text call, measured so the storyline lane could run beside
+/// extraction. Neither ships. On `make golden-vector` they read close to this
+/// card (recall-70 cross rate 36% and 20% against 15%; cross-5 rung 0.52 and
+/// 0.49 against 0.48), but on `make golden-sweep` the clusters they propose
+/// are junk: 45/98 and 47/98 against 60/98, with 23–24 items filed into
+/// storylines that are no effort at all where this card files none. The
+/// 27B's topics and summary are what make a cluster clean; the subject and
+/// three hundred characters of the newest message group threads by their
+/// boilerplate. The rows are in `docs/model-bakeoff.md` ("Pre-extraction
+/// cards").
+///
 /// Moving this constant orphans every stored conversation vector by
 /// construction, since every read filters on the tag, so it moves together
 /// with [EmbeddingsClient.modelTag] and the one-shot in `sync_service.dart`
@@ -133,6 +167,11 @@ const ClusteringCardVariant shippedClusteringCard = ClusteringCardVariant.topics
 
 /// The text a conversation is EMBEDDED from: [buildConversationCard]'s shape
 /// with [variant]'s segments kept and the rest left empty.
+///
+/// [ClusteringCardVariant.excerpt] reads [summary] as the excerpt: the caller
+/// passes [newestMessageExcerpt], not a triage summary.
+/// [ClusteringCardVariant.text] throws [ArgumentError]: it is the thread text,
+/// not four segments, and `clusteringCardFor` builds it.
 String buildClusteringCard({
   String? subject,
   required List<String> participants,
@@ -178,7 +217,33 @@ String buildClusteringCard({
           topics: topics,
           summary: summary,
         ),
+      ClusteringCardVariant.excerpt => buildConversationCard(
+          subject: subject,
+          participants: const [],
+          topics: const [],
+          summary: summary,
+        ),
+      ClusteringCardVariant.text => throw ArgumentError.value(
+          variant,
+          'variant',
+          'the text card is the thread text, not four segments; '
+              'clusteringCardFor in storyline_cards.dart builds it',
+        ),
     };
+
+/// The newest kept inbound message's own words, as the
+/// [ClusteringCardVariant.excerpt] card and the naming card read them:
+/// `body_text`, else `body_preview` (an unfetched body), with the attachment
+/// markers stripped the way the decision renderers strip them, every
+/// whitespace run joined and the whole capped at [storylineMessageCap] code
+/// points — the cap the thread text gives one message. Empty when the map
+/// carries neither.
+String newestMessageExcerpt(Map<String, Object?>? cardData) {
+  final body = cardData?['body_text'] as String? ?? '';
+  final text =
+      body.isNotEmpty ? body : cardData?['body_preview'] as String? ?? '';
+  return storylineCollapse(stripDecisionMarkers(text), storylineMessageCap);
+}
 
 /// The word a variant is named by on a command line and in a result file.
 ///
@@ -210,21 +275,23 @@ ClusteringCardVariant parseClusteringCardVariant(String raw) =>
       'summary' => ClusteringCardVariant.summary,
       'thread' => ClusteringCardVariant.thread,
       'topics_untitled' => ClusteringCardVariant.topicsUntitled,
+      'text' => ClusteringCardVariant.text,
+      'excerpt' => ClusteringCardVariant.excerpt,
       _ => throw ArgumentError.value(
           raw,
           'SWEEP_CARD',
           'must be one of participants, topics, subject, subject_topics, '
-              'summary, thread, topics_untitled',
+              'summary, thread, topics_untitled, text, excerpt',
         ),
     };
 
 /// The card a conversation is EMBEDDED from, built from a stored row and the
 /// stored facts of its newest kept inbound message.
 ///
-/// The one recipe over one data source, so the embed handler and the sweep's
-/// own re-embed cannot drift apart and the stored hash column means one thing.
-/// [variant] defaults to what the app ships, so the two callers inside `lib/`
-/// pass nothing and cannot drift from it; it is a parameter at all for the
+/// The one recipe over one data source, reached through `clusteringCardFor`
+/// (`storyline_cards.dart`), so the assign pass and the golden seed cannot
+/// drift apart and the stored hash column means one thing. [variant] defaults
+/// to what the app ships; it is a parameter at all for the
 /// benches, which price a card the app is NOT currently writing through this
 /// same recipe rather than through a second copy of it.
 ///
@@ -234,12 +301,26 @@ ClusteringCardVariant parseClusteringCardVariant(String raw) =>
 /// extraction blobs of the thread's newest [threadCardMessages] kept inbound
 /// messages, newest first. A map without that list (an older caller, or
 /// `newestInboundCardData`) reads as a one-message thread.
+///
+/// For [ClusteringCardVariant.excerpt], [cardData] is
+/// `newestInboundCardData`'s shape and the summary slot is
+/// [newestMessageExcerpt] of it. [ClusteringCardVariant.text] throws, as
+/// [buildClusteringCard] does: it goes through `clusteringCardFor`.
 String clusteringCardForConversationRow(
   Map<String, Object?> row,
   Map<String, Object?>? cardData, {
   ClusteringCardVariant variant = shippedClusteringCard,
 }) {
   final conversation = Conversation.fromRow(row);
+  if (variant == ClusteringCardVariant.excerpt) {
+    return buildClusteringCard(
+      subject: stripReFw(conversation.subject),
+      participants: const [],
+      topics: const [],
+      summary: newestMessageExcerpt(cardData),
+      variant: variant,
+    );
+  }
   bool untitledChat() =>
       conversation.source == 'teams' &&
       isTeamsNamesSubject(conversation.subject, [

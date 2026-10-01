@@ -131,6 +131,14 @@ class ActivityLog {
   /// connector that only syncs when the user asks.
   static const Set<String> _scanKeys = {'chats_seen', 'chats_fetched'};
 
+  /// The detail key a storyline refresh or recap notes when it waited for a
+  /// settled mailbox (`StorylineService._deferredUnsettled`). Such a pass did
+  /// nothing, and on a cold start it runs on every extraction burst, so on a
+  /// quiet kind it is quiet whatever backlog counts ride beside it: they
+  /// still reach an open panel on the transient event. The sweep says the
+  /// same thing with a STRING `deferred` instead, and stays a row.
+  static const String _waitedKey = 'unsettled';
+
   /// Where each pass's completion time is stamped. `storyline` is absent on
   /// purpose: it is per-thread work, so "when did it last run" is a fact about
   /// whichever thread happened to be extracted, not about the mailbox.
@@ -325,6 +333,7 @@ class ActivityLog {
     if (!_quietKinds.contains(kind)) return false;
     if (status != 'ok') return false;
     if ((count ?? 0) != 0) return false;
+    if (detail[_waitedKey] is num) return true;
     return detail.entries.every((entry) =>
         _scanKeys.contains(entry.key) ||
         (entry.value is num && entry.value == 0));

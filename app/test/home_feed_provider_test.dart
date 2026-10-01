@@ -478,7 +478,7 @@ void main() {
       final notifier = container.read(homeFeedProvider.notifier);
 
       await container.read(appPrefsProvider.notifier)
-          .setAttentionThreshold(0.9);
+          .setNeedsYouThreshold(0.9);
       // The listener fires on the pref's own write; a microtask is what its
       // reload needs to land in state.
       await Future<void>.delayed(Duration.zero);

@@ -373,6 +373,17 @@ class Messages extends Table with TableInfo<Messages, Message> {
     requiredDuringInsert: false,
     $customConstraints: '',
   );
+  static const VerificationMeta _needsYouPMeta = const VerificationMeta(
+    'needsYouP',
+  );
+  late final GeneratedColumn<double> needsYouP = GeneratedColumn<double>(
+    'needs_you_p',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -408,6 +419,7 @@ class Messages extends Table with TableInfo<Messages, Message> {
     needsYouVerdict,
     needsYouReason,
     gateOverride,
+    needsYouP,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -683,6 +695,12 @@ class Messages extends Table with TableInfo<Messages, Message> {
         ),
       );
     }
+    if (data.containsKey('needs_you_p')) {
+      context.handle(
+        _needsYouPMeta,
+        needsYouP.isAcceptableOrUnknown(data['needs_you_p']!, _needsYouPMeta),
+      );
+    }
     return context;
   }
 
@@ -824,6 +842,10 @@ class Messages extends Table with TableInfo<Messages, Message> {
         DriftSqlType.string,
         data['${effectivePrefix}gate_override'],
       ),
+      needsYouP: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}needs_you_p'],
+      ),
     );
   }
 
@@ -897,19 +919,14 @@ class Message extends DataClass implements Insertable<Message> {
   final int? replyExpected;
   final String? deadline;
 
-  /// `needs_you_verdict` is the needs-you pass's answer to the only question
-  /// the rail exists to ask: does this one want the owner? NULL means the pass
-  /// has never judged this row, which is NOT the same as "no" — the unjudged
-  /// rows ARE the worklist, so nothing may read NULL as 0. 0 is a judgement
-  /// that the message does not need the owner; 1 is a judgement that it does.
+  /// `needs_you_verdict` is INERT since v21: the pre-probability needs-you
+  /// verdict (NULL never judged, 0 no, 1 yes). Nothing writes it any more;
+  /// v21 mapped it into `needs_you_p` below, which is what Needs You reads.
   ///
-  /// Written by the `needs_you` work handler and by nobody else — the
-  /// deterministic floor or, later, the model. Ingest never touches it: what a
-  /// connector knows lands in `addressed_me`, which is a fact about the
-  /// message, while this is a verdict about it.
-  ///
-  /// `needs_you_reason` says why: 'teams_direct' from the floor, or the
-  /// model's own evidence sentence.
+  /// `needs_you_reason` says why the message's probability is what it is: the
+  /// decision model's templated sentence. Rows from before v21 may still carry
+  /// 'teams_direct', the retired Teams floor's token, or a language model's
+  /// evidence line from the builds that asked one.
   final int? needsYouVerdict;
   final String? needsYouReason;
 
@@ -925,6 +942,13 @@ class Message extends DataClass implements Insertable<Message> {
   /// `MessageStore.stampStorylineId`): the user is telling the app what the
   /// old messages were always about, and that word outlives the passes.
   final String? gateOverride;
+
+  /// `needs_you_p` is the decision model's calibrated p(needs_you = yes) for
+  /// this message, written by the triage pass (and by the needs-you handler
+  /// when it re-decides). It is the ONE number Needs You reads, against the
+  /// owner's slider (`needs_you_threshold`). NULL means not decided yet, which
+  /// is NOT a low probability: an undecided message needs nobody until it is.
+  final double? needsYouP;
   const Message({
     required this.source,
     required this.sourceMessageId,
@@ -959,6 +983,7 @@ class Message extends DataClass implements Insertable<Message> {
     this.needsYouVerdict,
     this.needsYouReason,
     this.gateOverride,
+    this.needsYouP,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1037,6 +1062,9 @@ class Message extends DataClass implements Insertable<Message> {
     }
     if (!nullToAbsent || gateOverride != null) {
       map['gate_override'] = Variable<String>(gateOverride);
+    }
+    if (!nullToAbsent || needsYouP != null) {
+      map['needs_you_p'] = Variable<double>(needsYouP);
     }
     return map;
   }
@@ -1118,6 +1146,9 @@ class Message extends DataClass implements Insertable<Message> {
       gateOverride: gateOverride == null && nullToAbsent
           ? const Value.absent()
           : Value(gateOverride),
+      needsYouP: needsYouP == null && nullToAbsent
+          ? const Value.absent()
+          : Value(needsYouP),
     );
   }
 
@@ -1162,6 +1193,7 @@ class Message extends DataClass implements Insertable<Message> {
       needsYouVerdict: serializer.fromJson<int?>(json['needs_you_verdict']),
       needsYouReason: serializer.fromJson<String?>(json['needs_you_reason']),
       gateOverride: serializer.fromJson<String?>(json['gate_override']),
+      needsYouP: serializer.fromJson<double?>(json['needs_you_p']),
     );
   }
   @override
@@ -1201,6 +1233,7 @@ class Message extends DataClass implements Insertable<Message> {
       'needs_you_verdict': serializer.toJson<int?>(needsYouVerdict),
       'needs_you_reason': serializer.toJson<String?>(needsYouReason),
       'gate_override': serializer.toJson<String?>(gateOverride),
+      'needs_you_p': serializer.toJson<double?>(needsYouP),
     };
   }
 
@@ -1238,6 +1271,7 @@ class Message extends DataClass implements Insertable<Message> {
     Value<int?> needsYouVerdict = const Value.absent(),
     Value<String?> needsYouReason = const Value.absent(),
     Value<String?> gateOverride = const Value.absent(),
+    Value<double?> needsYouP = const Value.absent(),
   }) => Message(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -1284,6 +1318,7 @@ class Message extends DataClass implements Insertable<Message> {
         ? needsYouReason.value
         : this.needsYouReason,
     gateOverride: gateOverride.present ? gateOverride.value : this.gateOverride,
+    needsYouP: needsYouP.present ? needsYouP.value : this.needsYouP,
   );
   Message copyWithCompanion(MessagesCompanion data) {
     return Message(
@@ -1360,6 +1395,7 @@ class Message extends DataClass implements Insertable<Message> {
       gateOverride: data.gateOverride.present
           ? data.gateOverride.value
           : this.gateOverride,
+      needsYouP: data.needsYouP.present ? data.needsYouP.value : this.needsYouP,
     );
   }
 
@@ -1398,7 +1434,8 @@ class Message extends DataClass implements Insertable<Message> {
           ..write('deadline: $deadline, ')
           ..write('needsYouVerdict: $needsYouVerdict, ')
           ..write('needsYouReason: $needsYouReason, ')
-          ..write('gateOverride: $gateOverride')
+          ..write('gateOverride: $gateOverride, ')
+          ..write('needsYouP: $needsYouP')
           ..write(')'))
         .toString();
   }
@@ -1438,6 +1475,7 @@ class Message extends DataClass implements Insertable<Message> {
     needsYouVerdict,
     needsYouReason,
     gateOverride,
+    needsYouP,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -1475,7 +1513,8 @@ class Message extends DataClass implements Insertable<Message> {
           other.deadline == this.deadline &&
           other.needsYouVerdict == this.needsYouVerdict &&
           other.needsYouReason == this.needsYouReason &&
-          other.gateOverride == this.gateOverride);
+          other.gateOverride == this.gateOverride &&
+          other.needsYouP == this.needsYouP);
 }
 
 class MessagesCompanion extends UpdateCompanion<Message> {
@@ -1512,6 +1551,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
   final Value<int?> needsYouVerdict;
   final Value<String?> needsYouReason;
   final Value<String?> gateOverride;
+  final Value<double?> needsYouP;
   final Value<int> rowid;
   const MessagesCompanion({
     this.source = const Value.absent(),
@@ -1547,6 +1587,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.needsYouVerdict = const Value.absent(),
     this.needsYouReason = const Value.absent(),
     this.gateOverride = const Value.absent(),
+    this.needsYouP = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -1583,6 +1624,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.needsYouVerdict = const Value.absent(),
     this.needsYouReason = const Value.absent(),
     this.gateOverride = const Value.absent(),
+    this.needsYouP = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : sourceMessageId = Value(sourceMessageId),
        conversationKey = Value(conversationKey),
@@ -1623,6 +1665,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Expression<int>? needsYouVerdict,
     Expression<String>? needsYouReason,
     Expression<String>? gateOverride,
+    Expression<double>? needsYouP,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1659,6 +1702,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       if (needsYouVerdict != null) 'needs_you_verdict': needsYouVerdict,
       if (needsYouReason != null) 'needs_you_reason': needsYouReason,
       if (gateOverride != null) 'gate_override': gateOverride,
+      if (needsYouP != null) 'needs_you_p': needsYouP,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1697,6 +1741,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Value<int?>? needsYouVerdict,
     Value<String?>? needsYouReason,
     Value<String?>? gateOverride,
+    Value<double?>? needsYouP,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -1733,6 +1778,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       needsYouVerdict: needsYouVerdict ?? this.needsYouVerdict,
       needsYouReason: needsYouReason ?? this.needsYouReason,
       gateOverride: gateOverride ?? this.gateOverride,
+      needsYouP: needsYouP ?? this.needsYouP,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1839,6 +1885,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     if (gateOverride.present) {
       map['gate_override'] = Variable<String>(gateOverride.value);
     }
+    if (needsYouP.present) {
+      map['needs_you_p'] = Variable<double>(needsYouP.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1881,6 +1930,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
           ..write('needsYouVerdict: $needsYouVerdict, ')
           ..write('needsYouReason: $needsYouReason, ')
           ..write('gateOverride: $gateOverride, ')
+          ..write('needsYouP: $needsYouP, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -18924,6 +18974,15 @@ class MessageDecisions extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _vectorMeta = const VerificationMeta('vector');
+  late final GeneratedColumn<Uint8List> vector = GeneratedColumn<Uint8List>(
+    'vector',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -18938,6 +18997,7 @@ class MessageDecisions extends Table
     latencyMs,
     truncated,
     decidedAt,
+    vector,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -19047,6 +19107,12 @@ class MessageDecisions extends Table
     } else if (isInserting) {
       context.missing(_decidedAtMeta);
     }
+    if (data.containsKey('vector')) {
+      context.handle(
+        _vectorMeta,
+        vector.isAcceptableOrUnknown(data['vector']!, _vectorMeta),
+      );
+    }
     return context;
   }
 
@@ -19104,6 +19170,10 @@ class MessageDecisions extends Table
         DriftSqlType.string,
         data['${effectivePrefix}decided_at'],
       )!,
+      vector: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}vector'],
+      ),
     );
   }
 
@@ -19135,6 +19205,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
   final double? latencyMs;
   final int truncated;
   final String decidedAt;
+  final Uint8List? vector;
   const MessageDecision({
     required this.source,
     required this.sourceMessageId,
@@ -19148,6 +19219,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     this.latencyMs,
     required this.truncated,
     required this.decidedAt,
+    this.vector,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -19174,6 +19246,9 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     }
     map['truncated'] = Variable<int>(truncated);
     map['decided_at'] = Variable<String>(decidedAt);
+    if (!nullToAbsent || vector != null) {
+      map['vector'] = Variable<Uint8List>(vector);
+    }
     return map;
   }
 
@@ -19201,6 +19276,9 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
           : Value(latencyMs),
       truncated: Value(truncated),
       decidedAt: Value(decidedAt),
+      vector: vector == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vector),
     );
   }
 
@@ -19222,6 +19300,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
       latencyMs: serializer.fromJson<double?>(json['latency_ms']),
       truncated: serializer.fromJson<int>(json['truncated']),
       decidedAt: serializer.fromJson<String>(json['decided_at']),
+      vector: serializer.fromJson<Uint8List?>(json['vector']),
     );
   }
   @override
@@ -19240,6 +19319,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
       'latency_ms': serializer.toJson<double?>(latencyMs),
       'truncated': serializer.toJson<int>(truncated),
       'decided_at': serializer.toJson<String>(decidedAt),
+      'vector': serializer.toJson<Uint8List?>(vector),
     };
   }
 
@@ -19256,6 +19336,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     Value<double?> latencyMs = const Value.absent(),
     int? truncated,
     String? decidedAt,
+    Value<Uint8List?> vector = const Value.absent(),
   }) => MessageDecision(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -19271,6 +19352,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     latencyMs: latencyMs.present ? latencyMs.value : this.latencyMs,
     truncated: truncated ?? this.truncated,
     decidedAt: decidedAt ?? this.decidedAt,
+    vector: vector.present ? vector.value : this.vector,
   );
   MessageDecision copyWithCompanion(MessageDecisionsCompanion data) {
     return MessageDecision(
@@ -19294,6 +19376,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
       latencyMs: data.latencyMs.present ? data.latencyMs.value : this.latencyMs,
       truncated: data.truncated.present ? data.truncated.value : this.truncated,
       decidedAt: data.decidedAt.present ? data.decidedAt.value : this.decidedAt,
+      vector: data.vector.present ? data.vector.value : this.vector,
     );
   }
 
@@ -19311,7 +19394,8 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
           ..write('replyExpectedP: $replyExpectedP, ')
           ..write('latencyMs: $latencyMs, ')
           ..write('truncated: $truncated, ')
-          ..write('decidedAt: $decidedAt')
+          ..write('decidedAt: $decidedAt, ')
+          ..write('vector: $vector')
           ..write(')'))
         .toString();
   }
@@ -19330,6 +19414,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     latencyMs,
     truncated,
     decidedAt,
+    $driftBlobEquality.hash(vector),
   );
   @override
   bool operator ==(Object other) =>
@@ -19346,7 +19431,8 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
           other.replyExpectedP == this.replyExpectedP &&
           other.latencyMs == this.latencyMs &&
           other.truncated == this.truncated &&
-          other.decidedAt == this.decidedAt);
+          other.decidedAt == this.decidedAt &&
+          $driftBlobEquality.equals(other.vector, this.vector));
 }
 
 class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
@@ -19362,6 +19448,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
   final Value<double?> latencyMs;
   final Value<int> truncated;
   final Value<String> decidedAt;
+  final Value<Uint8List?> vector;
   final Value<int> rowid;
   const MessageDecisionsCompanion({
     this.source = const Value.absent(),
@@ -19376,6 +19463,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     this.latencyMs = const Value.absent(),
     this.truncated = const Value.absent(),
     this.decidedAt = const Value.absent(),
+    this.vector = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessageDecisionsCompanion.insert({
@@ -19391,6 +19479,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     this.latencyMs = const Value.absent(),
     this.truncated = const Value.absent(),
     required String decidedAt,
+    this.vector = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : source = Value(source),
        sourceMessageId = Value(sourceMessageId),
@@ -19411,6 +19500,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     Expression<double>? latencyMs,
     Expression<int>? truncated,
     Expression<String>? decidedAt,
+    Expression<Uint8List>? vector,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -19426,6 +19516,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
       if (latencyMs != null) 'latency_ms': latencyMs,
       if (truncated != null) 'truncated': truncated,
       if (decidedAt != null) 'decided_at': decidedAt,
+      if (vector != null) 'vector': vector,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -19443,6 +19534,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     Value<double?>? latencyMs,
     Value<int>? truncated,
     Value<String>? decidedAt,
+    Value<Uint8List?>? vector,
     Value<int>? rowid,
   }) {
     return MessageDecisionsCompanion(
@@ -19458,6 +19550,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
       latencyMs: latencyMs ?? this.latencyMs,
       truncated: truncated ?? this.truncated,
       decidedAt: decidedAt ?? this.decidedAt,
+      vector: vector ?? this.vector,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -19501,6 +19594,9 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     if (decidedAt.present) {
       map['decided_at'] = Variable<String>(decidedAt.value);
     }
+    if (vector.present) {
+      map['vector'] = Variable<Uint8List>(vector.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -19522,7 +19618,890 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
           ..write('latencyMs: $latencyMs, ')
           ..write('truncated: $truncated, ')
           ..write('decidedAt: $decidedAt, ')
+          ..write('vector: $vector, ')
           ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class DecisionLabels extends Table
+    with TableInfo<DecisionLabels, DecisionLabel> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  DecisionLabels(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _questionMeta = const VerificationMeta(
+    'question',
+  );
+  late final GeneratedColumn<String> question = GeneratedColumn<String>(
+    'question',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _answerMeta = const VerificationMeta('answer');
+  late final GeneratedColumn<String> answer = GeneratedColumn<String>(
+    'answer',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _storylineIdMeta = const VerificationMeta(
+    'storylineId',
+  );
+  late final GeneratedColumn<String> storylineId = GeneratedColumn<String>(
+    'storyline_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _conversationKeyMeta = const VerificationMeta(
+    'conversationKey',
+  );
+  late final GeneratedColumn<String> conversationKey = GeneratedColumn<String>(
+    'conversation_key',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _otherSourceMeta = const VerificationMeta(
+    'otherSource',
+  );
+  late final GeneratedColumn<String> otherSource = GeneratedColumn<String>(
+    'other_source',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _otherConversationKeyMeta =
+      const VerificationMeta('otherConversationKey');
+  late final GeneratedColumn<String> otherConversationKey =
+      GeneratedColumn<String>(
+        'other_conversation_key',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        $customConstraints: '',
+      );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _charterMeta = const VerificationMeta(
+    'charter',
+  );
+  late final GeneratedColumn<String> charter = GeneratedColumn<String>(
+    'charter',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _originMeta = const VerificationMeta('origin');
+  late final GeneratedColumn<String> origin = GeneratedColumn<String>(
+    'origin',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _vectorMeta = const VerificationMeta('vector');
+  late final GeneratedColumn<Uint8List> vector = GeneratedColumn<Uint8List>(
+    'vector',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _vectorModelMeta = const VerificationMeta(
+    'vectorModel',
+  );
+  late final GeneratedColumn<String> vectorModel = GeneratedColumn<String>(
+    'vector_model',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    question,
+    answer,
+    storylineId,
+    source,
+    conversationKey,
+    otherSource,
+    otherConversationKey,
+    title,
+    charter,
+    origin,
+    createdAt,
+    sourceMessageId,
+    vector,
+    vectorModel,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'decision_labels';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<DecisionLabel> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('question')) {
+      context.handle(
+        _questionMeta,
+        question.isAcceptableOrUnknown(data['question']!, _questionMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_questionMeta);
+    }
+    if (data.containsKey('answer')) {
+      context.handle(
+        _answerMeta,
+        answer.isAcceptableOrUnknown(data['answer']!, _answerMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_answerMeta);
+    }
+    if (data.containsKey('storyline_id')) {
+      context.handle(
+        _storylineIdMeta,
+        storylineId.isAcceptableOrUnknown(
+          data['storyline_id']!,
+          _storylineIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('conversation_key')) {
+      context.handle(
+        _conversationKeyMeta,
+        conversationKey.isAcceptableOrUnknown(
+          data['conversation_key']!,
+          _conversationKeyMeta,
+        ),
+      );
+    }
+    if (data.containsKey('other_source')) {
+      context.handle(
+        _otherSourceMeta,
+        otherSource.isAcceptableOrUnknown(
+          data['other_source']!,
+          _otherSourceMeta,
+        ),
+      );
+    }
+    if (data.containsKey('other_conversation_key')) {
+      context.handle(
+        _otherConversationKeyMeta,
+        otherConversationKey.isAcceptableOrUnknown(
+          data['other_conversation_key']!,
+          _otherConversationKeyMeta,
+        ),
+      );
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    }
+    if (data.containsKey('charter')) {
+      context.handle(
+        _charterMeta,
+        charter.isAcceptableOrUnknown(data['charter']!, _charterMeta),
+      );
+    }
+    if (data.containsKey('origin')) {
+      context.handle(
+        _originMeta,
+        origin.isAcceptableOrUnknown(data['origin']!, _originMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_originMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('vector')) {
+      context.handle(
+        _vectorMeta,
+        vector.isAcceptableOrUnknown(data['vector']!, _vectorMeta),
+      );
+    }
+    if (data.containsKey('vector_model')) {
+      context.handle(
+        _vectorModelMeta,
+        vectorModel.isAcceptableOrUnknown(
+          data['vector_model']!,
+          _vectorModelMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  DecisionLabel map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return DecisionLabel(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      question: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}question'],
+      )!,
+      answer: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}answer'],
+      )!,
+      storylineId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}storyline_id'],
+      ),
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      ),
+      conversationKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}conversation_key'],
+      ),
+      otherSource: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}other_source'],
+      ),
+      otherConversationKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}other_conversation_key'],
+      ),
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      ),
+      charter: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}charter'],
+      ),
+      origin: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}origin'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      ),
+      vector: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}vector'],
+      ),
+      vectorModel: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}vector_model'],
+      ),
+    );
+  }
+
+  @override
+  DecisionLabels createAlias(String alias) {
+    return DecisionLabels(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class DecisionLabel extends DataClass implements Insertable<DecisionLabel> {
+  final int id;
+  final String question;
+  final String answer;
+  final String? storylineId;
+  final String? source;
+  final String? conversationKey;
+  final String? otherSource;
+  final String? otherConversationKey;
+  final String? title;
+  final String? charter;
+  final String origin;
+  final String createdAt;
+  final String? sourceMessageId;
+  final Uint8List? vector;
+  final String? vectorModel;
+  const DecisionLabel({
+    required this.id,
+    required this.question,
+    required this.answer,
+    this.storylineId,
+    this.source,
+    this.conversationKey,
+    this.otherSource,
+    this.otherConversationKey,
+    this.title,
+    this.charter,
+    required this.origin,
+    required this.createdAt,
+    this.sourceMessageId,
+    this.vector,
+    this.vectorModel,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['question'] = Variable<String>(question);
+    map['answer'] = Variable<String>(answer);
+    if (!nullToAbsent || storylineId != null) {
+      map['storyline_id'] = Variable<String>(storylineId);
+    }
+    if (!nullToAbsent || source != null) {
+      map['source'] = Variable<String>(source);
+    }
+    if (!nullToAbsent || conversationKey != null) {
+      map['conversation_key'] = Variable<String>(conversationKey);
+    }
+    if (!nullToAbsent || otherSource != null) {
+      map['other_source'] = Variable<String>(otherSource);
+    }
+    if (!nullToAbsent || otherConversationKey != null) {
+      map['other_conversation_key'] = Variable<String>(otherConversationKey);
+    }
+    if (!nullToAbsent || title != null) {
+      map['title'] = Variable<String>(title);
+    }
+    if (!nullToAbsent || charter != null) {
+      map['charter'] = Variable<String>(charter);
+    }
+    map['origin'] = Variable<String>(origin);
+    map['created_at'] = Variable<String>(createdAt);
+    if (!nullToAbsent || sourceMessageId != null) {
+      map['source_message_id'] = Variable<String>(sourceMessageId);
+    }
+    if (!nullToAbsent || vector != null) {
+      map['vector'] = Variable<Uint8List>(vector);
+    }
+    if (!nullToAbsent || vectorModel != null) {
+      map['vector_model'] = Variable<String>(vectorModel);
+    }
+    return map;
+  }
+
+  DecisionLabelsCompanion toCompanion(bool nullToAbsent) {
+    return DecisionLabelsCompanion(
+      id: Value(id),
+      question: Value(question),
+      answer: Value(answer),
+      storylineId: storylineId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(storylineId),
+      source: source == null && nullToAbsent
+          ? const Value.absent()
+          : Value(source),
+      conversationKey: conversationKey == null && nullToAbsent
+          ? const Value.absent()
+          : Value(conversationKey),
+      otherSource: otherSource == null && nullToAbsent
+          ? const Value.absent()
+          : Value(otherSource),
+      otherConversationKey: otherConversationKey == null && nullToAbsent
+          ? const Value.absent()
+          : Value(otherConversationKey),
+      title: title == null && nullToAbsent
+          ? const Value.absent()
+          : Value(title),
+      charter: charter == null && nullToAbsent
+          ? const Value.absent()
+          : Value(charter),
+      origin: Value(origin),
+      createdAt: Value(createdAt),
+      sourceMessageId: sourceMessageId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(sourceMessageId),
+      vector: vector == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vector),
+      vectorModel: vectorModel == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vectorModel),
+    );
+  }
+
+  factory DecisionLabel.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return DecisionLabel(
+      id: serializer.fromJson<int>(json['id']),
+      question: serializer.fromJson<String>(json['question']),
+      answer: serializer.fromJson<String>(json['answer']),
+      storylineId: serializer.fromJson<String?>(json['storyline_id']),
+      source: serializer.fromJson<String?>(json['source']),
+      conversationKey: serializer.fromJson<String?>(json['conversation_key']),
+      otherSource: serializer.fromJson<String?>(json['other_source']),
+      otherConversationKey: serializer.fromJson<String?>(
+        json['other_conversation_key'],
+      ),
+      title: serializer.fromJson<String?>(json['title']),
+      charter: serializer.fromJson<String?>(json['charter']),
+      origin: serializer.fromJson<String>(json['origin']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      sourceMessageId: serializer.fromJson<String?>(json['source_message_id']),
+      vector: serializer.fromJson<Uint8List?>(json['vector']),
+      vectorModel: serializer.fromJson<String?>(json['vector_model']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'question': serializer.toJson<String>(question),
+      'answer': serializer.toJson<String>(answer),
+      'storyline_id': serializer.toJson<String?>(storylineId),
+      'source': serializer.toJson<String?>(source),
+      'conversation_key': serializer.toJson<String?>(conversationKey),
+      'other_source': serializer.toJson<String?>(otherSource),
+      'other_conversation_key': serializer.toJson<String?>(
+        otherConversationKey,
+      ),
+      'title': serializer.toJson<String?>(title),
+      'charter': serializer.toJson<String?>(charter),
+      'origin': serializer.toJson<String>(origin),
+      'created_at': serializer.toJson<String>(createdAt),
+      'source_message_id': serializer.toJson<String?>(sourceMessageId),
+      'vector': serializer.toJson<Uint8List?>(vector),
+      'vector_model': serializer.toJson<String?>(vectorModel),
+    };
+  }
+
+  DecisionLabel copyWith({
+    int? id,
+    String? question,
+    String? answer,
+    Value<String?> storylineId = const Value.absent(),
+    Value<String?> source = const Value.absent(),
+    Value<String?> conversationKey = const Value.absent(),
+    Value<String?> otherSource = const Value.absent(),
+    Value<String?> otherConversationKey = const Value.absent(),
+    Value<String?> title = const Value.absent(),
+    Value<String?> charter = const Value.absent(),
+    String? origin,
+    String? createdAt,
+    Value<String?> sourceMessageId = const Value.absent(),
+    Value<Uint8List?> vector = const Value.absent(),
+    Value<String?> vectorModel = const Value.absent(),
+  }) => DecisionLabel(
+    id: id ?? this.id,
+    question: question ?? this.question,
+    answer: answer ?? this.answer,
+    storylineId: storylineId.present ? storylineId.value : this.storylineId,
+    source: source.present ? source.value : this.source,
+    conversationKey: conversationKey.present
+        ? conversationKey.value
+        : this.conversationKey,
+    otherSource: otherSource.present ? otherSource.value : this.otherSource,
+    otherConversationKey: otherConversationKey.present
+        ? otherConversationKey.value
+        : this.otherConversationKey,
+    title: title.present ? title.value : this.title,
+    charter: charter.present ? charter.value : this.charter,
+    origin: origin ?? this.origin,
+    createdAt: createdAt ?? this.createdAt,
+    sourceMessageId: sourceMessageId.present
+        ? sourceMessageId.value
+        : this.sourceMessageId,
+    vector: vector.present ? vector.value : this.vector,
+    vectorModel: vectorModel.present ? vectorModel.value : this.vectorModel,
+  );
+  DecisionLabel copyWithCompanion(DecisionLabelsCompanion data) {
+    return DecisionLabel(
+      id: data.id.present ? data.id.value : this.id,
+      question: data.question.present ? data.question.value : this.question,
+      answer: data.answer.present ? data.answer.value : this.answer,
+      storylineId: data.storylineId.present
+          ? data.storylineId.value
+          : this.storylineId,
+      source: data.source.present ? data.source.value : this.source,
+      conversationKey: data.conversationKey.present
+          ? data.conversationKey.value
+          : this.conversationKey,
+      otherSource: data.otherSource.present
+          ? data.otherSource.value
+          : this.otherSource,
+      otherConversationKey: data.otherConversationKey.present
+          ? data.otherConversationKey.value
+          : this.otherConversationKey,
+      title: data.title.present ? data.title.value : this.title,
+      charter: data.charter.present ? data.charter.value : this.charter,
+      origin: data.origin.present ? data.origin.value : this.origin,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      vector: data.vector.present ? data.vector.value : this.vector,
+      vectorModel: data.vectorModel.present
+          ? data.vectorModel.value
+          : this.vectorModel,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DecisionLabel(')
+          ..write('id: $id, ')
+          ..write('question: $question, ')
+          ..write('answer: $answer, ')
+          ..write('storylineId: $storylineId, ')
+          ..write('source: $source, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('otherSource: $otherSource, ')
+          ..write('otherConversationKey: $otherConversationKey, ')
+          ..write('title: $title, ')
+          ..write('charter: $charter, ')
+          ..write('origin: $origin, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('vector: $vector, ')
+          ..write('vectorModel: $vectorModel')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    question,
+    answer,
+    storylineId,
+    source,
+    conversationKey,
+    otherSource,
+    otherConversationKey,
+    title,
+    charter,
+    origin,
+    createdAt,
+    sourceMessageId,
+    $driftBlobEquality.hash(vector),
+    vectorModel,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is DecisionLabel &&
+          other.id == this.id &&
+          other.question == this.question &&
+          other.answer == this.answer &&
+          other.storylineId == this.storylineId &&
+          other.source == this.source &&
+          other.conversationKey == this.conversationKey &&
+          other.otherSource == this.otherSource &&
+          other.otherConversationKey == this.otherConversationKey &&
+          other.title == this.title &&
+          other.charter == this.charter &&
+          other.origin == this.origin &&
+          other.createdAt == this.createdAt &&
+          other.sourceMessageId == this.sourceMessageId &&
+          $driftBlobEquality.equals(other.vector, this.vector) &&
+          other.vectorModel == this.vectorModel);
+}
+
+class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
+  final Value<int> id;
+  final Value<String> question;
+  final Value<String> answer;
+  final Value<String?> storylineId;
+  final Value<String?> source;
+  final Value<String?> conversationKey;
+  final Value<String?> otherSource;
+  final Value<String?> otherConversationKey;
+  final Value<String?> title;
+  final Value<String?> charter;
+  final Value<String> origin;
+  final Value<String> createdAt;
+  final Value<String?> sourceMessageId;
+  final Value<Uint8List?> vector;
+  final Value<String?> vectorModel;
+  const DecisionLabelsCompanion({
+    this.id = const Value.absent(),
+    this.question = const Value.absent(),
+    this.answer = const Value.absent(),
+    this.storylineId = const Value.absent(),
+    this.source = const Value.absent(),
+    this.conversationKey = const Value.absent(),
+    this.otherSource = const Value.absent(),
+    this.otherConversationKey = const Value.absent(),
+    this.title = const Value.absent(),
+    this.charter = const Value.absent(),
+    this.origin = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.vector = const Value.absent(),
+    this.vectorModel = const Value.absent(),
+  });
+  DecisionLabelsCompanion.insert({
+    this.id = const Value.absent(),
+    required String question,
+    required String answer,
+    this.storylineId = const Value.absent(),
+    this.source = const Value.absent(),
+    this.conversationKey = const Value.absent(),
+    this.otherSource = const Value.absent(),
+    this.otherConversationKey = const Value.absent(),
+    this.title = const Value.absent(),
+    this.charter = const Value.absent(),
+    required String origin,
+    required String createdAt,
+    this.sourceMessageId = const Value.absent(),
+    this.vector = const Value.absent(),
+    this.vectorModel = const Value.absent(),
+  }) : question = Value(question),
+       answer = Value(answer),
+       origin = Value(origin),
+       createdAt = Value(createdAt);
+  static Insertable<DecisionLabel> custom({
+    Expression<int>? id,
+    Expression<String>? question,
+    Expression<String>? answer,
+    Expression<String>? storylineId,
+    Expression<String>? source,
+    Expression<String>? conversationKey,
+    Expression<String>? otherSource,
+    Expression<String>? otherConversationKey,
+    Expression<String>? title,
+    Expression<String>? charter,
+    Expression<String>? origin,
+    Expression<String>? createdAt,
+    Expression<String>? sourceMessageId,
+    Expression<Uint8List>? vector,
+    Expression<String>? vectorModel,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (question != null) 'question': question,
+      if (answer != null) 'answer': answer,
+      if (storylineId != null) 'storyline_id': storylineId,
+      if (source != null) 'source': source,
+      if (conversationKey != null) 'conversation_key': conversationKey,
+      if (otherSource != null) 'other_source': otherSource,
+      if (otherConversationKey != null)
+        'other_conversation_key': otherConversationKey,
+      if (title != null) 'title': title,
+      if (charter != null) 'charter': charter,
+      if (origin != null) 'origin': origin,
+      if (createdAt != null) 'created_at': createdAt,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (vector != null) 'vector': vector,
+      if (vectorModel != null) 'vector_model': vectorModel,
+    });
+  }
+
+  DecisionLabelsCompanion copyWith({
+    Value<int>? id,
+    Value<String>? question,
+    Value<String>? answer,
+    Value<String?>? storylineId,
+    Value<String?>? source,
+    Value<String?>? conversationKey,
+    Value<String?>? otherSource,
+    Value<String?>? otherConversationKey,
+    Value<String?>? title,
+    Value<String?>? charter,
+    Value<String>? origin,
+    Value<String>? createdAt,
+    Value<String?>? sourceMessageId,
+    Value<Uint8List?>? vector,
+    Value<String?>? vectorModel,
+  }) {
+    return DecisionLabelsCompanion(
+      id: id ?? this.id,
+      question: question ?? this.question,
+      answer: answer ?? this.answer,
+      storylineId: storylineId ?? this.storylineId,
+      source: source ?? this.source,
+      conversationKey: conversationKey ?? this.conversationKey,
+      otherSource: otherSource ?? this.otherSource,
+      otherConversationKey: otherConversationKey ?? this.otherConversationKey,
+      title: title ?? this.title,
+      charter: charter ?? this.charter,
+      origin: origin ?? this.origin,
+      createdAt: createdAt ?? this.createdAt,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      vector: vector ?? this.vector,
+      vectorModel: vectorModel ?? this.vectorModel,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (question.present) {
+      map['question'] = Variable<String>(question.value);
+    }
+    if (answer.present) {
+      map['answer'] = Variable<String>(answer.value);
+    }
+    if (storylineId.present) {
+      map['storyline_id'] = Variable<String>(storylineId.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (conversationKey.present) {
+      map['conversation_key'] = Variable<String>(conversationKey.value);
+    }
+    if (otherSource.present) {
+      map['other_source'] = Variable<String>(otherSource.value);
+    }
+    if (otherConversationKey.present) {
+      map['other_conversation_key'] = Variable<String>(
+        otherConversationKey.value,
+      );
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (charter.present) {
+      map['charter'] = Variable<String>(charter.value);
+    }
+    if (origin.present) {
+      map['origin'] = Variable<String>(origin.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (vector.present) {
+      map['vector'] = Variable<Uint8List>(vector.value);
+    }
+    if (vectorModel.present) {
+      map['vector_model'] = Variable<String>(vectorModel.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DecisionLabelsCompanion(')
+          ..write('id: $id, ')
+          ..write('question: $question, ')
+          ..write('answer: $answer, ')
+          ..write('storylineId: $storylineId, ')
+          ..write('source: $source, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('otherSource: $otherSource, ')
+          ..write('otherConversationKey: $otherConversationKey, ')
+          ..write('title: $title, ')
+          ..write('charter: $charter, ')
+          ..write('origin: $origin, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('vector: $vector, ')
+          ..write('vectorModel: $vectorModel')
           ..write(')'))
         .toString();
   }
@@ -21715,6 +22694,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'CREATE INDEX ix_conv_labels_label ON conversation_labels (label_id, applied_at DESC)',
   );
   late final MessageDecisions messageDecisions = MessageDecisions(this);
+  late final DecisionLabels decisionLabels = DecisionLabels(this);
   late final CalendarEvents calendarEvents = CalendarEvents(this);
   late final Index ixCalendarEventsStartUtc = Index(
     'ix_calendar_events_start_utc',
@@ -21787,6 +22767,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     conversationLabels,
     ixConvLabelsLabel,
     messageDecisions,
+    decisionLabels,
     calendarEvents,
     ixCalendarEventsStartUtc,
     ixCalendarEventsStartDate,
@@ -21829,6 +22810,7 @@ typedef $MessagesCreateCompanionBuilder =
       Value<int?> needsYouVerdict,
       Value<String?> needsYouReason,
       Value<String?> gateOverride,
+      Value<double?> needsYouP,
       Value<int> rowid,
     });
 typedef $MessagesUpdateCompanionBuilder =
@@ -21866,6 +22848,7 @@ typedef $MessagesUpdateCompanionBuilder =
       Value<int?> needsYouVerdict,
       Value<String?> needsYouReason,
       Value<String?> gateOverride,
+      Value<double?> needsYouP,
       Value<int> rowid,
     });
 
@@ -22039,6 +23022,11 @@ class $MessagesFilterComposer extends Composer<_$BondDatabase, Messages> {
 
   ColumnFilters<String> get gateOverride => $composableBuilder(
     column: $table.gateOverride,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get needsYouP => $composableBuilder(
+    column: $table.needsYouP,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -22215,6 +23203,11 @@ class $MessagesOrderingComposer extends Composer<_$BondDatabase, Messages> {
     column: $table.gateOverride,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<double> get needsYouP => $composableBuilder(
+    column: $table.needsYouP,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
@@ -22363,6 +23356,9 @@ class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
     column: $table.gateOverride,
     builder: (column) => column,
   );
+
+  GeneratedColumn<double> get needsYouP =>
+      $composableBuilder(column: $table.needsYouP, builder: (column) => column);
 }
 
 class $MessagesTableManager
@@ -22426,6 +23422,7 @@ class $MessagesTableManager
                 Value<int?> needsYouVerdict = const Value.absent(),
                 Value<String?> needsYouReason = const Value.absent(),
                 Value<String?> gateOverride = const Value.absent(),
+                Value<double?> needsYouP = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 source: source,
@@ -22461,6 +23458,7 @@ class $MessagesTableManager
                 needsYouVerdict: needsYouVerdict,
                 needsYouReason: needsYouReason,
                 gateOverride: gateOverride,
+                needsYouP: needsYouP,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -22498,6 +23496,7 @@ class $MessagesTableManager
                 Value<int?> needsYouVerdict = const Value.absent(),
                 Value<String?> needsYouReason = const Value.absent(),
                 Value<String?> gateOverride = const Value.absent(),
+                Value<double?> needsYouP = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 source: source,
@@ -22533,6 +23532,7 @@ class $MessagesTableManager
                 needsYouVerdict: needsYouVerdict,
                 needsYouReason: needsYouReason,
                 gateOverride: gateOverride,
+                needsYouP: needsYouP,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -30618,6 +31618,7 @@ typedef $MessageDecisionsCreateCompanionBuilder =
       Value<double?> latencyMs,
       Value<int> truncated,
       required String decidedAt,
+      Value<Uint8List?> vector,
       Value<int> rowid,
     });
 typedef $MessageDecisionsUpdateCompanionBuilder =
@@ -30634,6 +31635,7 @@ typedef $MessageDecisionsUpdateCompanionBuilder =
       Value<double?> latencyMs,
       Value<int> truncated,
       Value<String> decidedAt,
+      Value<Uint8List?> vector,
       Value<int> rowid,
     });
 
@@ -30703,6 +31705,11 @@ class $MessageDecisionsFilterComposer
 
   ColumnFilters<String> get decidedAt => $composableBuilder(
     column: $table.decidedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -30775,6 +31782,11 @@ class $MessageDecisionsOrderingComposer
     column: $table.decidedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessageDecisionsAnnotationComposer
@@ -30829,6 +31841,9 @@ class $MessageDecisionsAnnotationComposer
 
   GeneratedColumn<String> get decidedAt =>
       $composableBuilder(column: $table.decidedAt, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get vector =>
+      $composableBuilder(column: $table.vector, builder: (column) => column);
 }
 
 class $MessageDecisionsTableManager
@@ -30874,6 +31889,7 @@ class $MessageDecisionsTableManager
                 Value<double?> latencyMs = const Value.absent(),
                 Value<int> truncated = const Value.absent(),
                 Value<String> decidedAt = const Value.absent(),
+                Value<Uint8List?> vector = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessageDecisionsCompanion(
                 source: source,
@@ -30888,6 +31904,7 @@ class $MessageDecisionsTableManager
                 latencyMs: latencyMs,
                 truncated: truncated,
                 decidedAt: decidedAt,
+                vector: vector,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -30904,6 +31921,7 @@ class $MessageDecisionsTableManager
                 Value<double?> latencyMs = const Value.absent(),
                 Value<int> truncated = const Value.absent(),
                 required String decidedAt,
+                Value<Uint8List?> vector = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessageDecisionsCompanion.insert(
                 source: source,
@@ -30918,6 +31936,7 @@ class $MessageDecisionsTableManager
                 latencyMs: latencyMs,
                 truncated: truncated,
                 decidedAt: decidedAt,
+                vector: vector,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -30943,6 +31962,402 @@ typedef $MessageDecisionsProcessedTableManager =
         BaseReferences<_$BondDatabase, MessageDecisions, MessageDecision>,
       ),
       MessageDecision,
+      PrefetchHooks Function()
+    >;
+typedef $DecisionLabelsCreateCompanionBuilder =
+    DecisionLabelsCompanion Function({
+      Value<int> id,
+      required String question,
+      required String answer,
+      Value<String?> storylineId,
+      Value<String?> source,
+      Value<String?> conversationKey,
+      Value<String?> otherSource,
+      Value<String?> otherConversationKey,
+      Value<String?> title,
+      Value<String?> charter,
+      required String origin,
+      required String createdAt,
+      Value<String?> sourceMessageId,
+      Value<Uint8List?> vector,
+      Value<String?> vectorModel,
+    });
+typedef $DecisionLabelsUpdateCompanionBuilder =
+    DecisionLabelsCompanion Function({
+      Value<int> id,
+      Value<String> question,
+      Value<String> answer,
+      Value<String?> storylineId,
+      Value<String?> source,
+      Value<String?> conversationKey,
+      Value<String?> otherSource,
+      Value<String?> otherConversationKey,
+      Value<String?> title,
+      Value<String?> charter,
+      Value<String> origin,
+      Value<String> createdAt,
+      Value<String?> sourceMessageId,
+      Value<Uint8List?> vector,
+      Value<String?> vectorModel,
+    });
+
+class $DecisionLabelsFilterComposer
+    extends Composer<_$BondDatabase, DecisionLabels> {
+  $DecisionLabelsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get question => $composableBuilder(
+    column: $table.question,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get answer => $composableBuilder(
+    column: $table.answer,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get storylineId => $composableBuilder(
+    column: $table.storylineId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get otherSource => $composableBuilder(
+    column: $table.otherSource,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get otherConversationKey => $composableBuilder(
+    column: $table.otherConversationKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get charter => $composableBuilder(
+    column: $table.charter,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get origin => $composableBuilder(
+    column: $table.origin,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get vectorModel => $composableBuilder(
+    column: $table.vectorModel,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $DecisionLabelsOrderingComposer
+    extends Composer<_$BondDatabase, DecisionLabels> {
+  $DecisionLabelsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get question => $composableBuilder(
+    column: $table.question,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get answer => $composableBuilder(
+    column: $table.answer,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get storylineId => $composableBuilder(
+    column: $table.storylineId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get otherSource => $composableBuilder(
+    column: $table.otherSource,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get otherConversationKey => $composableBuilder(
+    column: $table.otherConversationKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get charter => $composableBuilder(
+    column: $table.charter,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get origin => $composableBuilder(
+    column: $table.origin,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get vectorModel => $composableBuilder(
+    column: $table.vectorModel,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $DecisionLabelsAnnotationComposer
+    extends Composer<_$BondDatabase, DecisionLabels> {
+  $DecisionLabelsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get question =>
+      $composableBuilder(column: $table.question, builder: (column) => column);
+
+  GeneratedColumn<String> get answer =>
+      $composableBuilder(column: $table.answer, builder: (column) => column);
+
+  GeneratedColumn<String> get storylineId => $composableBuilder(
+    column: $table.storylineId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get otherSource => $composableBuilder(
+    column: $table.otherSource,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get otherConversationKey => $composableBuilder(
+    column: $table.otherConversationKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get charter =>
+      $composableBuilder(column: $table.charter, builder: (column) => column);
+
+  GeneratedColumn<String> get origin =>
+      $composableBuilder(column: $table.origin, builder: (column) => column);
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get vector =>
+      $composableBuilder(column: $table.vector, builder: (column) => column);
+
+  GeneratedColumn<String> get vectorModel => $composableBuilder(
+    column: $table.vectorModel,
+    builder: (column) => column,
+  );
+}
+
+class $DecisionLabelsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          DecisionLabels,
+          DecisionLabel,
+          $DecisionLabelsFilterComposer,
+          $DecisionLabelsOrderingComposer,
+          $DecisionLabelsAnnotationComposer,
+          $DecisionLabelsCreateCompanionBuilder,
+          $DecisionLabelsUpdateCompanionBuilder,
+          (
+            DecisionLabel,
+            BaseReferences<_$BondDatabase, DecisionLabels, DecisionLabel>,
+          ),
+          DecisionLabel,
+          PrefetchHooks Function()
+        > {
+  $DecisionLabelsTableManager(_$BondDatabase db, DecisionLabels table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $DecisionLabelsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $DecisionLabelsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $DecisionLabelsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> question = const Value.absent(),
+                Value<String> answer = const Value.absent(),
+                Value<String?> storylineId = const Value.absent(),
+                Value<String?> source = const Value.absent(),
+                Value<String?> conversationKey = const Value.absent(),
+                Value<String?> otherSource = const Value.absent(),
+                Value<String?> otherConversationKey = const Value.absent(),
+                Value<String?> title = const Value.absent(),
+                Value<String?> charter = const Value.absent(),
+                Value<String> origin = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String?> sourceMessageId = const Value.absent(),
+                Value<Uint8List?> vector = const Value.absent(),
+                Value<String?> vectorModel = const Value.absent(),
+              }) => DecisionLabelsCompanion(
+                id: id,
+                question: question,
+                answer: answer,
+                storylineId: storylineId,
+                source: source,
+                conversationKey: conversationKey,
+                otherSource: otherSource,
+                otherConversationKey: otherConversationKey,
+                title: title,
+                charter: charter,
+                origin: origin,
+                createdAt: createdAt,
+                sourceMessageId: sourceMessageId,
+                vector: vector,
+                vectorModel: vectorModel,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String question,
+                required String answer,
+                Value<String?> storylineId = const Value.absent(),
+                Value<String?> source = const Value.absent(),
+                Value<String?> conversationKey = const Value.absent(),
+                Value<String?> otherSource = const Value.absent(),
+                Value<String?> otherConversationKey = const Value.absent(),
+                Value<String?> title = const Value.absent(),
+                Value<String?> charter = const Value.absent(),
+                required String origin,
+                required String createdAt,
+                Value<String?> sourceMessageId = const Value.absent(),
+                Value<Uint8List?> vector = const Value.absent(),
+                Value<String?> vectorModel = const Value.absent(),
+              }) => DecisionLabelsCompanion.insert(
+                id: id,
+                question: question,
+                answer: answer,
+                storylineId: storylineId,
+                source: source,
+                conversationKey: conversationKey,
+                otherSource: otherSource,
+                otherConversationKey: otherConversationKey,
+                title: title,
+                charter: charter,
+                origin: origin,
+                createdAt: createdAt,
+                sourceMessageId: sourceMessageId,
+                vector: vector,
+                vectorModel: vectorModel,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $DecisionLabelsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      DecisionLabels,
+      DecisionLabel,
+      $DecisionLabelsFilterComposer,
+      $DecisionLabelsOrderingComposer,
+      $DecisionLabelsAnnotationComposer,
+      $DecisionLabelsCreateCompanionBuilder,
+      $DecisionLabelsUpdateCompanionBuilder,
+      (
+        DecisionLabel,
+        BaseReferences<_$BondDatabase, DecisionLabels, DecisionLabel>,
+      ),
+      DecisionLabel,
       PrefetchHooks Function()
     >;
 typedef $CalendarEventsCreateCompanionBuilder =
@@ -31930,6 +33345,8 @@ class $BondDatabaseManager {
       $ConversationLabelsTableManager(_db, _db.conversationLabels);
   $MessageDecisionsTableManager get messageDecisions =>
       $MessageDecisionsTableManager(_db, _db.messageDecisions);
+  $DecisionLabelsTableManager get decisionLabels =>
+      $DecisionLabelsTableManager(_db, _db.decisionLabels);
   $CalendarEventsTableManager get calendarEvents =>
       $CalendarEventsTableManager(_db, _db.calendarEvents);
   $EventBriefsTableManager get eventBriefs =>

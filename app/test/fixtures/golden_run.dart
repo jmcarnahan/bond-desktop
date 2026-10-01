@@ -246,9 +246,9 @@ class GoldenCall {
 /// and the rest of the row still scores.
 ///
 /// [calls] is keyed by stage — `decision`, `message_text`, `needs_you`,
-/// `draft_reply`, `storyline_membership` — the same words the tasks use for
-/// their labels (older run files carry `triage`, `extraction` and
-/// `reply_decision`).
+/// `draft_reply`, `decision:member_of` — the same words the tasks use for
+/// their labels (older run files carry `triage`, `extraction`,
+/// `reply_decision` and `storyline_membership`).
 class GoldenRunEntry {
   final String id;
 

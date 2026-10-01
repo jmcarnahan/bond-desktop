@@ -22,6 +22,7 @@ import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The calendar's place in the inbox's refresh, which only the assembled
 /// screen can show: the launch forces a sync, the poll timer reaches it
@@ -53,6 +54,12 @@ class _FakeSync implements MailSync {
 
   @override
   Future<void> ensureBodies(String conversationKey) async {}
+
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
 
   @override
   Future<void> ensureMessageBody(String sourceMessageId) async {}
@@ -109,6 +116,9 @@ void main() {
       'received_at': at,
       'body_text': 'The homepage copy is in.',
     });
+    // Needs You is the decision model's probability against the slider since
+    // the needs-you signals round; the thread sits there by it.
+    await seedNeedsYou(store, 'email', 'c1-m1');
     await store.upsertConversation({
       'conversation_key': 'c1',
       'subject': 'Homepage copy',

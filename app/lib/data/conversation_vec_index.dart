@@ -15,7 +15,7 @@ import 'database.dart';
 /// **No physical table of its own.** `message_vectors` exists because a
 /// message's embedding had nowhere else to live; a conversation's already has
 /// somewhere — `conversation_ai.embedding`, written by
-/// `ExtractHandler._refreshCard`. So this class adds exactly one thing to the
+/// the storyline assign pass. So this class adds exactly one thing to the
 /// database, the vec0 table, and adds nothing to `schema.drift`.
 ///
 /// **No `indexed_at` column, so the diff IS the bookkeeping.** The message

@@ -10,6 +10,7 @@ import '../../data/message_store.dart';
 import '../../models/calendar_models.dart';
 import '../../models/message_models.dart';
 import '../decision/decision_policy.dart';
+import '../decision/needs_you_predicate.dart' show needsYouAt;
 import '../decision/stored_decision.dart';
 import '../attachments/attachment_markers.dart';
 import '../html_text.dart' show stripLinkTargets;
@@ -515,6 +516,7 @@ class BriefGatherer {
     // the thread: an ask before a reply is taken to have been answered. The
     // newest qualifying one per thread.
     final asks = <BriefAsk>[];
+    final needsYouThreshold = await _store.needsYouThreshold();
     for (var i = 0; i < chosen.length && asks.length < maxAsks; i++) {
       final k = chosen[i];
       if (k.c.state != ConversationState.needsReply) continue;
@@ -525,7 +527,9 @@ class BriefGatherer {
         if (m.outbound || !addresses.contains(from)) continue;
         final d = await decisionOf(m);
         final intent = _intentOf(d);
-        if (d == null || intent == null || !_wantsOwner(d)) continue;
+        if (d == null || intent == null || !_wantsOwner(d, needsYouThreshold)) {
+          continue;
+        }
         final text = _plain(m);
         if (text.isEmpty) continue;
         asks.add(BriefAsk(
@@ -628,11 +632,13 @@ class BriefGatherer {
     return urgency == 'high' || urgency == 'urgent' || importance == 'high';
   }
 
-  /// §1.1 point 1's threshold: needs-you or reply-expected at the policy's
-  /// yes line. The constants are fitted on the golden set and are read, never
+  /// §1.1 point 1's threshold: needs-you at the owner's slider — the one
+  /// rule Needs You itself reads (`needsYouAt`), so a brief's asks are the
+  /// messages the stop would show — or reply-expected at the policy's yes
+  /// line. The constants are fitted on the golden set and are read, never
   /// copied.
-  static bool _wantsOwner(StoredDecision d) =>
-      (d.needsYouP ?? 0) >= DecisionPolicy.needsYouYes ||
+  static bool _wantsOwner(StoredDecision d, double needsYouThreshold) =>
+      needsYouAt(d.needsYouP, needsYouThreshold) ||
       (d.replyExpectedP ?? 0) >= DecisionPolicy.replyYes;
 
   static String? _intentOf(StoredDecision? d) {

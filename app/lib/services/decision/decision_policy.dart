@@ -1,6 +1,7 @@
 /// What the pipeline does with the decision model's probabilities: the
-/// thresholds, the learned gate's reason words, and the sentences a
-/// model-decided needs-you verdict carries.
+/// thresholds, the learned gate's reason words, and the needs-you probability
+/// with the sentence it carries. The needs-you CUT is not here: it is the
+/// owner's slider (`needs_you_predicate.dart`).
 library;
 
 import 'decision_heads.dart';
@@ -13,17 +14,6 @@ import 'decision_heads.dart';
 abstract final class DecisionPolicy {
   /// The learned gate drops a rules-kept message at p(gate = drop) ≥ this.
   static const double gateDrop = 0.70;
-
-  /// A needs-you yes at p(needs_you = yes) ≥ this.
-  static const double needsYouYes = 0.65;
-
-  /// The same, for a stranger's first approach (the handler's own cold
-  /// outreach rule): outreach is written to read as an ask, so the bar moves.
-  static const double needsYouYesCold = 0.85;
-
-  /// A needs-you no below this. Between [needsYouNo] and the yes bar is the
-  /// BAND, which goes to the generative model exactly as before.
-  static const double needsYouNo = 0.35;
 
   /// `needs_action` is yes at p ≥ this.
   static const double booleanYes = 0.50;
@@ -73,12 +63,46 @@ String? learnedGateReason(DecisionAnswers a) {
   return _gateReasonFor[reason] ?? 'model_other';
 }
 
-/// The sentence a model-decided needs-you YES carries as `needs_you_reason`.
+/// The decision's p(needs_you = yes), or null when the answers carry no
+/// needs-you head at all (an unreadable stored row). The same number
+/// `message_decisions.needs_you_p` stores, and the one `messages.needs_you_p`
+/// carries for Needs You to read against the owner's slider.
+double? needsYouP(DecisionAnswers a) =>
+    a.fields.containsKey('needs_you') ? a.p('needs_you', 'yes') : null;
+
+/// The sentence the owner's own Needs You answer carries as
+/// `needs_you_reason`: [answer] `yes` or `no`, about "this message" when
+/// the label is on the message itself ([exact]) and "a message like this"
+/// for a near-duplicate's. The one place the four sentences are spelled, so
+/// a surface that has only the stored reason can tell the owner's word from
+/// a model's ([ownerNeedsYouReasons]).
+String ownerNeedsYouReason(String answer, {required bool exact}) {
+  final what = exact ? 'this message' : 'a message like this';
+  return answer == 'yes'
+      ? 'You added $what to Needs You.'
+      : 'You removed $what from Needs You.';
+}
+
+/// The four sentences [ownerNeedsYouReason] writes, each with its answer.
+final Map<String, String> ownerNeedsYouReasons = {
+  for (final answer in const ['yes', 'no'])
+    for (final exact in const [true, false])
+      ownerNeedsYouReason(answer, exact: exact): answer,
+};
+
+/// The sentence a model-decided needs-you probability carries as
+/// `needs_you_reason`, written beside it whatever its value: whether it reads
+/// as a yes is the slider's call, at read time.
 ///
 /// The Why panel and the rail's "can it explain itself" check read that
 /// column, and the decision model writes no evidence of its own, so the
-/// reason is templated from its intent and reply answers.
+/// reason is templated from its intent and reply answers — unless the owner
+/// answered for it ([DecisionAnswers.ownerAnswer]), when the sentence says so:
+/// "this message" for a label on the message itself, "a message like this"
+/// for a near-duplicate's.
 String needsYouYesReason(DecisionAnswers a) {
+  final owner = a.ownerAnswer;
+  if (owner != null) return ownerNeedsYouReason(owner, exact: a.ownerExact);
   switch (a['intent'].choice) {
     case 'approval':
       return 'Asks you to approve something.';
@@ -94,6 +118,3 @@ String needsYouYesReason(DecisionAnswers a) {
   }
   return 'Names you and needs your attention.';
 }
-
-/// The sentence a model-decided needs-you NO carries.
-const String needsYouNoReason = 'Nothing here asks for you.';

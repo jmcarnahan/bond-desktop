@@ -93,12 +93,6 @@ void main() {
     expect(StorylineTuning.clusterCoherenceFloor, 0.43);
     expect(StorylineTuning.clusterSplitStep, 0.05);
     expect(StorylineTuning.clusterSplitCeiling, 0.68);
-
-    // And the neighbourhood numbers the model-read grouping draws with, which
-    // pass through this same module with no coherence floor.
-    expect(StorylineTuning.groupingNeighbourhoodThreshold, 0.41);
-    expect(StorylineTuning.groupingNeighbourhoodMinSize, 3);
-    expect(StorylineTuning.groupingNeighbourhoodCap, 40);
   });
 
   group('PairSimilarities', () {

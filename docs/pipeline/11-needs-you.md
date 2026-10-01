@@ -1,397 +1,360 @@
-# 11 · Needs-you verdict
+# 11 · Needs You
 
-**Who reads this verdict.** The **notification settle** does — see
-`09-notifications.md`. Three readers, together so the tile and the toast
-cannot disagree: `notifyWorthy` counts `needs_you_verdict = 1` as a
-message-level ask; `needsYouSql` counts it in the same position, so the settle
-sweep's backstop writes the same `message_progress.needs_you`; and
-`_isComplete` holds a candidate open while its `needs_you` work item is still
-`pending` or `processing`. A yes is the **ask half only** — the attention
-threshold, the `later` bucket and the `done` state gate a judged yes exactly as
-they gate every other ask. A **no is a veto**: verdict 0 outranks every ask in
-`notifyWorthy` and in `needsYouSql`'s live arm, so a judged no never chips or
-toasts. The frozen v8 migration arm is unchanged. A hedge is stored NULL
-(see the raise policy below), so it vetoes nothing.
+**The rule.** A message needs the owner when the decision model's calibrated
+probability that it does, `messages.needs_you_p`, is at or above the owner's
+**Needs You slider** (`needs_you_threshold`, Settings → Needs You). That is the
+whole rule. No band hands a middle probability to a language model, there is no
+cold-outreach bar, no Teams 1:1 or @mention floor, no attachment-digest requeue
+and no owner-written rules text. **No generative model is asked about needs-you
+at all**, on any path. The slider is the owner's control over the cut, and
+moving it re-reads stored probabilities without asking any model anything. The
+owner's other control, **their own answers** (below), is already inside the
+probability, so the rule never reads it separately.
 
-**The rail and the tile** read a thread-level veto, and it is narrower than
-the per-message one. A thread is vetoed only when its newest KEPT inbound is
-judged no AND no kept inbound newer than the thread's last outbound is judged
-yes. The judge rates one message, so a bystander's reply-all judged no must
-not hide an older ask that is still unanswered; once the owner replies, the
-older yes is answered and a newer no vetoes. The rule is spelled once, as the
-SQL fragment `MessageStore.needsYouVetoedSql`. `loadConversations` loads it as
-`Conversation.needsYouVetoed`, which `isNeedsYou`
-(`app/lib/widgets/app_rail.dart`) reads before the ask, and
-`_liveNeedsYouThread` splices the same fragment for the Home tile and the
-Needs You filter. NULL keeps its place in all three. See
-[08-attention.md](08-attention.md).
+The rule is ONE predicate with two spellings, in
+`app/lib/services/decision/needs_you_predicate.dart`: `needsYouAt(p, threshold)`
+for Dart and `needsYouAtSql(column, threshold)` for a query, pinned to agree by
+`needs_you_predicate_test`. NULL is a message not decided yet. It needs nobody in
+either spelling, and it is never shown as a low probability.
 
-**Bucket filing** reads it too. A thread holding an unanswered judged yes is
-never filed to Later by the automatic rule, in either writer — see
-[08-attention.md](08-attention.md). That is what keeps the `later` gate above
-honest: the only Later a judged yes can now sit behind is one a person asked
-for.
+**The owner's answer.** "Remove from Needs You" and "Add to Needs You" on a
+thread (`NeedsYouEdits`, `app/lib/services/needs_you_edits.dart`) store the
+owner's word as a LABEL: a `question = 'needs_you'` row of `decision_labels`
+with `answer` `no` or `yes`, `origin` `remove` or `add`, the message, and the
+decision model's raw pooled vector of that message with the model tag it came
+from. A removal labels every message of the thread's Needs You window (the
+kept inbound after the last outbound, the messages the thread's number is the
+max over); an addition labels the newest one. The label is then applied where
+every decision is written, `applyDecision` (`triage_queue.dart`), through
+`NeedsYouExemplars` (`app/lib/services/decision/needs_you_exemplars.dart`):
+before the decision is stored, its `needs_you` becomes the owner's answer with
+certainty (p 1.0 or 0.0) when the message itself carries a label (EXACT; the
+newest row for a message wins) or when its vector is within cosine
+`NeedsYouExemplarTuning.matchCosine` = **0.97** of a label's vector under the
+same model tag (SIMILAR; the nearest wins). The 0.97 is measured on the
+owner's audit: templated duplicates sit at 0.99 or above, unrelated mail at a
+median of 0.27, and at 0.97 two presses cleared 125 of 185 wrong threads with
+no correct thread caught (`docs/model-bakeoff.md`, "Needs You audit"). Because
+the override lands in the stored number, every path inherits it with no code
+of its own: the triage claim, the needs-you pass's copy step and re-decide,
+the install-time re-decide, Re-judge and Clear AI results' re-triage. The
+reason says so: "You removed this message from Needs You." / "You removed a
+message like this from Needs You." (and "added … to"), from the scalar
+`owner_answer` and `owner_exact` keys in `answers_json` beside
+`owner_label_id` and `owner_cosine`.
 
-**Attention scoring** reads it too — see [08-attention.md](08-attention.md).
-`attentionScore` takes the newest inbound message's verdict off the
-`latestInboundMeta` row: a judged yes breaks the quiet-FYI temper and earns the
-direct boost, while NULL and 0 move nothing. It changes the score, never the
-threshold; the slider still gates.
+**Stored vectors make a press instant.** Every decision stores the decision
+model's raw pooled vector beside its answers (`message_decisions.vector`, v24,
+under the row's `model` tag; NULL on Kev), and when the owner's answer replaces
+the model's, `answers_json` keeps the model's own p(yes) as
+`model_needs_you_p`. So a press needs no model call for a message whose stored
+decision has a vector under the model the client answers with now
+(`DecisionClient.resolvedModelTag`: the heads file's model, after learning Your
+server's kind with one listing GET when this run has not; null on Kev and when
+the heads are missing — the needs-you pass reads the same): its label takes the stored vector and its decision is
+written again from the stored answers (`StoredDecision.modelAnswers`) through
+`applyDecision`, which now finds the label. Only a message without one (decided
+before v24, or under another model) is decided by the model, as every press was
+before.
 
-**The draft pre-gates** read it as well — see
-[04-extraction.md](04-extraction.md) and
-[07-replies.md](07-replies.md). Which gate runs is the user's **Suggested
-replies** setting, one of three `DraftPolicy` modes: `asksForAReply` counts
-`needs_you_verdict = 1` as a fifth reason to spend the 27B's time, and the
-default mode's narrower `prefetchWorthy` counts it as one of three. Either way
-this handler is registered ahead of `ExtractHandler` so the verdict is on the
-row when the gate reads it. A gate only decides what gets asked about;
-the reply decision (the decision model's stored `reply_expected`, see
-[07-replies.md](07-replies.md)) still decides whether a draft is written —
-except when a person pressed **Draft reply**, which is that decision.
+Then each press **sweeps**, BOTH ways, inside the press: a removal over every
+thread in Needs You at the slider, an addition over every thread out of it that
+is neither done nor in Later. The sweep is a SCAN, not model calls: one query
+(`needsYouCandidateVectors`) returns every window message of those threads that
+has a stored vector under the press's model, and each one within
+`matchCosine` of ANY of the press's label vectors has its stored decision
+written again through `applyDecision`, so its thread moves with its chip. Every
+window message, not only the driver: a templated thread often holds several
+near-duplicates, and the next would become the driver. Because nothing waits on
+a server, a sweep never competes with triage for the decision model. A removal
+scans the Needs You set; an addition scans every stored vector outside it, most
+of a mailbox, so each candidate is compared straight off its BLOB (no decoded
+list is built; only a match is decoded). Either way it runs AWAITED: the toast shows
+after the similar threads have already moved, and counts them
+(`NeedsYouPress.changed`, threads that crossed the slider). A candidate whose
+stored decision cannot be written again as it stands is left to its next
+decision, which inherits the label anyway; processing turned off stops the
+sweep between messages. A press whose labels carry no vector (Kev) sweeps
+nothing (`NeedsYouPress.changed` is 0).
 
-**What happens.** `NeedsYouHandler`
-(`app/lib/services/needs_you_handler.dart`, run by `AiWorker`) answers one
-question about one message — does this want the owner? — and writes the answer
-onto the message's own row. It runs after triage and **before** extraction, so
-the verdict is on the row by the time anything downstream asks about it.
+**Undo is a retract, not the opposite press.** `remove` and `add` return a
+`NeedsYouPress`: the label ids they wrote and the ONE `created_at` stamp every
+one of them carries (empty ids when the window was empty), with `changed` for
+the toast. `NeedsYouEdits.retract(press)` DELETES those rows FIRST
+(`deleteNeedsYouLabels(ids, createdAt:)`, which returns the ids that went),
+then reads every message whose stored decision cites one of them
+(`owner_label_id`, `messagesCitingNeedsYouLabels`) and writes each again from
+its stored decision with the model's own number put back
+(`model_needs_you_p`, `StoredDecision.modelAnswers`), under the row's own model
+and vector — no model call and no tag check, so Undo works with the decision
+server down and on Kev. The pressed thread AND every thread the sweep moved
+take the model's number back, unless another label still matches. Reading the
+citing rows after the delete means a decision that matched a label while the
+undo ran is in the list too. The stamp is there because `decision_labels.id`
+has no AUTOINCREMENT: a deleted highest id is handed out again, and an Undo
+retried with stale ids must not delete a newer press's label. An opposite
+label would instead tie the removed one for every near-duplicate, and the
+newer `yes` would put the whole template in Needs You.
 
-**Two halves, and the cheap one runs first.** The deterministic floor is
-`needsYouFloor(row)` in `app/lib/services/needs_you.dart`: an inbound Teams
-message with `addressed_me = 1`. Teams ingest (`teams_sync.dart`'s
-`messageRow`) sets that bit for a 1:1 chat *or* an @mention, so for chat the
-one bit is the whole floor, and where it fires no model is asked. Mail's
-`addressed_me` — sole To: recipient — is deliberately outside it: being the
-only address on an envelope is a hint, not a verdict, and those rows are what
-the model reads.
+**Forget.** Settings → Needs You lists the presses ("Your answers", counted by
+stamp) and **Forget all Needs You answers** undoes every one of them at once
+(`NeedsYouEdits.retractAll`: `deleteAllNeedsYouLabels`, then every message
+whose stored decision carries an owner's answer, `messagesWithOwnerAnswer`,
+written again from its stored decision as Undo writes it), then reloads the
+list ([settings.md](../settings.md)). Because it restores by the answer, not
+by the label id, Forget also heals an answer whose label is already gone.
 
-The floor can only **raise** the verdict. A message it says nothing about is
-handed on rather than written down as a no.
+**Decide first, write second — for a press.** A press has every message's
+decision in hand (from the store, or the one network step) before it writes any
+label or decision. A decision server that cannot answer therefore fails a press
+with NOTHING written, so the failure bar's "the thread is unchanged" holds
+literally. Undo and Forget need no decision (`applyDecision` looks the owner's
+answer up at write time, so the deleted labels no longer match). Processing
+turned off refuses all of them before anything is touched
+(`StateError('processing is off')`); turned off part-way through an Undo, it
+stops the writes between messages, and the answers left without a label are
+what Forget heals. A stored override from before the model's number was kept
+(no `model_needs_you_p`) cannot be restored without the model: Undo and Forget
+log it and leave it, and Clear AI results decides it again. Labels are compared only under their own model
+tag; a label whose message is decided under another model (or with no vector)
+has its vector refreshed from that decision, so a model swap heals the labels as
+the install-time re-decide reaches their messages, and the needs-you pass
+decides a stored decision with no vector under the current tag again rather
+than copying it (once the owner is known), so the stored vectors heal the same
+way. **Kev** (the `systemone` backend) returns no vector: on it a label applies
+to its own message only, no sweep runs, and the toast promises nothing more.
 
-**Cold outreach switches the floor off.** `isColdOutreach` (same file) marks
-a stranger's first approach: a sender outside the owner's domains
-(`isExternalAddress` over the handler's `ownerDomains` read) on a conversation
-whose `last_outbound_at` is empty, meaning the owner has never written on it.
-Both halves are required, so customers and suppliers the owner answers are
-not caught. `needsYouFloor(row, coldOutreach: true)` does not fire, and the
-model reads the message like any other. Every way the check cannot answer
-answers false, because a true takes a message off the rail.
+Known limits: a needs-you pass that read the model's decision just before a
+press rewrote it can copy the model's p back onto `messages` (the decision
+row keeps the owner's answer, and the next needs-you item for the message
+copies it again); and a message pressed while its triage is still pending can
+still be dropped by the learned gate when its claim runs, which takes it out
+of the window. The window an Undo leaves open is one `applyDecision` — a triage
+claim, a needs-you re-decide, the install-time re-decide or another press's
+sweep — that loaded the labels before the delete and writes after the Undo read
+the citing messages: that message cites the deleted label until it is next
+decided, and Forget heals it, since it restores every row with an owner answer.
+A sweep reaches only messages with a stored vector under the press's
+model; the rest inherit the label at their next decision. A heads refit that
+keeps the same model name re-applies the OLD heads' stored answers on a press
+(the vector is still right, the answers are the previous heads'); a follow-up
+could run `heads.apply(vector)` on the stored vector to refresh them with no
+request.
 
-**The decision model's verdict (schema v20).** Below the floor, the ladder
-(D6 of the decision-model round) is:
+**The slider's default is 0.35.** It is fitted on the golden set, keep-only
+needs_you of 76, and it moves with the decision model, because a probability's
+scale belongs to the model that gave it. On the v2 model (2026-09-29) the best
+cut was 0.30 at 69/76 (one false positive, six misses) against 67/76 at 0.50.
+On the shipped v3 model (2026-09-30) 0.35 scores 70/76 with no false positive
+and six misses, where 0.30 scores 67/76 (three and six) and 0.20 scores 69/76
+(four and three). Both sweeps are in the bakeoff ledger
+(`docs/model-bakeoff.md`). The slider runs from 0.05 to
+0.95 in 0.05 notches (`NeedsYouTuning`), and a stored value is normalized onto a
+notch, so the number the slider shows is the number the queries bind.
 
-1. **Forced to the language model:** the owner saved custom
-   `needs_you_rules` (non-blank and not a retype of the defaults — a trained
-   head cannot follow them), or the message has an attachment digest WITH an
-   ask (the decision model read the message, never its files; this is also
-   what the digest handler's requeue lands on). A digest that asks nothing
-   leaves the decision model to settle it.
-2. **No usable decision**: no `message_decisions` row (triaged before the
-   decision model), or a row decided with NO owner line in its state
-   (`owner_known` false inside `answers_json` — the account had not answered
-   when triage ran; the head was trained with that line): the language
-   model.
-3. Otherwise the stored p(needs_you = yes) against `DecisionPolicy`
-   (`app/lib/services/decision/decision_policy.dart`): **p ≥ 0.65** — or
-   **≥ 0.85** when `isColdOutreach` holds, the same cold rule that moves the
-   language model's bar below — writes **1**; **p < 0.35** writes **0**; the
-   BAND between goes to the language model exactly as before, its raise policy
-   and hedge unchanged. The activity note is `{verdict, source: decision, p}`.
+**A thread** needs the owner when it is not `done`, is not bucketed `later`, and
+its **needs-you probability** is at or above the slider. The thread's
+probability is `MessageStore.threadNeedsYouPSql`: the HIGHEST `needs_you_p` over
+its KEPT inbound messages received after its last outbound (every kept inbound
+when the owner never wrote on it). An older ask still unanswered keeps counting,
+so a bystander's reply-all cannot hide it. Once the owner replies, only newer
+messages count. `loadConversations` loads it as `Conversation.needsYouP`, and
+the `needs_you_reason` it carries comes off the message with that highest
+probability (newest on a tie), so the reason names the message whose number is
+shown.
 
-A decided yes carries a templated `needs_you_reason`, because the rail's
-`_canExplainItself` and the Why panel read it and the heads write no
-evidence: intent `approval` → "Asks you to approve something.", `question` →
-"Asks you a question.", `request` → "Asks you to do something.",
-`scheduling` → "Asks you about a time.", else p(reply_expected) ≥ 0.50 →
-"Expects a reply from you.", else "Names you and needs your attention." A
-decided no reads "Nothing here asks for you." (`needsYouYesReason`,
-`needsYouNoReason`).
+**The two buttons.** The thread's action bar (`ThreadActionBar`, built by
+`ThreadDetailPanel._actionBar()`) carries exactly one of **Remove from Needs
+You** (`thread-action-needs-you-remove`) and **Add to Needs You**
+(`thread-action-needs-you-add`), beside Mark done and Later, picked by the
+rail's own rule (`isNeedsYou` at the owner's slider): Remove on a thread in
+Needs You, Add on one that is not. Add is never drawn on a Done thread
+(Reopen is there) or one in Later (Keep in inbox is): Needs You reads
+neither, so the press would change nothing the reader could see. Both are
+labelled buttons, and the Needs You word gives way to its icon before Mark
+done's does when the row runs short. Remove runs `_triageAndAdvance`, like
+Mark done: the thread leaves the pile and the reader lands on the next row,
+and the bar says **"Removed from Needs You — and 78 like it."** (the threads the
+sweep moved; **"Removed from Needs You."** when it moved none or the backend has
+no vector) with an Undo; Add leaves the reader where they are and says **"Added
+to Needs You — and 3 like it."** / **"Added to Needs You."** the same way, with
+an Undo. Each goes through `ConversationsNotifier.removeFromNeedsYou` /
+`addToNeedsYou` (the press with its sweep, then one store-only reload). Undo is
+`ConversationsNotifier.undoNeedsYouPress`, the retract above — the threads the
+sweep moved go back with the pressed one. Add is not drawn either on a thread
+with nothing decided in its window (`Conversation.needsYouP` null: the owner
+wrote last, or nothing is decided yet), since it could only answer that. A
+thread
+whose window is empty (the owner wrote last) says **"Nothing here is waiting
+on you."** with no Undo and moves nobody. A press the decision model could not
+answer says **"Couldn't save that just now — the thread is unchanged."** with
+no Undo and moves nobody; a failed Undo says "Couldn't undo that just now."
+The landing is worked out before the press, and the next row is often a near
+duplicate the same press's sweep took; `_triageAndAdvance` reads the pile as
+the press left it and walks on from the landing to the nearest row still drawn
+(`_stillDrawn`). The row chip of a thread the sweep moved says **Like one you
+removed** / **Like one you added**; one the owner pressed says **You removed
+it** / **You added it**.
 
-**The model branch.** Everything the ladder above sends on goes to
-`NeedsYouTask` (`app/lib/services/llm/needs_you_task.dart`) on the **fast** slot — bulk work,
-one small answer per message, see `10-model-routing.md`. Temperature 0 and 256
-max tokens: the same message must get the same verdict twice, or a re-drain
-would flip rows under the user.
+**Who reads it.** Every reader goes through the one predicate at the owner's
+slider:
 
-The answer is three fields, in this order:
+- **The rail** (`isNeedsYou` in `app/lib/widgets/app_rail.dart`) and **the Home
+  tile and Needs You filter** (`_liveNeedsYouThread` in `message_store.dart`,
+  the same SQL). The two agree exactly. The attention score only ORDERS the
+  pile (see [08-attention.md](08-attention.md)).
+- **The notification settle** (see [09-notifications.md](09-notifications.md)):
+  `notifyWorthy` is the predicate on the message's own `needs_you_p`, plus a
+  thread that is not `done` and not `later`. `needsYouSql`
+  (`app/lib/data/progress_sql.dart`) says the same in SQL for the settle
+  sweep's backstop, with the read guard the coordinator applies first. The
+  frozen v8 migration keeps its own text, `needsYouSqlV8Frozen`, byte for byte.
+  `_isComplete` counts a candidate's needs-you as judged as soon as its
+  `needs_you_p` is not NULL, whatever work item is pending (or, with the p
+  still NULL, once its `needs_you` item is `done` or `error`).
+- **Bucket filing and attention scoring** (see
+  [08-attention.md](08-attention.md)): a thread holding an unanswered message
+  over the slider is never filed to Later by the automatic rule, and the newest
+  inbound message's answer breaks the quiet-FYI temper and earns the direct
+  boost.
+- **The draft pre-gates** (see [04-extraction.md](04-extraction.md) and
+  [07-replies.md](07-replies.md)): `prefetchWorthy`, the default **Suggested
+  replies** mode's gate, is exactly the predicate; `asksForAReply` counts it as
+  one of its five signals. The reply decision (the decision model's stored
+  `reply_expected`) still decides whether a draft is written.
+- **The mention index** reads a probability below the slider as the decision
+  model's no.
 
-| Field | Meaning |
-|---|---|
-| `evidence` | one sentence naming what in the message points at the owner, or saying nothing does |
-| `needs_you` | boolean |
-| `confidence` | `low` \| `medium` \| `high` |
+**Where the probability comes from.** The triage pass writes it. For every
+message it keeps, `TriageQueue` writes `needs_you_p` and a templated
+`needs_you_reason` in the same step as the rest of the decision
+(`writeNeedsYouP`).
 
-`evidence` comes **first**, the opposite of a verdict-first order, and the
-difference is the input: the floor has already taken the easy
-cases, so what reaches this call is the ambiguous residue. Locating the
-sentence that points at the owner *is* the work, and the boolean should fall
-out of having written it.
+**One ownerless policy.** The head was trained with the owner line in its
+state, so a decision made before the keychain answered is UNTRUSTED, but it is
+not hidden: its probability is written and shown like any other, and
+`message_decisions.owner_known` (inside `answers_json`) records that it was
+ownerless. Every mail sync requeues the needs-you pass for each triaged inbound
+message whose decision is ownerless (`MessageStore.requeueOwnerlessNeedsYou`,
+both sources in one statement, reported as `requeued_needs_you_ownerless` when
+it found any), and so does **Retry owed stages** for one message
+(`PipelineRepairService.retryOwed`). The pass then decides the message again
+WITH the owner once the owner is known. While the owner is still unknown it
+keeps the ownerless probability and returns, so a requeue before the keychain
+answers is a no-op rather than a model call. A re-decision records the owner,
+and the message stops matching.
 
-The judged evidence sentence passes 27–28% on the golden set, because it
-names a category where the rubric checks for the specific ask. On 2026-09-16
-two rewordings asked for the quoted words instead, and both were measured and
-not shipped: one lifted the sentence to 36% but put 27 of 64 sentences at the
-300-character clamp and cost the verdict 92% to 89%, and a short-sentence
-version kept every sentence under the clamp and scored 9% with the verdict at
-86%. The verdict is the chip the owner sees and the sentence sits behind it,
-so the original wording stays; the rows are in the bakeoff ledger
-(`docs/model-bakeoff.md`, "Golden ledger"). The schema's `evidence`
-description and this bullet say the same thing, and a future rewording must
-move both together: a Converse-wire target reads the description as the tool
-spec.
+The reason is templated from the decision, because the heads write no evidence
+(`needsYouYesReason` in `app/lib/services/decision/decision_policy.dart`):
+intent `approval` → "Asks you to approve something.", `question` → "Asks you a
+question.", `request` → "Asks you to do something.", `scheduling` → "Asks you
+about a time.", else p(reply_expected) ≥ `DecisionPolicy.replyYes` → "Expects a
+reply from you.", else "Names you and needs your attention." It is written
+beside the probability whatever its value, because whether it reads as a yes is
+the slider's call at read time. Rows from before v21 may still carry
+`teams_direct`, the retired Teams floor's token, or an evidence sentence from a
+language model. Every surface still words both.
 
-**The raise policy.** The handler writes three answers, not two:
+**The Teams floor survives in one place.** `needsYouFloor(row)`
+(`app/lib/services/needs_you.dart`, an inbound Teams message with
+`addressed_me = 1`: a 1:1 chat or an @mention) no longer raises anything. What
+it still does is keep the learned gate off such a message in the triage pass:
+somebody wrote to the owner by name, and no learned gate takes that message.
 
-```
-clearsBar = cold ? confidence == 'high' : confidence != 'low'
-verdict   = !needs_you ? 0 : (clearsBar ? 1 : NULL)
-```
+**The needs-you pass only settles the probability.** `NeedsYouHandler`
+(`app/lib/services/needs_you_handler.dart`, the `needs_you` work kind on the
+fast lane, ahead of extraction, `concurrency` 3) takes no language-model client.
+Per message it:
 
-For cold outreach the bar is higher: only a `high` yes clears it.
-Unsolicited outreach is written to read as an ask, so only a confident yes
-raises it.
+1. early-returns *done* on the shapes the queue can hand over stale (deleted,
+   outbound, gated, with the `teams_source` tolerance every post-triage stage
+   keeps) and records the reason on its activity row;
+2. when the stored decision was made with the owner known, or was made
+   ownerless and the owner is STILL unknown, **copies** its probability and
+   templated reason onto the row if the row's differs, and otherwise writes
+   nothing;
+3. when the decision was made **ownerless** and the owner is now known, or
+   it has **no vector under the current model** (`DecisionClient.modelTag`:
+   decided before v24 or under another model) and the owner is known — never
+   on Kev, whose tag is null — or there is no decision at all (triaged before
+   the decision model),
+   **re-decides** the message with the decision model, on the input the triage
+   pass builds (`decisionInputFor`), and writes the whole state that decision
+   determines through the triage claim's own writer (`applyDecision`): the
+   decision row, the four triage fields, the probability, the extraction's
+   intent and importance, and the thread's CTA fold. With no decision and the owner still unknown the message is
+   decided ownerless anyway and written, because an undecided row is a message
+   nobody sees; the ownerless requeue above brings it back once the owner is
+   known.
 
-A yes below the bar, low or a cold medium, is a HEDGE. It is stored as a NULL
-verdict with its evidence kept as `needs_you_reason`, and it neither raises
-nor vetoes: triage decides such a message exactly as it decides an unjudged
-one. "Possibly" is not grounds for an interruption, and the model did not say
-no either. Writing a hedge as 0, as earlier builds did, let a medium yes on a
-new customer's "please send the signed contract by Friday" take the thread off
-every Needs You surface over triage's own ask. An unrecognised `confidence`
-validates to `low` for the same reason: a malformed answer must not be able to
-promote a message on its own.
+A decision server that is down, or heads the client refuses, THROWS, and the
+throw is left to the worker, which parks the kind. Nothing falls back to a
+language model. The handler has **no arm** in `AiWorker`'s `_park` /
+`_recordFailure` per-kind ladders, deliberately: those re-note a
+`message_progress` stage state, and needs-you has no stage column.
 
-A model failure — including the server being down — **propagates**. The verdict
-stays NULL, the row stays on the worklist, and the worker's park-and-retry
-machinery owns what happens next.
+**Storage.** `messages.needs_you_p` (REAL, schema v21) is the ONE number every
+reader reads; NULL means not decided. `messages.needs_you_reason` says why.
+`message_decisions` keeps the decision's own `needs_you_p` beside its other
+answers. The owner's answers are `decision_labels` rows (KEPT, so Clear AI
+results keeps them and the next decision applies them again; `wipeAll` deletes
+them) with three columns added in v23: `source_message_id`, `vector` (BLOB,
+float32 little-endian, `encodeEmbedding`) and `vector_model`. Since v24
+`message_decisions.vector` keeps each decision's own vector the same way (NULL
+on Kev and on rows decided before v24), and `answers_json` keeps
+`model_needs_you_p` beside an override.
+`messages.needs_you_verdict` is INERT since v21: v21 mapped it into
+`needs_you_p`, and nothing writes or reads it any more. The pref key
+`needs_you_rules` is inert too. Nothing reads it, and `wipeAll` still clears a
+stored copy with the rest of one person's text.
 
-**This stage never reads triage's verdicts.** The queue now hands over only
-rows triage has finished with — `MessageStore.claimPendingWork` holds a
-`needs_you` item back while its message is `pending` or `processing`, so what
-arrives here is `triaged`, `skipped`, `error`, or a message that has been
-deleted (see [04-extraction.md](04-extraction.md) for the claim rule). So
-`reply_expected` and `needs_action` are usually sitting right there, and this
-pass still does not look at them: a verdict built on another model's verdict
-inherits its mistakes, and the one case a per-message judgement exists for —
-a busy thread where the owner gets one direct question — is the case triage's
-thread-level answer loses. The handler reads the message body and the thread
-behind it, plus two facts for the cold-outreach check: the owner's domains
-and the conversation's `last_outbound_at`, the latter read only for an
-external sender. (The one thing it does read from triage is the
-`skipped` **gate**, which is a guard against judging a newsletter, not a
-judgement it defers to.)
+**The chip follows the probability.** `message_progress.needs_you` is a
+snapshot taken at settle time from `notifyWorthy`. When any decision writer
+changes a probability ACROSS the owner's slider (the needs-you pass, and
+through `applyDecision` the triage claim, the install-time re-decide and the
+owner's Needs You presses and their sweeps), the
+shared `followNeedsYouChip` hands the message to
+`PipelineProgress.refreshNeedsYou`, which re-asks `notifyWorthy` and rewrites
+the flag. A probability that moved without crossing the slider is a repeat of
+the answer and writes nothing, so a chip cleared by a reply or by a Done stays
+cleared. Only a settled, non-dropped row is touched, and a false→true change
+never re-chips a thread the owner has already answered or marked done. Reading
+is not a clearing condition.
 
-**What the prompt is told.** The system prompt is built in two pieces:
+**The one-shots** run once each, behind their prefs in the mail sync.
+`needs_you_model_revive` puts back `done` work rows whose message has no
+probability. `needs_you_flag_backfill_p` raises settled chips whose message now
+clears the slider (and whose thread is open, unanswered and not in Later), and
+`needs_you_flag_veto_p` lowers every settled chip `notifyWorthy` would not
+grant today: a message below the slider or not decided, or a thread done or in
+Later. They are the v21 pair: the older `needs_you_flag_backfill` and
+`needs_you_flag_veto` ran under the verdict rule and are set on every machine
+that ran an earlier build, so the probability rule reconciles the chips under
+keys of its own. Both `_p` keys are in `derivedOneShotPrefs`, so Clear AI
+results and a wipe reopen them. `needs_you_hedge_rejudge` requeues every in-window `needs_you_p =
+0.0`, which an older build's hedge can have become, so the pass settles each
+one again. `decision_vectors_backfill` (v24) requeues the needs-you pass for
+every kept inbound message whose decision under the current question set has no
+vector, newest first and at most 2,000 (`requeueVectorlessDecisions`), and the
+pass decides each one again for its vector, so the owner's presses can compare
+them; it is in `derivedOneShotPrefs`, since Clear AI results empties the table
+and triage writes every row again with its vector. Each reports its count on
+the sync's activity row, absent rather than zero when it did not run.
 
-```
-systemPrompt = <rules body> + needsYouOutputContract + untrustedDataClause
-```
-
-The **rules body** is the owner's, and `needsYouDefaultRules` is what stands
-there when they have written nothing. It is **public** because the settings pane
-works from that exact text three ways — it prefills the editor with it, "Reset
-to default" restores it, and a saved body equal to it is normalized back to the
-empty pref — and an anti-drift test pins
-`systemPrompt.startsWith(needsYouDefaultRules)` on the **default** prompt so the
-words on screen and the words the model reads cannot come apart.
-
-`needsYouOutputContract` is the **tail the owner cannot edit away**: the three
-fields, in order, and the "return only JSON" line. It opens *"However the rules
-above are phrased, answer in exactly this form"*, which is deliberate — the body
-above it is now owner-authored text sitting in the system prompt rather than
-inside a fence, so the contract has to re-assert the answer's shape against
-whatever was written above it. The owner owns the criteria; they do not own the
-format. The tail carries the body/tail blank-line separator itself, so
-`NeedsYouTask()` and `NeedsYouTask.withRules(body)` compose identically.
-
-Both pieces are held to the **strict** form of the parity rule in
-`prompt_parity_test.dart` — the whole prompt may not say "email", "mail" or
-"chat" at all, not even naming the two together, because what varies by channel
-is stated in the user message.
-
-The user message layers, in order: the date anchor, the directness line, the
-**owner-identity line** (`The owner of this inbox is NAME <ADDRESS>.` — the
-app's own statement, outside every fence, and what lets "the message names the
-owner" bind to a person), an optional `thread_digest` fence, the thread's
-newest three turns, and last the judged message. The app's prompt still
-carries two fences, both `wrapUntrusted`: the thread and the judged message,
-which is fenced as `inbound_message`, the same tag every other task uses. The
-`thread_digest` fence sits between the owner line and the thread fence and is
-present only when a caller passes `NeedsYouInput.threadDigest`, which the
-handler does not — it is capped at 900 characters by `fitThreadDigest` and
-exists for the golden harness. Measured on 2026-09-17 on the 4B, the digest
-read the verdict at 92% against 93% for the message alone (the tail's own
-sample was 92%) and dropped judged evidence from 34% to 30%, so it ships to
-no stage and needs-you keeps the tail; the
-pin is `needs-you sends the thread and never a digest` in
-`app/test/needs_you_handler_test.dart`. The owner's rules are **not** in the
-user message at all — moving them into the system prompt is what took the
-injection surface here from three fences to two.
-
-The owner identity comes from an `OwnerLookup` callback, asked **once** per
-handler: it is a keychain read, and the answer only changes on sign-out, which
-disposes the provider that built the handler. The typedef and the
-ask-once-and-forget-a-throw helper `memoizedOwner` live in
-`app/lib/services/owner_lookup.dart`, because the storyline service takes the
-same closure for its overlap rule: the owner is on every thread in their own
-mailbox and must not count as a shared person. One keychain read path, two
-callers.
-
-**The `needs_you_rules` pref.** One global text (`app_prefs`, key
-`needs_you_rules`, re-exported by `prefs_provider.dart`) holding the **whole**
-rules body. Empty means `needsYouDefaultRules` is in force — the empty string is
-how the app says "the defaults", not "no rules". Read per message so an edit
-mid-drain applies to the rest of the drain, and **memoized on its own text** in
-the handler (`_taskFor`): an unchanged pref reuses the same `NeedsYouTask`, and
-so the same system-prompt string object, because llama-server caches the KV
-prefix on the bytes. The cache therefore re-primes once per rules **edit** and
-then holds, rather than once per message.
-
-Stored **verbatim** — the editor trims before it calls, and trimming again in
-the store would mean the text in the field and the text the model reads are not
-the same string. Capped at `needsYouRulesCap` = 4000, which is both the clamp in
-`_taskFor` and the `maxLength` the editor enforces: a cap the editor did not
-show would silently drop the end of what somebody typed, and the clamp is there
-for a pref that reached the store through something other than the editor. A body
-equal to the defaults takes the const default path either way. It is one
-person's text, so `wipeAll` clears it alongside `about_me` — inherited by the
-next identity it would decide what *they* get interrupted about.
-
-**Where it is edited.** Settings → the **Needs You** section, whose body is the
-threshold slider above `NeedsYouRulesEditor`
-(`app/lib/widgets/needs_you_rules_editor.dart`). The two belong together: the
-slider says how much gets through, the rules say what "needs you" means in the
-first place. There is no separate pane to open and no dialog to pop — Settings
-is itself a full screen with a back arrow (see [../settings.md](../settings.md)).
-
-**Save is the only thing that commits**: Cancel puts the last saved text back in
-the field and stays, and being disposed discards. The about-me field beside it
-keeps the same contract now — neither text is written on the way out.
-
-The field is **prefilled with `needsYouDefaultRules`** rather than left blank,
-because those defaults are the text actually in force; what the owner edits is
-the real thing. **"Reset to default"** puts them back, and like every other edit
-in the section it is local until Save. Saving a body identical to the defaults
-stores the **empty** pref — otherwise the same words would arrive as an
-equal-but-not-identical string and fork the const prompt (and the identity pin
-on it) for no change in what is asked. The editor trims, the store keeps the
-result verbatim.
-
-A collapsed disclosure, **"What Bond adds after your rules"**, shows
-`needsYouOutputContract` **verbatim** (left-trimmed only, since it opens with
-the separator blank line). Somebody who may replace every word of the body and
-not one word of the tail is owed the sight of it.
-
-The owner's about-me text is deliberately **not** in this prompt. Two
-owner-authored free-texts in one call is the charter-versus-summary confusion
-this app avoids elsewhere; the needs-you rules are the one owner text this
-judgement reads.
-
-**Storage.** Two columns on `messages`, added in schema v10:
-
-| Column | Meaning |
-|---|---|
-| `needs_you_verdict` | tri-state INTEGER — NULL never judged or a hedge, 0 judged no, 1 judged yes |
-| `needs_you_reason` | why: `teams_direct` from the floor, a templated sentence from the decision model, or the language model's evidence sentence; on a NULL verdict, a reason marks a hedge |
-
-The tri-state is load-bearing. NULL is not "no" — the unjudged rows *are* the
-worklist, so nothing may read the two as one. The work row, not the NULL, says
-whether a message was judged. The v10 migration adds the
-columns and backfills nothing for exactly that reason: a stored mailbox is
-entirely unjudged, which is what the pass is looking for.
-`MessageStore.upsertMessage`'s conflict branch does not name these columns, so
-a re-sync cannot clobber a verdict.
-
-**The chip follows the verdict.** `message_progress.needs_you` is a snapshot
-taken at settle time from `notifyWorthy` — the same call that decided whether
-to interrupt — so a verdict written *afterwards* would leave the home screen's
-chip and tile showing an answer the pipeline has changed its mind about. When,
-and only when, the stored verdict MOVES (`null`→0/1, 0↔1, or an old 0
-becoming a NULL hedge), `NeedsYouHandler`
-hands the message to `PipelineProgress.refreshNeedsYou`, which re-asks
-`notifyWorthy` and rewrites the flag through
-`MessageStore.refreshNeedsYouFlag`. Four rules make that safe. A re-verdict
-that returns the **same** answer writes nothing, so a chip cleared by a reply
-or by a Done stays cleared. Only a **settled** row is touched; an unsettled one
-takes its snapshot at settle from the same predicate. A **dropped** row is left
-alone, because the feed hides it and the tile counts it. And the path adds an
-outbound guard `notifyWorthy` has no need of — the coordinator settles before
-any reply can exist — so a false→true re-verdict never re-chips a thread the
-user has already answered or marked done. Reading is deliberately *not* a
-clearing condition: a chip once earned survives being read.
-
-**The one-shot flag backfill.** Rows that settled before the v11 verdict column
-existed took a snapshot that never saw it, so a message later judged yes sits
-at `needs_you_verdict = 1` beside `needs_you = 0`.
-`MessageStore.backfillNeedsYouFromVerdicts` raises those chips once, behind the
-`needs_you_flag_backfill` pref in the mail sync, reported as
-`backfilled_needs_you` on the activity row (absent, not zero, when it did not
-run). Raise-only, and carrying the same guards as the live path — both guard on
-`dropped = 0`, so a gate cascade, which also writes `settle_state = 'done'`,
-stays dropped either way.
-
-Its lowering twin, `needs_you_flag_veto`, ran once for the veto:
-`PipelineProgress.lowerVetoedNeedsYou` clears the settled chips that stood on
-triage's ask beside a judged no, ticking each row, reported as
-`vetoed_needs_you`.
-
-**The hedge re-judge.** Earlier builds wrote a hedge as 0, and an old hedge
-cannot be told apart from a real no. So the `needs_you_hedge_rejudge` one-shot
-re-queues needs-you work once, through `requeueZeroNeedsYouVerdicts`, for every
-in-window inbound mail and chat message whose verdict is 0, and the handler
-writes each one the way it now answers. It reports
-`requeued_needs_you_hedges`. It is not in `derivedOneShotPrefs`, so Clear AI
-results does not reset it: Clear AI re-judges every message anyway, and
-nothing writes a hedge as 0 again.
-
-**The chip follows the thread out of Later, too.** The verdict rule above has
-a hole the two rules before it cannot see: a message that settles while its
-thread sits in Later takes a 0 on the strength of the bucket alone, and
-lifting the bucket moves no verdict, so nothing would ever re-ask. Both ways
-out of Later for one thread — a deferral whose date arrived, and Keep in inbox
-— run `PipelineProgress.raiseNeedsYouForThread`, the backfill's statement
-scoped to that thread, ticking each row it raises. See
-[08-attention.md](08-attention.md) for the resurfacing itself.
+**The chip follows the thread out of Later, too.** A message that settles while
+its thread sits in Later takes a 0 on the strength of the bucket alone, and
+lifting the bucket moves no probability. Both ways out of Later for one thread,
+a deferral whose date arrived and Keep in inbox, run
+`PipelineProgress.raiseNeedsYouForThread`. See [08-attention.md](08-attention.md).
 
 **Queueing.** `MessageStore.enqueueNeedsYouBacklog` is
-`enqueueExtractBacklog`'s twin — same filter, same caps, same `OR IGNORE`
-idempotence, one shared private statement — and both syncs call the two side
-by side (`sync_service.dart`, `teams_sync.dart`, counted as `queued_needs_you`
-on the sync activity row). The symmetry is the guarantee that the verdict set
-covers exactly the rows extraction will read.
-
-**The one-shot revive.** The build that shipped only the floor completed its
-below-floor items as `done` with a NULL verdict, and `INSERT OR IGNORE` will
-never offer those rows again. `MessageStore.reviveUnjudgedNeedsYou` puts them
-back to `pending` with `attempts` reset; the mail sync runs it once, behind the
-`needs_you_model_revive` pref, and reports it as `revived_needs_you` on the
-activity row (absent, not zero, when it did not run — "did not run" and "ran
-and found nothing" are different facts). One run covers both sources: the SQL
-has no source filter, which is why `teams_sync.dart` does not repeat it. The
-predicate is deliberately simple, and the price is that gated and outbound rows
-with a NULL verdict are revived too and leave again through the handler's own
-guards — one queue row each, once.
-
-**The standing revive.** `INSERT OR IGNORE` also never re-offers a row the
-window stopped reaching before its work was queued. `reviveOwedMessageStages`
-runs on every sync, both sources, and files `needs_you` beside `extract` and
-`embed_message` for kept inbound rows whose triage is done and whose extract
-stage is still pending, at most 150 per kind per pass for mail and 100 for
-Teams (see
-[01-sync-ingest.md](01-sync-ingest.md)).
-
-**Handler position and failure behavior.** First in the `aiWorkerProvider`
-handler list, ahead of extraction; `concurrency` 3, since an item touches only
-its own row. It early-returns *done* on the shapes the queue can hand over
-stale — deleted, outbound, gated (with the `teams_source` tolerance every
-post-triage stage keeps) — and records the reason on its activity row.
-
-It has **no arm** in `AiWorker`'s `_park` / `_recordFailure` per-kind ladders,
-deliberately. Those ladders exist to re-note a `message_progress` stage state
-when the worker rather than the handler decides how an exception ended;
-needs-you has no stage column, so an arm there would write nothing. The generic
-parking above those ladders still applies: a fast server that is not running
-parks the whole kind rather than burning attempts on it.
+`enqueueExtractBacklog`'s twin, with the same filter, caps and `OR IGNORE`
+idempotence, and both syncs call the two side by side (counted as
+`queued_needs_you` on the sync activity row). The standing revive,
+`reviveOwedMessageStages`, files `needs_you` beside `extract` and
+`embed_message` for kept inbound rows the window stopped reaching before their
+work was queued (see [01-sync-ingest.md](01-sync-ingest.md)). Clear AI results
+queues the pass for every kept message itself.
 
 ## Activity tabs on the overview
 
@@ -545,96 +508,20 @@ facet Home's grammar does not know (`label:`, `-label:`, `is:done`,
 "is:done"; the rail's own empty state says nothing matched. `from:` and `has:`
 still escalate, because Home's search grammar honours both.
 
-## What the documents on a message say
-
-`NeedsYouInput.attachmentDigests` is one line per digested document on **this
-message** — `<name>: <summary>` plus ` Asks: <a; b>` when the digest recorded
-any — built by `attachmentDigestLines`
-(`app/lib/services/attachments/attachment_digest_lines.dart`) from
-`MessageStore.digestsForMessages(source, [id])`. Rows with no readable digest
-are skipped: "not read yet" and "says nothing" are different states, and only
-the second is worth a line.
-
-It sits in the user message after the thread block and before `Judge ONLY this
-message:`, inside `<untrusted_data source="attachment_digests">`, clamped to
-600 characters in total (each line to 300 of its own). The judged message stays
-last, as it always has. The fence count in `needs_you_task_test` went from two
-to three deliberately — what a file says is the sender's text like any other,
-so it arrives fenced rather than as a line the app appears to be asserting.
-
-The digests and not the documents: this judgement turns on what a file *asks
-for*, which is one sentence. The file's own words are the retriever's business
-(see `07-replies.md`), and a contract in this prompt would drown the message it
-is about. The system prompt does not change.
-
-## The re-verdict
-
-**Saving the Needs You rules is a trigger.** The editor replaces the whole
-prompt body, so every verdict on disk was written under words the owner has
-just replaced. `MessageStore.requeueNeedsYouRejudge` therefore re-queues the
-last **7 days** of kept inbound messages — newest first, capped at **200** —
-through the ordinary `needs_you` work kind, and the chip follows each new
-verdict per **The chip follows the verdict** above. Older verdicts stay as they
-are: those rules were the rules when those messages landed, so they are history
-rather than mistakes. Saving text identical to what is stored queues nothing.
-The Settings section's summary reads "judging N messages" while the queue
-drains, and one `needs_you_rejudge` activity row records the count.
-
-A document that asks for a signature can change whether its message wants the
-owner — and the first needs-you pass ran before anything had read it. Whatever
-triggers a re-judge, the chip on the home screen follows it: see **The chip
-follows the verdict** above.
-`AttachmentDigestHandler` therefore requeues the message once, right after the
-digest chunk is embedded:
-
-```
-digest.asks.isNotEmpty
-  && message.direction == 'inbound'
-  && message.needs_you_verdict != 1
-  && attachmentsWithAsks(source, messageId) == 1
-```
-
-`== 1` is the whole guard against one requeue per file: `setAttachmentDigest`
-has already written this row by the time the count is taken, so the first
-document on a message to carry an ask sees exactly 1 and every later one sees 2
-or more. The other three each refuse their own case — the owner's own message
-is never judged, a verdict already at `1` cannot be raised, and asks are the
-only part of a digest that can move the verdict.
-
-Needs-you drains ahead of `attachment_digest`, so the pass that would have
-picked the requeue up has already gone by — which is why the handler also
-**wakes the worker**: its `onRequeue` callback is wired in `app_providers.dart`
-to `AiWorker.pump()`, which on a running drain only sets the re-pump flag and
-returns that drain's future (never awaited inside the handler, since that
-future is the drain the handler is running in). The drain then makes one more
-full pass, and the re-verdict lands in the **same** drain. That matters for the
-notification settle, which holds a message's candidate open while its
-`needs_you` item is pending: without the wake, a document that asks for
-something would cost its message up to the six-minute settle deadline.
-`requeueWork` revives only `done` and `error` rows, so a message still waiting
-for its first verdict keeps its place in the queue rather than being reset.
-The activity row for the digest notes `requeued: needs_you`
-(`ActivityLog.note` merges, so it lands beside the digest's own facts).
-
-This was deferred out of Phase 3 on purpose: a re-verdict before the
-`attachment_digests` fence existed would have spent a model call on a
-re-judgement that could not see what changed.
-
 ## The Why panel
 
-This section supersedes the position this file took until now, that
-`needs_you_reason` was stored against a future reader: it has one. The Why
-panel (`lib/widgets/why_panel.dart`, `WhyPanelBody`) is the explanation beside
-a message, and the reason is the first thing on it.
+The Why panel (`lib/widgets/why_panel.dart`, `WhyPanelBody`) is the
+explanation beside a message, and the needs-you probability and its reason are
+the first thing on it.
 
 **What it reads.** Five blocks, in this order.
 
 | Block | Source |
 |---|---|
-| Verdict | `Message.needsYouVerdict` / `needsYouReason`, now parsed in `Message.fromRow`; `gateReason` when the gate took the message (in `homeDropLabels`' words, lower-cased, when it has one); and, when `message_decisions` has a row, one line "Decision model: gate keep 0.94, needs you 0.71, action 0.66, reply 0.12 · 58 ms" (`WhyPanelBody.decisionLine`). The gate is worded by the verdict: "gate drop 0.91" on a dropped message, "gate keep (drop 0.60)" on a kept one the head leaned against |
+| Verdict | `Message.needsYouP` / `needsYouReason`, parsed in `Message.fromRow`; `gateReason` when the gate took the message (in `homeDropLabels`' words, lower-cased, when it has one); and, when `message_decisions` has a row, one line "Decision model: gate keep 0.94, needs you 0.71, action 0.66, reply 0.12 · 58 ms" (`WhyPanelBody.decisionLine`). The gate is worded by the verdict: "gate drop 0.91" on a dropped message, "gate keep (drop 0.60)" on a kept one the head leaned against |
 | Triage | the message's `triageStatus`, `summary`, `urgency`, `category`, `label` |
 | Asks | `needsAction`, `replyExpected`, `deadline`, `addressedMe`, `actionItems` |
-| Attention | the thread's `attentionScore` against the reader's own threshold, then `conversation_ai`'s `bucket`, `bucket_reason` and `snoozed_until` |
+| Attention | the thread's `attentionScore` on its own (it orders Needs You and gates nothing), then `conversation_ai`'s `bucket`, `bucket_reason` and `snoozed_until` |
 | What it is about | `MessageStore.extractionFor(source, messageId)` — `getExtraction` decoded through `ExtractionResult.fromJson`, and null on a blob that will not parse |
 
 The facts come from `whyFactsProvider` (`lib/providers/why_provider.dart`), a
@@ -644,15 +531,18 @@ thread: the panel has to work for a message whose transcript is not the one
 loaded — opened from a side thread, from a room — and a provider that depended
 on the thread provider would show an empty panel exactly then.
 
-**The tri-state survives into the copy.** `true` reads *Needs you*, `false`
-reads *Not flagged*, and NULL reads *Not judged yet* with the line "The
-needs-you pass has not reached this message." Three answers, never two: a panel
-that rendered NULL as "not flagged" would be claiming a judgement the pass has
-not made, which is exactly the confusion the tri-state column exists to
-prevent. A NULL verdict WITH a reason is a hedge, and it reads *Not sure* with
-"The pass leaned yes but was not sure, so triage decides." and the reason.
-Message history says the same in its own words: "Needs you: not sure —
-<reason>".
+**The number the slider is set in.** The headline is `Needs you: 72%`, the
+message's `needs_you_p` as a floored whole percentage, which is the unit the
+Settings slider states its threshold in, so the two read as one number. Under
+it come the reason sentence and one line against the reader's own slider: "In
+Needs You: at or above your 35% line." or "Not in Needs You: below your 35%
+line." NULL reads `Needs you: —` with "The needs-you pass has not reached this
+message." An undecided message is never shown as 0%. Message history says the
+same in its own words ("Needs you: 72% — <reason>", or "Needs you: not
+decided"). The rail's reason chip and the thread header's `Why:` line append
+the THREAD's probability (`Conversation.needsYouP`): `Asks you a question. · 72%`
+and `Why: Asks you a question. · 72% · <when>`. All of them spell the number
+through `needsYouPercentWords` (`app/lib/widgets/needs_you_reason.dart`).
 
 **How it opens.** Two gestures, both in `ThreadDetailPanel`. Hovering an
 inbound transcript row gives a third button on the strip, **Why**
@@ -664,8 +554,24 @@ this ask come from" had no answer anywhere. With no Why wired, or on a thread
 with nothing inbound in it, the banner falls back to focusing the composer as
 it always did. Every per-message ask line still focuses the box.
 
-**What it never does.** It feeds nothing back. This reads model OUTPUT that
-has already been through the untrusted-data fence upstream; it writes nothing,
+**The owner's answer.** When the message's stored decision carries the
+owner's answer (`StoredDecision.ownerAnswer`), the headline is theirs, with
+no percentage: **"Needs you: no — you removed it"** or **"Needs you: yes — you
+added it"** (**"— like one you removed"** / **"— like one you added"** when the
+answer came from a message like it, and the history screen's line the same) —
+the 0.0 or 1.0 under it is the owner's word, not a model's confidence. The stored reason ("You removed a message like this from Needs
+You.") is shown on EITHER side of the line, since it says what the owner did,
+and the line against the slider follows as usual. The rail's chip and the
+thread's `Why:` line, which have only the thread's stored reason, tell the
+owner's four sentences from a model's by `ownerNeedsYouReasons`
+(`decision_policy.dart`, where `ownerNeedsYouReason` spells them once): the
+chip reads **You removed it** / **You added it** and neither draws a
+percentage.
+
+**What it never does.** It takes no answer: the owner's Needs You answer is
+SHOWN here, and taken on the thread's action bar (the two buttons above),
+never in this panel. It feeds nothing back. This reads model OUTPUT that has
+already been through the untrusted-data fence upstream; it writes nothing,
 sends nothing and prompts nothing, so there is no second fence here. And it
 renders sentences, never stored shapes — no JSON, no enum names dressed as
 prose, no field names. `teams_direct` reads "A direct message to you on
@@ -679,7 +585,7 @@ shell wires it to the message's history, which opens in the SAME side slot in
 place of the Why panel: Why is the verdict in a paragraph, the history is every
 stage, judgement and queue row behind it, with the levers — see
 [README.md](README.md#finding-out-what-happened-to-a-message). The two read the
-same rows (`needs_you_verdict`, `needs_you_reason`, the extraction, the
+same rows (`needs_you_p`, `needs_you_reason`, the extraction, the
 attention row) through their own reads, by decision: `whyFactsProvider` is
 four store calls (the fourth is `decisionFor`) and `messageHistoryProvider`
 is nine (over eight tables), and the smaller one is what makes Why cheap
