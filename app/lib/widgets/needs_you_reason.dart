@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../services/decision/decision_policy.dart' show ownerNeedsYouReasons;
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'time_format.dart';
@@ -40,6 +41,13 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
   if (collapsed.length <= maxChars) return collapsed;
   return '${collapsed.substring(0, maxChars).trimRight()}…';
 }
+
+/// The owner's own Needs You answer, when [reason] is one of its sentences
+/// (`ownerNeedsYouReason`): `yes` or `no`, else null. The number beside such
+/// a reason is the owner's 1.0 or 0.0, not a model's confidence, so neither
+/// surface below draws it as a percentage.
+String? ownerAnswerOf(String? reason) =>
+    ownerNeedsYouReasons[reason?.trim() ?? ''];
 
 /// Whether [p] is an EARLIER model's verdict rather than a probability.
 ///
@@ -100,8 +108,18 @@ const Key needsYouWhyLineKey = ValueKey('needs-you-why-line');
 /// sentence is a click away in the thread. The clamp is on the reason alone;
 /// the thread's percentage ([Conversation.needsYouP]) is appended after it
 /// and never cut.
+///
+/// The owner's own answer is the chip's one short form: `You removed it` /
+/// `You added it`, with no percentage — the full sentence would be clamped
+/// mid-word, and the 0% or 100% under it is the owner's, not a model's.
 List<Widget> needsYouReasonChips(Conversation c, {int maxChars = 36}) {
   if (c.state != ConversationState.needsReply) return const [];
+  switch (ownerAnswerOf(c.needsYouReason)) {
+    case 'no':
+      return [BondChip.metric('You removed it', key: needsYouReasonChipKey)];
+    case 'yes':
+      return [BondChip.metric('You added it', key: needsYouReasonChipKey)];
+  }
   final words = needsYouReasonWords(c.needsYouReason, maxChars: maxChars);
   if (words == null) return const [];
   return [
@@ -155,7 +173,10 @@ class NeedsYouWhyLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final reasonWords = needsYouReasonWords(reason);
     if (reasonWords == null) return const SizedBox.shrink();
-    final words = _withPercent(reasonWords, p, decidedNow);
+    // The owner's answer is its own sentence, with no percentage after it.
+    final words = ownerAnswerOf(reason) != null
+        ? reasonWords
+        : _withPercent(reasonWords, p, decidedNow);
     final stamp = formatTimestamp(at);
     final line = Text(
       stamp == null ? 'Why: $words' : 'Why: $words · $stamp',

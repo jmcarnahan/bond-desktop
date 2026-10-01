@@ -15,11 +15,16 @@ import 'label_chip.dart';
 /// Here the verb is Mark done, and pressing it opens its two choices — plain,
 /// or with a label — in place under the bar, each saying what it does.
 ///
-/// Icons, each with a tooltip that names the act and, where one exists, the
-/// key that does it from the list, because the panel shares its width with a
-/// split and a row of words would be clipped long before a row of icons is.
-/// What stays in the header's ⋯ is what is about the SENDER rather than this
-/// thread.
+/// The one other button with a word is the owner's Needs You answer —
+/// "Remove from Needs You" or "Add to Needs You", whichever the thread's place
+/// calls for — because what it does reaches past this thread, and an icon
+/// would not say so. Its word gives way first when the row runs short.
+///
+/// The rest are icons, each with a tooltip that names the act and, where one
+/// exists, the key that does it from the list, because the panel shares its
+/// width with a split and a row of words would be clipped long before a row
+/// of icons is. What stays in the header's ⋯ is what is about the SENDER
+/// rather than this thread.
 ///
 /// Every callback is optional and a null one draws no button, so a host that
 /// wires nothing draws nothing.
@@ -35,6 +40,20 @@ class ThreadActionBar extends StatefulWidget {
   final VoidCallback? onReopen;
   final VoidCallback? onLater;
   final VoidCallback? onKeepInInbox;
+
+  /// Whether the thread is in Needs You at the owner's slider (the rail's
+  /// `isNeedsYou`). It picks which of the two Needs You buttons draws:
+  /// "Remove from Needs You" when it is, "Add to Needs You" when it is not.
+  final bool inNeedsYou;
+
+  /// The owner's answer about this thread, kept as a label the decision
+  /// model's every later verdict inherits. Remove draws only when
+  /// [inNeedsYou]; Add only when it is not AND the thread is neither done
+  /// nor in Later — Needs You reads neither, so an Add there would change
+  /// nothing the reader could see.
+  final VoidCallback? onRemoveFromNeedsYou;
+  final VoidCallback? onAddToNeedsYou;
+
   final VoidCallback? onStoryline;
   final VoidCallback? onContext;
 
@@ -59,6 +78,9 @@ class ThreadActionBar extends StatefulWidget {
     this.onReopen,
     this.onLater,
     this.onKeepInInbox,
+    this.inNeedsYou = false,
+    this.onRemoveFromNeedsYou,
+    this.onAddToNeedsYou,
     this.onStoryline,
     this.onContext,
     this.contextLinked = 0,
@@ -76,6 +98,9 @@ class ThreadActionBar extends StatefulWidget {
   static const Key reopenKey = ValueKey('thread-action-reopen');
   static const Key laterKey = ValueKey('thread-action-later');
   static const Key keepKey = ValueKey('thread-action-keep');
+  static const Key needsYouRemoveKey =
+      ValueKey('thread-action-needs-you-remove');
+  static const Key needsYouAddKey = ValueKey('thread-action-needs-you-add');
   static const Key storylineKey = ValueKey('thread-action-storyline');
   static const Key contextKey = ValueKey('thread-context');
   static const Key composeKey = ValueKey('thread-compose');
@@ -177,12 +202,39 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
     final lineHeight = word.height + 14 > 34 ? word.height + 14 : 34.0;
     word.dispose();
     double doneWidth(double? w) => hasDone ? _doneWidth(w, chevron) : 0;
+    // The Needs You button is labelled too, and measured the same way. Its
+    // word goes first when room runs short, Mark done's only after it: the
+    // bar's one decision keeps its word longest.
+    final needsYou = _needsYouButton;
+    double? needsYouWord;
+    if (needsYou != null) {
+      final painter = TextPainter(
+        text: TextSpan(
+          text: needsYou.word,
+          style: (Theme.of(context).textTheme.bodyMedium ??
+                  DefaultTextStyle.of(context).style)
+              .merge(_doneStyle),
+        ),
+        textDirection: TextDirection.ltr,
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout();
+      needsYouWord = painter.width;
+      painter.dispose();
+    }
+    double needsYouWidth(double? w) =>
+        needsYou == null ? 0 : BondSpacing.s4 + _doneWidth(w, false);
     final icons = _iconCount();
     final showLabels = widget.onAddLabel != null || widget.labels.isNotEmpty;
     final inner = box.maxWidth - 2 * BondSpacing.s12;
     final tail = showLabels ? _ruleWidth + _iconWidth : 0.0;
-    final compact = doneWidth(wordWidth) + icons * _iconWidth + tail > inner;
-    final verbs = doneWidth(compact ? null : wordWidth) + icons * _iconWidth;
+    final rest = icons * _iconWidth + tail;
+    final needsYouCompact =
+        doneWidth(wordWidth) + needsYouWidth(needsYouWord) + rest > inner;
+    final compact = doneWidth(wordWidth) + needsYouWidth(null) + rest > inner;
+    final verbs = doneWidth(compact ? null : wordWidth) +
+        needsYouWidth(needsYouCompact ? null : needsYouWord) +
+        icons * _iconWidth;
     // Still no room for the rule and the add button beside even the compact
     // verbs: the whole label strip — button and chips — takes the line below.
     final labelsBelow = showLabels && verbs + tail > inner;
@@ -231,6 +283,15 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
           tooltip: 'Send to Later',
           shortcut: 's',
           onTap: widget.onLater!,
+        ),
+      if (needsYou != null)
+        _DoneButton(
+          buttonKey: needsYou.key,
+          name: needsYou.word,
+          label: needsYouCompact ? null : needsYou.word,
+          icon: needsYou.icon,
+          tooltip: needsYou.tooltip,
+          onDone: needsYou.onTap,
         ),
       if (widget.onStoryline != null)
         _ActionIcon(
@@ -389,6 +450,33 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
   /// would move nothing anybody is looking at. (`s` still can.)
   bool get _showLater =>
       !widget.inLater && !widget.done && widget.onLater != null;
+
+  /// The one Needs You button the bar draws, or null: Remove for a thread in
+  /// Needs You, Add for one that is not and is still being worked (neither
+  /// done nor in Later), and nothing whose callback is unwired.
+  ({Key key, String word, IconData icon, String tooltip, VoidCallback onTap})?
+      get _needsYouButton {
+    final remove = widget.onRemoveFromNeedsYou;
+    final add = widget.onAddToNeedsYou;
+    if (widget.inNeedsYou) {
+      if (remove == null) return null;
+      return (
+        key: ThreadActionBar.needsYouRemoveKey,
+        word: 'Remove from Needs You',
+        icon: Icons.notifications_off_outlined,
+        tooltip: 'Remove from Needs You — and anything like it',
+        onTap: remove,
+      );
+    }
+    if (add == null || widget.done || widget.inLater) return null;
+    return (
+      key: ThreadActionBar.needsYouAddKey,
+      word: 'Add to Needs You',
+      icon: Icons.notification_add_outlined,
+      tooltip: 'Add to Needs You',
+      onTap: add,
+    );
+  }
 
   /// How many icon buttons the row draws — the same conditions as the list
   /// below them, so the measure and the row cannot disagree.

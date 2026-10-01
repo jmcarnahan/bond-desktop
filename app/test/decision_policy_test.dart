@@ -138,6 +138,17 @@ void main() {
           'You added this message to Needs You.');
     });
 
+    test("the four owner sentences are known by their answer, and no model "
+        'sentence is', () {
+      expect(ownerNeedsYouReasons, {
+        'You added this message to Needs You.': 'yes',
+        'You added a message like this to Needs You.': 'yes',
+        'You removed this message from Needs You.': 'no',
+        'You removed a message like this from Needs You.': 'no',
+      });
+      expect(ownerNeedsYouReasons['Asks you to do something.'], isNull);
+    });
+
     test("the owner's answer survives the stored blob's round trip", () {
       final json = {
         ...fakeAnswers(needsYou: 0.9).withNeedsYou('no').toJson(),

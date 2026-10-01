@@ -5209,7 +5209,10 @@ SELECT conversation_key FROM (
   /// wrote ([deleteNeedsYouLabels]) rather than answering them with the
   /// opposite label.
   ///
-  /// Written by `NeedsYouEdits` at the press and by nothing automatic.
+  /// Written by `NeedsYouEdits` at the press and by nothing automatic. A
+  /// press that labels several messages passes ONE [createdAt] stamp for all
+  /// of them, which is how its undo tells its rows from a newer press's
+  /// (`id` is reused after a delete); unset is now.
   Future<int> writeNeedsYouLabel({
     required String source,
     required String conversationKey,
@@ -5218,6 +5221,7 @@ SELECT conversation_key FROM (
     required String origin,
     List<double>? vector,
     String? vectorModel,
+    String? createdAt,
   }) async {
     final rows = await db.customWriteReturning(
       'INSERT INTO decision_labels '
@@ -5229,7 +5233,7 @@ SELECT conversation_key FROM (
         source,
         conversationKey,
         origin,
-        _nowIso(),
+        createdAt ?? _nowIso(),
         sourceMessageId,
         vector == null ? null : encodeEmbedding(vector),
         vector == null ? null : vectorModel,
@@ -5283,15 +5287,22 @@ SELECT conversation_key FROM (
     return (count: row['n'] as int, maxId: row['max_id'] as int);
   }
 
-  /// Deletes the Needs You labels [ids] and returns how many went: the undo
-  /// of a press (`NeedsYouEdits.retract`), the one DELETE the log takes short
-  /// of a wipe. Only `needs_you` rows; an unknown id deletes nothing.
-  Future<int> deleteNeedsYouLabels(List<int> ids) async {
+  /// Deletes the Needs You labels [ids] stamped [createdAt] and returns how
+  /// many went: the undo of a press (`NeedsYouEdits.retract`), the one
+  /// DELETE the log takes short of a wipe. Only `needs_you` rows; an unknown
+  /// id deletes nothing, and so does an id a NEWER press took over — `id` is
+  /// an INTEGER PRIMARY KEY without AUTOINCREMENT, so a deleted highest id is
+  /// handed out again, and the stamp is what tells the two rows apart.
+  Future<int> deleteNeedsYouLabels(
+    List<int> ids, {
+    required String createdAt,
+  }) async {
     if (ids.isEmpty) return 0;
     return db.customUpdate(
       'DELETE FROM decision_labels '
-      "WHERE question = 'needs_you' AND id IN (${_placeholders(ids.length)})",
-      variables: _args(ids),
+      "WHERE question = 'needs_you' AND id IN (${_placeholders(ids.length)}) "
+      'AND created_at = ?',
+      variables: _args([...ids, createdAt]),
     );
   }
 

@@ -7,12 +7,17 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
+import 'package:bond_inbox/services/llm/llm_client.dart'
+    show DecisionUnavailableException;
+import 'package:bond_inbox/services/needs_you_edits.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
 /// A [MailSync] that never touches a socket. [manual] holds each call open on
@@ -840,6 +845,126 @@ void main() {
       await slow;
 
       expect(identical(notifier.state, settled), isTrue);
+    });
+  });
+
+  group('Needs You presses', () {
+    /// One thread in Needs You: a kept ask the model put at 0.9.
+    Future<void> seedAsk() async {
+      await seedConversation('c1');
+      await store.upsertMessage({
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Can you sign the form?',
+        'triage_status': 'triaged',
+      });
+      await store.writeNeedsYouP('email', 'm1', p: 0.9, reason: 'Asks you.');
+    }
+
+    /// The presses over [client]. No vector on its answers, so a removal
+    /// starts no sweep that would outlive the test's database.
+    NeedsYouEdits editsOver(FakeDecisionClient client) => NeedsYouEdits(
+          store,
+          client,
+          NeedsYouExemplars(store),
+          owner: () async => 'Lo <lo@x.com>',
+          threshold: () async => 0.35,
+        );
+
+    FakeDecisionClient asks() => FakeDecisionClient(
+          (_) => fakeDecision(fakeAnswers(needsYou: 0.9), model: 'kev'),
+        );
+
+    double? pOf(ConversationsNotifier notifier) =>
+        (notifier.state as ConversationsLoaded)
+            .conversations
+            .singleWhere((c) => c.id == 'c1')
+            .needsYouP;
+
+    test('Remove writes the label and reloads the list', () async {
+      await seedAsk();
+      final edits = editsOver(asks());
+      final notifier = ConversationsNotifier(store, sync,
+          needsYouEdits: () => edits);
+      await notifier.load(syncFirst: false);
+      expect(pOf(notifier), closeTo(0.9, 1e-9));
+
+      final press = await notifier.removeFromNeedsYou('email', 'c1');
+
+      expect(press, isNotNull);
+      expect(press!.ids, hasLength(1));
+      final label = (await store.needsYouLabels()).single;
+      expect(label.sourceMessageId, 'm1');
+      expect(label.answer, 'no');
+      expect(pOf(notifier), 0.0);
+      expect(sync.syncCalls, 0);
+    });
+
+    test('a decision error leaves the thread unchanged and answers null',
+        () async {
+      await seedAsk();
+      final edits = editsOver(FakeDecisionClient(
+        (_) => throw const DecisionUnavailableException('down'),
+      ));
+      final notifier = ConversationsNotifier(store, sync,
+          needsYouEdits: () => edits);
+      await notifier.load(syncFirst: false);
+
+      final press = await notifier.removeFromNeedsYou('email', 'c1');
+
+      expect(press, isNull);
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(pOf(notifier), closeTo(0.9, 1e-9));
+      // The screen words the failure in its own bar; the list carries none.
+      expect((notifier.state as ConversationsLoaded).loadError, isNull);
+    });
+
+    test('Undo retracts the press and reloads', () async {
+      await seedAsk();
+      final edits = editsOver(asks());
+      final notifier = ConversationsNotifier(store, sync,
+          needsYouEdits: () => edits);
+      await notifier.load(syncFirst: false);
+      final press = await notifier.removeFromNeedsYou('email', 'c1');
+      expect(pOf(notifier), 0.0);
+
+      await notifier.undoNeedsYouPress(press!);
+
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(pOf(notifier), closeTo(0.9, 1e-9));
+    });
+
+    test('Add on a thread the owner answered last is an empty press',
+        () async {
+      await seedAsk();
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'c1',
+        'state': 'waiting',
+        'last_message_at': '2026-08-28T11:00:00Z',
+        'last_outbound_at': '2026-08-28T11:00:00Z',
+      });
+      final client = asks();
+      final edits = editsOver(client);
+      final notifier = ConversationsNotifier(store, sync,
+          needsYouEdits: () => edits);
+      await notifier.load(syncFirst: false);
+
+      final press = await notifier.addToNeedsYou('email', 'c1');
+
+      expect(press!.isEmpty, isTrue);
+      expect(client.calls, isEmpty);
+    });
+
+    test('a notifier built without the presses answers null', () async {
+      await seedAsk();
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load(syncFirst: false);
+
+      expect(await notifier.removeFromNeedsYou('email', 'c1'), isNull);
+      expect(await store.needsYouLabels(), isEmpty);
     });
   });
 

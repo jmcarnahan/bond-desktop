@@ -269,6 +269,33 @@ void main() {
       AsyncValue.data(_history(message: message(1.0, null), decidedNow: true)),
     );
     expect(find.text('Needs you: 100%'), findsOneWidget);
+
+    // The owner's own answer reads as theirs, sentence and all, on either
+    // side of the line — never as 0% or 100%.
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        message: message(0.0, 'You removed a message like this from Needs You.'),
+        decidedNow: true,
+      )),
+    );
+    expect(
+      find.text('Needs you: no — you removed it — '
+          'You removed a message like this from Needs You.'),
+      findsOneWidget,
+    );
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        message: message(1.0, 'You added this message to Needs You.'),
+        decidedNow: true,
+      )),
+    );
+    expect(
+      find.text('Needs you: yes — you added it — '
+          'You added this message to Needs You.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a dropped message offers Restore and nothing that would run '

@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, immutable;
 
 import '../data/message_store.dart';
 import '../models/message_models.dart';
@@ -10,6 +10,32 @@ import 'decision/needs_you_predicate.dart';
 import 'llm/llm_client.dart';
 import 'pipeline_progress.dart';
 import 'triage_queue.dart' show applyDecision, decisionInputFor;
+
+/// One press of "Remove from Needs You" or "Add to Needs You": the labels
+/// it wrote and the one `created_at` stamp they all carry — what the toast's
+/// Undo holds and hands to [NeedsYouEdits.retract].
+///
+/// The stamp is there because a label's id is not enough: `decision_labels`
+/// hands a deleted highest id out again, so an Undo retried with stale ids
+/// could otherwise delete a NEWER press's label.
+@immutable
+class NeedsYouPress {
+  /// The `decision_labels` rows the press wrote; empty when the thread's
+  /// Needs You window was (the owner wrote last) and nothing was written.
+  final List<int> ids;
+
+  /// The `created_at` every one of [ids] was written with.
+  final String createdAt;
+
+  NeedsYouPress(List<int> ids, this.createdAt) : ids = List.unmodifiable(ids);
+
+  /// A press that wrote nothing.
+  const NeedsYouPress.none()
+      : ids = const [],
+        createdAt = '';
+
+  bool get isEmpty => ids.isEmpty;
+}
 
 /// Everything the OWNER does to Needs You: "Remove from Needs You" and "Add
 /// to Needs You" on a thread, the sweep a removal starts, and the undo of a
@@ -71,6 +97,10 @@ class NeedsYouEdits {
   bool _sweeping = false;
   bool _again = false;
 
+  /// The sweep's message in flight, which [retract] waits out: it may have
+  /// matched a label before the undo deleted it and write after.
+  Future<void>? _inFlight;
+
   NeedsYouEdits(
     this._store,
     this._client,
@@ -90,26 +120,34 @@ class NeedsYouEdits {
   /// vector and decided again, so the thread's probability drops to 0.0
   /// under any slider; then the sweep starts, unawaited, when a label carries
   /// a vector to match (on Kev none does, and a sweep would change nothing).
-  /// Returns the label ids it wrote, for [retract]; empty when the window
-  /// was (nothing waits on the owner there).
+  /// Returns the press, for [retract]; an empty one when the window was
+  /// (nothing waits on the owner there).
   ///
   /// Every message, not just the driver: the thread's number is the MAX over
   /// the window, and a second ask left at its old p would hold the thread in.
-  /// A decision error propagates to the caller, which shows the house
-  /// failure sentence; the labels written before it stay.
-  Future<List<int>> remove(String source, String conversationKey) async {
+  ///
+  /// DECIDE FIRST, WRITE SECOND: every message is decided (the one network
+  /// step) before anything is stored, so a decision error propagates with
+  /// nothing written and the caller's "the thread is unchanged" is true.
+  /// Processing turned off refuses the press the same way ([_refuseWhenOff]):
+  /// a press is a decision, and a label the switch kept from being applied
+  /// would sit unseen.
+  Future<NeedsYouPress> remove(String source, String conversationKey) async {
+    _refuseWhenOff();
     final rows = await _store.needsYouWindowMessages(source, conversationKey);
-    if (rows.isEmpty) return const [];
+    if (rows.isEmpty) return const NeedsYouPress.none();
     final owner = await _owner();
-    final ids = <int>[];
-    var anyVector = false;
-    for (final row in rows) {
-      final label =
-          await _label(source, conversationKey, row, owner, answer: 'no');
-      ids.add(label.id);
-      anyVector = anyVector || label.hasVector;
-    }
-    if (anyVector) {
+    final decided = [
+      for (final row in rows)
+        await _decide(row, owner, conversationKey: conversationKey),
+    ];
+    final createdAt = MessageStore.isoStamp(DateTime.now());
+    final ids = <int>[
+      for (var i = 0; i < rows.length; i++)
+        await _label(source, conversationKey, rows[i], decided[i], owner,
+            answer: 'no', createdAt: createdAt),
+    ];
+    if (decided.any((d) => d.vector != null)) {
       // Unawaited: the press is done once its own thread is written. Nobody
       // awaits this future, so a failure is logged here rather than left to
       // the zone.
@@ -118,129 +156,195 @@ class NeedsYouEdits {
         onError: (Object e) => debugPrint('needs_you: the sweep failed: $e'),
       ));
     }
-    return ids;
+    return NeedsYouPress(ids, createdAt);
   }
 
   /// "Add to Needs You" on one thread: the newest message of its Needs You
   /// window is labelled `yes` and decided again, so the thread's probability
-  /// becomes 1.0. No sweep. Returns the label id in a list, for [retract];
-  /// empty when the window is — the owner wrote last, so nothing waits on
-  /// the owner there — and nothing was written.
+  /// becomes 1.0. No sweep. Returns the press, for [retract]; an empty one
+  /// when the window is — the owner wrote last, so nothing waits on the
+  /// owner there — and nothing was written. Decided before anything is
+  /// written, and refused with processing off, as [remove] is.
   ///
   /// A thread that is Done or in Later takes the label all the same, but
   /// stays off the rail: Needs You reads neither.
-  Future<List<int>> add(String source, String conversationKey) async {
+  Future<NeedsYouPress> add(String source, String conversationKey) async {
+    _refuseWhenOff();
     final rows = await _store.needsYouWindowMessages(source, conversationKey);
-    if (rows.isEmpty) return const [];
-    final label = await _label(
-      source,
-      conversationKey,
-      rows.last,
-      await _owner(),
-      answer: 'yes',
-    );
-    return [label.id];
+    if (rows.isEmpty) return const NeedsYouPress.none();
+    final owner = await _owner();
+    final decided =
+        await _decide(rows.last, owner, conversationKey: conversationKey);
+    final createdAt = MessageStore.isoStamp(DateTime.now());
+    final id = await _label(source, conversationKey, rows.last, decided, owner,
+        answer: 'yes', createdAt: createdAt);
+    return NeedsYouPress([id], createdAt);
   }
 
-  /// The undo of a press: deletes the labels [labelIds] (what [remove] or
-  /// [add] returned) and decides again, with the labels that remain, every
-  /// message whose stored decision cites one of them — the pressed thread's
-  /// and every thread the sweep removed — so each takes the model's number
-  /// back unless another label still matches it. Returns how many messages
-  /// it decided again; an unknown id deletes and decides nothing.
+  /// The undo of a press: deletes the labels [press] wrote and decides
+  /// again, with the labels that remain, every message whose stored decision
+  /// cites one of them — the pressed thread's and every thread the sweep
+  /// removed — so each takes the model's number back unless another label
+  /// still matches it. Returns how many messages it decided again; an
+  /// unknown id deletes and decides nothing, and an id a newer press took
+  /// over (ids are handed out again) is left to that press entirely.
   ///
-  /// The citing rows are read BEFORE the delete and the decisions still cite
-  /// the deleted ids until each is decided again, so a retract that a
-  /// decision error cut short is finished by calling it again with the same
-  /// ids. A decision server that cannot answer propagates, as a press does;
-  /// a per-message fault is logged and that message keeps its decision.
-  Future<int> retract(List<int> labelIds) async {
-    if (labelIds.isEmpty) return 0;
-    final rows = await _store.messagesCitingNeedsYouLabels(labelIds);
-    await _store.deleteNeedsYouLabels(labelIds);
-    _exemplars.invalidate();
-    if (rows.isEmpty) return 0;
+  /// Decide first, as a press does: the citing messages are decided before
+  /// the labels are deleted, then each is written with its fetched result
+  /// (whose owner answer [applyDecision] looks up at write time, so the
+  /// deleted labels no longer match). A decision server that cannot answer
+  /// therefore propagates with nothing changed, and so does processing
+  /// turned off ([_refuseWhenOff]): an undo that deleted the labels and then
+  /// stopped would leave the press's answers in place with no label behind
+  /// them and no way back. A per-message format fault is logged and that
+  /// message keeps its decision.
+  ///
+  /// A sweep still running from the press can have matched a label before
+  /// the delete and write its 0.0 after it, citing a label that is gone. So
+  /// the undo waits out the sweep's message in flight and then asks again
+  /// which messages cite the deleted labels, deciding those again, for at
+  /// most [_retractRounds] rounds. The sweep carries on meanwhile, matching
+  /// nothing of this press.
+  Future<int> retract(NeedsYouPress press) async {
+    _refuseWhenOff();
+    if (press.isEmpty) return 0;
+    final takenOver = {
+      for (final label in await _exemplars.load())
+        if (label.createdAt != press.createdAt) label.id,
+    };
+    final ids = [
+      for (final id in press.ids)
+        if (!takenOver.contains(id)) id,
+    ];
+    if (ids.isEmpty) return 0;
     final owner = await _owner();
-    var redecided = 0;
-    for (final row in rows) {
+    final first = await _decideAll(
+      await _store.messagesCitingNeedsYouLabels(ids),
+      owner,
+    );
+    await _store.deleteNeedsYouLabels(ids, createdAt: press.createdAt);
+    _exemplars.invalidate();
+    final inFlight = _inFlight;
+    var redecided = await _applyAll(first, owner);
+    if (inFlight != null) {
+      // Its error is the sweep's to log.
+      await inFlight.then<void>((_) {}, onError: (Object _) {});
+    }
+    for (var round = 0; round < _retractRounds; round++) {
       if (_off) break;
-      try {
-        await _decideAndApply(row, owner);
-      } on LlmUnavailableException {
-        rethrow;
-      } on LlmFormatException catch (e) {
-        debugPrint('needs_you: an undo could not decide one message: '
-            '${e.runtimeType}');
-        continue;
-      }
-      redecided++;
+      final late = await _store.messagesCitingNeedsYouLabels(ids);
+      if (late.isEmpty) break;
+      redecided += await _applyAll(await _decideAll(late, owner), owner);
     }
     return redecided;
   }
 
-  /// Decides [row], stores the owner's [answer] about it with the fresh
-  /// vector, and writes the decision through [applyDecision], which finds
-  /// the label it just got.
-  Future<({int id, bool hasVector})> _label(
+  /// How many times [retract] asks again for decisions a running sweep
+  /// wrote against the deleted labels.
+  static const _retractRounds = 3;
+
+  /// Throws when processing is off: the owner's presses and undo are
+  /// decisions, and a half-done one is worse than a refused one. The inbox
+  /// words the throw as its failure sentence.
+  void _refuseWhenOff() {
+    if (_off) throw StateError('processing is off');
+  }
+
+  /// One message decided. Throws what the decision client throws.
+  Future<DecisionResult> _decide(
+    Map<String, Object?> row,
+    String? owner, {
+    String? conversationKey,
+  }) async =>
+      _client.decide(await decisionInputFor(
+        _store,
+        row['source'] as String,
+        Message.fromRow(row),
+        conversationKey: conversationKey ?? row['conversation_key'] as String?,
+        owner: owner,
+      ));
+
+  /// [rows] decided, for [retract], with nothing written: a message the
+  /// model could not read ([LlmFormatException]) is logged and left out, a
+  /// server that cannot answer propagates.
+  Future<List<(Map<String, Object?>, DecisionResult)>> _decideAll(
+    List<Map<String, Object?>> rows,
+    String? owner,
+  ) async {
+    final decided = <(Map<String, Object?>, DecisionResult)>[];
+    for (final row in rows) {
+      try {
+        decided.add((row, await _decide(row, owner)));
+      } on LlmFormatException catch (e) {
+        debugPrint('needs_you: an undo could not decide one message: '
+            '${e.runtimeType}');
+      }
+    }
+    return decided;
+  }
+
+  /// [decided] written through [applyDecision], for [retract]; returns how
+  /// many were.
+  Future<int> _applyAll(
+    List<(Map<String, Object?>, DecisionResult)> decided,
+    String? owner,
+  ) async {
+    for (final (row, result) in decided) {
+      await _apply(row, result, owner);
+    }
+    return decided.length;
+  }
+
+  /// Stores the owner's [answer] about [row] with the vector of its fresh
+  /// decision [decided], then writes that decision through [applyDecision],
+  /// which finds the label it just got. Returns the label's id.
+  Future<int> _label(
     String source,
     String conversationKey,
     Map<String, Object?> row,
+    DecisionResult decided,
     String? owner, {
     required String answer,
+    required String createdAt,
   }) async {
-    final id = row['source_message_id'] as String;
-    final decided = await _client.decide(await decisionInputFor(
-      _store,
-      source,
-      Message.fromRow(row),
-      conversationKey: conversationKey,
-      owner: owner,
-    ));
     final labelId = await _store.writeNeedsYouLabel(
       source: source,
       conversationKey: conversationKey,
-      sourceMessageId: id,
+      sourceMessageId: row['source_message_id'] as String,
       answer: answer,
       origin: answer == 'yes' ? 'add' : 'remove',
       vector: decided.vector,
       vectorModel: decided.model,
+      createdAt: createdAt,
     );
     _exemplars.invalidate();
-    await applyDecision(
-      _store,
-      source,
-      row,
-      decided,
-      ownerKnown: owner != null,
-      progress: _progress,
-      threshold: _threshold,
-      exemplars: _exemplars,
-    );
-    return (id: labelId, hasVector: decided.vector != null);
+    await _apply(row, decided, owner);
+    return labelId;
   }
 
+  /// [decided] written for [row] through [applyDecision] with the owner's
+  /// labels as they stand now.
+  Future<void> _apply(
+    Map<String, Object?> row,
+    DecisionResult decided,
+    String? owner,
+  ) =>
+      applyDecision(
+        _store,
+        row['source'] as String,
+        row,
+        decided,
+        ownerKnown: owner != null,
+        progress: _progress,
+        threshold: _threshold,
+        exemplars: _exemplars,
+      );
+
   /// One message decided again and written through [applyDecision] with the
-  /// owner's labels. Throws what the decision client throws.
-  Future<void> _decideAndApply(Map<String, Object?> row, String? owner) async {
-    final source = row['source'] as String;
-    final decided = await _client.decide(await decisionInputFor(
-      _store,
-      source,
-      Message.fromRow(row),
-      conversationKey: row['conversation_key'] as String?,
-      owner: owner,
-    ));
-    await applyDecision(
-      _store,
-      source,
-      row,
-      decided,
-      ownerKnown: owner != null,
-      progress: _progress,
-      threshold: _threshold,
-      exemplars: _exemplars,
-    );
-  }
+  /// owner's labels — the sweep's step. Throws what the decision client
+  /// throws.
+  Future<void> _decideAndApply(Map<String, Object?> row, String? owner) async =>
+      _apply(row, await _decide(row, owner), owner);
 
   /// Decides every message of every thread in Needs You at the slider again
   /// (the threads [MessageStore.needsYouDriverRows] lists, each over its
@@ -277,6 +381,7 @@ class NeedsYouEdits {
     } finally {
       _sweeping = false;
       _again = false;
+      _inFlight = null;
     }
     _onSwept?.call();
     return changed;
@@ -293,7 +398,7 @@ class NeedsYouEdits {
       for (final row in window) {
         if (_off) return (changed: changed, stopped: true);
         try {
-          await _decideAndApply(row, owner);
+          await (_inFlight = _decideAndApply(row, owner));
         } on LlmUnavailableException catch (e) {
           debugPrint('needs_you: the sweep stopped, the decision model is '
               'unavailable: ${e.runtimeType}');

@@ -10,9 +10,13 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
-import 'package:bond_inbox/services/backend/backend_types.dart' show SentDraft;
+import 'package:bond_inbox/services/backend/auth_session.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart'
+    show AccountInfo, SentDraft;
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
+import 'package:bond_inbox/services/llm/llm_client.dart'
+    show DecisionUnavailableException;
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
@@ -255,6 +259,25 @@ const String _sendGrant =
     'https://graph.microsoft.com/Mail.ReadWrite '
     'https://graph.microsoft.com/Mail.Send';
 
+/// Signed in, with no account on record: the owner line a Needs You press
+/// asks for is simply absent.
+class _AccountlessSession implements AuthSession {
+  @override
+  Future<bool> get isSignedIn async => true;
+
+  @override
+  Future<bool> get needsReconsent async => false;
+
+  @override
+  Future<bool> hasScope(String bareScope) async => false;
+
+  @override
+  Future<AccountInfo?> get storedAccount async => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
 class _FakeTeamsSync implements TeamsSync {
   @override
   Future<String?> get lastSyncedAt async => null;
@@ -335,6 +358,8 @@ void main() {
     MessageStore? storeAs,
     _SendingMail? mail,
     RailSection section = RailSection.needsYou,
+    Override? decision,
+    bool accountless = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -355,7 +380,7 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
-      keepingDecisionClient(),
+      decision ?? keepingDecisionClient(),
       initialSectionProvider.overrideWithValue(section),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
@@ -364,6 +389,10 @@ void main() {
           .overrideWithValue(NotificationCoordinator(store)),
       if (storeAs != null) messageStoreProvider.overrideWithValue(storeAs),
       if (auth != null) graphAuthProvider.overrideWithValue(auth),
+      // A Needs You press reads the owner's account, which the default
+      // backend's session never answers under a test.
+      if (accountless)
+        authSessionProvider.overrideWithValue(_AccountlessSession()),
       if (mail != null) mailBackendProvider.overrideWithValue(mail),
     ]);
     addTearDown(container.dispose);
@@ -526,6 +555,78 @@ void main() {
 
     expect(rowTitles(tester), ['Homepage copy', 'Invoice 4471']);
     expect(litRow(tester), 'Invoice 4471');
+    await settleQueues(tester);
+  });
+
+  testWidgets('Remove from Needs You clears the thread and anything like it, '
+      'and Undo brings them back', (tester) async {
+    await seedPile();
+    // The decision model's vectors, by subject: the invoice is a near
+    // duplicate of the homepage thread, the quote is not.
+    final client = FakeDecisionClient((input) => fakeDecision(
+          fakeAnswers(needsYou: 0.9),
+          vector: switch (input.subject) {
+            'Homepage copy' => const [1.0, 0.0, 0.0, 0.0],
+            'Invoice 4471' => const [1.0, 0.1, 0.0, 0.0],
+            _ => const [0.0, 1.0, 0.0, 0.0],
+          },
+        ));
+    await pumpInbox(
+      tester,
+      decision: decisionClientProvider.overrideWithValue(client),
+      accountless: true,
+    );
+    await press(tester, LogicalKeyboardKey.keyJ);
+    expect(litRow(tester), 'Homepage copy');
+
+    await tester.tap(find.byKey(ThreadActionBar.needsYouRemoveKey));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await settleQueues(tester);
+
+    expect(find.text('Removed from Needs You — and anything like it.'),
+        findsOneWidget);
+    // The pressed thread and its near duplicate left. The press landed the
+    // reader on the next row, the sweep took that one too, and the reader
+    // was stepped on to the row still drawn.
+    expect(rowTitles(tester), ['Vendor quote']);
+    expect(litRow(tester), 'Vendor quote');
+
+    await tester.tap(find.text('Undo'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await settleQueues(tester);
+
+    expect(rowTitles(tester),
+        containsAll(['Homepage copy', 'Invoice 4471', 'Vendor quote']));
+    expect(await store.needsYouLabels(), isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('Remove on a thread the decision model cannot reach says so '
+      'and moves nobody', (tester) async {
+    await seedPile();
+    await pumpInbox(
+      tester,
+      decision: decisionClientProvider.overrideWithValue(FakeDecisionClient(
+        (_) => throw const DecisionUnavailableException('down'),
+      )),
+      accountless: true,
+    );
+    await press(tester, LogicalKeyboardKey.keyJ);
+
+    await tester.tap(find.byKey(ThreadActionBar.needsYouRemoveKey));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text("Couldn't save that just now — the thread is unchanged."),
+        findsOneWidget);
+    expect(find.text('Undo'), findsNothing);
+    expect(rowTitles(tester), contains('Homepage copy'));
+    expect(litRow(tester), 'Homepage copy');
     await settleQueues(tester);
   });
 

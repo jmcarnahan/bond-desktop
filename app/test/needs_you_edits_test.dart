@@ -192,6 +192,50 @@ void main() {
       await pumpEventQueue();
       expect(swept, 0);
     });
+
+    test('a decision error part-way writes nothing at all',
+        () async {
+      await thread('t1');
+      await message('t1', 'w1', 'Access granted: receipt-one',
+          receivedAt: '2026-09-30T09:00:00Z');
+      await message('t1', 'w2', 'Access granted: receipt-two',
+          receivedAt: '2026-09-30T10:00:00Z');
+      var swept = 0;
+      final client = FakeDecisionClient((input) {
+        if ((input.bodyText ?? '').contains('receipt-two')) {
+          throw const DecisionUnavailableException('down');
+        }
+        return fakeDecision(fakeAnswers(needsYou: 0.9),
+            vector: vectorOf(input));
+      });
+
+      await expectLater(
+        edits(client, onSwept: () => swept++).remove('email', 't1'),
+        throwsA(isA<DecisionUnavailableException>()),
+      );
+
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(await pOf('w1'), closeTo(0.9, 1e-9));
+      // Decided, but never written: no decision row cites anything.
+      expect(await store.decisionFor('email', 'w1'), isNull);
+      expect(await threadP('t1'), closeTo(0.9, 1e-9));
+      await pumpEventQueue();
+      expect(swept, 0);
+    });
+
+    test('processing off refuses the press and writes nothing', () async {
+      await seedList();
+      final client = model();
+
+      await expectLater(
+        edits(client, enabled: () => false).remove('email', 't-one'),
+        throwsStateError,
+      );
+
+      expect(client.calls, isEmpty);
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(await pOf('a1'), closeTo(0.9, 1e-9));
+    });
   });
 
   group('add', () {
@@ -221,12 +265,27 @@ void main() {
       expect(swept, 0, reason: 'an addition sweeps nothing');
     });
 
+    test('processing off refuses the press and writes nothing', () async {
+      await thread('t1');
+      await message('t1', 'w1', 'First note', p: 0.1);
+      final client = model(needsYou: 0.1);
+
+      await expectLater(
+        edits(client, enabled: () => false).add('email', 't1'),
+        throwsStateError,
+      );
+
+      expect(client.calls, isEmpty);
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(await pOf('w1'), closeTo(0.1, 1e-9));
+    });
+
     test('a thread the owner wrote last has nothing to add', () async {
       await thread('t1', lastOutboundAt: '2026-09-30T11:00:00Z');
       await message('t1', 'w1', 'First note');
       final client = model();
 
-      expect(await edits(client).add('email', 't1'), isEmpty);
+      expect((await edits(client).add('email', 't1')).isEmpty, isTrue);
 
       expect(client.calls, isEmpty);
       expect(await store.needsYouLabels(), isEmpty);
@@ -392,11 +451,11 @@ void main() {
         (_) => fakeDecision(fakeAnswers(needsYou: 0.9), model: 'kev'),
       );
 
-      final ids =
+      final press =
           await edits(kev, onSwept: () => swept++).remove('email', 't-one');
       await pumpEventQueue();
 
-      expect(ids, hasLength(1));
+      expect(press.ids, hasLength(1));
       expect(await pOf('a1'), 0.0);
       expect(await pOf('b1'), closeTo(0.9, 1e-9));
       expect(kev.calls, hasLength(1));
@@ -412,12 +471,12 @@ void main() {
       final done = Completer<void>();
       final e = edits(client, onSwept: done.complete);
 
-      final ids = await e.remove('email', 't-one');
+      final press = await e.remove('email', 't-one');
       await done.future;
       expect(await pOf('a1'), 0.0);
       expect(await pOf('b1'), 0.0);
 
-      final redecided = await e.retract(ids);
+      final redecided = await e.retract(press);
 
       expect(redecided, 2);
       expect(await store.needsYouLabels(), isEmpty);
@@ -437,9 +496,9 @@ void main() {
       await message('t1', 'w1', 'First note', p: 0.1);
       final e = edits(model(needsYou: 0.1));
 
-      final ids = await e.add('email', 't1');
+      final press = await e.add('email', 't1');
       expect(await pOf('w1'), 1.0);
-      expect(await e.retract(ids), 1);
+      expect(await e.retract(press), 1);
 
       expect(await pOf('w1'), closeTo(0.1, 1e-9));
     });
@@ -448,8 +507,13 @@ void main() {
       await seedList();
       final client = model();
 
-      expect(await edits(client).retract([4242]), 0);
-      expect(await edits(client).retract(const []), 0);
+      expect(
+        await edits(client).retract(
+          NeedsYouPress([4242], '2026-09-30T10:00:00.000000Z'),
+        ),
+        0,
+      );
+      expect(await edits(client).retract(const NeedsYouPress.none()), 0);
 
       expect(client.calls, isEmpty);
       expect(await pOf('a1'), closeTo(0.9, 1e-9));
@@ -472,7 +536,7 @@ void main() {
       await sweeps(1);
       final second = await e.remove('email', 't-two');
       await sweeps(2);
-      expect(first, isNotEmpty);
+      expect(first.ids, isNotEmpty);
 
       await e.retract(second);
 
@@ -482,5 +546,164 @@ void main() {
         'You removed a message like this from Needs You.',
       );
     });
+
+    test('processing off refuses the undo before it deletes anything',
+        () async {
+      await thread('t1');
+      await message('t1', 'w1', 'First note', p: 0.1);
+      var on = true;
+      final e = edits(model(needsYou: 0.1), enabled: () => on);
+      final press = await e.add('email', 't1');
+      on = false;
+
+      await expectLater(e.retract(press), throwsStateError);
+
+      expect((await store.needsYouLabels()).single.id, press.ids.single);
+      expect(await pOf('w1'), 1.0);
+      expect((await store.decisionFor('email', 'w1'))!.ownerAnswer, 'yes');
+    });
+
+    test('a decision server down at the undo changes nothing', () async {
+      await thread('t1');
+      await message('t1', 'w1', 'First note', p: 0.1);
+      var down = false;
+      final client = FakeDecisionClient((input) {
+        if (down) throw const DecisionUnavailableException('down');
+        return fakeDecision(fakeAnswers(needsYou: 0.1),
+            vector: vectorOf(input));
+      });
+      final e = edits(client);
+      final press = await e.add('email', 't1');
+      down = true;
+
+      await expectLater(
+        e.retract(press),
+        throwsA(isA<DecisionUnavailableException>()),
+      );
+
+      expect(await store.needsYouLabels(), hasLength(1));
+      expect(await pOf('w1'), 1.0);
+      // So the same press can be undone once the server is back.
+      down = false;
+      expect(await e.retract(press), 1);
+      expect(await pOf('w1'), closeTo(0.1, 1e-9));
+    });
+
+    test('every label of one press shares one stamp', () async {
+      await thread('t1');
+      await message('t1', 'w1', 'Access granted: receipt-one',
+          receivedAt: '2026-09-30T09:00:00Z');
+      await message('t1', 'w2', 'Access granted: receipt-two',
+          receivedAt: '2026-09-30T10:00:00Z');
+      final done = Completer<void>();
+
+      final press =
+          await edits(model(), onSwept: done.complete).remove('email', 't1');
+      await done.future;
+
+      final labels = await store.needsYouLabels();
+      expect(press.ids, labels.map((l) => l.id));
+      expect(labels.map((l) => l.createdAt).toSet(), {press.createdAt});
+    });
+
+    test('an undo retried after its id went to a newer press deletes nothing '
+        'of that press', () async {
+      await thread('t1');
+      await message('t1', 'w1', 'First note', p: 0.1);
+      await thread('t2');
+      await message('t2', 'x1', 'Second note', p: 0.1);
+      final e = edits(model(needsYou: 0.1));
+
+      final stale = await e.add('email', 't1');
+      await e.retract(stale);
+      // The highest id is handed out again, to a later press.
+      final newer = NeedsYouPress(
+        [
+          await store.writeNeedsYouLabel(
+            source: 'email',
+            conversationKey: 't2',
+            sourceMessageId: 'x1',
+            answer: 'yes',
+            origin: 'add',
+            createdAt: '2099-01-01T00:00:00.000000Z',
+          ),
+        ],
+        '2099-01-01T00:00:00.000000Z',
+      );
+      expect(newer.ids, stale.ids);
+      exemplars.invalidate();
+
+      expect(await e.retract(stale), 0);
+
+      expect((await store.needsYouLabels()).single.sourceMessageId, 'x1');
+    });
+
+    test('an undo during the sweep leaves no decision citing its labels',
+        () async {
+      await seedList();
+      final gate = Completer<void>();
+      final matched = Completer<void>();
+      // The sweep's b1 has matched the press's label and is held before it
+      // writes — the window between the read and the delete.
+      final held = _HeldExemplars(store, 'b1', matched, gate.future);
+      final done = Completer<void>();
+      final e = NeedsYouEdits(
+        store,
+        model(),
+        held,
+        owner: () async => 'Lo <lo@x.com>',
+        threshold: () async => 0.35,
+        onSwept: done.complete,
+      );
+
+      final press = await e.remove('email', 't-one');
+      await matched.future;
+      final undo = e.retract(press);
+      await pumpEventQueue();
+      gate.complete();
+      await undo;
+      await done.future;
+
+      final citing = await db.customSelect(
+        'SELECT source_message_id FROM message_decisions '
+        "WHERE json_extract(answers_json, '\$.owner_label_id') IN "
+        '(${press.ids.join(',')})',
+      ).get();
+      expect(citing, isEmpty);
+      expect(await pOf('a1'), closeTo(0.9, 1e-9));
+      expect(await pOf('b1'), closeTo(0.9, 1e-9));
+    });
   });
+}
+
+/// Exemplars that hold one message's answer, once, after the match is made
+/// and before `applyDecision` writes it.
+class _HeldExemplars extends NeedsYouExemplars {
+  final String messageId;
+  final Completer<void> matched;
+  final Future<void> release;
+  bool _held = false;
+
+  _HeldExemplars(super.store, this.messageId, this.matched, this.release);
+
+  @override
+  Future<OwnerAnswer?> answerFor({
+    required String source,
+    required String sourceMessageId,
+    List<double>? vector,
+    required String model,
+  }) async {
+    final answer = await super.answerFor(
+      source: source,
+      sourceMessageId: sourceMessageId,
+      vector: vector,
+      model: model,
+    );
+    if (sourceMessageId == messageId && answer != null && !_held) {
+      _held = true;
+      matched.complete();
+      await release;
+    }
+    return answer;
+  }
 }

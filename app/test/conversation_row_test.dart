@@ -422,6 +422,33 @@ void main() {
       expect(text, startsWith('The sender asks you'));
     });
 
+    testWidgets("the owner's answer is a short chip with no percentage",
+        (tester) async {
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'You removed a message like this from Needs You.',
+          needsYouP: 0.0,
+          decidedNow: true,
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+      expect(chipText(tester), 'You removed it');
+
+      await tester.pumpWidget(_host(ConversationRow(
+        conversation: _conv(
+          state: ConversationState.needsReply,
+          reason: 'You added this message to Needs You.',
+          needsYouP: 1.0,
+          decidedNow: true,
+        ),
+        selected: false,
+        onTap: () {},
+      )));
+      expect(chipText(tester), 'You added it');
+    });
+
     testWidgets('a thread with no reason draws no chip', (tester) async {
       await tester.pumpWidget(_host(ConversationRow(
         conversation: _conv(state: ConversationState.needsReply),

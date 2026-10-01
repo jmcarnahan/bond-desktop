@@ -57,15 +57,35 @@ turned off stops it, and a crash mid-sweep costs a second press — the labels
 are stored first, so the next sweep, or any later decision of those messages,
 applies them. An addition sweeps nothing.
 
-**Undo is a retract, not the opposite press.** `remove` and `add` return the
-label ids they wrote, and `NeedsYouEdits.retract(ids)` DELETES those rows
-(`deleteNeedsYouLabels`, the one delete the log takes short of a wipe), then
-decides again every message whose stored decision cites one of them
+**Undo is a retract, not the opposite press.** `remove` and `add` return a
+`NeedsYouPress`: the label ids they wrote and the ONE `created_at` stamp every
+one of them carries (empty ids when the window was empty).
+`NeedsYouEdits.retract(press)` DELETES those rows (`deleteNeedsYouLabels(ids,
+createdAt:)`, the one delete the log takes short of a wipe), then decides
+again every message whose stored decision cites one of them
 (`owner_label_id`, `messagesCitingNeedsYouLabels`): the pressed thread AND
 every thread the sweep removed take the model's number back, unless another
-label still matches. An opposite label would instead tie the removed one for
-every near-duplicate, and the newer `yes` would put the whole template in
-Needs You. Labels are compared only
+label still matches. The stamp is there because `decision_labels.id` has no
+AUTOINCREMENT: a deleted highest id is handed out again, and an Undo retried
+with stale ids must not delete a newer press's label (an id a newer press
+holds is left to that press entirely). A sweep still running from the press
+can have matched a label before the delete and write its 0.0 after it, so the
+retract waits out the sweep's message in flight and then asks again which
+messages cite the deleted ids, deciding those again, for at most three rounds.
+An opposite label would instead tie the removed one for every
+near-duplicate, and the newer `yes` would put the whole template in Needs You.
+
+**Decide first, write second.** A press decides every message of the window
+(the one network step) before it writes any label or decision, and a retract
+decides the citing messages before it deletes the labels, then writes each
+with its fetched result (`applyDecision` looks the owner's answer up at write
+time, so the deleted labels no longer match). A decision server that cannot
+answer therefore fails a press or an Undo with NOTHING written, so the failure
+bar's "the thread is unchanged" holds literally, and a failed retract can be
+run again with the same press. Processing turned off refuses all three the
+same way, before anything is touched (`StateError('processing is off')`): an
+Undo that deleted the labels and then stopped at the switch would leave the
+answers in place with no label behind them. Labels are compared only
 under their own model tag; a label whose message is decided under another
 model (or with no vector) has its vector refreshed from that decision, so a
 model swap heals the labels as the install-time re-decide reaches their
@@ -77,7 +97,12 @@ press rewrote it can copy the model's p back onto `messages` (the decision
 row keeps the owner's answer, and the next needs-you item for the message
 copies it again); and a message pressed while its triage is still pending can
 still be dropped by the learned gate when its claim runs, which takes it out
-of the window.
+of the window. An Undo's re-asking covers the sweep of its own
+`NeedsYouEdits`; a triage claim, a needs-you re-decide or the install-time
+re-decide that matched a label just before the Undo deleted it and writes
+after the last round still cites the deleted label until that message is next
+decided, and so does a sweep still running on an older `NeedsYouEdits` after
+the provider was rebuilt (a decision-client change).
 
 **The slider's default is 0.35.** It is fitted on the golden set, keep-only
 needs_you of 76, and it moves with the decision model, because a probability's
@@ -100,6 +125,32 @@ messages count. `loadConversations` loads it as `Conversation.needsYouP`, and
 the `needs_you_reason` it carries comes off the message with that highest
 probability (newest on a tie), so the reason names the message whose number is
 shown.
+
+**The two buttons.** The thread's action bar (`ThreadActionBar`, built by
+`ThreadDetailPanel._actionBar()`) carries exactly one of **Remove from Needs
+You** (`thread-action-needs-you-remove`) and **Add to Needs You**
+(`thread-action-needs-you-add`), beside Mark done and Later, picked by the
+rail's own rule (`isNeedsYou` at the owner's slider): Remove on a thread in
+Needs You, Add on one that is not. Add is never drawn on a Done thread
+(Reopen is there) or one in Later (Keep in inbox is): Needs You reads
+neither, so the press would change nothing the reader could see. Both are
+labelled buttons, and the Needs You word gives way to its icon before Mark
+done's does when the row runs short. Remove runs `_triageAndAdvance`, like
+Mark done: the thread leaves the pile and the reader lands on the next row,
+and the bar says **"Removed from Needs You — and anything like it."** with an
+Undo; Add leaves the reader where they are and says **"Added to Needs You."**
+with an Undo. Each goes through `ConversationsNotifier.removeFromNeedsYou` /
+`addToNeedsYou` (the press, then a store-only reload; the sweep reloads again
+when it ends). Undo is `ConversationsNotifier.undoNeedsYouPress`, the retract
+above — the threads the sweep took come back with the pressed one. A thread
+whose window is empty (the owner wrote last) says **"Nothing here is waiting
+on you."** with no Undo and moves nobody. A press the decision model could not
+answer says **"Couldn't save that just now — the thread is unchanged."** with
+no Undo and moves nobody; a failed Undo says "Couldn't undo that just now."
+The landing is worked out before the press, and the next row is often a near
+duplicate the sweep takes a moment later; while the reader has not moved off
+that landing, every list reload that finds it gone steps them on to the
+nearest row still drawn (`_followSweptLanding`, over `_stepFromDeparted`).
 
 **Who reads it.** Every reader goes through the one predicate at the owner's
 slider:
@@ -448,8 +499,23 @@ this ask come from" had no answer anywhere. With no Why wired, or on a thread
 with nothing inbound in it, the banner falls back to focusing the composer as
 it always did. Every per-message ask line still focuses the box.
 
-**What it never does.** It feeds nothing back. This reads model OUTPUT that
-has already been through the untrusted-data fence upstream; it writes nothing,
+**The owner's answer.** When the message's stored decision carries the
+owner's answer (`StoredDecision.ownerAnswer`), the headline is theirs, with
+no percentage: **"Needs you: no — you removed it"** or **"Needs you: yes — you
+added it"** — the 0.0 or 1.0 under it is the owner's word, not a model's
+confidence. The stored reason ("You removed a message like this from Needs
+You.") is shown on EITHER side of the line, since it says what the owner did,
+and the line against the slider follows as usual. The rail's chip and the
+thread's `Why:` line, which have only the thread's stored reason, tell the
+owner's four sentences from a model's by `ownerNeedsYouReasons`
+(`decision_policy.dart`, where `ownerNeedsYouReason` spells them once): the
+chip reads **You removed it** / **You added it** and neither draws a
+percentage.
+
+**What it never does.** It takes no answer: the owner's Needs You answer is
+SHOWN here, and taken on the thread's action bar (the two buttons above),
+never in this panel. It feeds nothing back. This reads model OUTPUT that has
+already been through the untrusted-data fence upstream; it writes nothing,
 sends nothing and prompts nothing, so there is no second fence here. And it
 renders sentences, never stored shapes — no JSON, no enum names dressed as
 prose, no field names. `teams_direct` reads "A direct message to you on

@@ -699,6 +699,41 @@ enforce the ones that are commands.
   count/max-id signature on every load, so a wipe is seen without an
   invalidate. Clear AI results keeps it and `wipeAll` deletes it. The storyline `DecisionLabel` is
   a RECORD typedef with no optional fields; do not widen it, add a writer.
+- The owner's Needs You buttons are on `ThreadActionBar`, exactly one drawn
+  by `inNeedsYou` (`isNeedsYou` at the slider, passed by
+  `ThreadDetailPanel._actionBar()`): `thread-action-needs-you-remove` /
+  `thread-action-needs-you-add` (`needsYouRemoveKey` / `needsYouAddKey`), and
+  Add never on a Done or Later thread. A press returns a `NeedsYouPress`
+  (`needs_you_edits.dart`: the label `ids` and the ONE `createdAt` stamp they
+  share; empty ids when the window was) through
+  `ConversationsNotifier.removeFromNeedsYou` / `addToNeedsYou` (null on a
+  decision error, which the inbox words as the house failure toast), and the
+  toast's Undo hands it to `undoNeedsYouPress` → `NeedsYouEdits.retract`,
+  which deletes by id AND stamp (`id` is reused after a delete) and re-asks
+  for late citations a running sweep wrote. The notifier takes the service
+  as a getter (`needsYouEdits: () => …`), so a test builds it over `testDb()`
+  without a decision client. A press or Undo decides before it writes and
+  refuses with processing off (`StateError`), so a failure changes nothing.
+  An inbox test that presses overrides
+  `authSessionProvider` (the press reads the owner's account, which the
+  default session never answers under `flutter test`). The owner's four
+  reason sentences are spelled once, `ownerNeedsYouReason`
+  (`decision_policy.dart`); a surface holding only a stored reason tells them
+  apart by `ownerNeedsYouReasons`, never by its own string match.
+- `messages.needs_you_p` has ONE writer, `MessageStore.writeNeedsYouP`, with
+  two callers: `applyDecision` and `NeedsYouHandler`'s copy step, which
+  copies the `message_decisions.needs_you_p` COLUMN (never a recomputation
+  from `answers_json`). The owner's answer lives in that column, so a third
+  writer, or a copy that recomputes, silently undoes every press.
+- `needsYouFromEarlierModel` reads an exact 0.0/1.0 with no current decision
+  as an earlier model's verdict; the owner's override is written under
+  `decisionQhash`, so it is decided-now, and every surface (Why panel,
+  history, chip, Why line) words the owner's answer BEFORE it reads a
+  percentage, so a press never shows as `0%`/`100%`.
+- There is no DB stream: the rail and the pile follow
+  `ConversationsNotifier.load()` (a press reloads, the sweep's `onSwept`
+  reloads, progress reloads on `_scheduleReload`), and Home follows
+  `ProgressTick`s. A new writer that changes what the list shows reloads it.
 - Schema v23 appends `decision_labels.source_message_id`, `vector` (BLOB,
   float32 LE via `encodeEmbedding`) and `vector_model` for the needs-you
   labels; NULL on every storyline row. A label's vector is the decision
