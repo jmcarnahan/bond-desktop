@@ -1334,6 +1334,32 @@ void main() {
     });
   });
 
+  test('v23 to v24 gives message_decisions a vector, NULL on the decisions '
+      'already there', () async {
+    // Nothing to backfill in the step: the sync's one-shot requeues the
+    // needs-you pass, which decides those messages again with a vector.
+    final schema = await verifier.schemaAt(23);
+    schema.rawDatabase.execute("""
+      INSERT INTO message_decisions (source, source_message_id, model, qhash,
+        answers_json, needs_you_p, decided_at) VALUES
+        ('email', 'm1', 'bond-decide', 'q', '{}', 0.8, 't');
+    """);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 24);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT source_message_id, needs_you_p, vector '
+            'FROM message_decisions')
+        .get();
+    expect(rows, hasLength(1));
+    expect(rows.single.data, {
+      'source_message_id': 'm1',
+      'needs_you_p': 0.8,
+      'vector': null,
+    });
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

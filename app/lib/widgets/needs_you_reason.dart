@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
-import '../services/decision/decision_policy.dart' show ownerNeedsYouReasons;
+import '../services/decision/decision_policy.dart'
+    show ownerNeedsYouReason, ownerNeedsYouReasons;
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'time_format.dart';
@@ -48,6 +49,15 @@ String? needsYouReasonWords(String? reason, {int maxChars = 120}) {
 /// surface below draws it as a percentage.
 String? ownerAnswerOf(String? reason) =>
     ownerNeedsYouReasons[reason?.trim() ?? ''];
+
+/// Whether [reason] is the owner's answer about that very message ("You
+/// removed this message…") rather than about one like it ("…a message like
+/// this…"); false for any other reason.
+bool ownerAnswerExact(String? reason) {
+  final answer = ownerAnswerOf(reason);
+  return answer != null &&
+      reason!.trim() == ownerNeedsYouReason(answer, exact: true);
+}
 
 /// Whether [p] is an EARLIER model's verdict rather than a probability.
 ///
@@ -110,15 +120,24 @@ const Key needsYouWhyLineKey = ValueKey('needs-you-why-line');
 /// and never cut.
 ///
 /// The owner's own answer is the chip's one short form: `You removed it` /
-/// `You added it`, with no percentage — the full sentence would be clamped
-/// mid-word, and the 0% or 100% under it is the owner's, not a model's.
+/// `You added it` for a press on this thread, `Like one you removed` /
+/// `Like one you added` for a thread a press's sweep moved, with no
+/// percentage — the full sentence would be clamped mid-word, and the 0% or
+/// 100% under it is the owner's, not a model's.
 List<Widget> needsYouReasonChips(Conversation c, {int maxChars = 36}) {
   if (c.state != ConversationState.needsReply) return const [];
+  final exact = ownerAnswerExact(c.needsYouReason);
   switch (ownerAnswerOf(c.needsYouReason)) {
     case 'no':
-      return [BondChip.metric('You removed it', key: needsYouReasonChipKey)];
+      return [
+        BondChip.metric(exact ? 'You removed it' : 'Like one you removed',
+            key: needsYouReasonChipKey),
+      ];
     case 'yes':
-      return [BondChip.metric('You added it', key: needsYouReasonChipKey)];
+      return [
+        BondChip.metric(exact ? 'You added it' : 'Like one you added',
+            key: needsYouReasonChipKey),
+      ];
   }
   final words = needsYouReasonWords(c.needsYouReason, maxChars: maxChars);
   if (words == null) return const [];

@@ -793,6 +793,12 @@ CREATE INDEX ix_conv_labels_label
 -- state carried an owner line rides in `answers_json` as `owner_known`: the
 -- needs-you head was trained WITH that line, so an ownerless row's needs-you
 -- probability is not trusted and that pass asks the language model.
+--
+-- `vector` (v24) is the decision model's raw pooled vector of the message
+-- (float32 LE, `encodeEmbedding`), under the row's `model` tag; NULL on a
+-- backend with no vector (Kev) and on a row decided before v24. The owner's
+-- Needs You presses and their sweeps compare it against their labels with no
+-- model call (`NeedsYouEdits`).
 CREATE TABLE message_decisions (
   source TEXT NOT NULL,
   source_message_id TEXT NOT NULL,
@@ -806,6 +812,7 @@ CREATE TABLE message_decisions (
   latency_ms REAL,
   truncated INTEGER NOT NULL DEFAULT 0,
   decided_at TEXT NOT NULL,
+  vector BLOB,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 

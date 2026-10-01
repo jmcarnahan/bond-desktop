@@ -16,6 +16,7 @@ import 'decision/stored_decision.dart'
     show
         decisionOwnerAnswerKey,
         decisionOwnerCosineKey,
+        decisionModelNeedsYouKey,
         decisionOwnerExactKey,
         decisionOwnerLabelIdKey;
 import 'decision/decision_questions.dart' show decisionQhash;
@@ -1364,7 +1365,9 @@ Future<DecisionInput> decisionInputFor(
 /// replaces the model's `needs_you` BEFORE anything is written, so
 /// `message_decisions.needs_you_p`, `messages.needs_you_p`, the reason and the
 /// chip all carry 1.0 or 0.0, and `answers_json` records where it came from
-/// ([decisionOwnerAnswerKey] and its siblings). This is the one place the
+/// ([decisionOwnerAnswerKey] and its siblings), with the model's own p(yes)
+/// beside it ([decisionModelNeedsYouKey]) so the decision can be applied
+/// again once the labels are gone. This is the one place the
 /// override lives: every decision path passes through here. A label on this
 /// message taken under another model (or with no vector, Kev) has its vector
 /// refreshed from [decided] on the way through, so a model swap heals the
@@ -1392,6 +1395,7 @@ Future<void> applyDecision(
       model: decided.model,
     );
     if (owner != null) {
+      final modelP = needsYouP(decided.answers);
       decided = decided.withAnswers(
         decided.answers.withNeedsYou(owner.answer, exact: owner.exact),
       );
@@ -1400,6 +1404,7 @@ Future<void> applyDecision(
         decisionOwnerLabelIdKey: owner.labelId,
         decisionOwnerCosineKey: owner.cosine,
         decisionOwnerExactKey: owner.exact,
+        decisionModelNeedsYouKey: ?modelP,
       };
       final vector = decided.vector;
       if (owner.exact && vector != null) {

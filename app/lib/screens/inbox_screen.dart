@@ -1714,11 +1714,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _leaving = true;
         _signOut();
       }
-      // After the frame, so [_rows] is the list this state draws.
-      if (next is ConversationsLoaded && _sweptLanding != null) {
-        WidgetsBinding.instance
-            .addPostFrameCallback((_) => _followSweptLanding());
-      }
     });
 
     // The open thread's own sends, whoever started them. Both arms store the
@@ -2723,8 +2718,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _takeTriageFocus();
         return;
       }
-      if (landing != null) {
-        _selectTriageRow(landing.source, landing.key);
+      // The act can take the landing out of the pile too — a Needs You
+      // press moves every thread like the pressed one, and those are its
+      // neighbours — so the reader lands on the nearest row still drawn, read
+      // from the notifier's state as the act left it: [_rows] waits for the
+      // next build.
+      final standing = landing == null
+          ? null
+          : _stillDrawn(
+              landing,
+              target,
+              before: rows,
+              now: _pileAsLoaded(),
+            );
+      if (standing != null) {
+        _selectTriageRow(standing.source, standing.key);
         return;
       }
       final beside = _threadBeside;
@@ -2744,6 +2752,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _triaging = false;
       idle.complete();
     }
+  }
+
+  /// The pile as the notifier's state holds it now, ahead of the build that
+  /// will draw it: [_rows] taken from the state the way the build takes it,
+  /// then [_triageRows].
+  List<Conversation> _pileAsLoaded() {
+    if (ref.read(conversationsProvider)
+        case ConversationsLoaded(:final conversations)) {
+      _rows = bySource(conversations, _sourceFilter);
+    }
+    return _triageRows(ref.read(appPrefsProvider));
+  }
+
+  /// [landing] if [now] still draws it; else the nearest row of [before]
+  /// that [now] still draws, walking down from [landing], then up — never
+  /// [target], the thread the act just cleared. Null when nothing is left.
+  ({String source, String key})? _stillDrawn(
+    ({String source, String key}) landing,
+    ({String source, String key}) target, {
+    required List<Conversation> before,
+    required List<Conversation> now,
+  }) {
+    final drawn = {for (final c in now) (source: c.source, key: c.id)};
+    if (drawn.contains(landing)) return landing;
+    final order = [for (final c in before) (source: c.source, key: c.id)];
+    final at = order.indexOf(landing);
+    if (at < 0) return null;
+    for (final i in [
+      for (var i = at + 1; i < order.length; i++) i,
+      for (var i = at - 1; i >= 0; i--) i,
+    ]) {
+      if (order[i] != target && drawn.contains(order[i])) return order[i];
+    }
+    return null;
   }
 
   /// Dismiss: `done`, said in a bar with the way back on it.
@@ -2804,72 +2846,39 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// "Remove from Needs You", on the bar: the owner's `no` about this
-  /// thread and anything like it, said in a bar whose Undo takes the press
-  /// back — every thread the sweep took included
+  /// thread and every thread like it, said in a bar that counts the others
+  /// and whose Undo takes the whole press back
   /// ([ConversationsNotifier.undoNeedsYouPress]), never the opposite press.
   ///
   /// The thread leaves the pile, so it runs under [_triageAndAdvance] and the
-  /// reader lands on the next one. A press that wrote nothing (no message in
-  /// the thread waits on the owner) or that failed answers false and moves
-  /// nobody.
+  /// reader lands on the next row still drawn: the press's sweep has already
+  /// written when it returns, so the landing skips the threads it took. A
+  /// press that wrote nothing (no message in the thread waits on the owner)
+  /// or that failed answers false and moves nobody.
   Future<bool> _removeFromNeedsYou(({String source, String key}) target) =>
-      _pressNeedsYou(
-        target,
-        remove: true,
-        said: 'Removed from Needs You — and anything like it.',
-      );
+      _pressNeedsYou(target, remove: true);
 
-  /// Where a Remove landed the reader, while they are still on it: the
-  /// removal's sweep can take that row out of the pile moments later (its
-  /// near duplicates are its neighbours), and [_followSweptLanding] then
-  /// steps the reader on, as if the press had landed there to begin with.
-  /// Dropped the moment the reader is elsewhere.
-  ({String source, String key})? _sweptLanding;
-
-  /// [_removeFromNeedsYou] under [_triageAndAdvance], remembering where it
-  /// landed for [_followSweptLanding].
-  Future<void> _removeAndFollow(({String source, String key}) target) async {
-    _sweptLanding = null;
-    var removed = false;
-    await _triageAndAdvance(
-      (t) async => removed = await _removeFromNeedsYou(t),
-      on: target,
-    );
-    if (!removed || !mounted) return;
-    _sweptLanding = _triageTarget;
-    // The sweep may have ended already.
-    _followSweptLanding();
+  /// "Add to Needs You", on the bar: the owner's `yes`, with the same count
+  /// and Undo. The thread stays where the reader is, so it advances nobody,
+  /// and so it is not under [_triaging]'s latch: [_adding] is its own, and a
+  /// second press while one (with its sweep) is out is dropped, rather than
+  /// writing a second stamp whose `yes` would outlive the first one's Undo.
+  Future<void> _addToNeedsYou(({String source, String key}) target) async {
+    if (_adding) return;
+    _adding = true;
+    try {
+      await _pressNeedsYou(target, remove: false);
+    } finally {
+      _adding = false;
+    }
   }
 
-  /// Steps the reader off a landing the sweep took out of the pile — only
-  /// while they have not moved since the press, and to the nearest row still
-  /// drawn, the way a departed thread is stepped from ([_stepFromDeparted]).
-  void _followSweptLanding() {
-    final landing = _sweptLanding;
-    if (landing == null || !mounted) return;
-    if (_triaging || _triageTarget != landing) {
-      if (!_triaging) _sweptLanding = null;
-      return;
-    }
-    final rows = _triageRows(ref.read(appPrefsProvider));
-    if (rows.any((c) => c.id == landing.key && c.source == landing.source)) {
-      return;
-    }
-    final next = _stepFromDeparted(landing, rows, forward: true) ??
-        _stepFromDeparted(landing, rows, forward: false);
-    _sweptLanding = next;
-    if (next != null) _selectTriageRow(next.source, next.key);
-  }
-
-  /// "Add to Needs You", on the bar: the owner's `yes`, with the same Undo.
-  /// The thread stays where the reader is, so it advances nobody.
-  Future<void> _addToNeedsYou(({String source, String key}) target) =>
-      _pressNeedsYou(target, remove: false, said: 'Added to Needs You.');
+  /// An Add is out — see [_addToNeedsYou].
+  bool _adding = false;
 
   Future<bool> _pressNeedsYou(
     ({String source, String key}) target, {
     required bool remove,
-    required String said,
   }) async {
     final notifier = ref.read(conversationsProvider.notifier);
     final press = remove
@@ -2884,7 +2893,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _toast('Nothing here is waiting on you.');
       return false;
     }
-    _toast(said, onUndo: () => unawaited(_undoNeedsYou(press)));
+    _toast(
+      needsYouPressSaid(press, remove: remove),
+      onUndo: () => unawaited(_undoNeedsYou(press)),
+    );
     return true;
   }
 
@@ -5547,9 +5559,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       )),
       // The owner's Needs You answer. Remove takes the thread off the pile,
       // so it advances like Mark done; Add leaves the reader where they are.
-      onRemoveFromNeedsYou: () => unawaited(
-        _removeAndFollow((source: selected.source, key: selected.id)),
-      ),
+      onRemoveFromNeedsYou: () => unawaited(_triageAndAdvance(
+        _removeFromNeedsYou,
+        on: (source: selected.source, key: selected.id),
+      )),
       onAddToNeedsYou: () => unawaited(
         _addToNeedsYou((source: selected.source, key: selected.id)),
       ),
@@ -7653,4 +7666,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       },
     );
   }
+}
+
+/// The bar's sentence for a Needs You press: `Removed from Needs You — and 78
+/// like it.` / `Added to Needs You — and 3 like it.` with the threads the
+/// press's sweep moved ([NeedsYouPress.changed]), and the head alone when it
+/// moved none or could not look ([NeedsYouPress.similar] false: a backend
+/// with no vector, where the answer holds for the pressed thread alone).
+String needsYouPressSaid(NeedsYouPress press, {required bool remove}) {
+  final head = remove ? 'Removed from Needs You' : 'Added to Needs You';
+  if (!press.similar || press.changed == 0) return '$head.';
+  return '$head — and ${press.changed} like it.';
 }

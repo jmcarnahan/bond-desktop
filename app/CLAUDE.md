@@ -694,11 +694,13 @@ enforce the ones that are commands.
   takes is `updateNeedsYouLabelVector`, the vector refresh `applyDecision`
   makes when a labelled message is decided under another model, and the one
   DELETE short of a wipe is `deleteNeedsYouLabels`, the undo of a press
-  (`NeedsYouEdits.retract`, which then re-decides the messages citing the
-  deleted ids). Undo is never the opposite press. `NeedsYouExemplars` checks a
-  count/max-id signature on every load, so a wipe is seen without an
-  invalidate. Clear AI results keeps it and `wipeAll` deletes it. The storyline `DecisionLabel` is
-  a RECORD typedef with no optional fields; do not widen it, add a writer.
+  (`NeedsYouEdits.retract`, which then writes again the messages citing the
+  deleted ids; `retractAll`, Settings' Forget, retracts every press by its
+  stamp, `needsYouLabelStamps`). Undo is never the opposite press.
+  `NeedsYouExemplars` checks a count/max-id signature on every load, so a
+  wipe is seen without an invalidate. Clear AI results keeps it and
+  `wipeAll` deletes it. The storyline `DecisionLabel` is a RECORD typedef
+  with no optional fields; do not widen it, add a writer.
 - The owner's Needs You buttons are on `ThreadActionBar`, exactly one drawn
   by `inNeedsYou` (`isNeedsYou` at the slider, passed by
   `ThreadDetailPanel._actionBar()`): `thread-action-needs-you-remove` /
@@ -709,8 +711,25 @@ enforce the ones that are commands.
   `ConversationsNotifier.removeFromNeedsYou` / `addToNeedsYou` (null on a
   decision error, which the inbox words as the house failure toast), and the
   toast's Undo hands it to `undoNeedsYouPress` → `NeedsYouEdits.retract`,
-  which deletes by id AND stamp (`id` is reused after a delete) and re-asks
-  for late citations a running sweep wrote. The notifier takes the service
+  which deletes by id AND stamp (`id` is reused after a delete) in one pass.
+  The press's SWEEP runs inside it, awaited, both ways (a removal over the
+  threads in Needs You, an addition over those out of it and neither done
+  nor in Later): a SCAN of stored decision vectors
+  (`needsYouCandidateVectors`, cosine ≥ 0.97 to any of the press's label
+  vectors), never model calls, so `NeedsYouPress.changed` is final when the
+  toast reads `Removed from Needs You — and N like it.` (no tail when N is 0
+  or `similar` is false, Kev). A press, its sweep and a retract write from
+  the STORED decision (`StoredDecision.modelAnswers` + `vector`) whenever
+  it has a vector under `DecisionClient.modelTag`, and ask the model only
+  for a message without one; the needs-you pass reads `resolvedModelTag`,
+  which learns Your server's kind first (the sync getter answers null until
+  then). An addition's sweep scans most of a mailbox, so candidates come
+  back as BLOBs and are compared off the bytes, never decoded in bulk.
+  `FakeDecisionClient.tag` is what a test sets to make its stored decisions
+  count (both getters answer it), and `calls` proves no call was made. Add
+  has its own in-flight guard on the inbox (`_adding`).
+  Add is not drawn when `Conversation.needsYouP` is null
+  (`ThreadActionBar.needsYouDecided`). The notifier takes the service
   as a getter (`needsYouEdits: () => …`), so a test builds it over `testDb()`
   without a decision client. A press or Undo decides before it writes and
   refuses with processing off (`StateError`), so a failure changes nothing.
@@ -731,14 +750,25 @@ enforce the ones that are commands.
   history, chip, Why line) words the owner's answer BEFORE it reads a
   percentage, so a press never shows as `0%`/`100%`.
 - There is no DB stream: the rail and the pile follow
-  `ConversationsNotifier.load()` (a press reloads, the sweep's `onSwept`
-  reloads, progress reloads on `_scheduleReload`), and Home follows
+  `ConversationsNotifier.load()` (a press reloads once, after its sweep;
+  progress reloads on `_scheduleReload`), and Home follows
   `ProgressTick`s. A new writer that changes what the list shows reloads it.
 - Schema v23 appends `decision_labels.source_message_id`, `vector` (BLOB,
   float32 LE via `encodeEmbedding`) and `vector_model` for the needs-you
   labels; NULL on every storyline row. A label's vector is the decision
   model's RAW pooled vector (`DecisionResult.vector`, null on Kev), compared
   only under the same `vector_model` tag.
+- Schema v24 appends `message_decisions.vector` (BLOB, float32 LE): every
+  `writeDecision` stores `DecisionResult.vector` under the row's `model`
+  tag, NULL on Kev, and `decisionFor` decodes it into `StoredDecision.vector`.
+  When `applyDecision` overrides, `answers_json` also keeps the model's own
+  p(yes) as `model_needs_you_p` (`decisionModelNeedsYouKey`), so a stored
+  decision can be written again with the labels gone and the model's number
+  comes back with no call. The needs-you pass decides a stored decision
+  again when it has no vector under `DecisionClient.modelTag` (and the owner
+  is known; a null tag owes nothing), and the sync one-shot
+  `decision_vectors_backfill` (in `derivedOneShotPrefs`) requeues the pass
+  for every kept inbound vectorless decision once, newest first, cap 2,000.
 - The install-time re-decide (`TriageQueue.redecideStale`) runs the DECISION
   pass again for the last 30 days of kept inbound messages decided under
   another qhash (at most 2,000, newest first), writing only the decision row,
@@ -756,7 +786,9 @@ enforce the ones that are commands.
 - `message_decisions` is DERIVED (Clear AI results empties it; the triage
   pass writes it again), keyed by `(source, source_message_id)`. The four
   `*_p` columns are the probabilities read by hand; `answers_json` is every
-  option's calibrated probability plus `owner_known`. A row decided WITHOUT an
+  option's calibrated probability plus `owner_known` (and the owner's
+  answer's scalar keys with `model_needs_you_p` on an override); `vector`
+  (v24) is the decision model's vector of the message. A row decided WITHOUT an
   owner line (the keychain had not answered yet) has an untrusted
   `needs_you_p`: triage still writes it to `messages.needs_you_p` and it is
   SHOWN, every mail sync (and Retry owed stages) requeues the needs-you pass

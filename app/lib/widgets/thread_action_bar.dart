@@ -46,6 +46,12 @@ class ThreadActionBar extends StatefulWidget {
   /// "Remove from Needs You" when it is, "Add to Needs You" when it is not.
   final bool inNeedsYou;
 
+  /// Whether anything in the thread's Needs You window has been decided —
+  /// `Conversation.needsYouP` is not null. When it has not (the owner wrote
+  /// last, or nothing is decided yet) nothing waits on the owner there and an
+  /// Add could only answer that, so Add does not draw.
+  final bool needsYouDecided;
+
   /// The owner's answer about this thread, kept as a label the decision
   /// model's every later verdict inherits. Remove draws only when
   /// [inNeedsYou]; Add only when it is not AND the thread is neither done
@@ -79,6 +85,7 @@ class ThreadActionBar extends StatefulWidget {
     this.onLater,
     this.onKeepInInbox,
     this.inNeedsYou = false,
+    this.needsYouDecided = true,
     this.onRemoveFromNeedsYou,
     this.onAddToNeedsYou,
     this.onStoryline,
@@ -453,7 +460,9 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
 
   /// The one Needs You button the bar draws, or null: Remove for a thread in
   /// Needs You, Add for one that is not and is still being worked (neither
-  /// done nor in Later), and nothing whose callback is unwired.
+  /// done nor in Later) with something decided waiting on the owner
+  /// ([ThreadActionBar.needsYouDecided]), and nothing whose callback is
+  /// unwired.
   ({Key key, String word, IconData icon, String tooltip, VoidCallback onTap})?
       get _needsYouButton {
     final remove = widget.onRemoveFromNeedsYou;
@@ -468,7 +477,12 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
         onTap: remove,
       );
     }
-    if (add == null || widget.done || widget.inLater) return null;
+    if (add == null ||
+        widget.done ||
+        widget.inLater ||
+        !widget.needsYouDecided) {
+      return null;
+    }
     return (
       key: ThreadActionBar.needsYouAddKey,
       word: 'Add to Needs You',

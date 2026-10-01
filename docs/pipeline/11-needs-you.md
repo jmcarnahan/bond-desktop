@@ -43,66 +43,96 @@ message like this from Needs You." (and "added … to"), from the scalar
 `owner_answer` and `owner_exact` keys in `answers_json` beside
 `owner_label_id` and `owner_cosine`.
 
-A removal then **sweeps**: every thread still in Needs You at the slider has
-every message of its window decided again (not only the highest-p one: a
-templated thread often holds several near-duplicates, and the next would
-become the driver) through the same `decide` + `applyDecision` path,
-unawaited after the pressed thread is written, so the near-duplicates leave
-with their chips, and the conversation list reloads once when it ends. It
-runs only when a label the press wrote carries a vector. No work kind, no
-durable queue: a second press during a sweep makes it run one more pass, a
-decision server that cannot answer stops it with one log line, a per-message
-fault is logged and that message keeps its current decision, processing
-turned off stops it, and a crash mid-sweep costs a second press — the labels
-are stored first, so the next sweep, or any later decision of those messages,
-applies them. An addition sweeps nothing.
+**Stored vectors make a press instant.** Every decision stores the decision
+model's raw pooled vector beside its answers (`message_decisions.vector`, v24,
+under the row's `model` tag; NULL on Kev), and when the owner's answer replaces
+the model's, `answers_json` keeps the model's own p(yes) as
+`model_needs_you_p`. So a press needs no model call for a message whose stored
+decision has a vector under the model the client answers with now
+(`DecisionClient.modelTag`: the heads file's model; null on Kev, when the heads
+are missing, and for Your server whose kind this run has not learned yet — the
+needs-you pass reads `resolvedModelTag`, which learns it with one listing GET): its label takes the stored vector and its decision is
+written again from the stored answers (`StoredDecision.modelAnswers`) through
+`applyDecision`, which now finds the label. Only a message without one (decided
+before v24, or under another model) is decided by the model, as every press was
+before.
+
+Then each press **sweeps**, BOTH ways, inside the press: a removal over every
+thread in Needs You at the slider, an addition over every thread out of it that
+is neither done nor in Later. The sweep is a SCAN, not model calls: one query
+(`needsYouCandidateVectors`) returns every window message of those threads that
+has a stored vector under the press's model, and each one within
+`matchCosine` of ANY of the press's label vectors has its stored decision
+written again through `applyDecision`, so its thread moves with its chip. Every
+window message, not only the driver: a templated thread often holds several
+near-duplicates, and the next would become the driver. Because nothing waits on
+a server, a sweep never competes with triage for the decision model. A removal
+scans the Needs You set; an addition scans every stored vector outside it, most
+of a mailbox, so each candidate is compared straight off its BLOB (no decoded
+list is built; only a match is decoded). Either way it runs AWAITED: the toast shows
+after the similar threads have already moved, and counts them
+(`NeedsYouPress.changed`, threads that crossed the slider). A candidate whose
+stored decision cannot be written again as it stands is left to its next
+decision, which inherits the label anyway; processing turned off stops the
+sweep between messages. A press whose labels carry no vector (Kev) sweeps
+nothing (`NeedsYouPress.similar` is false).
 
 **Undo is a retract, not the opposite press.** `remove` and `add` return a
 `NeedsYouPress`: the label ids they wrote and the ONE `created_at` stamp every
-one of them carries (empty ids when the window was empty).
-`NeedsYouEdits.retract(press)` DELETES those rows (`deleteNeedsYouLabels(ids,
-createdAt:)`, the one delete the log takes short of a wipe), then decides
-again every message whose stored decision cites one of them
-(`owner_label_id`, `messagesCitingNeedsYouLabels`): the pressed thread AND
-every thread the sweep removed take the model's number back, unless another
-label still matches. The stamp is there because `decision_labels.id` has no
-AUTOINCREMENT: a deleted highest id is handed out again, and an Undo retried
-with stale ids must not delete a newer press's label (an id a newer press
-holds is left to that press entirely). A sweep still running from the press
-can have matched a label before the delete and write its 0.0 after it, so the
-retract waits out the sweep's message in flight and then asks again which
-messages cite the deleted ids, deciding those again, for at most three rounds.
-An opposite label would instead tie the removed one for every
-near-duplicate, and the newer `yes` would put the whole template in Needs You.
+one of them carries (empty ids when the window was empty), with `similar` and
+`changed` for the toast. `NeedsYouEdits.retract(press)` DELETES those rows
+(`deleteNeedsYouLabels(ids, createdAt:)`, the one delete the log takes short of
+a wipe), then writes again every message whose stored decision cites one of
+them (`owner_label_id`, `messagesCitingNeedsYouLabels`) — from its stored
+decision with the model's own number put back (`model_needs_you_p`) when it has
+a vector under the current model, else decided by the model — so the pressed
+thread AND every thread the sweep moved take the model's number back, unless
+another label still matches. One pass: the sweep runs inside its press, so no
+sweep of the press can write a citation after the delete. The stamp is there
+because `decision_labels.id` has no AUTOINCREMENT: a deleted highest id is
+handed out again, and an Undo retried with stale ids must not delete a newer
+press's label (an id a newer press holds is left to that press entirely). An
+opposite label would instead tie the removed one for every near-duplicate, and
+the newer `yes` would put the whole template in Needs You.
 
-**Decide first, write second.** A press decides every message of the window
-(the one network step) before it writes any label or decision, and a retract
-decides the citing messages before it deletes the labels, then writes each
-with its fetched result (`applyDecision` looks the owner's answer up at write
-time, so the deleted labels no longer match). A decision server that cannot
-answer therefore fails a press or an Undo with NOTHING written, so the failure
-bar's "the thread is unchanged" holds literally, and a failed retract can be
-run again with the same press. Processing turned off refuses all three the
-same way, before anything is touched (`StateError('processing is off')`): an
-Undo that deleted the labels and then stopped at the switch would leave the
-answers in place with no label behind them. Labels are compared only
-under their own model tag; a label whose message is decided under another
-model (or with no vector) has its vector refreshed from that decision, so a
-model swap heals the labels as the install-time re-decide reaches their
-messages. **Kev** (the `systemone` backend) returns no vector: on it a label
-applies to its own message only, and no sweep runs.
+**Forget.** Settings → Needs You lists the presses ("Your answers", counted by
+stamp) and **Forget all Needs You answers** undoes every one of them, newest
+first (`NeedsYouEdits.retractAll` over `needsYouLabelStamps`, one retract per
+stamp), then reloads the list ([settings.md](../settings.md)).
+
+**Decide first, write second.** A press has every message's decision in hand
+(from the store, or the one network step) before it writes any label or
+decision, and a retract has the citing messages' before it deletes the labels,
+then writes each (`applyDecision` looks the owner's answer up at write time, so
+the deleted labels no longer match). A decision server that cannot answer
+therefore fails a press or an Undo with NOTHING written, so the failure bar's
+"the thread is unchanged" holds literally, and a failed retract can be run again
+with the same press. Processing turned off refuses all of them the same way,
+before anything is touched (`StateError('processing is off')`): an Undo that
+deleted the labels and then stopped at the switch would leave the answers in
+place with no label behind them. Labels are compared only under their own model
+tag; a label whose message is decided under another model (or with no vector)
+has its vector refreshed from that decision, so a model swap heals the labels as
+the install-time re-decide reaches their messages, and the needs-you pass
+decides a stored decision with no vector under the current tag again rather
+than copying it (once the owner is known), so the stored vectors heal the same
+way. **Kev** (the `systemone` backend) returns no vector: on it a label applies
+to its own message only, no sweep runs, and the toast promises nothing more.
 
 Known limits: a needs-you pass that read the model's decision just before a
 press rewrote it can copy the model's p back onto `messages` (the decision
 row keeps the owner's answer, and the next needs-you item for the message
 copies it again); and a message pressed while its triage is still pending can
 still be dropped by the learned gate when its claim runs, which takes it out
-of the window. An Undo's re-asking covers the sweep of its own
-`NeedsYouEdits`; a triage claim, a needs-you re-decide or the install-time
-re-decide that matched a label just before the Undo deleted it and writes
-after the last round still cites the deleted label until that message is next
-decided, and so does a sweep still running on an older `NeedsYouEdits` after
-the provider was rebuilt (a decision-client change).
+of the window. A triage claim, a needs-you re-decide or the install-time
+re-decide — or another press's sweep — that matched a label just before an Undo
+deleted it and writes after the retract's pass still cites the deleted label
+until that message is next decided. A sweep reaches only messages with a stored vector under the press's
+model; the rest inherit the label at their next decision. A heads refit that
+keeps the same model name re-applies the OLD heads' stored answers on a press
+(the vector is still right, the answers are the previous heads'); a follow-up
+could run `heads.apply(vector)` on the stored vector to refresh them with no
+request.
 
 **The slider's default is 0.35.** It is fitted on the golden set, keep-only
 needs_you of 76, and it moves with the decision model, because a probability's
@@ -137,20 +167,27 @@ neither, so the press would change nothing the reader could see. Both are
 labelled buttons, and the Needs You word gives way to its icon before Mark
 done's does when the row runs short. Remove runs `_triageAndAdvance`, like
 Mark done: the thread leaves the pile and the reader lands on the next row,
-and the bar says **"Removed from Needs You — and anything like it."** with an
-Undo; Add leaves the reader where they are and says **"Added to Needs You."**
-with an Undo. Each goes through `ConversationsNotifier.removeFromNeedsYou` /
-`addToNeedsYou` (the press, then a store-only reload; the sweep reloads again
-when it ends). Undo is `ConversationsNotifier.undoNeedsYouPress`, the retract
-above — the threads the sweep took come back with the pressed one. A thread
+and the bar says **"Removed from Needs You — and 78 like it."** (the threads the
+sweep moved; **"Removed from Needs You."** when it moved none or the backend has
+no vector) with an Undo; Add leaves the reader where they are and says **"Added
+to Needs You — and 3 like it."** / **"Added to Needs You."** the same way, with
+an Undo. Each goes through `ConversationsNotifier.removeFromNeedsYou` /
+`addToNeedsYou` (the press with its sweep, then one store-only reload). Undo is
+`ConversationsNotifier.undoNeedsYouPress`, the retract above — the threads the
+sweep moved go back with the pressed one. Add is not drawn either on a thread
+with nothing decided in its window (`Conversation.needsYouP` null: the owner
+wrote last, or nothing is decided yet), since it could only answer that. A
+thread
 whose window is empty (the owner wrote last) says **"Nothing here is waiting
 on you."** with no Undo and moves nobody. A press the decision model could not
 answer says **"Couldn't save that just now — the thread is unchanged."** with
 no Undo and moves nobody; a failed Undo says "Couldn't undo that just now."
 The landing is worked out before the press, and the next row is often a near
-duplicate the sweep takes a moment later; while the reader has not moved off
-that landing, every list reload that finds it gone steps them on to the
-nearest row still drawn (`_followSweptLanding`, over `_stepFromDeparted`).
+duplicate the same press's sweep took; `_triageAndAdvance` reads the pile as
+the press left it and walks on from the landing to the nearest row still drawn
+(`_stillDrawn`). The row chip of a thread the sweep moved says **Like one you
+removed** / **Like one you added**; one the owner pressed says **You removed
+it** / **You added it**.
 
 **Who reads it.** Every reader goes through the one predicate at the owner's
 slider:
@@ -230,7 +267,10 @@ Per message it:
    templated reason onto the row if the row's differs, and otherwise writes
    nothing;
 3. when the decision was made **ownerless** and the owner is now known, or
-   there is no decision at all (triaged before the decision model),
+   it has **no vector under the current model** (`DecisionClient.modelTag`:
+   decided before v24 or under another model) and the owner is known — never
+   on Kev, whose tag is null — or there is no decision at all (triaged before
+   the decision model),
    **re-decides** the message with the decision model, on the input the triage
    pass builds (`decisionInputFor`), and writes the whole state that decision
    determines through the triage claim's own writer (`applyDecision`): the
@@ -252,7 +292,10 @@ reader reads; NULL means not decided. `messages.needs_you_reason` says why.
 answers. The owner's answers are `decision_labels` rows (KEPT, so Clear AI
 results keeps them and the next decision applies them again; `wipeAll` deletes
 them) with three columns added in v23: `source_message_id`, `vector` (BLOB,
-float32 little-endian, `encodeEmbedding`) and `vector_model`.
+float32 little-endian, `encodeEmbedding`) and `vector_model`. Since v24
+`message_decisions.vector` keeps each decision's own vector the same way (NULL
+on Kev and on rows decided before v24), and `answers_json` keeps
+`model_needs_you_p` beside an override.
 `messages.needs_you_verdict` is INERT since v21: v21 mapped it into
 `needs_you_p`, and nothing writes or reads it any more. The pref key
 `needs_you_rules` is inert too. Nothing reads it, and `wipeAll` still clears a
@@ -262,7 +305,7 @@ stored copy with the rest of one person's text.
 snapshot taken at settle time from `notifyWorthy`. When any decision writer
 changes a probability ACROSS the owner's slider (the needs-you pass, and
 through `applyDecision` the triage claim, the install-time re-decide and the
-owner's Needs You presses and their sweep), the
+owner's Needs You presses and their sweeps), the
 shared `followNeedsYouChip` hands the message to
 `PipelineProgress.refreshNeedsYou`, which re-asks `notifyWorthy` and rewrites
 the flag. A probability that moved without crossing the slider is a repeat of
@@ -283,8 +326,13 @@ that ran an earlier build, so the probability rule reconciles the chips under
 keys of its own. Both `_p` keys are in `derivedOneShotPrefs`, so Clear AI
 results and a wipe reopen them. `needs_you_hedge_rejudge` requeues every in-window `needs_you_p =
 0.0`, which an older build's hedge can have become, so the pass settles each
-one again. Each reports its count on the sync's activity row, absent rather than
-zero when it did not run.
+one again. `decision_vectors_backfill` (v24) requeues the needs-you pass for
+every kept inbound message whose decision under the current question set has no
+vector, newest first and at most 2,000 (`requeueVectorlessDecisions`), and the
+pass decides each one again for its vector, so the owner's presses can compare
+them; it is in `derivedOneShotPrefs`, since Clear AI results empties the table
+and triage writes every row again with its vector. Each reports its count on
+the sync's activity row, absent rather than zero when it did not run.
 
 **The chip follows the thread out of Later, too.** A message that settles while
 its thread sits in Later takes a 0 on the strength of the bucket alone, and

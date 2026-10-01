@@ -105,6 +105,16 @@ class SettingsScreen extends StatefulWidget {
   /// read now; the section says so in one quiet line.
   final bool oldNeedsYouRules;
 
+  /// The owner's Needs You presses, counted by press: how many removed mail
+  /// from Needs You and how many added it (`MessageStore.needsYouPressCounts`).
+  /// Null while the host has not read them, which draws no line.
+  final ({int removed, int added})? needsYouAnswers;
+
+  /// Forgets every Needs You press — each one undone, so the model's own
+  /// numbers come back (`NeedsYouEdits.retractAll`) — behind a two-step
+  /// button. Null takes the button off; a throw is said under it.
+  final Future<void> Function()? onForgetNeedsYouAnswers;
+
   final String aboutMe;
 
   /// Fired when the user lets go of the slider, not on every pixel of the
@@ -515,6 +525,8 @@ class SettingsScreen extends StatefulWidget {
     this.scope = SettingsScope.all,
     required this.threshold,
     this.oldNeedsYouRules = false,
+    this.needsYouAnswers,
+    this.onForgetNeedsYouAnswers,
     required this.aboutMe,
     required this.onThresholdChanged,
     required this.onAboutMeChanged,
@@ -662,6 +674,13 @@ class SettingsScreen extends StatefulWidget {
   static const Key needsYouThresholdLineKey =
       ValueKey('settings-needs-you-threshold-line');
 
+  /// The line counting the owner's Needs You presses, and the two-step
+  /// button that forgets them (its label turns into the second step).
+  static const Key needsYouAnswersLineKey =
+      ValueKey('settings-needs-you-answers-line');
+  static const Key forgetNeedsYouAnswersKey =
+      ValueKey('settings-forget-needs-you-answers');
+
   /// The cloud-draft controls: the standing switch under Suggested replies,
   /// and the ledger line and cap field under Processing. Keyed for the reason
   /// the buttons above are — each one's label is also most of the caption
@@ -781,6 +800,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _confirmingForget = false;
   bool _forgetting = false;
   String? _forgetError;
+
+  /// The Needs You answers' Forget, a two-step quiet button rather than a
+  /// confirm pair: it takes back the owner's own presses, which a press can
+  /// make again, rather than deleting mail or results.
+  bool _confirmingForgetAnswers = false;
+  bool _forgettingAnswers = false;
+  String? _forgetAnswersError;
 
   /// And once more for the revoke, which is a two-step of the same shape over
   /// three prefs writes rather than over a DELETE.
@@ -2212,6 +2238,77 @@ class _SettingsScreenState extends State<SettingsScreen> {
         NeedsYouTuning.maxThreshold + NeedsYouTuning.minThreshold - position,
       );
 
+  /// The owner's Remove and Add presses, counted, and the way to forget
+  /// them all: the answers sit in the decision model's every later verdict,
+  /// and after the toast is gone this is where the owner sees them.
+  List<Widget> _needsYouAnswersBlock(({int removed, int added}) answers) {
+    final none = answers.removed == 0 && answers.added == 0;
+    final forget = widget.onForgetNeedsYouAnswers;
+    return [
+      Text(
+        'Your answers',
+        style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        none
+            ? "You haven't answered for any mail yet."
+            : "You've removed ${_kinds(answers.removed)} of mail from Needs "
+                'You and added ${_kinds(answers.added)}.',
+        key: SettingsScreen.needsYouAnswersLineKey,
+        style: BondType.body,
+      ),
+      if (!none && forget != null)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: SettingsScreen.forgetNeedsYouAnswersKey,
+            onPressed: _forgettingAnswers
+                ? null
+                : () {
+                    if (!_confirmingForgetAnswers) {
+                      setState(() => _confirmingForgetAnswers = true);
+                      return;
+                    }
+                    unawaited(_forgetNeedsYouAnswers(forget));
+                  },
+            child: Text(_confirmingForgetAnswers
+                ? 'Really forget?'
+                : 'Forget all Needs You answers'),
+          ),
+        ),
+      if (_forgetAnswersError case final error?)
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+    ];
+  }
+
+  /// `1 kind` / `3 kinds`.
+  static String _kinds(int n) => n == 1 ? '1 kind' : '$n kinds';
+
+  Future<void> _forgetNeedsYouAnswers(Future<void> Function() forget) async {
+    setState(() {
+      _forgettingAnswers = true;
+      _forgetAnswersError = null;
+    });
+    try {
+      await forget();
+      if (!mounted) return;
+      setState(() {
+        _forgettingAnswers = false;
+        _confirmingForgetAnswers = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _forgettingAnswers = false;
+        _confirmingForgetAnswers = false;
+        _forgetAnswersError =
+            "Your answers couldn't be forgotten just now — processing has to "
+            'be on and the decision model reachable.';
+      });
+    }
+  }
+
   Widget _needsYouBody() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2273,6 +2370,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             key: SettingsScreen.oldNeedsYouRulesKey,
             style: BondType.caption,
           ),
+        if (widget.needsYouAnswers case final answers?) ...[
+          const SizedBox(height: BondSpacing.s12),
+          ..._needsYouAnswersBlock(answers),
+        ],
         // Last in the section because it is about leaving the pile rather than
         // about what lands in it, and it is the one control here that acts on
         // threads already judged.

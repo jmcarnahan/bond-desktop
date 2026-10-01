@@ -94,9 +94,6 @@ import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
 import '../widgets/app_rail.dart' show RailSection;
-// The one reach back: the sweep's end reloads the conversation list, read
-// inside a callback ([needsYouEditsProvider]), never at build.
-import 'conversations_provider.dart' show conversationsProvider;
 import 'navigation_provider.dart';
 import 'notify_routing.dart';
 import 'prefs_provider.dart';
@@ -1154,35 +1151,27 @@ final needsYouExemplarsProvider = Provider<NeedsYouExemplars>(
   (ref) => NeedsYouExemplars(ref.watch(messageStoreProvider)),
 );
 
-/// "Remove from Needs You" / "Add to Needs You" and the sweep a removal
-/// starts (`NeedsYouEdits`), over the same decision client, exemplars, owner
-/// line and slider as the triage queue.
+/// "Remove from Needs You" / "Add to Needs You", the sweep inside each press
+/// and the undo (`NeedsYouEdits`), over the same decision client, exemplars,
+/// owner line and slider as the triage queue. The notifier reloads the list
+/// after a press, which already holds the sweep's writes.
 final needsYouEditsProvider = Provider<NeedsYouEdits>((ref) {
   final store = ref.watch(messageStoreProvider);
   final owner = memoizedOwner(_ownerLookup(ref));
+  final decision = ref.watch(decisionClientProvider);
   return NeedsYouEdits(
     store,
-    ref.watch(decisionClientProvider),
+    decision,
     ref.watch(needsYouExemplarsProvider),
     owner: () async => decisionOwnerString(await owner()),
     threshold: needsYouThresholdReader(store),
     progress: ref.watch(pipelineProgressProvider),
-    // The rail and the pile follow the notifier's state, which nothing else
-    // reloads after a quiet run of decision writes. `read` inside the
-    // callback, and guarded: it fires long after this body, possibly against
-    // a torn-down container.
-    onSwept: () {
-      try {
-        unawaited(
-          ref.read(conversationsProvider.notifier).load(syncFirst: false),
-        );
-      } catch (e) {
-        debugPrint('needs_you: reloading the list after a sweep failed: $e');
-      }
-    },
     // The processing switch — see [processingProvider] and [_enabledReader]:
     // the sweep and the undo stop when it is off, so a reset is not raced.
     enabled: _enabledReader(ref),
+    // Read per press: a stored decision stands in for a model call only
+    // under the model the client answers with now.
+    modelTag: () => decision.modelTag,
   );
 });
 
@@ -1486,6 +1475,10 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // The owner's Needs You answers, for a re-decide here; the copy step
         // reads them off the stored decision.
         exemplars: ref.watch(needsYouExemplarsProvider),
+        // The tag a fresh vector carries now: a stored decision with no
+        // vector under it is decided again rather than copied, so the
+        // owner's presses can compare it.
+        modelTag: () => ref.read(decisionClientProvider).resolvedModelTag(),
       ),
       // The message-text stage next (kind `extract`). The thread's clustering
       // card is built from what it writes, so it is what decides, by the

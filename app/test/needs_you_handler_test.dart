@@ -132,12 +132,15 @@ void main() {
     FakeDecisionClient? decision,
     Future<({String? name, String? address})?> Function()? owner,
     PipelineProgress progress = const PipelineProgress.disabled(),
+    String? tag,
+    Future<String?> Function()? modelTag,
   }) =>
       NeedsYouHandler(
         store,
         decisionClient: decision ?? FakeDecisionClient.never(),
         owner: owner,
         progress: progress,
+        modelTag: modelTag ?? (tag == null ? null : () async => tag),
       );
 
   Future<void> runOne(
@@ -659,6 +662,136 @@ void main() {
   // The Needs You chip on the home screen is a snapshot taken at settle time,
   // and nothing else in the app would reconcile it with an answer written
   // afterwards.
+  group('the decision vector', () {
+    const tag = 'bond-decide-fake';
+    Future<({String? name, String? address})?> known() async =>
+        (name: 'Alex Rivera', address: null);
+
+    FakeDecisionClient withVector() => FakeDecisionClient(
+          (_) => fakeDecision(fakeAnswers(needsYou: 0.3),
+              vector: const [1.0, 0.0, 0.0, 0.0]),
+        );
+
+    test('a decision with no vector under the current model is decided '
+        'again for one', () async {
+      await seed();
+      await decide(0.6);
+      await writeP(0.6);
+      final decision = withVector();
+
+      await runOne(handler(decision: decision, owner: known, tag: tag));
+
+      expect(decision.calls, hasLength(1));
+      final stored = (await store.decisionFor('email', 'm1'))!;
+      expect(stored.vector, [1.0, 0.0, 0.0, 0.0]);
+      expect(stored.vectorModel, tag);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.3, 1e-9));
+    });
+
+    test("the tag is asked when there is a stored decision: Your server's "
+        'kind learned there is the tag the row is owed under', () async {
+      await seed();
+      await decide(0.6);
+      await writeP(0.6);
+      // The sync getter would still answer null here (kind not cached); the
+      // resolver learns the kind and answers the encoder's tag.
+      var asked = 0;
+      final decision = withVector();
+
+      await runOne(handler(
+        decision: decision,
+        owner: known,
+        modelTag: () async {
+          asked++;
+          return tag;
+        },
+      ));
+
+      expect(asked, 1);
+      expect(decision.calls, hasLength(1));
+      expect((await store.decisionFor('email', 'm1'))!.vector, isNotNull);
+    });
+
+    test('a message with no stored decision never asks for the tag',
+        () async {
+      await seed();
+      var asked = 0;
+
+      await runOne(handler(
+        decision: withVector(),
+        owner: known,
+        modelTag: () async {
+          asked++;
+          return tag;
+        },
+      ));
+
+      expect(asked, 0);
+    });
+
+    test('a vector under another model is decided again', () async {
+      await seed();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.6),
+            vector: const [0.0, 1.0, 0.0, 0.0], model: 'an-older-model'),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+      await writeP(0.6);
+      final decision = withVector();
+
+      await runOne(handler(decision: decision, owner: known, tag: tag));
+
+      expect(decision.calls, hasLength(1));
+      expect((await store.decisionFor('email', 'm1'))!.vectorModel, tag);
+    });
+
+    test('a vector under the current model is copied, never decided again',
+        () async {
+      await seed();
+      await store.writeDecision(
+        'email',
+        'm1',
+        fakeDecision(fakeAnswers(needsYou: 0.6),
+            vector: const [0.0, 1.0, 0.0, 0.0]),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision, owner: known, tag: tag));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.6, 1e-9));
+    });
+
+    test('on a backend with no vector (no tag) nothing is owed', () async {
+      await seed();
+      await decide(0.6);
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision, owner: known));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.6, 1e-9));
+    });
+
+    test('with the owner unknown it is copied, never traded for an '
+        'ownerless decision', () async {
+      await seed();
+      await decide(0.6);
+      final decision = FakeDecisionClient.never();
+
+      await runOne(handler(decision: decision, tag: tag));
+
+      expect(decision.calls, isEmpty);
+      expect((await answerOf('email', 'm1'))['p'], closeTo(0.6, 1e-9));
+      expect(await ownerKnownOf('email', 'm1'), isTrue);
+    });
+  });
+
   group('the chip that follows the answer', () {
     late ProgressBus bus;
     late PipelineProgress progress;

@@ -401,6 +401,52 @@ class DecisionClient {
     return 'heads:${heads.model}@${heads.fingerprint}';
   }
 
+  /// The tag a fresh decision's vector would carry right now
+  /// ([DecisionResult.model] on the encoder-heads kind: the heads file's
+  /// model), or null when this client would answer with no vector or cannot
+  /// say without asking: the target unavailable, the heads file missing or
+  /// refused, Your server of the systemone kind, or Your server whose kind
+  /// this run has not learned yet. Synchronous and never a request — the
+  /// heads are cached per file modification and a server's kind per address.
+  ///
+  /// What the owner's Needs You presses read to tell a stored decision's
+  /// vector they can compare from one they cannot (`NeedsYouEdits`; a press
+  /// that finds null asks the model, which is harmless). The needs-you pass
+  /// reads [resolvedModelTag] instead.
+  String? get modelTag {
+    final destination = target;
+    if (destination.unavailable != null) return null;
+    if (_yours(destination) &&
+        _kinds[_keyOf(destination)]?.kind != DecisionServerKind.encoderHeads) {
+      return null;
+    }
+    try {
+      return _heads().model;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// [modelTag], after learning Your server's kind when this run has not:
+  /// one listing GET per address, cached as every call caches it. What the
+  /// needs-you pass reads (`NeedsYouHandler`), which otherwise never makes a
+  /// request and so would read null for every item of the vector backfill
+  /// on Your server and copy them all. A kind that cannot be learned (the
+  /// server down, the key refused, another question set) answers null,
+  /// which owes nothing, so the pass copies as before rather than parking.
+  Future<String?> resolvedModelTag() async {
+    final destination = target;
+    if (destination.unavailable != null) return null;
+    if (_yours(destination) && !_kinds.containsKey(_keyOf(destination))) {
+      try {
+        await _resolveKind(destination, _CallFacts(yourServer: true));
+      } on LlmException {
+        return null;
+      }
+    }
+    return modelTag;
+  }
+
   /// `same_effort` for each pair of thread texts (`renderStorylineThread`),
   /// in order: the mean of p(yes) over both orders, A-then-B and B-then-A,
   /// which is how the model was trained and how the contract asks it. Both

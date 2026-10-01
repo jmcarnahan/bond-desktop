@@ -972,15 +972,16 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   }
 
   /// "Remove from Needs You" on one thread: the owner's `no`, kept as a label
-  /// on every message of the thread's Needs You window and decided again, so
-  /// the thread leaves the pile at once; the sweep that follows takes every
-  /// thread like it out too, and reloads the list itself when it ends
-  /// ([NeedsYouEdits.remove]).
+  /// on every message of the thread's Needs You window and written again, so
+  /// the thread leaves the pile at once, with every thread like it — the
+  /// press's sweep runs inside it ([NeedsYouEdits.remove]) — and then the
+  /// list is read again, once, with all of it.
   ///
-  /// Returns the press for the Undo ([undoNeedsYouPress]) — an empty one
-  /// when nothing in the thread waits on the owner — or null when the
-  /// decision model could not answer. Null changes nothing on screen and
-  /// sets no error: the caller says it in its own bar.
+  /// Returns the press for the Undo ([undoNeedsYouPress]) and the toast
+  /// ([NeedsYouPress.changed]) — an empty one when nothing in the thread
+  /// waits on the owner — or null when the decision model could not answer.
+  /// Null changes nothing on screen and sets no error: the caller says it in
+  /// its own bar.
   Future<NeedsYouPress?> removeFromNeedsYou(
     String source,
     String conversationKey,
@@ -988,8 +989,9 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       _pressNeedsYou((edits) => edits.remove(source, conversationKey));
 
   /// "Add to Needs You" on one thread: the owner's `yes` on its newest
-  /// message, so the thread is in Needs You at any slider
-  /// ([NeedsYouEdits.add]). Returns what [removeFromNeedsYou] returns.
+  /// message, so the thread is in Needs You at any slider, with every thread
+  /// like it ([NeedsYouEdits.add]). Returns what [removeFromNeedsYou]
+  /// returns.
   Future<NeedsYouPress?> addToNeedsYou(
     String source,
     String conversationKey,
@@ -1142,10 +1144,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       _logImplicit('thread', conversationKey, 'up');
 }
 
-// Typed, because `needsYouEditsProvider` reads this one back from inside its
-// sweep hook and the two would otherwise infer each other's type.
-final StateNotifierProvider<ConversationsNotifier, ConversationsState>
-    conversationsProvider =
+final conversationsProvider =
     StateNotifierProvider<ConversationsNotifier, ConversationsState>(
   (ref) => ConversationsNotifier(
     ref.watch(messageStoreProvider),

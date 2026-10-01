@@ -42,6 +42,7 @@ void main() {
     int contextLinked = 0,
     bool inNeedsYou = false,
     bool withNeedsYou = false,
+    bool needsYouDecided = true,
   }) async {
     await tester.binding.setSurfaceSize(Size(width, 400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -60,6 +61,7 @@ void main() {
               onLater: fullBar ? () {} : null,
               onKeepInInbox: () => kept++,
               inNeedsYou: inNeedsYou,
+              needsYouDecided: needsYouDecided,
               onRemoveFromNeedsYou:
                   withNeedsYou ? () => needsYou.add('remove') : null,
               onAddToNeedsYou: withNeedsYou ? () => needsYou.add('add') : null,
@@ -752,6 +754,14 @@ void main() {
       expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
 
       await pump(tester, inLater: true, withNeedsYou: true);
+      expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
+      expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
+    });
+
+    testWidgets('a thread with nothing decided waiting on the owner is '
+        'offered no Add', (tester) async {
+      await pump(tester, withNeedsYou: true, needsYouDecided: false);
+
       expect(find.byKey(ThreadActionBar.needsYouAddKey), findsNothing);
       expect(find.byKey(ThreadActionBar.needsYouRemoveKey), findsNothing);
     });

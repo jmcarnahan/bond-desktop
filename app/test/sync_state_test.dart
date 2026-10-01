@@ -549,6 +549,7 @@ void main() {
         () async {
       await store.setPref('needs_you_model_revive', '1');
       await store.setPref('needs_you_hedge_rejudge', '1');
+      await store.setPref('decision_vectors_backfill', '1');
       await decided('ownerless', ownerKnown: false);
       await decided('owned', ownerKnown: true);
 
@@ -558,6 +559,58 @@ void main() {
           'pending');
       expect(await store.workStatusOf('needs_you', 'email', 'owned'), 'done');
       expect((await syncMailDetail())['requeued_needs_you_ownerless'], 1);
+    });
+
+    test('the decision-vector backfill queues the vectorless decisions once, '
+        'newest first and capped', () async {
+      await store.setPref('needs_you_model_revive', '1');
+      await store.setPref('needs_you_hedge_rejudge', '1');
+      await decided('vectorless', ownerKnown: true);
+      await decided('with-vector', ownerKnown: true);
+      await store.writeDecision(
+        'email',
+        'with-vector',
+        fakeDecision(fakeAnswers(needsYou: 0.7),
+            vector: const [1.0, 0.0, 0.0, 0.0]),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+
+      await syncReaching(14, userAddress: 'owner@example.com').syncNow();
+
+      expect(await store.workStatusOf('needs_you', 'email', 'vectorless'),
+          'pending');
+      expect(await store.workStatusOf('needs_you', 'email', 'with-vector'),
+          'done');
+      expect((await syncMailDetail())['requeued_vectorless_decisions'], 1);
+      expect(await store.getPref('decision_vectors_backfill'), '1');
+      expect(MessageStore.derivedOneShotPrefs,
+          contains('decision_vectors_backfill'));
+
+      // Once: the next sync leaves a finished row finished.
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'done' WHERE entity_id = 'vectorless'",
+      );
+      await syncReaching(14, userAddress: 'owner@example.com').syncNow();
+      expect(await store.workStatusOf('needs_you', 'email', 'vectorless'),
+          'done');
+    });
+
+    test('the vectorless requeue takes the newest first, up to its cap',
+        () async {
+      for (final id in ['older', 'newer']) {
+        await decided(id, ownerKnown: true);
+      }
+      await db.customUpdate(
+        "UPDATE messages SET received_at = ? WHERE source_message_id = 'older'",
+        variables: [Variable<String>(isoAgo(const Duration(hours: 9)))],
+      );
+
+      expect(await store.requeueVectorlessDecisions(cap: 1), 1);
+
+      expect(await store.workStatusOf('needs_you', 'email', 'newer'),
+          'pending');
+      expect(await store.workStatusOf('needs_you', 'email', 'older'), 'done');
     });
 
     test('the ownerless requeue revives only a finished work row', () async {
@@ -583,6 +636,7 @@ void main() {
       // of no-ops on every sync.
       await store.setPref('needs_you_model_revive', '1');
       await store.setPref('needs_you_hedge_rejudge', '1');
+      await store.setPref('decision_vectors_backfill', '1');
       await decided('ownerless', ownerKnown: false);
 
       await syncReaching(14).syncNow();

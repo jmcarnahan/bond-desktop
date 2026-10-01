@@ -33,6 +33,14 @@ final _oldNeedsYouRulesProvider = FutureProvider.autoDispose<bool>((ref) async {
   return (text ?? '').trim().isNotEmpty;
 });
 
+/// The owner's Needs You presses, counted for the section's "Your answers"
+/// line. Re-read when the pane opens and after a Forget; a press made with
+/// the pane open lands on the next open.
+final _needsYouAnswersProvider =
+    FutureProvider.autoDispose<({int removed, int added})>(
+  (ref) => ref.watch(messageStoreProvider).needsYouPressCounts(),
+);
+
 /// The settings surface, and every mutator only settings calls.
 ///
 /// A widget rather than a method on the inbox, for the message history host's
@@ -237,6 +245,8 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       threshold: prefs.needsYouThreshold,
       oldNeedsYouRules:
           ref.watch(_oldNeedsYouRulesProvider).valueOrNull ?? false,
+      needsYouAnswers: ref.watch(_needsYouAnswersProvider).valueOrNull,
+      onForgetNeedsYouAnswers: forgetNeedsYouAnswers,
       aboutMe: prefs.aboutMe,
       // The prefs setters update state first and persist behind the caller's
       // back on purpose (see AppPrefsNotifier) — `unawaited` says the discard
@@ -597,6 +607,25 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         );
       },
     );
+  }
+
+  /// Settings' **Forget all Needs You answers**: every Remove and Add press
+  /// the owner made, undone newest first (`NeedsYouEdits.retractAll`), so
+  /// each message they answered for takes the model's own number back; then
+  /// the list and the section's count are read again. Throws what the undo
+  /// throws — processing off, or the decision model unable to answer for a
+  /// message it has no stored vector for — after reloading whatever did
+  /// change.
+  Future<void> forgetNeedsYouAnswers() async {
+    if (!mounted) return;
+    final edits = ref.read(needsYouEditsProvider);
+    final conversations = ref.read(conversationsProvider.notifier);
+    try {
+      await edits.retractAll();
+    } finally {
+      await conversations.load(syncFirst: false);
+      if (mounted) ref.invalidate(_needsYouAnswersProvider);
+    }
   }
 
   /// The Decision model's **Check** on This Mac.

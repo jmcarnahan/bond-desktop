@@ -1343,6 +1343,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       onLater: widget.onLaterThread,
       onKeepInInbox: widget.onKeepInInbox,
       inNeedsYou: isNeedsYou(c, threshold: widget.needsYouThreshold),
+      needsYouDecided: c.needsYouP != null,
       onRemoveFromNeedsYou: widget.onRemoveFromNeedsYou,
       onAddToNeedsYou: widget.onAddToNeedsYou,
       onStoryline: widget.onAddToStoryline,

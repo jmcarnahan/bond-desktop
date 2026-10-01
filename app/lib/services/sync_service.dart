@@ -530,6 +530,21 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_model_revive', '1');
       }
 
+      // The decision vectors a build before v24 never kept. The owner's Needs
+      // You presses and their sweeps compare stored vectors with no model
+      // call, so every kept inbound message decided without one has its
+      // needs-you pass queued once, newest first and at most 2,000, and the
+      // pass decides it again under the current model
+      // (`NeedsYouHandler`'s vector rule). In the background: fresh mail
+      // still claims first. Same one-shot idiom, null until it runs, and in
+      // `derivedOneShotPrefs`, because Clear AI results empties the table
+      // this read and triage writes every row again with its vector.
+      int? requeuedVectorless;
+      if (await _store.getPref('decision_vectors_backfill') == null) {
+        requeuedVectorless = await _store.requeueVectorlessDecisions();
+        await _store.setPref('decision_vectors_backfill', '1');
+      }
+
       // The other half of that catch-up, on the home screen's side. The
       // `needs_you` snapshot each settled row took was taken under the rule of
       // its day, so a message that needs the owner by its probability now can
@@ -1045,6 +1060,7 @@ class SyncService implements MailSync {
           'reconcile_error': ?reconcileError,
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
+          'requeued_vectorless_decisions': ?requeuedVectorless,
           'backfilled_needs_you': ?backfilledNeedsYou,
           'vetoed_needs_you': ?vetoedNeedsYou,
           'requeued_needs_you_hedges': ?requeuedNeedsYouHedges,

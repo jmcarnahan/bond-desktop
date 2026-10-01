@@ -14,6 +14,8 @@ import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart'
     show AccountInfo, SentDraft;
 import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart'
+    show decisionQhash;
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart'
     show DecisionUnavailableException;
@@ -558,19 +560,30 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('Remove from Needs You clears the thread and anything like it, '
-      'and Undo brings them back', (tester) async {
+  testWidgets('Remove from Needs You clears the thread and every one like '
+      'it at once, says how many, and Undo brings them back', (tester) async {
     await seedPile();
-    // The decision model's vectors, by subject: the invoice is a near
-    // duplicate of the homepage thread, the quote is not.
-    final client = FakeDecisionClient((input) => fakeDecision(
-          fakeAnswers(needsYou: 0.9),
-          vector: switch (input.subject) {
-            'Homepage copy' => const [1.0, 0.0, 0.0, 0.0],
-            'Invoice 4471' => const [1.0, 0.1, 0.0, 0.0],
-            _ => const [0.0, 1.0, 0.0, 0.0],
-          },
-        ));
+    // The decision model's vectors, stored with each decision as triage
+    // leaves them: the invoice is a near duplicate of the homepage thread,
+    // the quote is not.
+    const vectors = {
+      'c1-m1': [1.0, 0.0, 0.0, 0.0],
+      'c2-m1': [1.0, 0.1, 0.0, 0.0],
+      'c3-m1': [0.0, 1.0, 0.0, 0.0],
+    };
+    for (final MapEntry(:key, :value) in vectors.entries) {
+      await store.writeDecision(
+        'email',
+        key,
+        fakeDecision(fakeAnswers(needsYou: 0.9), vector: value),
+        qhash: decisionQhash,
+        ownerKnown: true,
+      );
+    }
+    // Under the stored vectors' model, so the press needs no model call.
+    final client = FakeDecisionClient(
+      (_) => fakeDecision(fakeAnswers(needsYou: 0.9)),
+    )..tag = 'bond-decide-fake';
     await pumpInbox(
       tester,
       decision: decisionClientProvider.overrideWithValue(client),
@@ -585,11 +598,11 @@ void main() {
     await tester.pump();
     await settleQueues(tester);
 
-    expect(find.text('Removed from Needs You — and anything like it.'),
+    expect(find.text('Removed from Needs You — and 1 like it.'),
         findsOneWidget);
-    // The pressed thread and its near duplicate left. The press landed the
-    // reader on the next row, the sweep took that one too, and the reader
-    // was stepped on to the row still drawn.
+    expect(client.calls, isEmpty);
+    // The pressed thread and its near duplicate left together, and the
+    // reader landed past both, on the row still drawn.
     expect(rowTitles(tester), ['Vendor quote']);
     expect(litRow(tester), 'Vendor quote');
 
@@ -602,6 +615,48 @@ void main() {
     expect(rowTitles(tester),
         containsAll(['Homepage copy', 'Invoice 4471', 'Vendor quote']));
     expect(await store.needsYouLabels(), isEmpty);
+    expect(client.calls, isEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a second Add while the first is out is dropped: one press, '
+      'one label', (tester) async {
+    await seedPile();
+    // Below the slider, so the thread is out of Needs You and offers Add.
+    await seedNeedsYou(store, 'email', 'c2-m1', p: 0.1);
+    await store.writeDecision(
+      'email',
+      'c2-m1',
+      fakeDecision(fakeAnswers(needsYou: 0.1),
+          vector: const [1.0, 0.0, 0.0, 0.0]),
+      qhash: decisionQhash,
+      ownerKnown: true,
+    );
+    final client = FakeDecisionClient(
+      (_) => fakeDecision(fakeAnswers(needsYou: 0.1)),
+    )..tag = 'bond-decide-fake';
+    await pumpInbox(
+      tester,
+      section: RailSection.home,
+      decision: decisionClientProvider.overrideWithValue(client),
+      accountless: true,
+    );
+    await tester.tap(find.text('Invoice 4471').first);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final add = find.byKey(ThreadActionBar.needsYouAddKey);
+    expect(add, findsOneWidget);
+    await tester.tap(add);
+    await tester.tap(add);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await settleQueues(tester);
+
+    expect(await store.needsYouLabels(), hasLength(1));
+    expect(find.text('Added to Needs You.'), findsOneWidget);
     await settleQueues(tester);
   });
 

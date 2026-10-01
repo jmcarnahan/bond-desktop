@@ -134,8 +134,39 @@ void main() {
     final stored = (await store.decisionFor('email', 'm1'))!;
     expect(stored.ownerAnswer, 'no');
     expect(stored.needsYouP, 0.0);
-    // The model's other answers stand.
+    // The model's other answers stand, and its own number is kept beside
+    // the override, so the decision can be applied again without a call.
     expect(stored.answers['intent'].choice, 'request');
+    expect(json['model_needs_you_p'], closeTo(0.9, 1e-9));
+    expect(stored.modelNeedsYouP, closeTo(0.9, 1e-9));
+    expect(stored.modelAnswers!.p('needs_you', 'yes'), closeTo(0.9, 1e-9));
+    expect(stored.modelAnswers!.ownerAnswer, isNull);
+  });
+
+  test("every decision stores its vector, and the model's own decision "
+      'keeps no model_needs_you_p', () async {
+    final row = await seed('m1', p: 0.9);
+
+    await apply(row, vector: twin, using: exemplars);
+
+    final stored = (await store.decisionFor('email', 'm1'))!;
+    expect(stored.ownerAnswer, isNull);
+    expect(stored.modelNeedsYouP, isNull);
+    expect(stored.vectorModel, 'bond-decide-fake');
+    expect(stored.vector![0], 1.0);
+    expect(stored.vector![1], closeTo(0.1425, 1e-6));
+    expect(stored.modelAnswers!.p('needs_you', 'yes'), closeTo(0.9, 1e-9));
+    final json = jsonDecode((await decisionRow('m1'))['answers_json'] as String)
+        as Map;
+    expect(json.containsKey('model_needs_you_p'), isFalse);
+  });
+
+  test('a decision with no vector stores none', () async {
+    final row = await seed('m1', p: 0.9);
+
+    await apply(row, model: 'kev', using: exemplars);
+
+    expect((await store.decisionFor('email', 'm1'))!.vector, isNull);
   });
 
   test('a label on the message itself is worded "this message"', () async {

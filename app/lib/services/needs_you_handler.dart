@@ -24,7 +24,9 @@ import 'triage_queue.dart'
 /// most messages this pass finds it already there and does nothing. It
 /// decides a message AGAIN, with the decision model, when the stored decision
 /// is missing or was made without an owner line (the head was trained with
-/// that line, so its number is not trusted without it), and then it writes
+/// that line, so its number is not trusted without it) or has no vector under
+/// the model the client answers with now ([DecisionClient.modelTag]; the
+/// owner's Needs You presses compare stored vectors), and then it writes
 /// the whole state that decision determines through [applyDecision], the
 /// triage claim's writer: the triage fields, the extraction's intent and
 /// importance and the thread fold move with the p. NULL on the row means
@@ -93,6 +95,16 @@ class NeedsYouHandler extends WorkHandler {
   /// wires none.
   final NeedsYouExemplars? _exemplars;
 
+  /// The tag a fresh decision's vector carries now
+  /// ([DecisionClient.resolvedModelTag], which learns Your server's kind
+  /// first rather than answering null for it). A stored decision with no
+  /// vector under it is decided again instead of copied (once the owner is
+  /// known), so the owner's Needs You presses can compare it without a model
+  /// call: how rows decided before v24, or under another model, heal as they
+  /// pass. Null, or unwired, means the backend has no vector to keep and
+  /// nothing is owed. Asked only when there is a stored decision to judge.
+  final Future<String?> Function()? _modelTag;
+
   NeedsYouHandler(
     this._store, {
     required DecisionClient decisionClient,
@@ -101,6 +113,7 @@ class NeedsYouHandler extends WorkHandler {
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<double> Function()? needsYouThreshold,
     this._exemplars,
+    this._modelTag,
   })  : _decision = decisionClient,
         _log = activityLog ?? ActivityLog.disabled(),
         _owner = memoizedOwner(owner ?? (() async => null)),
@@ -174,12 +187,20 @@ class NeedsYouHandler extends WorkHandler {
         found != null && storedP != null && found.answers.fields.isNotEmpty
             ? found
             : null;
-    final owner = stored != null && stored.ownerKnown
+    // A stored decision with no vector under the model the client answers
+    // with now is decided again for one, once the owner is known — never
+    // traded for an ownerless decision, so with the owner unknown it is
+    // copied as before.
+    final tag = stored == null ? null : await _modelTag?.call();
+    final vectorOwed = stored != null &&
+        tag != null &&
+        (stored.vector == null || stored.vectorModel != tag);
+    final owner = stored != null && stored.ownerKnown && !vectorOwed
         ? null
         : decisionOwnerString(await _owner());
     if (stored != null &&
         storedP != null &&
-        (stored.ownerKnown || owner == null)) {
+        (vectorOwed ? owner == null : stored.ownerKnown || owner == null)) {
       if (previous == storedP) {
         _log.note({
           'source': 'decision',
@@ -239,6 +260,7 @@ class NeedsYouHandler extends WorkHandler {
       'p': needsYouP(decided.answers),
       'redecided': true,
       'owner_known': owner != null,
+      if (vectorOwed) 'vector_owed': true,
     });
   }
 }

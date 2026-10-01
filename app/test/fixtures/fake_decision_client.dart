@@ -176,6 +176,19 @@ class FakeDecisionClient extends DecisionClient {
     return [for (final state in states) yesFor(question, state)];
   }
 
+  /// What [modelTag] answers: null — no vector to compare under, as the real
+  /// client answers with no heads file — unless a test says. A test of the
+  /// owner's stored-vector presses sets it to the tag its stored decisions
+  /// carry (`fakeDecision`'s `'bond-decide-fake'`).
+  String? tag;
+
+  @override
+  String? get modelTag => tag;
+
+  /// [tag] as well: no kind to learn in a fake.
+  @override
+  Future<String?> resolvedModelTag() async => tag;
+
   /// How many [ensureReady] checks were made.
   int readyChecks = 0;
 

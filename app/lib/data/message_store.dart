@@ -2614,7 +2614,13 @@ WHERE COALESCE(cta_text, '') <> ''
   ///
   /// [extraKeys] ride beside it on the same terms — scalars, never a Map: the
   /// owner's Needs You answer when it replaced the model's
-  /// ([decisionOwnerAnswerKey] and its siblings, `applyDecision`).
+  /// ([decisionOwnerAnswerKey] and its siblings, with the model's own number
+  /// under [decisionModelNeedsYouKey], `applyDecision`).
+  ///
+  /// The result's vector ([DecisionResult.vector]) is stored too, float32 in
+  /// `vector` under the row's `model` tag, NULL when the backend had none —
+  /// what lets an owner's press and its sweep compare messages without asking
+  /// the model again (`NeedsYouEdits`).
   Future<void> writeDecision(
     String source,
     String sourceMessageId,
@@ -2629,8 +2635,8 @@ WHERE COALESCE(cta_text, '') <> ''
     await db.customUpdate(
       'INSERT INTO message_decisions (source, source_message_id, model, '
       'qhash, answers_json, gate_p, needs_you_p, needs_action_p, '
-      'reply_expected_p, latency_ms, truncated, decided_at) '
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+      'reply_expected_p, latency_ms, truncated, decided_at, vector) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
       'ON CONFLICT(source, source_message_id) DO UPDATE SET '
       'model = excluded.model, qhash = excluded.qhash, '
       'answers_json = excluded.answers_json, gate_p = excluded.gate_p, '
@@ -2638,7 +2644,7 @@ WHERE COALESCE(cta_text, '') <> ''
       'needs_action_p = excluded.needs_action_p, '
       'reply_expected_p = excluded.reply_expected_p, '
       'latency_ms = excluded.latency_ms, truncated = excluded.truncated, '
-      'decided_at = excluded.decided_at',
+      'decided_at = excluded.decided_at, vector = excluded.vector',
       variables: _args([
         source,
         sourceMessageId,
@@ -2656,6 +2662,10 @@ WHERE COALESCE(cta_text, '') <> ''
         result.latencyMs.toDouble(),
         result.truncated ? 1 : 0,
         _nowIso(),
+        switch (result.vector) {
+          final vector? => encodeEmbedding(vector),
+          null => null,
+        },
       ]),
     );
   }
@@ -2672,10 +2682,15 @@ WHERE COALESCE(cta_text, '') <> ''
   /// an older model's row as they stand. The install-time re-decide
   /// (`TriageQueue.redecideStale`, over [staleDecisionRefs]) is what decides
   /// the recent ones again under the model this build reads.
+  ///
+  /// [withVector] false leaves [StoredDecision.vector] null without decoding
+  /// the BLOB — for a caller that already holds the vector (the Needs You
+  /// sweep, which matched on it).
   Future<StoredDecision?> decisionFor(
     String source,
-    String sourceMessageId,
-  ) async {
+    String sourceMessageId, {
+    bool withVector = true,
+  }) async {
     final rows = await db.customSelect(
       'SELECT * FROM message_decisions '
       'WHERE source = ? AND source_message_id = ?',
@@ -2686,6 +2701,7 @@ WHERE COALESCE(cta_text, '') <> ''
     if (row['qhash'] != decisionQhash) return null;
     var answers = const DecisionAnswers({});
     var ownerKnown = false;
+    double? modelNeedsYouP;
     try {
       final decoded = jsonDecode(row['answers_json'] as String? ?? '{}');
       if (decoded is Map) {
@@ -2698,6 +2714,10 @@ WHERE COALESCE(cta_text, '') <> ''
             if (e.key != decisionOwnerKnownKey) e.key: e.value,
         });
         ownerKnown = json[decisionOwnerKnownKey] == true;
+        modelNeedsYouP = switch (json[decisionModelNeedsYouKey]) {
+          final num p => p.toDouble(),
+          _ => null,
+        };
       }
     } on FormatException {
       // Unreadable: no answers and no owner, which every reader treats as
@@ -2714,6 +2734,11 @@ WHERE COALESCE(cta_text, '') <> ''
       latencyMs: d('latency_ms'),
       truncated: (row['truncated'] as num?)?.toInt() == 1,
       ownerKnown: ownerKnown,
+      modelNeedsYouP: modelNeedsYouP,
+      vector: switch (row['vector']) {
+        final Uint8List blob when withVector => decodeEmbedding(blob),
+        _ => null,
+      },
     );
   }
 
@@ -3681,6 +3706,7 @@ RETURNING *
   /// the pref describes rows, and the rows are gone.
   static const List<String> derivedOneShotPrefs = [
     'needs_you_model_revive',
+    'decision_vectors_backfill',
     // The p-based pair (v21). The older `needs_you_flag_backfill` and
     // `needs_you_flag_veto` ran under the verdict rule and have closed on
     // every installed machine, so the chips were re-reconciled under new keys
@@ -4053,7 +4079,7 @@ FROM messages
   /// how far back THIS mailbox was drained and would otherwise tell the next
   /// bootstrap that its window had already been covered.
   ///
-  /// And every marker in [derivedOneShotPrefs] — ten of them — each saying a
+  /// And every marker in [derivedOneShotPrefs] — twelve of them — each saying a
   /// catch-up has already run over rows this method is deleting: left behind,
   /// they would tell the next first sync that its mailbox had been reconciled,
   /// its verdicts backfilled and its vectors re-embedded when nothing had read
@@ -5285,6 +5311,42 @@ SELECT conversation_key FROM (
             .getSingle())
         .data;
     return (count: row['n'] as int, maxId: row['max_id'] as int);
+  }
+
+  /// The owner's Needs You presses, counted by their `created_at` stamp (one
+  /// press labels several messages under one stamp): how many removed mail
+  /// from Needs You and how many added it — what Settings says under the
+  /// slider.
+  Future<({int removed, int added})> needsYouPressCounts() async {
+    final rows = await db
+        .customSelect(
+          'SELECT origin, COUNT(DISTINCT created_at) AS n FROM decision_labels '
+          "WHERE question = 'needs_you' GROUP BY origin",
+        )
+        .get();
+    var removed = 0, added = 0;
+    for (final row in rows) {
+      final n = row.data['n'] as int;
+      switch (row.data['origin']) {
+        case 'remove':
+          removed = n;
+        case 'add':
+          added = n;
+      }
+    }
+    return (removed: removed, added: added);
+  }
+
+  /// Every Needs You press's `created_at` stamp, newest first — what
+  /// `NeedsYouEdits.retractAll` walks, one press at a time.
+  Future<List<String>> needsYouLabelStamps() async {
+    final rows = await db
+        .customSelect(
+          'SELECT DISTINCT created_at FROM decision_labels '
+          "WHERE question = 'needs_you' ORDER BY created_at DESC",
+        )
+        .get();
+    return [for (final row in rows) row.data['created_at'] as String];
   }
 
   /// Deletes the Needs You labels [ids] stamped [createdAt] and returns how
@@ -9261,7 +9323,7 @@ $m.source = $c.source
   /// the thread behind the `conversations` alias [c]: among the window's
   /// decided messages, the HIGHEST `needs_you_p`, ties to the newest (then
   /// the id). A scalar subselect with no placeholders — the `nr` join of
-  /// [loadConversations] and the sweep's [needsYouDriverRows] both read it.
+  /// [loadConversations] reads it.
   static String needsYouDriverIdSql(String c) => """
 (SELECT m5.source_message_id FROM messages m5
   WHERE ${_needsYouWindowSql('m5', c)}
@@ -9286,26 +9348,90 @@ $m.source = $c.source
     return [for (final row in rows) row.data];
   }
 
-  /// One row per thread in Needs You at [threshold] ([_liveNeedsYouThread],
-  /// the rail's rule): the driver message ([needsYouDriverIdSql]) as a full
-  /// `messages` row, newest thread first — what the sweep after a "Remove
-  /// from Needs You" press decides again.
-  Future<List<Map<String, Object?>>> needsYouDriverRows(
-    double threshold,
-  ) async {
+  /// The decision vectors a Needs You sweep compares against a press's
+  /// labels, one per window message ([_needsYouWindowSql]) that has a stored
+  /// decision under [model] with a vector, newest thread first. [inNeedsYou]
+  /// picks the threads: those in Needs You at [threshold]
+  /// ([_liveNeedsYouThread], the rail's rule) for a removal, else those NOT
+  /// in it that are neither done nor in Later, for an addition — Needs You
+  /// reads neither, so pulling one in would change nothing anybody sees.
+  ///
+  /// One statement and no model call, which is what lets a press sweep the
+  /// whole list before its toast. The vectors come back as their BLOBs,
+  /// undecoded: an addition's candidates are every stored vector outside
+  /// Needs You, most of a mailbox, and the sweep compares each off its bytes
+  /// (`NeedsYouEdits`) rather than holding thousands of decoded lists at
+  /// once.
+  Future<
+      List<
+          ({
+            String source,
+            String id,
+            String conversationKey,
+            Uint8List vector,
+          })>> needsYouCandidateVectors({
+    required bool inNeedsYou,
+    required double threshold,
+    required String model,
+  }) async {
+    final threads = inNeedsYou
+        ? _liveNeedsYouThread
+        : "COALESCE(ai.bucket, '') <> 'later' AND c.state <> 'done' "
+            "AND NOT ${needsYouAtSql(threadNeedsYouPSql('c'), '?')}";
     final rows = await db.customSelect(
-      'SELECT nr.* FROM conversations c '
+      'SELECT m.source, m.source_message_id, m.conversation_key, d.vector '
+      'FROM conversations c '
       'LEFT JOIN conversation_ai ai '
       '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
-      'JOIN messages nr '
-      '  ON nr.source = c.source '
-      '  AND nr.conversation_key = c.conversation_key '
-      '  AND nr.source_message_id = ${needsYouDriverIdSql('c')} '
-      'WHERE $_liveNeedsYouThread '
-      'ORDER BY c.last_message_at DESC, c.conversation_key',
-      variables: _args([threshold]),
+      "JOIN messages m ON ${_needsYouWindowSql('m', 'c')} "
+      'JOIN message_decisions d '
+      '  ON d.source = m.source AND d.source_message_id = m.source_message_id '
+      'WHERE $threads '
+      "  AND d.vector IS NOT NULL AND d.model = ? AND d.qhash = '$decisionQhash' "
+      'ORDER BY c.last_message_at DESC, c.conversation_key, m.received_at, '
+      '  m.source_message_id',
+      variables: _args([threshold, model]),
     ).get();
-    return [for (final row in rows) row.data];
+    return [
+      for (final row in rows)
+        if (row.data['vector'] case final Uint8List blob)
+          (
+            source: row.data['source'] as String,
+            id: row.data['source_message_id'] as String,
+            conversationKey: row.data['conversation_key'] as String,
+            vector: blob,
+          ),
+    ];
+  }
+
+  /// Puts the needs-you pass back on the queue for the kept inbound messages
+  /// whose decision under [decisionQhash] has no vector, newest first, at
+  /// most [cap], and returns how many that was: the one-shot behind
+  /// `decision_vectors_backfill`. The pass decides each one again when the
+  /// decision model has vectors (`NeedsYouHandler`), so the owner's presses
+  /// can compare them without a model call; on a backend with none it copies
+  /// and changes nothing.
+  Future<int> requeueVectorlessDecisions({int cap = 2000}) async {
+    final rows = await db.customSelect(
+      'SELECT m.source, m.source_message_id FROM messages m '
+      'JOIN message_decisions d ON d.source = m.source '
+      '  AND d.source_message_id = m.source_message_id '
+      "WHERE m.direction = 'inbound' AND ${keptMessageSql('m')} "
+      "  AND d.vector IS NULL AND d.qhash = '$decisionQhash' "
+      "  AND instr(d.answers_json, '\"$decisionRedecideFailedKey\"') = 0 "
+      'ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT ?',
+      variables: _args([cap]),
+    ).get();
+    await db.transaction(() async {
+      for (final row in rows) {
+        await requeueWork(
+          'needs_you',
+          row.data['source'] as String,
+          row.data['source_message_id'] as String,
+        );
+      }
+    });
+    return rows.length;
   }
 
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`

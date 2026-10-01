@@ -18974,6 +18974,15 @@ class MessageDecisions extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _vectorMeta = const VerificationMeta('vector');
+  late final GeneratedColumn<Uint8List> vector = GeneratedColumn<Uint8List>(
+    'vector',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -18988,6 +18997,7 @@ class MessageDecisions extends Table
     latencyMs,
     truncated,
     decidedAt,
+    vector,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -19097,6 +19107,12 @@ class MessageDecisions extends Table
     } else if (isInserting) {
       context.missing(_decidedAtMeta);
     }
+    if (data.containsKey('vector')) {
+      context.handle(
+        _vectorMeta,
+        vector.isAcceptableOrUnknown(data['vector']!, _vectorMeta),
+      );
+    }
     return context;
   }
 
@@ -19154,6 +19170,10 @@ class MessageDecisions extends Table
         DriftSqlType.string,
         data['${effectivePrefix}decided_at'],
       )!,
+      vector: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}vector'],
+      ),
     );
   }
 
@@ -19185,6 +19205,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
   final double? latencyMs;
   final int truncated;
   final String decidedAt;
+  final Uint8List? vector;
   const MessageDecision({
     required this.source,
     required this.sourceMessageId,
@@ -19198,6 +19219,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     this.latencyMs,
     required this.truncated,
     required this.decidedAt,
+    this.vector,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -19224,6 +19246,9 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     }
     map['truncated'] = Variable<int>(truncated);
     map['decided_at'] = Variable<String>(decidedAt);
+    if (!nullToAbsent || vector != null) {
+      map['vector'] = Variable<Uint8List>(vector);
+    }
     return map;
   }
 
@@ -19251,6 +19276,9 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
           : Value(latencyMs),
       truncated: Value(truncated),
       decidedAt: Value(decidedAt),
+      vector: vector == null && nullToAbsent
+          ? const Value.absent()
+          : Value(vector),
     );
   }
 
@@ -19272,6 +19300,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
       latencyMs: serializer.fromJson<double?>(json['latency_ms']),
       truncated: serializer.fromJson<int>(json['truncated']),
       decidedAt: serializer.fromJson<String>(json['decided_at']),
+      vector: serializer.fromJson<Uint8List?>(json['vector']),
     );
   }
   @override
@@ -19290,6 +19319,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
       'latency_ms': serializer.toJson<double?>(latencyMs),
       'truncated': serializer.toJson<int>(truncated),
       'decided_at': serializer.toJson<String>(decidedAt),
+      'vector': serializer.toJson<Uint8List?>(vector),
     };
   }
 
@@ -19306,6 +19336,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     Value<double?> latencyMs = const Value.absent(),
     int? truncated,
     String? decidedAt,
+    Value<Uint8List?> vector = const Value.absent(),
   }) => MessageDecision(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -19321,6 +19352,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     latencyMs: latencyMs.present ? latencyMs.value : this.latencyMs,
     truncated: truncated ?? this.truncated,
     decidedAt: decidedAt ?? this.decidedAt,
+    vector: vector.present ? vector.value : this.vector,
   );
   MessageDecision copyWithCompanion(MessageDecisionsCompanion data) {
     return MessageDecision(
@@ -19344,6 +19376,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
       latencyMs: data.latencyMs.present ? data.latencyMs.value : this.latencyMs,
       truncated: data.truncated.present ? data.truncated.value : this.truncated,
       decidedAt: data.decidedAt.present ? data.decidedAt.value : this.decidedAt,
+      vector: data.vector.present ? data.vector.value : this.vector,
     );
   }
 
@@ -19361,7 +19394,8 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
           ..write('replyExpectedP: $replyExpectedP, ')
           ..write('latencyMs: $latencyMs, ')
           ..write('truncated: $truncated, ')
-          ..write('decidedAt: $decidedAt')
+          ..write('decidedAt: $decidedAt, ')
+          ..write('vector: $vector')
           ..write(')'))
         .toString();
   }
@@ -19380,6 +19414,7 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
     latencyMs,
     truncated,
     decidedAt,
+    $driftBlobEquality.hash(vector),
   );
   @override
   bool operator ==(Object other) =>
@@ -19396,7 +19431,8 @@ class MessageDecision extends DataClass implements Insertable<MessageDecision> {
           other.replyExpectedP == this.replyExpectedP &&
           other.latencyMs == this.latencyMs &&
           other.truncated == this.truncated &&
-          other.decidedAt == this.decidedAt);
+          other.decidedAt == this.decidedAt &&
+          $driftBlobEquality.equals(other.vector, this.vector));
 }
 
 class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
@@ -19412,6 +19448,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
   final Value<double?> latencyMs;
   final Value<int> truncated;
   final Value<String> decidedAt;
+  final Value<Uint8List?> vector;
   final Value<int> rowid;
   const MessageDecisionsCompanion({
     this.source = const Value.absent(),
@@ -19426,6 +19463,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     this.latencyMs = const Value.absent(),
     this.truncated = const Value.absent(),
     this.decidedAt = const Value.absent(),
+    this.vector = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessageDecisionsCompanion.insert({
@@ -19441,6 +19479,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     this.latencyMs = const Value.absent(),
     this.truncated = const Value.absent(),
     required String decidedAt,
+    this.vector = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : source = Value(source),
        sourceMessageId = Value(sourceMessageId),
@@ -19461,6 +19500,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     Expression<double>? latencyMs,
     Expression<int>? truncated,
     Expression<String>? decidedAt,
+    Expression<Uint8List>? vector,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -19476,6 +19516,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
       if (latencyMs != null) 'latency_ms': latencyMs,
       if (truncated != null) 'truncated': truncated,
       if (decidedAt != null) 'decided_at': decidedAt,
+      if (vector != null) 'vector': vector,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -19493,6 +19534,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     Value<double?>? latencyMs,
     Value<int>? truncated,
     Value<String>? decidedAt,
+    Value<Uint8List?>? vector,
     Value<int>? rowid,
   }) {
     return MessageDecisionsCompanion(
@@ -19508,6 +19550,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
       latencyMs: latencyMs ?? this.latencyMs,
       truncated: truncated ?? this.truncated,
       decidedAt: decidedAt ?? this.decidedAt,
+      vector: vector ?? this.vector,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -19551,6 +19594,9 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
     if (decidedAt.present) {
       map['decided_at'] = Variable<String>(decidedAt.value);
     }
+    if (vector.present) {
+      map['vector'] = Variable<Uint8List>(vector.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -19572,6 +19618,7 @@ class MessageDecisionsCompanion extends UpdateCompanion<MessageDecision> {
           ..write('latencyMs: $latencyMs, ')
           ..write('truncated: $truncated, ')
           ..write('decidedAt: $decidedAt, ')
+          ..write('vector: $vector, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -29515,6 +29562,7 @@ typedef $MessageDecisionsCreateCompanionBuilder =
       Value<double?> latencyMs,
       Value<int> truncated,
       required String decidedAt,
+      Value<Uint8List?> vector,
       Value<int> rowid,
     });
 typedef $MessageDecisionsUpdateCompanionBuilder =
@@ -29531,6 +29579,7 @@ typedef $MessageDecisionsUpdateCompanionBuilder =
       Value<double?> latencyMs,
       Value<int> truncated,
       Value<String> decidedAt,
+      Value<Uint8List?> vector,
       Value<int> rowid,
     });
 
@@ -29600,6 +29649,11 @@ class $MessageDecisionsFilterComposer
 
   ColumnFilters<String> get decidedAt => $composableBuilder(
     column: $table.decidedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -29672,6 +29726,11 @@ class $MessageDecisionsOrderingComposer
     column: $table.decidedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<Uint8List> get vector => $composableBuilder(
+    column: $table.vector,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessageDecisionsAnnotationComposer
@@ -29726,6 +29785,9 @@ class $MessageDecisionsAnnotationComposer
 
   GeneratedColumn<String> get decidedAt =>
       $composableBuilder(column: $table.decidedAt, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get vector =>
+      $composableBuilder(column: $table.vector, builder: (column) => column);
 }
 
 class $MessageDecisionsTableManager
@@ -29771,6 +29833,7 @@ class $MessageDecisionsTableManager
                 Value<double?> latencyMs = const Value.absent(),
                 Value<int> truncated = const Value.absent(),
                 Value<String> decidedAt = const Value.absent(),
+                Value<Uint8List?> vector = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessageDecisionsCompanion(
                 source: source,
@@ -29785,6 +29848,7 @@ class $MessageDecisionsTableManager
                 latencyMs: latencyMs,
                 truncated: truncated,
                 decidedAt: decidedAt,
+                vector: vector,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -29801,6 +29865,7 @@ class $MessageDecisionsTableManager
                 Value<double?> latencyMs = const Value.absent(),
                 Value<int> truncated = const Value.absent(),
                 required String decidedAt,
+                Value<Uint8List?> vector = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessageDecisionsCompanion.insert(
                 source: source,
@@ -29815,6 +29880,7 @@ class $MessageDecisionsTableManager
                 latencyMs: latencyMs,
                 truncated: truncated,
                 decidedAt: decidedAt,
+                vector: vector,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

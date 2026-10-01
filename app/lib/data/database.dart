@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 23;
+  int get schemaVersion => 24;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -808,6 +808,21 @@ WHERE needs_you_p IS NULL''');
                   await m.addColumn(
                     schema.decisionLabels,
                     schema.decisionLabels.vectorModel,
+                  );
+                }
+              },
+              // v24 — the decision model's vector on the decision row, so
+              // the owner's Needs You presses and their sweeps compare stored
+              // vectors instead of asking the model again.
+              //
+              // Nothing to backfill here: an old row's vector is NULL, and the
+              // `decision_vectors_backfill` one-shot in the sync requeues the
+              // needs-you pass, which decides those messages again.
+              from23To24: (m, schema) async {
+                if (!await _columnExists('message_decisions', 'vector')) {
+                  await m.addColumn(
+                    schema.messageDecisions,
+                    schema.messageDecisions.vector,
                   );
                 }
               },
