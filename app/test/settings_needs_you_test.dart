@@ -5,11 +5,9 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart'
-    show needsYouDefaultRules;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
-import 'package:bond_inbox/widgets/needs_you_rules_editor.dart';
+import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,16 +16,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
-/// The rules editor as the SCREEN assembles it.
+/// The Needs You slider as the SCREEN assembles it.
 ///
-/// `needs_you_rules_editor_test.dart` pins what the editor does with the values
-/// it is handed; this pins the door in front of it — that the gear opens
-/// Settings, that the Needs You section holds the editor, that it opens on what
-/// is stored, and that a Save from inside it lands in `app_prefs` and moves the
-/// summary above it. Those are wiring touches on the screen, and none of them
-/// is visible from the editor's own tests.
+/// `settings_screen_test.dart` pins what the slider does with the values it is
+/// handed; this pins the door in front of it — that the gear opens Settings,
+/// that the Needs You section opens on the stored threshold, that a drag lands
+/// in `app_prefs` and moves the summary above it, and that a needs-you text an
+/// older build stored brings no editor back. Those are wiring touches on the
+/// screen, and none of them is visible from the screen's own tests.
 
 class _FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   @override
   Future<void> syncNow() async {}
 
@@ -62,9 +66,8 @@ void main() {
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
-        // A worker with no handlers: a rules save wakes the queue, and the
-        // real one would reach a model server this test has no business
-        // dialling — and would claim the very rows the assertions read.
+        // A worker with no handlers: the real one would reach a model server
+        // this test has no business dialling.
         aiWorkerProvider.overrideWithValue(AiWorker(store, handlers: const [])),
       ],
       child: const MaterialApp(home: InboxScreen()),
@@ -99,7 +102,7 @@ void main() {
     await tapVisible(tester, find.byKey(SettingsSection.toggleKey(title)));
   }
 
-  Future<void> openRules(WidgetTester tester) async {
+  Future<void> openNeedsYou(WidgetTester tester) async {
     await openSettings(tester);
     await expand(tester, 'Needs You');
   }
@@ -112,154 +115,60 @@ void main() {
     // Eight sections on a wired host; every one of them shut.
     expect(find.text('Expand'), findsWidgets);
     expect(find.text('Collapse'), findsNothing);
-    expect(find.byType(NeedsYouRulesEditor), findsNothing);
     expect(find.byType(Slider), findsNothing);
   });
 
-  testWidgets('Settings opens the rules on what is stored', (tester) async {
+  testWidgets('Settings opens the slider on what is stored', (tester) async {
+    await store.setPref(needsYouThresholdKey, '0.45');
+
+    await openNeedsYou(tester);
+
+    expect(find.text('At 45% or more'), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.byKey(SettingsScreen.needsYouThresholdLineKey))
+          .data,
+      'Needs you at 45% or more',
+    );
+  });
+
+  testWidgets('a drag lands in app_prefs and moves the summary',
+      (tester) async {
+    await openNeedsYou(tester);
+    expect(find.text('At 35% or more'), findsOneWidget);
+
+    // All the way right: anything plausible, the lowest threshold.
+    final slider = find.byType(Slider);
+    await tester.ensureVisible(slider);
+    await tester.pump();
+    await tester.drag(slider, const Offset(2000, 0));
+    await tester.pump();
+    await tester.pump();
+
+    expect(await store.getPref(needsYouThresholdKey), '0.05');
+    // The summary followed it, which only happens because the host watches
+    // the prefs rather than reading them once.
+    expect(find.text('At 5% or more'), findsOneWidget);
+  });
+
+  testWidgets('a needs-you text an older build stored brings back no editor, '
+      'only one quiet line saying so', (tester) async {
     await store.setPref(needsYouRulesKey, 'Anything about the budget.');
 
-    await openRules(tester);
+    await openNeedsYou(tester);
 
-    expect(find.byType(NeedsYouRulesEditor), findsOneWidget);
-    expect(find.text('Anything about the budget.'), findsOneWidget);
-  });
-
-  testWidgets('a Save from the section lands in app_prefs', (tester) async {
-    await openRules(tester);
-
-    await tester.enterText(
-      find.descendant(
-        of: find.byType(NeedsYouRulesEditor),
-        matching: find.byType(TextField),
-      ),
-      '  Invoices always. \n',
-    );
-    await tester.pump();
-    await tapVisible(tester, find.text('Save'));
-    await tester.pump();
-
-    // Trimmed by the editor, stored verbatim by the store — the two halves of
-    // the one contract.
-    expect(await store.getPref(needsYouRulesKey), 'Invoices always.');
-    // Still here: Save commits and stays, because there is nowhere to go back
-    // to from a section.
-    expect(find.byType(NeedsYouRulesEditor), findsOneWidget);
-    // And the summary followed it, which only happens because the host watches
-    // the prefs rather than reading them once.
-    expect(find.textContaining('custom rules'), findsOneWidget);
-  });
-
-  testWidgets('a fresh install shows the default body in the field',
-      (tester) async {
-    // Nothing stored means the app's own rules are what the model reads, so
-    // they are what the editor opens on — and the screen has to hand the
-    // editor the real ones for that to be true.
-    await openRules(tester);
-
-    // Scoped to the editor: About me holds a TextField of its own, and a bare
-    // type finder would depend on which sections happen to be open.
+    expect(find.byType(Slider), findsOneWidget);
+    expect(find.text('Anything about the budget.'), findsNothing);
     expect(
-      tester
-          .widget<TextField>(find.descendant(
-            of: find.byType(NeedsYouRulesEditor),
-            matching: find.byType(TextField),
-          ))
-          .controller!
-          .text,
-      needsYouDefaultRules,
+      find.text('Your earlier Needs You rules are no longer used; the slider '
+          'is the one control.'),
+      findsOneWidget,
     );
   });
 
-  /// One kept inbound message, [ageDays] old.
-  Future<void> seedJudgeable(String id, {required int ageDays}) async {
-    await store.upsertMessage({
-      'source': 'email',
-      'source_message_id': id,
-      'conversation_key': 'conv-$id',
-      'direction': 'inbound',
-      'subject': 'Launch date',
-      'from_address': 'sarah@x.com',
-      'received_at': DateTime.now()
-          .toUtc()
-          .subtract(Duration(days: ageDays))
-          .toIso8601String(),
-      'triage_status': 'triaged',
-    });
-  }
+  testWidgets('with no old rules text there is no such line', (tester) async {
+    await openNeedsYou(tester);
 
-  /// Every `needs_you` work row, as `entity_id` → status.
-  Future<Map<String, String>> needsYouWork() async {
-    final rows = await db
-        .customSelect(
-          "SELECT entity_id, status FROM work_items "
-          "WHERE task_kind = 'needs_you'",
-        )
-        .get();
-    return {
-      for (final row in rows)
-        row.data['entity_id'] as String: row.data['status'] as String,
-    };
-  }
-
-  Future<List<Map<String, Object?>>> rejudgeEvents() async => [
-        for (final row in await store.recentActivity())
-          if (row['kind'] == 'needs_you_rejudge') row,
-      ];
-
-  /// Types [text] into the rules field and saves it.
-  Future<void> saveRules(WidgetTester tester, String text) async {
-    await tester.enterText(
-      find.descendant(
-        of: find.byType(NeedsYouRulesEditor),
-        matching: find.byType(TextField),
-      ),
-      text,
-    );
-    await tester.pump();
-    await tapVisible(tester, find.text('Save'));
-    await tester.pump();
-    await tester.pump();
-  }
-
-  testWidgets('saving the same rules again re-judges nothing', (tester) async {
-    // The whitespace is what makes Save available at all: the editor trims on
-    // the way out, so what the host is handed is the string already stored.
-    await store.setPref(needsYouRulesKey, 'Invoices always.');
-    await seedJudgeable('m1', ageDays: 1);
-
-    await openRules(tester);
-    await saveRules(tester, '  Invoices always. \n');
-
-    expect(await needsYouWork(), isEmpty);
-    expect(await rejudgeEvents(), isEmpty);
-  });
-
-  testWidgets('new rules re-judge the recent window and record what they queued',
-      (tester) async {
-    await seedJudgeable('m-today', ageDays: 1);
-    await seedJudgeable('m-week', ageDays: 5);
-    await seedJudgeable('m-month', ageDays: 30);
-
-    await openRules(tester);
-    await saveRules(tester, 'Anything about the budget.');
-
-    expect(
-      (await needsYouWork()).keys,
-      unorderedEquals(['m-today', 'm-week']),
-      reason: 'the month-old verdict is history, not a mistake',
-    );
-    final events = await rejudgeEvents();
-    expect(events, hasLength(1));
-    expect(events.single['count'], 2);
-  });
-
-  testWidgets('the Needs You summary counts the queue down', (tester) async {
-    await seedJudgeable('m-today', ageDays: 1);
-
-    await openRules(tester);
-    await saveRules(tester, 'Anything about the budget.');
-
-    expect(find.textContaining('judging 1 message'), findsOneWidget);
+    expect(find.byKey(SettingsScreen.oldNeedsYouRulesKey), findsNothing);
+    expect(find.textContaining('rules'), findsNothing);
   });
 }

@@ -590,25 +590,39 @@ void main() {
     });
 
     test('needs_you is judged against the threshold it was handed', () async {
-      await ingest('m1', urgency: 'high');
+      await ingest('m1');
+      await store.writeNeedsYouP('email', 'm1', p: 0.6);
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.6);
+      await store.writeAttentionScore('email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.9), 1);
       expect((await progressOf('m1'))['needs_you'], 0);
     });
 
-    test('an ask over the threshold reads as needing the user', () async {
-      await ingest('m1', urgency: 'high');
+    test('a probability over the threshold reads as needing the user',
+        () async {
+      await ingest('m1');
+      await store.writeNeedsYouP('email', 'm1', p: 0.6);
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.6);
+      // A low score: it orders Needs You and gates nothing.
+      await store.writeAttentionScore('email', 'c1', 0.05);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
       expect((await progressOf('m1'))['needs_you'], 1);
     });
 
+    test("triage's asks alone read as needing nobody", () async {
+      await ingest('m1', urgency: 'high');
+      await finishStages('m1');
+      await store.writeAttentionScore('email', 'c1', 0.95);
+
+      expect(await progress.sweepSettled(threshold: 0.5), 1);
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
+
     test('a message already read needs nobody, however loud it is', () async {
       await ingest('m1', urgency: 'urgent', isRead: true);
+      await store.writeNeedsYouP('email', 'm1', p: 0.9);
       await finishStages('m1');
       await store.writeAttentionScore('email', 'c1', 0.95);
 
@@ -621,6 +635,7 @@ void main() {
 
     test('a thread the user finished needs nobody', () async {
       await ingest('m1', urgency: 'high');
+      await store.writeNeedsYouP('email', 'm1', p: 0.9);
       await store.upsertConversation({
         'source': 'email',
         'conversation_key': 'c1',
@@ -636,6 +651,7 @@ void main() {
 
     test('a thread parked in Later needs nobody', () async {
       await ingest('m1', urgency: 'high');
+      await store.writeNeedsYouP('email', 'm1', p: 0.9);
       await finishStages('m1');
       await store.writeAttentionScore('email', 'c1', 0.95);
       await store.setConversationBucket(
@@ -650,7 +666,7 @@ void main() {
       expect((await progressOf('m1'))['needs_you'], 0);
     });
 
-    test('a message with no ask in it needs nobody, whatever it scores',
+    test('a message nothing has decided needs nobody, whatever it scores',
         () async {
       await ingest('m1');
       await finishStages('m1');
@@ -661,14 +677,14 @@ void main() {
       expect((await progressOf('m1'))['needs_you'], 0);
     });
 
-    test('a judged needs-you yes is an ask nothing else here provides',
+    test('a needs-you probability is the ask, and nothing else provides one',
         () async {
       // No urgency, no needs_action, no deadline, no CTA — the needs-you
-      // verdict is the only clause in the predicate that can be true, so this
-      // is the SQL side of the same fact the coordinator's toast reads.
+      // probability is the only clause in the predicate that asks, so this is
+      // the SQL side of the same fact the coordinator's toast reads.
       await ingest('m1');
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'names the owner and asks for a date');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'names the owner and asks for a date');
       await finishStages('m1');
       await store.writeAttentionScore('email', 'c1', 0.9);
 
@@ -678,8 +694,8 @@ void main() {
 
     test('a judged needs-you no leaves the message needing nobody', () async {
       await ingest('m1');
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: false, reason: 'a status update, addressed to the team');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.1, reason: 'a status update, addressed to the team');
       await finishStages('m1');
       await store.writeAttentionScore('email', 'c1', 0.9);
 
@@ -967,10 +983,10 @@ void main() {
     });
   });
 
-  // The chip that has to follow the verdict when the verdict moves. Nothing
+  // The chip that has to follow the answer when the answer moves. Nothing
   // else in the app reconciles `message_progress.needs_you` with
-  // `messages.needs_you_verdict`, so a snapshot taken at settle would go on
-  // showing an answer the pipeline has since changed its mind about.
+  // `messages.needs_you_p`, so a snapshot taken at settle would go on showing
+  // an answer the pipeline has since changed its mind about.
   group('the needs-you snapshot', () {
     Future<void> seedSettled({required bool needsYou}) async {
       await ingest('m1');
@@ -1040,9 +1056,9 @@ void main() {
     });
   });
 
-  // The one-shot for rows that settled before there was a verdict column to
-  // read. Everything here is a row whose snapshot says 0 while the verdict
-  // beside it says 1.
+  // The one-shot for rows that settled under an older rule. Everything here is
+  // a row whose snapshot says 0 while the probability beside it clears the
+  // slider.
   group('the needs-you backfill', () {
     Future<void> seedJudged({
       String conversationKey = 'c1',
@@ -1050,6 +1066,7 @@ void main() {
       String state = 'needs_reply',
       String? bucket,
       double score = 0.9,
+      double p = 0.9,
     }) async {
       await store.upsertConversation({
         'source': 'email',
@@ -1060,8 +1077,8 @@ void main() {
         'last_outbound_at': lastOutboundAt,
       });
       await ingest('m1', conversationKey: conversationKey);
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'names the owner');
+      await store.writeNeedsYouP('email', 'm1',
+          p: p, reason: 'names the owner');
       await progress.noteSettled(
         'email',
         'm1',
@@ -1076,7 +1093,7 @@ void main() {
       await store.writeAttentionScore('email', conversationKey, score);
     }
 
-    test('a judged yes on a live thread gains the chip, and ticks', () async {
+    test('a live thread over the slider gains the chip, and ticks', () async {
       await seedJudged();
       ticks.clear();
 
@@ -1100,8 +1117,8 @@ void main() {
         'last_message_at': '2026-09-01T10:00:00Z',
       });
       await ingest('m2', conversationKey: 'c2');
-      await store.writeNeedsYouVerdict('email', 'm2',
-          verdict: true, reason: 'names the owner');
+      await store.writeNeedsYouP('email', 'm2',
+          p: 0.9, reason: 'names the owner');
       await progress.noteSettled(
         'email',
         'm2',
@@ -1151,16 +1168,22 @@ void main() {
       expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
     });
 
-    test('and neither does one under the attention floor', () async {
-      await seedJudged(score: 0.2);
+    test('and neither does one under the slider', () async {
+      await seedJudged(p: 0.2);
 
       expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
     });
 
+    test('a low attention score is no bar to it', () async {
+      await seedJudged(score: 0.05);
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 1);
+    });
+
     test('a gate-dropped row keeps its drop', () async {
       await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'names the owner');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'names the owner');
       await store.writeAttentionScore('email', 'c1', 0.9);
 
       expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
@@ -1303,125 +1326,6 @@ void main() {
       await const PipelineProgress.disabled().clearNeedsYou('email', 'c1');
 
       expect((await progressOf('m1'))['needs_you'], 1);
-    });
-  });
-
-  group('re-judging the recent window', () {
-    /// The work rows for one kind, as `entity_id` → status.
-    Future<Map<String, String>> workRows(String kind) async {
-      final rows = await db
-          .customSelect(
-            'SELECT entity_id, status FROM work_items WHERE task_kind = ?',
-            variables: [Variable(kind)],
-          )
-          .get();
-      return {
-        for (final row in rows)
-          row.data['entity_id'] as String: row.data['status'] as String,
-      };
-    }
-
-    test('a finished judgement inside the window goes back on the queue',
-        () async {
-      await ingest('m1', triageStatus: 'triaged');
-      await store.enqueueWork('needs_you', 'email', 'm1');
-      await store.writeWork('needs_you', 'email', 'm1', status: 'done');
-
-      final n = await store.requeueNeedsYouRejudge(
-        sinceIso: '2026-08-25T00:00:00Z',
-      );
-
-      expect(n, 1);
-      expect(await workRows('needs_you'), {'m1': 'pending'});
-    });
-
-    test('and a message that was never judged gets its first row', () async {
-      // `requeueWork` inserts when there is nothing to revive, which is what
-      // reaches a message the first pass never got to.
-      await ingest('m1', triageStatus: 'triaged');
-
-      expect(
-        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
-        1,
-      );
-      expect(await workRows('needs_you'), {'m1': 'pending'});
-    });
-
-    test('a message older than the window is left alone', () async {
-      // Those rules were the rules when it landed. History, not a mistake.
-      await ingest('m1',
-          triageStatus: 'triaged', receivedAt: '2026-08-01T10:00:00Z');
-
-      expect(
-        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
-        0,
-      );
-      expect(await workRows('needs_you'), isEmpty);
-    });
-
-    test('a gated message is left alone unless it is a legacy chat row',
-        () async {
-      // The same admission the first judgement had: the pipeline threw the
-      // newsletter out, and a rules edit is not a reason to pay a model for it.
-      await ingest('m-gated',
-          triageStatus: 'skipped', gateReason: 'newsletter');
-      await ingest('m-chat',
-          triageStatus: 'skipped',
-          gateReason: 'teams_source',
-          source: 'teams');
-
-      expect(
-        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
-        1,
-      );
-      expect(await workRows('needs_you'), {'m-chat': 'pending'});
-    });
-
-    test('the cap takes the newest and stops', () async {
-      await ingest('m-old',
-          triageStatus: 'triaged', receivedAt: '2026-09-01T08:00:00Z');
-      await ingest('m-mid',
-          triageStatus: 'triaged', receivedAt: '2026-09-01T09:00:00Z');
-      await ingest('m-new',
-          triageStatus: 'triaged', receivedAt: '2026-09-01T11:00:00Z');
-
-      expect(
-        await store.requeueNeedsYouRejudge(
-          sinceIso: '2026-08-25T00:00:00Z',
-          cap: 2,
-        ),
-        2,
-      );
-      expect(
-        (await workRows('needs_you')).keys,
-        unorderedEquals(['m-new', 'm-mid']),
-      );
-    });
-
-    test('an item a drain is already holding keeps its claim and its place',
-        () async {
-      // `requeueWork` refuses to reset a `processing` row — handing an item a
-      // worker holds to a second drain is worse than judging it a moment late.
-      // It is still counted: it is still going to be judged.
-      await ingest('m1', triageStatus: 'triaged');
-      await store.enqueueWork('needs_you', 'email', 'm1');
-      await store.writeWork('needs_you', 'email', 'm1', status: 'processing');
-
-      expect(
-        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
-        1,
-      );
-      expect(await workRows('needs_you'), {'m1': 'processing'});
-    });
-
-    test('the owner\'s own messages are never re-judged', () async {
-      await ingest('m-out', direction: 'outbound', triageStatus: 'triaged');
-
-      expect(
-        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
-        0,
-      );
-      expect(await workRows('needs_you'), isEmpty);
     });
   });
 

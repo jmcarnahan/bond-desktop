@@ -185,7 +185,8 @@ class ModelServerProbe {
 
     // An empty list is still a live server — it is reachable with nothing
     // loaded, which is a different thing from unreachable and the screen has
-    // to be able to say so.
+    // to be able to say so. An entry with no `id` is named by `name`: the
+    // `models` shape a Kev decision server lists (`{"name", "qhash", …}`).
     return ModelProbeResult(
       reachable: true,
       probedUrl: url,
@@ -193,6 +194,8 @@ class ModelServerProbe {
         for (final entry in list)
           if (entry is Map && entry['id'] is String)
             entry['id'] as String
+          else if (entry is Map && entry['name'] is String)
+            entry['name'] as String
           else if (entry is String)
             entry,
       ],

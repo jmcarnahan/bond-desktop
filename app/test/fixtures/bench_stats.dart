@@ -1,11 +1,11 @@
 /// The arithmetic every live benchmark prints, and the accumulator it prints
 /// from.
 ///
-/// Extracted rather than duplicated: `llm_bench_live_test.dart`,
-/// `llm_ab_live_test.dart` and `llm_membership_live_test.dart` are read side by
-/// side — the bench says how fast the app's path is, the A/B says what that
-/// path cost in agreement — and two copies of a percentile that drifted apart
-/// would make those tables quietly incomparable.
+/// Extracted rather than duplicated: `llm_bench_live_test.dart` and
+/// `llm_ab_live_test.dart` are read side by side — the bench says how fast the
+/// app's path is, the A/B says what that path cost in agreement — and two
+/// copies of a percentile that drifted apart would make those tables quietly
+/// incomparable.
 ///
 /// What lives here now is more than percentiles because the question the bench
 /// answers has grown. Latency alone cannot compare two runtimes: a server that

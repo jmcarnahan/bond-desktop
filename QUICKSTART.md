@@ -15,8 +15,8 @@ server you have not named:
 
 | Role | Hand-started server | Port | Model | Size |
 |---|---|---|---|---|
-| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
-| **Generative** (message summaries, the needs-you band, storylines, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
+| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected; and judges storylines: which storyline a thread belongs to, whether a charter is specific) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
+| **Generative** (message summaries, storyline titles, charters and recaps, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
 | **Embeddings** (clustering, search) | `make embed` | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
 
 `make setup` also starts `make fast` on :8082 (Qwen3-4B-Instruct Q8_0,
@@ -31,12 +31,30 @@ app's own server runs the 27B, or the 4B on a smaller Mac.
 sha256-checked, from the export the training project writes (`DECIDE_SRC`),
 so it works only on a machine that has that export. Without it new mail
 parks at triage (the rail and Settings, Models say the decision model is not
-installed): no summary, no needs-you verdict and no suggested draft until it is
-installed, because the text and needs-you work waits behind triage. Sync,
+installed): no summary, no needs-you probability, no storyline filed and no
+suggested draft until it is installed, because the text and needs-you work
+waits behind triage and the storyline lane parks on the same model. Sync,
 reading and search still work. The next round
 ships it as a model bundle from a registry (JFrog Artifactory; the design is
 `docs/DESIGN-model-bundles.md` in the training project), which retires
 `make decide-install`.
+
+**The installed model must be the current one.** `make decide-install` copies the v3 export
+(`bond-decide-mbl-v3`, a schema-2 heads file with the twelve questions). An older install (the v2
+schema-1 heads) parks triage with the rail sentence "The installed decision model is an older
+version that this app no longer reads · N waiting · install the current decision model to resume
+sorting new mail", and Settings, Models says the same under the Decision model with a quieter
+`For developers: make decide-install` line beneath it. The box serves the decide slot under the
+GGUF's name less its `-<quant>.gguf` (`bond-decide-mbl-v3`, which `boxDecideModel` matches;
+`--decide-served` overrides it), and a served name that does not match the heads' model is refused.
+
+**Decision model on your server.** Settings, Models can point the Decision
+model at **Your server** instead, and what the URL serves decides what this Mac
+needs. A URL to ModernBERT on llama-server (`…/v1/embeddings`) returns vectors
+and the app applies the heads here, so this Mac still needs the heads file from
+`make decide-install`. A URL to a Kev 4B wrapper (`…/v1/systemone`) answers the
+questions on the server, and this Mac needs no decision files at all. The app
+detects which one it is when it checks the address and names it under the form.
 
 You need:
 
@@ -148,6 +166,12 @@ whichever lines apply. Nothing else in the repo needs to change:
 # and embeddings on :8081 instead of following the app's router. Read as a
 # value, so `= 0` turns it back off.
 # BOND_DEV_HAND_SERVERS = 1
+# Serves a recorded sample mailbox instead of Microsoft (see "Running against a
+# sample" in step 5). Read-only, on its own database file; set the lookback in
+# Settings -> Sync & data, and pull Teams with Refresh. The path must be
+# ABSOLUTE: a relative path or `~` resolves against the app's working
+# directory. The sample is real mail: nothing from it may be committed.
+# BOND_SAMPLE_DIR = /absolute/path/to/sample-v2
 ```
 
 ## 3. Models and servers
@@ -178,7 +202,8 @@ What happens:
   refusing unless both match the export's `SHA256SUMS`. The app reads the
   heads file from there whichever server runs the model, so it is needed on
   the hand-started path too. It fails with a pointer when the export is not on
-  this machine (see step 0).
+  this machine (see step 0). It copies the v3 model; an older v2 install
+  is refused and parks triage until it is run again (step 0).
 - `make decide` serves the installed model on :8083.
 - `make status` should show `model`, `embed`, `fast` and `decide` as `[up]`
   with a pid. `fast` is up because `make setup` starts it for the benches; the
@@ -314,6 +339,39 @@ Rebuild the app after a `git pull`:
 make app-install
 make app-run
 ```
+
+### Running against a sample
+
+`BOND_SAMPLE_DIR = /absolute/path/to/sample-v2` in `local.mk` (step 2), then
+`make app-run`, points the app at a recorded sample directory instead of
+Microsoft. Every stage after the backend runs exactly as it does on a real
+account, so this is how the pipeline is reviewed by hand at a real mailbox's
+size. The path must be absolute: a relative path or `~` resolves against the
+app's working directory.
+
+- It is **read-only**: send, drafts and chat writes refuse with a sentence
+  that says "sandbox", and attachment previews and profile photos are absent.
+- It uses its **own database file**, `bond_inbox-sample.db`, beside the real
+  one. Remove the line and rebuild to go back; there is nothing to clean up.
+- A fresh file means fresh settings: the wizard shows unless
+  `BOND_DEV_SKIP_SETUP = 1` is set too, and the model servers are entered once.
+- The default lookback is one day and a recording ends on a fixed date, so the
+  first sync finds nothing. Set the window in **Settings → Sync & data** to
+  reach back into the sample, turn processing off, press **Forget everything
+  and re-sync** once, and turn processing back on, so the next drain is a first
+  run over the wide window. Widening without it ingests the whole sample as
+  quiet backfill: it is triaged, but no thread's state moves, so every thread
+  reads Waiting. The window caps at 365 days, so the oldest days of a
+  year-long recording are out of reach.
+- Teams is pulled with **Refresh**, as always. Chats never show unread in the
+  sandbox: the recording has no chat read state, so every chat message is
+  stored as read. Mail read state is the recording's, so most mail arrives
+  read.
+- The first sync of each launch waits while the sample is parsed: about 20
+  seconds for a year-long mailbox.
+- **Sign out** wipes the sandbox database and lands back in an empty inbox,
+  which works as a reset.
+- The sample is real mail. Nothing from it goes into the repo.
 
 ## 6. Troubleshooting
 

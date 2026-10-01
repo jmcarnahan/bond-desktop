@@ -34,6 +34,12 @@ import 'fixtures/test_db.dart';
 
 class _FakeSync implements MailSync {
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> syncNow() async {}
 
   @override

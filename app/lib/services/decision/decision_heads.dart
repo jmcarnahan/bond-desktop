@@ -1,9 +1,10 @@
-/// The nine classification heads the decision model ends in, applied in Dart.
+/// The decision model's classification heads, applied in Dart: the nine
+/// message fields and the three storyline questions.
 ///
 /// The server returns the encoder's raw mean-pooled vector and nothing else;
-/// the heads — one linear layer and one calibration temperature per field —
-/// ride beside the model file as `decide-heads.json`, exported losslessly from
-/// the PyTorch checkpoint. Keeping them here rather than on the server is what
+/// the heads — one linear layer and one calibration temperature per
+/// question — ride beside the model file as `decide-heads.json` (schema 2),
+/// exported losslessly from the PyTorch checkpoint. Keeping them here rather than on the server is what
 /// lets a stock llama-server serve the model at all.
 library;
 
@@ -12,9 +13,17 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show immutable;
 
-import '../llm/llm_client.dart' show LlmFormatException;
+import '../llm/llm_client.dart'
+    show
+        DecisionMisconfiguredException,
+        DecisionOlderModelException,
+        LlmFormatException,
+        decisionOlderModelText;
+import 'decision_questions.dart';
+import 'decision_state.dart' show decisionRendererVersion;
 
 /// The fields in head order, which is `distill/questions.py` `FIELDS`.
 const List<String> decisionFields = [
@@ -83,6 +92,27 @@ class ChoiceAnswer {
     required this.probabilities,
   });
 
+  /// The answer a set of calibrated probabilities makes: the most probable of
+  /// [options], the first on a tie, as [DecisionHeads.apply] chooses. The
+  /// probabilities are kept in [options] order. For a server that answers
+  /// probabilities itself (the `systemone` kind), which calibrated them there.
+  factory ChoiceAnswer.fromProbabilities(
+    List<String> options,
+    Map<String, double> probabilities,
+  ) {
+    var best = options.first;
+    for (final option in options.skip(1)) {
+      if ((probabilities[option] ?? 0) > (probabilities[best] ?? 0)) {
+        best = option;
+      }
+    }
+    return ChoiceAnswer(
+      choice: best,
+      confidence: probabilities[best] ?? 0,
+      probabilities: {for (final o in options) o: probabilities[o] ?? 0},
+    );
+  }
+
   Map<String, Object?> toJson() => {
         'choice': choice,
         'confidence': confidence,
@@ -106,6 +136,20 @@ class DecisionAnswers {
   final Map<String, ChoiceAnswer> fields;
 
   const DecisionAnswers(this.fields);
+
+  /// All nine answers from each field's calibrated probabilities, keyed by
+  /// field and then option: [ChoiceAnswer.fromProbabilities] over
+  /// [decisionOptions], in [decisionFields] order.
+  factory DecisionAnswers.fromProbabilities(
+    Map<String, Map<String, double>> probabilities,
+  ) =>
+      DecisionAnswers({
+        for (final field in decisionFields)
+          field: ChoiceAnswer.fromProbabilities(
+            decisionOptions[field]!,
+            probabilities[field] ?? const {},
+          ),
+      });
 
   /// The answer for [field]. Throws [ArgumentError] for a field this model
   /// does not answer — a caller asking for one is a programming error.
@@ -136,7 +180,7 @@ class DecisionAnswers {
       });
 }
 
-/// One field's linear head.
+/// One question's linear head.
 class _Head {
   final String name;
   final List<String> options;
@@ -150,41 +194,67 @@ class _Head {
 }
 
 /// The heads file, validated, and the arithmetic that turns a vector into
-/// [DecisionAnswers].
+/// [DecisionAnswers] or a storyline question's p(yes).
 class DecisionHeads {
-  /// The question hash the model was trained under
-  /// (`questions.question_hash()`). A heads file from another question set
-  /// answers different questions, so it is refused rather than trusted.
-  static const String expectedQhash = '6eba387492208260';
+  /// The question hash the model was trained under ([decisionQhash]). A
+  /// heads file from another question set answers different questions, so
+  /// it is refused rather than trusted.
+  static const String expectedQhash = decisionQhash;
+
+  /// The width of the encoder's pooled vector: ModernBERT-large's hidden
+  /// size. A file whose heads read another width is not this model's.
+  static const int width = 1024;
+
+  /// What a schema-1 file says: the nine-field heads of the first decision
+  /// model, which cannot answer the storyline questions. It is the one
+  /// refusal the owner meets after an upgrade, so it names the cause rather
+  /// than a mismatch, in plain words with no command
+  /// ([decisionOlderModelText], `DecisionOlderModelException`'s sentence).
+  static const String olderModelText = decisionOlderModelText;
 
   /// The model's own name, from the file — what a stored decision records.
   final String model;
   final String qhash;
 
-  /// The vector width every head reads.
+  /// The first 12 hex of the file's sha256, or empty for heads built in
+  /// memory. Two installs that share a [model] name but differ in any weight
+  /// differ here (`DecisionClient.modelIdentity`).
+  final String fingerprint;
+
+  /// The vector width every head reads: the file's weight rows', which is
+  /// always [width].
   final int hidden;
 
   /// The encoder's context in tokens, specials included. The client truncates
   /// a long state to this.
   final int maxTokens;
 
+  /// The nine message fields' heads, in [decisionFields] order.
   final List<_Head> _heads;
+
+  /// The storyline questions' heads, one per [StorylineQuestion].
+  final Map<StorylineQuestion, _Head> _storyline;
 
   DecisionHeads._(
     this.model,
     this.qhash,
+    this.fingerprint,
     this.hidden,
     this.maxTokens,
     this._heads,
+    this._storyline,
   );
 
-  /// Reads and validates [file]. Throws [LlmFormatException] when the file is
-  /// not a heads file this build can use, [FileSystemException] when it cannot
-  /// be read.
+  /// Reads and validates [file]. Throws [DecisionOlderModelException] for the
+  /// older model's file, [LlmFormatException] when the file is otherwise not
+  /// a heads file this build can use, [FileSystemException] when it cannot be
+  /// read.
   static Future<DecisionHeads> load(File file) async {
     final Object? decoded;
+    final String text;
     try {
-      decoded = jsonDecode(await file.readAsString());
+      text = await file.readAsString();
+      decoded = jsonDecode(text);
     } on FormatException {
       throw const LlmFormatException(
         'The decision heads file is not JSON.',
@@ -195,53 +265,95 @@ class DecisionHeads {
         'The decision heads file is not a JSON object.',
       );
     }
-    return DecisionHeads.fromJson(decoded.cast<String, Object?>());
+    return DecisionHeads.fromJson(
+      decoded.cast<String, Object?>(),
+      fingerprint: headsFingerprint(text),
+    );
   }
 
-  /// Validates everything [apply] relies on, so a bad file fails once, here,
-  /// with a sentence, rather than as a wrong answer on every message.
-  factory DecisionHeads.fromJson(Map<String, Object?> json) {
+  /// [fingerprint] for a heads file's [text].
+  static String headsFingerprint(String text) =>
+      sha256.convert(utf8.encode(text)).toString().substring(0, 12);
+
+  /// Validates everything [apply] and [pYes] rely on, so a bad file fails
+  /// once, here, with a sentence, rather than as a wrong answer on every
+  /// message.
+  ///
+  /// Schema 2 (question set v5): `questions` is the nine message fields in
+  /// [decisionFields] order, renderer `message`, then `same_effort` (`pair`),
+  /// `member_of` (`membership`) and `charter_specific` (`charter`), each
+  /// `{id, renderer, options, weight, bias, temperature}`.
+  factory DecisionHeads.fromJson(
+    Map<String, Object?> json, {
+    String fingerprint = '',
+  }) {
     Never refuse(String why) =>
         throw LlmFormatException('The decision heads file $why.');
 
-    if (json['schema'] != 1) refuse('has schema ${json['schema']}, not 1');
+    if (json['schema'] == 1) throw const DecisionOlderModelException();
+    if (json['schema'] != 2) refuse('has schema ${json['schema']}, not 2');
     final qhash = json['qhash'];
     if (qhash != expectedQhash) {
       refuse('was trained on question set $qhash, not $expectedQhash');
+    }
+    if (json['renderer'] != decisionRendererVersion) {
+      refuse('reads renderer ${json['renderer']}, not '
+          '$decisionRendererVersion');
     }
     if (json['pooling'] != 'mean') {
       refuse('pools by ${json['pooling']}, not mean');
     }
     final model = json['model'];
     if (model is! String || model.isEmpty) refuse('names no model');
-    final hidden = json['hidden'];
-    if (hidden is! int || hidden <= 0) refuse('has no hidden width');
+    // The width is the first weight row's; every row of every question must
+    // agree with it, and it must be [width]. `hidden` is optional in schema
+    // 2, and a file that states one must state the same.
+    final questions = json['questions'];
+    final firstQuestion =
+        questions is List && questions.isNotEmpty ? questions.first : null;
+    final firstWeight = firstQuestion is Map ? firstQuestion['weight'] : null;
+    final firstRow =
+        firstWeight is List && firstWeight.isNotEmpty ? firstWeight.first : null;
+    if (firstRow is! List) refuse('has no weight to read a width from');
+    final hidden = firstRow.length;
+    if (hidden != width) refuse('has heads $hidden wide, not $width');
+    final stated = json['hidden'];
+    if (stated != null && stated != hidden) {
+      refuse('has a hidden width of $stated, but heads $hidden wide');
+    }
     final maxTokens = json['max_tokens'];
     // Room for the two specials and at least one token of text.
     if (maxTokens is! int || maxTokens < 3) refuse('has no max_tokens');
 
-    final fields = json['fields'];
-    if (fields is! List || fields.length != decisionFields.length) {
-      refuse('does not carry the ${decisionFields.length} decision fields');
+    final expected = [
+      for (final f in decisionFields) (f, 'message', decisionOptions[f]!),
+      for (final q in StorylineQuestion.values)
+        (q.id, q.renderer, StorylineQuestion.options),
+    ];
+    if (questions is! List || questions.length != expected.length) {
+      refuse('does not carry the ${expected.length} decision questions');
     }
     final heads = <_Head>[];
-    for (var i = 0; i < decisionFields.length; i++) {
-      final name = decisionFields[i];
-      final field = fields[i];
-      if (field is! Map || field['name'] != name) {
-        refuse('has its fields out of order (expected $name at $i)');
+    for (var i = 0; i < expected.length; i++) {
+      final (name, renderer, options) = expected[i];
+      final question = questions[i];
+      if (question is! Map || question['id'] != name) {
+        refuse('has its questions out of order (expected $name at $i)');
       }
-      final expected = decisionOptions[name]!;
-      final options = field['options'];
-      if (options is! List ||
-          options.length != expected.length ||
-          [for (var j = 0; j < expected.length; j++) options[j] == expected[j]]
+      if (question['renderer'] != renderer) {
+        refuse('has $name on renderer ${question['renderer']}, not '
+            '$renderer');
+      }
+      final got = question['options'];
+      if (got is! List ||
+          got.length != options.length ||
+          [for (var j = 0; j < options.length; j++) got[j] == options[j]]
               .contains(false)) {
         refuse('has different options for $name');
       }
-      final n = expected.length;
+      final n = options.length;
 
-      final weight = field['weight'];
+      final weight = question['weight'];
       if (weight is! List || weight.length != n) {
         refuse('has a $name weight that is not $n rows');
       }
@@ -253,12 +365,12 @@ class DecisionHeads {
         rows.add(_numbers(row, () => refuse('has a non-number in $name')));
       }
 
-      final bias = field['bias'];
+      final bias = question['bias'];
       if (bias is! List || bias.length != n) {
         refuse('has a $name bias that is not $n long');
       }
 
-      final temperature = field['temperature'];
+      final temperature = question['temperature'];
       if (temperature is! num ||
           !temperature.isFinite ||
           temperature <= 0) {
@@ -267,13 +379,25 @@ class DecisionHeads {
 
       heads.add(_Head(
         name,
-        expected,
+        options,
         rows,
         _numbers(bias, () => refuse('has a non-number in $name')),
         temperature.toDouble(),
       ));
     }
-    return DecisionHeads._(model, qhash as String, hidden, maxTokens, heads);
+    final fields = decisionFields.length;
+    return DecisionHeads._(
+      model,
+      qhash as String,
+      fingerprint,
+      hidden,
+      maxTokens,
+      heads.sublist(0, fields),
+      {
+        for (final (i, q) in StorylineQuestion.values.indexed)
+          q: heads[fields + i],
+      },
+    );
   }
 
   static Float64List _numbers(List<Object?> values, Never Function() bad) {
@@ -286,49 +410,85 @@ class DecisionHeads {
     return out;
   }
 
-  /// Every field's answer for one raw (UNnormalised) pooled vector:
-  /// `softmax((W·v + b) / T)`, the argmax (the first on a tie) and its
-  /// probability.
+  /// Every message field's answer for one raw (UNnormalised) pooled
+  /// vector: `softmax((W·v + b) / T)`, the argmax (the first on a tie) and
+  /// its probability.
   DecisionAnswers apply(List<double> vector) {
+    _checkWidth(vector);
+    final answers = <String, ChoiceAnswer>{};
+    for (final head in _heads) {
+      final logits = _logits(head, vector);
+      // The argmax of the LOGITS, the first on a tie: two probabilities that
+      // round to the same double must not change which option is chosen.
+      var best = 0;
+      for (var o = 1; o < logits.length; o++) {
+        if (logits[o] > logits[best]) best = o;
+      }
+      final probabilities = _softmaxOf(logits);
+      answers[head.name] = ChoiceAnswer(
+        choice: head.options[best],
+        confidence: probabilities[best],
+        probabilities: {
+          for (var o = 0; o < probabilities.length; o++)
+            head.options[o]: probabilities[o],
+        },
+      );
+    }
+    return DecisionAnswers(answers);
+  }
+
+  /// [question]'s calibrated p(yes) for one raw pooled vector of its
+  /// rendered state: `softmax((W·v + b) / T)` at `yes`.
+  double pYes(StorylineQuestion question, List<double> vector) {
+    _checkWidth(vector);
+    final head = _storyline[question]!;
+    return _softmaxOf(_logits(head, vector))[head.options.indexOf('yes')];
+  }
+
+  /// A vector of another width is the SERVER's (another model behind the
+  /// address), never one message's, so it parks rather than failing the
+  /// message: every message would come back the same width.
+  void _checkWidth(List<double> vector) {
     if (vector.length != hidden) {
-      throw LlmFormatException(
+      throw DecisionMisconfiguredException(
         'The decision model returned a vector of ${vector.length} numbers, '
         'not $hidden.',
       );
     }
-    final answers = <String, ChoiceAnswer>{};
-    for (final head in _heads) {
-      final n = head.options.length;
-      final logits = Float64List(n);
-      for (var o = 0; o < n; o++) {
-        final row = head.weight[o];
-        var dot = head.bias[o];
-        for (var k = 0; k < hidden; k++) {
-          dot += row[k] * vector[k];
-        }
-        logits[o] = dot / head.temperature;
+  }
+
+  /// One head's `(W·v + b) / T`, in option order.
+  Float64List _logits(_Head head, List<double> vector) {
+    final n = head.options.length;
+    final logits = Float64List(n);
+    for (var o = 0; o < n; o++) {
+      final row = head.weight[o];
+      var dot = head.bias[o];
+      for (var k = 0; k < hidden; k++) {
+        dot += row[k] * vector[k];
       }
-      // Max-subtracted, so a large logit cannot overflow `exp`.
-      var best = 0;
-      for (var o = 1; o < n; o++) {
-        if (logits[o] > logits[best]) best = o;
-      }
-      final top = logits[best];
-      var sum = 0.0;
-      final exps = Float64List(n);
-      for (var o = 0; o < n; o++) {
-        exps[o] = math.exp(logits[o] - top);
-        sum += exps[o];
-      }
-      final probabilities = {
-        for (var o = 0; o < n; o++) head.options[o]: exps[o] / sum,
-      };
-      answers[head.name] = ChoiceAnswer(
-        choice: head.options[best],
-        confidence: exps[best] / sum,
-        probabilities: probabilities,
-      );
+      logits[o] = dot / head.temperature;
     }
-    return DecisionAnswers(answers);
+    return logits;
+  }
+
+  /// [logits]' probabilities, in the same order.
+  static Float64List _softmaxOf(Float64List logits) {
+    final n = logits.length;
+    // Max-subtracted, so a large logit cannot overflow `exp`.
+    var top = logits[0];
+    for (var o = 1; o < n; o++) {
+      if (logits[o] > top) top = logits[o];
+    }
+    var sum = 0.0;
+    final out = Float64List(n);
+    for (var o = 0; o < n; o++) {
+      out[o] = math.exp(logits[o] - top);
+      sum += out[o];
+    }
+    for (var o = 0; o < n; o++) {
+      out[o] /= sum;
+    }
+    return out;
   }
 }

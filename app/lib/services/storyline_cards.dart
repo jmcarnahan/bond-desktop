@@ -1,18 +1,22 @@
 /// The card and vector statics both halves of the storyline work read.
 ///
 /// They came out of `storyline_service.dart` when that file was split into the
-/// service, `StorylineEdits` and `StorylineGrouper`: every one of them is a
-/// pure function of its arguments, and the naming pass, the grouping pass and
-/// the confirms all have to build a card and order a cluster the same way or
-/// the model that groups a thread reads something different from the model
-/// that names it. Public rather than private to one half for exactly that
-/// reason, and re-exported by `storyline_service.dart` so nothing that imported
-/// the service for them has to change.
+/// service, `StorylineEdits` and `StorylineGrouper`: every one of them but
+/// [clusteringCardFor] is a pure function of its arguments, and the passes
+/// that build a card or order a cluster have to do it the same way.
+/// [clusteringCardFor] reads the store (the thread text, the card data), and
+/// lives here because it is the one entry to a thread's card. Public rather
+/// than private to one half for exactly that reason, and re-exported by
+/// `storyline_service.dart` so nothing that imported the service for them
+/// has to change.
 library;
 
+import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'clustering_card.dart';
 import 'conversation_state.dart';
+import 'decision/storyline_state.dart' show renderStorylineCharter;
+import 'decision/storyline_thread_input.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/storyline_tasks.dart';
 
@@ -50,23 +54,16 @@ List<int> centralIndexes(
 /// [cards] numbered `[1] `, `[2] `, … in the order given, each clamped to
 /// [NameStorylineTask.cardCap] AFTER its number is prefixed, then whole
 /// cards dropped from the END until the set joined with `\n---\n` fits
-/// [cap], which defaults to [NameStorylineTask.cardsCap]. Only the grouping
-/// call passes one, and only because `GroupingMode.pool` shows four times
-/// as many cards as the namer ever does; every other caller builds to the
-/// namer's set, which is what makes a card read the same to the model that
-/// groups it as to the model that names it.
+/// [NameStorylineTask.cardsCap].
 ///
-/// The numbers are what the prompt's `outliers` rule points at, so they are
-/// 1-based and the caller maps them back. Dropping whole cards rather than
+/// The numbers are 1-based, so the namer can refer to a thread by the number
+/// a person would read it under. Dropping whole cards rather than
 /// truncating the joined string is the whole change: the old prompt fitted
 /// every card into four thousand characters by cutting each one to eighty
 /// characters, which left the model a list of subject lines. The sweep
 /// orders by centrality, so a dropped card is an edge; the bootstrap path
 /// passes member order and a dropped card there is the last member.
-List<String> numberedCards(
-  List<String> cards, {
-  int cap = NameStorylineTask.cardsCap,
-}) {
+List<String> numberedCards(List<String> cards) {
   const separator = '\n---\n';
   final numbered = <String>[
     for (var i = 0; i < cards.length; i++)
@@ -76,7 +73,7 @@ List<String> numberedCards(
   final kept = <String>[];
   for (final card in numbered) {
     final cost = card.length + (kept.isEmpty ? 0 : separator.length);
-    if (total + cost > cap) break;
+    if (total + cost > NameStorylineTask.cardsCap) break;
     kept.add(card);
     total += cost;
   }
@@ -119,7 +116,10 @@ String threadKey(String source, String conversationKey) =>
 /// Naming sees every member thread at once under one 4000-character cap, and
 /// a topic list is the segment that says least per character it costs — the
 /// sentence describing what was last said is what a title comes out of. The
-/// membership prompt, which reads ONE card, can afford both.
+/// membership prompt, which reads ONE card, can afford both. The newest
+/// message's own words ([newestMessageExcerpt]) in place of the summary were
+/// measured on 2026-09-30 at 55/98 against the summary's 60/98 on `make
+/// golden-sweep` and do not ship.
 String namingCardForConversationRow(
   Map<String, Object?> row,
   Map<String, Object?>? cardData,
@@ -135,3 +135,54 @@ String namingCardForConversationRow(
     summary: cardData?['summary'] as String?,
   );
 }
+
+/// The card a THREAD is embedded from under [variant]: the one entry every
+/// place that embeds a thread goes through (the assign pass and the golden
+/// seed), so a bench and the app cannot build two cards.
+///
+/// [ClusteringCardVariant.text] is the thread text the decision model's
+/// storyline questions read ([storylineThreadTextFor]), rendered over the
+/// store, and [row] is not read. Every other variant is the pure
+/// [clusteringCardForConversationRow] over [row] — the conversation row the
+/// caller already holds — and the store's [MessageStore.clusteringCardData]
+/// for that variant.
+Future<String> clusteringCardFor(
+  MessageStore store,
+  String source,
+  String conversationKey,
+  Map<String, Object?> row, {
+  ClusteringCardVariant variant = shippedClusteringCard,
+}) async {
+  if (variant == ClusteringCardVariant.text) {
+    return (await storylineThreadTextFor(store, source, conversationKey)).text;
+  }
+  return clusteringCardForConversationRow(
+    row,
+    await store.clusteringCardData(source, conversationKey, variant: variant),
+    variant: variant,
+  );
+}
+
+/// The text a storyline's CHARTER is embedded from, for a storyline with no
+/// member vector to average.
+///
+/// Under [ClusteringCardVariant.text] it is the decision model's own charter
+/// rendering ([renderStorylineCharter]), so a charter and a thread text are
+/// the same renderer family in one space. Every other card is
+/// [buildClusteringCard] with the title in the subject slot and the charter
+/// in the summary slot — `title |  |  | charter` for the shipped shapes, the
+/// shape the threads it is compared with were built in.
+String charterCardFor(
+  String title,
+  String charter, {
+  ClusteringCardVariant variant = shippedClusteringCard,
+}) =>
+    variant == ClusteringCardVariant.text
+        ? renderStorylineCharter(title: title, charter: charter)
+        : buildClusteringCard(
+            subject: title,
+            participants: const [],
+            topics: const [],
+            summary: charter,
+            variant: variant,
+          );

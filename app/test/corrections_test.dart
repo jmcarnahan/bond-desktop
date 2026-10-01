@@ -4,8 +4,8 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
-import 'package:bond_inbox/services/attention.dart';
 import 'package:bond_inbox/services/attention_service.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +16,12 @@ import 'fixtures/test_db.dart';
 /// A [MailSync] that never touches a socket. These tests are about what the
 /// corrections write, so nothing here needs the network to do anything at all.
 class SilentSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   @override
   Future<void> syncNow() async {}
 
@@ -45,6 +51,7 @@ void main() {
     String from = 'eric@x.com',
     String state = 'waiting',
     String receivedAt = '2026-08-28T10:00:00Z',
+    double? needsYouP,
   }) async {
     await store.upsertConversation({
       'conversation_key': key,
@@ -60,6 +67,9 @@ void main() {
       'from_address': from,
       'received_at': receivedAt,
     });
+    if (needsYouP != null) {
+      await store.writeNeedsYouP('email', '$key-m1', p: needsYouP);
+    }
   }
 
   ConversationsNotifier notifier() =>
@@ -150,7 +160,7 @@ void main() {
     });
 
     test('deferred threads leave the rail sections they were in', () async {
-      await seed('c1', state: 'needs_reply');
+      await seed('c1', state: 'needs_reply', needsYouP: 0.9);
       final n = notifier();
       await n.load();
       expect(needsYouRows(rows(n)), hasLength(1));
@@ -480,29 +490,21 @@ void main() {
   group('the threshold re-filters Needs You', () {
     test('a thread below the cut leaves Needs You but stays in Conversations',
         () async {
-      // A waiting thread with an ask scores around the waiting base, which is
-      // below the default cut.
-      await store.upsertConversation({
-        'conversation_key': 'c1',
-        'state': 'waiting',
-        'cta_text': 'Send the homepage copy',
-        'last_message_at': DateTime.now().toUtc().toIso8601String(),
-      });
+      // A thread whose message needs the owner at 40%: in at the default
+      // slider, out once the slider asks for more.
+      await seed('c1', needsYouP: 0.4);
       final n = notifier();
       await n.load();
 
       final all = rows(n);
       expect(needsYouRows(all), hasLength(1),
-          reason: 'with no threshold everything eligible is in');
+          reason: 'at the default slider the thread is in');
       expect(conversationRows(all), isEmpty,
           reason: 'and what Needs You claims, Conversations does not repeat');
 
+      expect(needsYouRows(all, threshold: 0.5), isEmpty);
       expect(
-        needsYouRows(all, threshold: AttentionTuning.defaultThreshold),
-        isEmpty,
-      );
-      expect(
-        conversationRows(all, threshold: AttentionTuning.defaultThreshold),
+        conversationRows(all, threshold: 0.5),
         hasLength(1),
         reason: 'nothing the threshold cuts is ever hidden entirely',
       );
@@ -511,7 +513,7 @@ void main() {
 
   group('prefs provider', () {
     test('reads what is stored, writes what is set', () async {
-      await store.setPref(attentionThresholdKey, '0.8');
+      await store.setPref(needsYouThresholdKey, '0.8');
       await store.setPref(aboutMeKey, 'I run a small design studio.');
 
       final container = ProviderContainer(
@@ -520,16 +522,16 @@ void main() {
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
-      expect(container.read(appPrefsProvider).attentionThreshold, 0.8);
+      expect(container.read(appPrefsProvider).needsYouThreshold, 0.8);
       expect(container.read(appPrefsProvider).aboutMe, 'I run a small design studio.');
 
-      await container.read(appPrefsProvider.notifier).setAttentionThreshold(0.3);
-      expect(container.read(appPrefsProvider).attentionThreshold, 0.3);
-      expect(await store.getPref(attentionThresholdKey), '0.3');
+      await container.read(appPrefsProvider.notifier).setNeedsYouThreshold(0.3);
+      expect(container.read(appPrefsProvider).needsYouThreshold, 0.3);
+      expect(await store.getPref(needsYouThresholdKey), '0.3');
     });
 
     test('an unreadable stored threshold falls back to the default', () async {
-      await store.setPref(attentionThresholdKey, 'somewhat');
+      await store.setPref(needsYouThresholdKey, 'somewhat');
 
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
@@ -538,8 +540,8 @@ void main() {
       await container.read(appPrefsProvider.notifier).ready;
 
       expect(
-        container.read(appPrefsProvider).attentionThreshold,
-        AttentionTuning.defaultThreshold,
+        container.read(appPrefsProvider).needsYouThreshold,
+        NeedsYouTuning.defaultThreshold,
       );
     });
 
@@ -551,8 +553,11 @@ void main() {
       addTearDown(container.dispose);
       await container.read(appPrefsProvider.notifier).ready;
 
-      await container.read(appPrefsProvider.notifier).setAttentionThreshold(9);
-      expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
+      await container.read(appPrefsProvider.notifier).setNeedsYouThreshold(9);
+      expect(
+        container.read(appPrefsProvider).needsYouThreshold,
+        NeedsYouTuning.maxThreshold,
+      );
     });
   });
 

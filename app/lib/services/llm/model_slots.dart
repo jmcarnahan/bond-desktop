@@ -225,7 +225,7 @@ const String boxDecideId = 'box-decide';
 /// What each remote is asked for when no name was discovered: the 27B the
 /// compiled box serves under `/prose`, and the decision model under `/decide`.
 const String boxProseModel = 'qwen3.8';
-const String boxDecideModel = 'bond-decide-mbl-v2swap';
+const String boxDecideModel = 'bond-decide-mbl-v3';
 
 /// The box address the wizard prefills, compiled in from `.env`'s
 /// `BOND_BOX_URL` through the Makefile's `APP_SECRET_DEFINE`.
@@ -429,6 +429,13 @@ class LlmTargetSpec {
   /// other const value here is.
   final int parallel;
 
+  /// How many message-text calls (extraction, attachment digests) may be in
+  /// flight at this target: the fast lane's width, where [parallel] is the
+  /// draft lane's. Its own number because the two lanes run side by side on
+  /// one server, and the build's box (sixteen sequences in its prose-only
+  /// profile) can give the backlog eight while drafts keep theirs. Clamped 1..8 by [tryParse], as [parallel].
+  final int textParallel;
+
   /// Whether a draft at this target may stream. False for a wire with nothing
   /// to stream, and for a server that answers a streamed request badly.
   final bool streams;
@@ -441,6 +448,7 @@ class LlmTargetSpec {
     this.wire = LlmWire.openAi,
     this.hasBearer = false,
     this.parallel = 1,
+    this.textParallel = 3,
     this.streams = true,
   });
 
@@ -474,6 +482,7 @@ class LlmTargetSpec {
     LlmWire? wire,
     bool? hasBearer,
     int? parallel,
+    int? textParallel,
     bool? streams,
   }) =>
       LlmTargetSpec(
@@ -485,6 +494,7 @@ class LlmTargetSpec {
         wire: wire ?? this.wire,
         hasBearer: hasBearer ?? this.hasBearer,
         parallel: parallel ?? this.parallel,
+        textParallel: textParallel ?? this.textParallel,
         streams: streams ?? this.streams,
       );
 
@@ -497,6 +507,7 @@ class LlmTargetSpec {
         // A BOOLEAN, always. The token is in the keychain.
         'bearer': hasBearer,
         'parallel': parallel,
+        'text_parallel': textParallel,
         'streams': streams,
       };
 
@@ -528,6 +539,7 @@ class LlmTargetSpec {
     }
 
     final parallel = json['parallel'];
+    final textParallel = json['text_parallel'];
     final streams = json['streams'];
     return LlmTargetSpec(
       id: id,
@@ -537,6 +549,7 @@ class LlmTargetSpec {
       wire: wire,
       hasBearer: json['bearer'] == true,
       parallel: parallel is int ? parallel.clamp(1, 8) : 1,
+      textParallel: textParallel is int ? textParallel.clamp(1, 8) : 3,
       streams: streams is bool ? streams : true,
     );
   }
@@ -551,11 +564,12 @@ class LlmTargetSpec {
       other.wire == wire &&
       other.hasBearer == hasBearer &&
       other.parallel == parallel &&
+      other.textParallel == textParallel &&
       other.streams == streams;
 
   @override
-  int get hashCode =>
-      Object.hash(id, name, url, model, wire, hasBearer, parallel, streams);
+  int get hashCode => Object.hash(
+      id, name, url, model, wire, hasBearer, parallel, textParallel, streams);
 
   @override
   String toString() => '$name: $model @ $url';
@@ -668,12 +682,6 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.decide,
   ),
   PipelineStageInfo(
-    id: 'needs_you',
-    label: 'Needs-you verdict',
-    description: 'Whether a message wants the owner',
-    slot: ModelSlot.generative,
-  ),
-  PipelineStageInfo(
     id: 'message_text',
     label: 'Message text',
     description: 'Summary, action items, deadline, topics, project',
@@ -704,18 +712,6 @@ const List<PipelineStageInfo> pipelineStages = [
     label: 'Directory section pick',
     description: 'Which two sections of a directory a reply should read in '
         'full',
-    slot: ModelSlot.generative,
-  ),
-  PipelineStageInfo(
-    id: 'storyline_membership',
-    label: 'Storyline membership',
-    description: 'Whether a thread belongs to a storyline',
-    slot: ModelSlot.generative,
-  ),
-  PipelineStageInfo(
-    id: 'storyline_group',
-    label: 'Storyline grouping',
-    description: 'Which threads in a neighbourhood are one project or event',
     slot: ModelSlot.generative,
   ),
   PipelineStageInfo(

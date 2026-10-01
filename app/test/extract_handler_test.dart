@@ -1,19 +1,20 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/draft_policy.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
-import 'package:bond_inbox/services/clustering_card.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/storyline_cards.dart' show clusteringCardFor;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -51,10 +52,12 @@ class FakeEmbeddings {
 
   FakeEmbeddings({this.vector = const [0.6, 0.8]});
 
-  /// One extraction now embeds TWICE, into two corpora that must never be
-  /// compared: the thread's clustering card, and the message's own search
-  /// card. Every count below is over one of them, because a bare total would
-  /// pass whichever of the two calls actually happened.
+  /// Two corpora that must never be compared: the thread's clustering card
+  /// (which extraction no longer embeds — the assign pass does, and the
+  /// assertions below pin that it stays empty here) and the message's own
+  /// search card. Every count below is
+  /// over one of them, because a bare total would pass whichever of the two
+  /// calls actually happened.
   List<String> get clusteringInputs => [
         for (final input in inputs)
           if (input.startsWith(EmbeddingsClient.clusteringPrefix)) input,
@@ -128,6 +131,7 @@ void main() {
   Future<void> seedMessage({
     String id = 'm1',
     String conversationKey = 'conv-1',
+    String receivedAt = '2026-08-29T10:00:00Z',
     String? summary,
     String? triageStatus,
     Map<String, String>? headers,
@@ -140,7 +144,7 @@ void main() {
       'subject': 'Re: Launch date',
       'from_name': 'Sarah',
       'from_address': 'sarah@x.com',
-      'received_at': '2026-08-29T10:00:00Z',
+      'received_at': receivedAt,
       'body_text': 'Can we still ship on Thursday?',
       // The shape the detail fetch stores them in, which is what
       // `classificationOf` reads a machine sender off.
@@ -193,7 +197,7 @@ void main() {
           intent: intent ?? 'fyi',
           importance: importance ?? 'normal',
         )),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       return a;
@@ -297,7 +301,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(intent: 'request', importance: 'high')),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
       final llm = scripted([
@@ -528,253 +532,10 @@ void main() {
     });
   });
 
-  group('conversation card', () {
-    test('embeds the card and records the hash and the model', () async {
-      await seedConversation();
-      await seedMessage();
-      final embeddings = FakeEmbeddings();
-
-      await runOne(ExtractHandler(
-        store,
-        scripted([answer(summary: 'Sarah needs the lock extended.')]),
-        embeddings.client,
-      ));
-
-      // The people segment is empty since Round D Phase 2 — the card is four
-      // segments by contract whatever the flag says, so the vector is taken
-      // over a subject, a topic list and a summary and nothing else.
-      expect(
-        embeddings.clusteringInputs.single,
-        '${EmbeddingsClient.clusteringPrefix}'
-        'Launch date |  | launch date | '
-        'Sarah needs the lock extended.',
-      );
-      final row = (await store.getConversationAi('email', 'conv-1'))!;
-      expect(row['embedding'], encodeEmbedding(const [0.6, 0.8]));
-      expect(row['embed_model'], EmbeddingsClient.modelTag);
-      expect(row['embedded_hash'], isNotNull);
-      expect(
-        decodeEmbedding(row['embedding'] as Uint8List),
-        [closeTo(0.6, 1e-6), closeTo(0.8, 1e-6)],
-      );
-    });
-
-    test('an unchanged card is not embedded twice', () async {
-      await seedConversation();
-      await seedMessage();
-      final embeddings = FakeEmbeddings();
-      final handler = ExtractHandler(
-        store,
-        scripted([answer()]),
-        embeddings.client,
-      );
-
-      await runOne(handler);
-      await runOne(handler);
-
-      // The whole reason a hash is stored: the tenth message of a thread must
-      // not spend an embedding call to arrive at the same vector.
-      expect(embeddings.clusteringInputs.length, 1);
-      // The per-message card has its own hash, and the same guard.
-      expect(embeddings.documentInputs.length, 1);
-    });
-
-    test('the hash is over the card the heal path would rebuild', () async {
-      // One thread, one card. Extraction used to build from the result in hand
-      // and the row's own triage summary while `StorylineService._reembed`
-      // built from the thread's newest kept inbound, and both wrote the same
-      // `embedded_hash` column — so extracting an older message of a thread
-      // stored a hash over a card nothing else would ever produce, and the
-      // next heal re-embedded a thread that had not changed. The older message
-      // is extracted here deliberately: that is the case that used to differ.
-      await seedConversation();
-      await seedMessage(summary: 'Sarah needs the lock extended.');
-      await store.upsertMessage({
-        'source': 'email',
-        'source_message_id': 'm2',
-        'conversation_key': 'conv-1',
-        'direction': 'inbound',
-        'subject': 'Re: Launch date',
-        'from_name': 'Sarah',
-        'from_address': 'sarah@x.com',
-        'received_at': '2026-08-30T10:00:00Z',
-        'body_text': 'And the photography?',
-        'triage_status': 'triaged',
-      });
-      await writeTriaged(
-        store,
-        'email',
-        'm2',
-        status: 'triaged',
-        urgency: 'normal',
-        category: 'work',
-        summary: 'Sarah is asking about the photography.',
-        needsAction: true,
-        actionItems: ['Send the photo selects'],
-      );
-      await store.writeExtraction(
-        'email',
-        'm2',
-        jsonEncode({
-          'topics': ['photography'],
-        }),
-      );
-      final embeddings = FakeEmbeddings();
-
-      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
-
-      final expected = clusteringCardForConversationRow(
-        (await store.getConversationRow('email', 'conv-1'))!,
-        await store.newestInboundCardData('email', 'conv-1'),
-      );
-      expect(
-        (await store.getConversationAi('email', 'conv-1'))!['embedded_hash'],
-        cardHash(expected),
-      );
-      // And the text that was actually embedded is that card, not the one the
-      // extracted message alone would have described.
-      expect(
-        embeddings.clusteringInputs.single,
-        '${EmbeddingsClient.clusteringPrefix}$expected',
-      );
-      expect(expected, contains('photography'));
-    });
-
-    test('a card stored under the retired tag is embedded again', () async {
-      // The defect a tag bump would otherwise leave behind. The card has not
-      // changed, so the hash matches and the old guard would have skipped —
-      // and the thread would carry a vector nothing reads for as long as its
-      // card stayed the same, invisible to every sweep.
-      await seedConversation();
-      await seedMessage();
-      final embeddings = FakeEmbeddings();
-      final handler = ExtractHandler(
-        store,
-        scripted([answer()]),
-        embeddings.client,
-      );
-
-      await runOne(handler);
-      final hash =
-          (await store.getConversationAi('email', 'conv-1'))!['embedded_hash'];
-      await store.upsertConversationAi(
-        'email',
-        'conv-1',
-        embedModel: EmbeddingsClient.retiredModelTag,
-      );
-
-      await runOne(handler);
-
-      expect(embeddings.clusteringInputs.length, 2);
-      final row = (await store.getConversationAi('email', 'conv-1'))!;
-      expect(row['embed_model'], EmbeddingsClient.modelTag);
-      // The same card, so the same hash: what moved is the space the vector
-      // lives in.
-      expect(row['embedded_hash'], hash);
-    });
-
-    test('the same card under the current tag is not embedded twice', () async {
-      await seedConversation();
-      await seedMessage();
-      final embeddings = FakeEmbeddings();
-      final handler = ExtractHandler(
-        store,
-        scripted([answer()]),
-        embeddings.client,
-      );
-
-      await runOne(handler);
-      expect(
-        (await store.getConversationAi('email', 'conv-1'))!['embed_model'],
-        EmbeddingsClient.modelTag,
-      );
-
-      await runOne(handler);
-
-      expect(embeddings.clusteringInputs.length, 1);
-    });
-
-    test('a changed card is re-embedded', () async {
-      await seedConversation();
-      await seedMessage();
-      final embeddings = FakeEmbeddings();
-      final handler = ExtractHandler(
-        store,
-        scripted([
-          answer(),
-          answer(topics: const ['homepage copy', 'launch date']),
-        ]),
-        embeddings.client,
-      );
-
-      await runOne(handler);
-      await runOne(handler);
-
-      expect(embeddings.clusteringInputs.length, 2);
-      expect(
-        embeddings.clusteringInputs.last,
-        contains('homepage copy, launch date'),
-      );
-    });
-
-    test('an embedding server that is down does not cost the extraction',
-        () async {
-      await seedConversation();
-      await seedMessage();
-      final embeddings = FakeEmbeddings(vector: null);
-
-      // Not a throw: the worker would mark the item failed and re-run the
-      // model call that already succeeded, to retry an optimisation.
-      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
-
-      expect(await store.getExtraction('email', 'm1'), isNotNull);
-      final row = await store.getConversationAi('email', 'conv-1');
-      // No row, no hash: nothing was written, so the next pass tries again.
-      expect(row?['embedding'], isNull);
-      expect(row?['embedded_hash'], isNull);
-    });
-
-    test('a message with no conversation row embeds nothing', () async {
-      await seedMessage(conversationKey: 'orphan');
-      final embeddings = FakeEmbeddings();
-
-      await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
-
-      expect(await store.getExtraction('email', 'm1'), isNotNull);
-      expect(embeddings.clusteringInputs, isEmpty);
-      expect(await store.getConversationAi('email', 'orphan'), isNull);
-    });
-
-    test('an embedding write leaves a bucket a later phase wrote alone',
-        () async {
-      await seedConversation();
-      await seedMessage();
-      final handler = ExtractHandler(
-        store,
-        scripted([answer(), answer(topics: const ['homepage copy'])]),
-        FakeEmbeddings().client,
-      );
-      await runOne(handler);
-      await db.customUpdate(
-        "UPDATE conversation_ai SET bucket = 'now' "
-        'WHERE source = ? AND conversation_key = ?',
-        variables: [const Variable('email'), const Variable('conv-1')],
-      );
-
-      await runOne(handler);
-
-      expect(
-        (await store.getConversationAi('email', 'conv-1'))!['bucket'],
-        'now',
-      );
-    });
-  });
-
-  // The stage the settle machine now waits on. A thread whose card did not
-  // change queues no storyline pass, so the handler is the only writer left
-  // for the new message's row — and a row left `pending` here would wait out
-  // the notification deadline and never close its outcome.
-  group('the storyline stage when no pass is queued', () {
+  // Extraction decides whether a thread's storyline assign is OWED, by the
+  // clustering card's hash, and queues it; it never embeds the card —
+  // `StorylineService.vectorFor`, in the assign pass, is the one writer.
+  group('the storyline assign', () {
     Future<Map<String, Object?>> progressOf(String id) async => (await db
             .customSelect(
               'SELECT * FROM message_progress '
@@ -783,6 +544,47 @@ void main() {
             )
             .getSingle())
         .data;
+
+    /// What the assign pass leaves behind: the thread's vector stored under
+    /// the hash of the card as it reads NOW, and its row closed.
+    Future<void> assignRan() async {
+      final row = (await store.getConversationRow('email', 'conv-1'))!;
+      final card = await clusteringCardFor(store, 'email', 'conv-1', row);
+      await store.upsertConversationAi(
+        'email',
+        'conv-1',
+        embedding: encodeEmbedding(const [0.6, 0.8]),
+        embeddedHash: cardHash(card),
+        embedModel: EmbeddingsClient.modelTag,
+      );
+      await store.writeWork('storyline', 'email', 'conv-1', status: 'done');
+    }
+
+    test('a changed card queues the assign and wakes the lane, and embeds '
+        'nothing', () async {
+      await seedConversation();
+      await seedMessage();
+      final embeddings = FakeEmbeddings();
+      var woken = 0;
+
+      await runOne(ExtractHandler(
+        store,
+        scripted([answer(summary: 'Sarah needs the lock extended.')]),
+        embeddings.client,
+        onStorylineQueued: () => woken++,
+      ));
+
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
+      expect(woken, 1);
+      // The pass embeds; this stage only decides it is owed.
+      expect(embeddings.clusteringInputs, isEmpty);
+      final ai = await store.getConversationAi('email', 'conv-1');
+      expect(ai?['embedding'], isNull);
+      expect(ai?['embedded_hash'], isNull);
+      // The message's own search vector is still this stage's.
+      expect(embeddings.documentInputs, hasLength(1));
+    });
 
     test('an unchanged card closes the stage with the thread\'s storyline',
         () async {
@@ -796,17 +598,21 @@ void main() {
       );
       await store.addStorylineMember('sl-1', 'email', 'conv-1',
           addedBy: 'auto');
+      final embeddings = FakeEmbeddings();
+      var woken = 0;
       final handler = ExtractHandler(
         store,
-        scripted([answer()]),
-        FakeEmbeddings().client,
+        scripted([answer(), answer()]),
+        embeddings.client,
         progress: PipelineProgress(store),
+        onStorylineQueued: () => woken++,
       );
 
-      // The first message embeds the card and queues the pass, which is what
-      // writes the stage for it later — so it is still owed here.
+      // The first message queues the pass, which is what writes the stage
+      // for it later — so it is still owed here.
       await runOne(handler);
       expect((await progressOf('m1'))['storyline_state'], 'pending');
+      await assignRan();
 
       // The second lands the same card: no pass, and the stage is closed
       // with the storyline the thread already sits in.
@@ -816,6 +622,9 @@ void main() {
       final row = await progressOf('m2');
       expect(row['storyline_state'], 'done');
       expect(row['storyline_id'], 'sl-1');
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'), 'done');
+      expect(woken, 1);
+      expect(embeddings.clusteringInputs, isEmpty);
     });
 
     test('a thread in no storyline still finishes the stage', () async {
@@ -823,17 +632,140 @@ void main() {
       await seedMessage();
       final handler = ExtractHandler(
         store,
-        scripted([answer()]),
+        scripted([answer(), answer()]),
         FakeEmbeddings().client,
         progress: PipelineProgress(store),
       );
       await runOne(handler);
+      await assignRan();
       await seedMessage(id: 'm2');
       await runOne(handler, id: 'm2');
 
       final row = await progressOf('m2');
       expect(row['storyline_state'], 'done');
       expect(row['storyline_id'], isNull);
+    });
+
+    test('an older message waits for the newest one\'s text', () async {
+      // The text claim order is not recency, so an older message of a thread
+      // can finish first. The card would then lack the newest message's
+      // summary and topics — the pre-extraction card the ledger rejected —
+      // so nothing is queued and nothing is noted until the newest lands.
+      await seedConversation();
+      await seedMessage();
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      var woken = 0;
+      final handler = ExtractHandler(
+        store,
+        scripted([answer(), answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+        onStorylineQueued: () => woken++,
+      );
+
+      await runOne(handler);
+
+      expect(await store.workCounts('storyline'), isEmpty);
+      expect(woken, 0);
+      expect((await progressOf('m1'))['storyline_state'], 'pending');
+
+      await runOne(handler, id: 'm2');
+
+      expect(await store.workCounts('storyline'), {'pending': 1});
+      expect(woken, 1);
+    });
+
+    test('a newest message triage drops releases the hold', () async {
+      // Untriaged, the newest message reads as kept, so the older message's
+      // extraction holds. Triage then drops it: its extract item takes the
+      // gated early return, which runs the assign check, and the older
+      // message — the newest KEPT one now, text and all — is what the card
+      // is built from.
+      await seedConversation();
+      await seedMessage(triageStatus: 'triaged');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
+      var woken = 0;
+      final handler = ExtractHandler(
+        store,
+        scripted([answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+        onStorylineQueued: () => woken++,
+      );
+
+      await runOne(handler);
+      expect(await store.workCounts('storyline'), isEmpty);
+
+      await db.customStatement(
+        "UPDATE messages SET triage_status = 'skipped', "
+        "gate_reason = 'no_reply' WHERE source_message_id = 'm2'",
+      );
+      await runOne(handler, id: 'm2');
+
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
+      expect(woken, 1);
+    });
+
+    test('a newest message whose text ended in error holds nothing',
+        () async {
+      await seedConversation();
+      await seedMessage(triageStatus: 'triaged');
+      await seedMessage(
+          id: 'm2', receivedAt: '2026-08-29T11:00:00Z', triageStatus: 'triaged');
+      await store.enqueueWork('extract', 'email', 'm2');
+      await store.writeWork('extract', 'email', 'm2', status: 'error');
+
+      await runOne(ExtractHandler(
+        store,
+        scripted([answer()]),
+        FakeEmbeddings().client,
+      ));
+
+      // No text is coming for m2, so the assign runs on the card there is.
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
+    });
+
+    test('a newest message whose text is at the server holds', () async {
+      await seedConversation();
+      await seedMessage(triageStatus: 'triaged');
+      await seedMessage(
+          id: 'm2', receivedAt: '2026-08-29T11:00:00Z', triageStatus: 'triaged');
+      await store.enqueueWork('extract', 'email', 'm2');
+      await store.writeWork('extract', 'email', 'm2', status: 'processing');
+
+      await runOne(ExtractHandler(
+        store,
+        scripted([answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+      ));
+
+      expect(await store.workCounts('storyline'), isEmpty);
+      expect((await progressOf('m1'))['storyline_state'], 'pending');
+    });
+
+    test('a vector under a retired tag queues the pass again', () async {
+      await seedConversation();
+      await seedMessage();
+      final handler = ExtractHandler(
+        store,
+        scripted([answer(), answer()]),
+        FakeEmbeddings().client,
+      );
+      await runOne(handler);
+      await assignRan();
+      await store.upsertConversationAi(
+        'email',
+        'conv-1',
+        embedModel: EmbeddingsClient.retiredModelTag,
+      );
+
+      await runOne(handler);
+
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
     });
 
     test('a message with no thread row is skipped, not owed', () async {
@@ -847,6 +779,56 @@ void main() {
       ));
 
       expect((await progressOf('m1'))['storyline_state'], 'skipped');
+      expect(await store.workCounts('storyline'), isEmpty);
+    });
+
+    test('a wake that throws does not cost the extraction', () async {
+      await seedConversation();
+      await seedMessage(triageStatus: 'triaged');
+      await store.enqueueWork('extract', 'email', 'm1');
+      final worker = AiWorker(
+        store,
+        handlers: [
+          ExtractHandler(
+            store,
+            scripted([answer()]),
+            FakeEmbeddings().client,
+            onStorylineQueued: () => throw StateError('torn down'),
+          ),
+        ],
+      );
+
+      await worker.pump();
+
+      expect(await store.workCounts('extract'), {'done': 1});
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
+    });
+  });
+
+  group('concurrency', () {
+    test('three when nothing says', () {
+      expect(
+        ExtractHandler(store, scripted(const []), FakeEmbeddings().client)
+            .concurrency,
+        3,
+      );
+    });
+
+    test("the target's text width, read on every claim", () {
+      var width = 8;
+      final handler = ExtractHandler(
+        store,
+        scripted(const []),
+        FakeEmbeddings().client,
+        textParallel: () => width,
+      );
+
+      expect(handler.concurrency, 8);
+      // Read again, not captured: a target change in Settings moves the next
+      // claim without rebuilding the worker.
+      width = 2;
+      expect(handler.concurrency, 2);
     });
   });
 
@@ -1016,9 +998,9 @@ void main() {
       await seedMessage();
       final embeddings = FakeEmbeddings(vector: null);
 
-      // Not a throw, for `_refreshCard`'s reason: the facts are already
-      // stored, and failing the item would re-run the model call that
-      // succeeded in order to retry an optimisation.
+      // Not a throw: the facts are already stored, and failing the item
+      // would re-run the model call that succeeded in order to retry an
+      // optimisation.
       await runOne(ExtractHandler(store, scripted([answer()]), embeddings.client));
 
       expect(await store.getExtraction('email', 'm1'), isNotNull);
@@ -1101,7 +1083,7 @@ void main() {
         'email',
         'm1',
         fakeDecision(fakeAnswers(intent: 'fyi', importance: 'low')),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
 
@@ -1221,8 +1203,8 @@ void main() {
         'from_address': 'sarah@x.com',
         'received_at': '2026-08-28T09:00:00Z',
       });
-      await store.writeNeedsYouVerdict('email', 'm-ask',
-          verdict: true, reason: 'asks whether Thursday still holds');
+      await store.writeNeedsYouP('email', 'm-ask',
+          p: 0.9, reason: 'asks whether Thursday still holds');
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
@@ -1240,8 +1222,8 @@ void main() {
         'from_address': 'sarah@x.com',
         'received_at': '2026-08-28T09:00:00Z',
       });
-      await store.writeNeedsYouVerdict('email', 'm-ask',
-          verdict: true, reason: 'asks whether Thursday still holds');
+      await store.writeNeedsYouP('email', 'm-ask',
+          p: 0.9, reason: 'asks whether Thursday still holds');
       // The outbound watermark lives on the conversation row, and it is what
       // closes the ask.
       await store.upsertConversation({
@@ -1341,7 +1323,7 @@ void main() {
         'email',
         id,
         fakeDecision(fakeAnswers(replyExpected: replyP)),
-        qhash: 'test',
+        qhash: decisionQhash,
         ownerKnown: true,
       );
     }
@@ -1436,8 +1418,8 @@ void main() {
       await seedMessage();
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'Priya is waiting on your number');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'Priya is waiting on your number');
 
       await extract();
 
@@ -1459,8 +1441,8 @@ void main() {
           urgency: 'urgent',
           replyP: 0.2,
         );
-        await store.writeNeedsYouVerdict('email', id,
-            verdict: true, reason: 'Priya is waiting on your number');
+        await store.writeNeedsYouP('email', id,
+            p: 0.9, reason: 'Priya is waiting on your number');
         final log = _Recorder();
         var woken = 0;
 
@@ -1493,6 +1475,7 @@ void main() {
     test('and a stored reply_expected of 1 goes on to the pre-gate', () async {
       await seedMessage();
       await triageSaid(replyExpected: true, urgency: 'urgent', replyP: null);
+      await store.writeNeedsYouP('email', 'm1', p: 0.9);
 
       await extract(policy: DraftPolicy.needsYou);
 
@@ -1513,8 +1496,8 @@ void main() {
       await seedMessage();
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: false, reason: 'a heads-up, nothing to answer');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.1, reason: 'a heads-up, nothing to answer');
 
       await extract();
 
@@ -1528,7 +1511,7 @@ void main() {
       await seedMessage();
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1', verdict: null);
+      await store.writeNeedsYouP('email', 'm1', p: null);
 
       await extract();
 
@@ -1549,7 +1532,7 @@ void main() {
         'body_text': 'Sent it over. — Jo',
       });
       await triageSaid(id: 'o1');
-      await store.writeNeedsYouVerdict('email', 'o1', verdict: true);
+      await store.writeNeedsYouP('email', 'o1', p: 0.9);
 
       await extract(id: 'o1');
 
@@ -1668,8 +1651,8 @@ void main() {
       await seedMessage(headers: {'List-Id': 'news.x.example.com'});
       await seedConversation();
       await triageSaid();
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'it asks the reader to approve the invoice');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'it asks the reader to approve the invoice');
       final log = _Recorder();
 
       await extract(policy: DraftPolicy.needsYou, activityLog: log);
@@ -1702,11 +1685,13 @@ void main() {
   });
 
   group('suggested replies: the three policies', () {
-    /// A message with every signal `asksForAReply` reads, so the only thing
-    /// separating the policies in a test is the policy.
+    /// A message with every signal `asksForAReply` reads, the needs-you
+    /// probability included, so the only thing separating the policies in a
+    /// test is the policy.
     Future<void> seedLoud({String id = 'm1'}) async {
       await seedMessage(id: id);
       await triageSaid(id: id, replyExpected: true, urgency: 'urgent');
+      await store.writeNeedsYouP('email', id, p: 0.9);
     }
 
     /// A message that asks for a reply but is not worth the big model's idle
@@ -1753,8 +1738,8 @@ void main() {
     group('onDemand', () {
       test('queues nothing, however loud the message', () async {
         await seedLoud();
-        await store.writeNeedsYouVerdict('email', 'm1',
-            verdict: true, reason: 'Priya is waiting on your number');
+        await store.writeNeedsYouP('email', 'm1',
+            p: 0.9, reason: 'Priya is waiting on your number');
         final log = _Recorder();
 
         await extract(policy: DraftPolicy.onDemand, activityLog: log);
@@ -1780,14 +1765,13 @@ void main() {
     });
 
     group('needsYou', () {
-      test('queues a message the needs-you stage called the owner\'s',
-          () async {
-        // Nothing triage wrote is loud. The whole-message verdict is the
+      test('queues a message whose probability clears the slider', () async {
+        // Nothing triage wrote is loud. The needs-you probability is the
         // signal.
         await seedMessage();
         await triageSaid();
-        await store.writeNeedsYouVerdict('email', 'm1',
-            verdict: true, reason: 'Priya is waiting on your number');
+        await store.writeNeedsYouP('email', 'm1',
+            p: 0.9, reason: 'Priya is waiting on your number');
         var woken = 0;
 
         await extract(
@@ -1800,7 +1784,10 @@ void main() {
         expect(woken, 1);
       });
 
-      test('and an urgent one, and a high one', () async {
+      test('but not an urgent one, nor a high one, on loudness alone',
+          () async {
+        // One predicate: the needs-you probability. Triage's urgency word is
+        // no ask of its own.
         await seedMessage(id: 'm1');
         await triageSaid(id: 'm1', urgency: 'urgent');
         await seedMessage(id: 'm2', conversationKey: 'conv-2');
@@ -1809,7 +1796,19 @@ void main() {
         await extract(policy: DraftPolicy.needsYou, id: 'm1');
         await extract(policy: DraftPolicy.needsYou, id: 'm2');
 
-        expect(await queuedDrafts(), ['m1', 'm2']);
+        expect(await queuedDrafts(), isEmpty);
+      });
+
+      test("the owner's slider is the cut it reads", () async {
+        await seedMessage();
+        await triageSaid();
+        await store.writeNeedsYouP('email', 'm1', p: 0.4);
+        await store.setPref(needsYouThresholdKey, '0.5');
+
+        await extract(policy: DraftPolicy.needsYou);
+
+        expect(await queuedDrafts(), isEmpty);
+        expect(await draftStateOf('m1'), 'skipped');
       });
 
       test('but not a message whose only cue is that a reply is expected',
@@ -1825,8 +1824,13 @@ void main() {
         );
 
         // The wide gate would have taken it — this is the narrowing.
-        expect(asksForAReply(await store.getMessageRow('email', 'm1') ?? {}),
-            isTrue);
+        expect(
+          asksForAReply(
+            await store.getMessageRow('email', 'm1') ?? {},
+            threshold: NeedsYouTuning.defaultThreshold,
+          ),
+          isTrue,
+        );
         expect(await queuedDrafts(), isEmpty);
         expect(await draftStateOf('m1'), 'skipped');
         // Its OWN reason, not the mode's: a person reading the activity row
@@ -1854,14 +1858,15 @@ void main() {
         expect(await queuedDrafts(), isEmpty);
       });
 
-      test('a judged no is a no, and so is a verdict nothing wrote', () async {
+      test('a probability below the slider is a no, and so is none at all',
+          () async {
         await seedMessage(id: 'm1');
         await triageSaid(id: 'm1');
-        await store.writeNeedsYouVerdict('email', 'm1',
-            verdict: false, reason: 'a heads-up, nothing to answer');
+        await store.writeNeedsYouP('email', 'm1',
+            p: 0.1, reason: 'a heads-up, nothing to answer');
         await seedMessage(id: 'm2', conversationKey: 'conv-2');
         await triageSaid(id: 'm2');
-        await store.writeNeedsYouVerdict('email', 'm2', verdict: null);
+        await store.writeNeedsYouP('email', 'm2', p: null);
 
         await extract(policy: DraftPolicy.needsYou, id: 'm1');
         await extract(policy: DraftPolicy.needsYou, id: 'm2');
@@ -1880,7 +1885,7 @@ void main() {
           'body_text': 'Sent it over. — Jo',
         });
         await triageSaid(id: 'o1', urgency: 'urgent');
-        await store.writeNeedsYouVerdict('email', 'o1', verdict: true);
+        await store.writeNeedsYouP('email', 'o1', p: 0.9);
 
         await extract(policy: DraftPolicy.needsYou, id: 'o1');
 
@@ -2061,7 +2066,11 @@ void main() {
 
       expect(await store.workCounts('extract'), {'done': 1});
       expect(await store.getExtraction('email', 'm1'), isNotNull);
-      expect(embeddings.clusteringInputs.length, 1);
+      // The message's search vector only; the thread's clustering vector is
+      // the assign pass's, which this stage queued.
+      expect(embeddings.clusteringInputs, isEmpty);
+      expect(await store.workStatusOf('storyline', 'email', 'conv-1'),
+          'pending');
       expect(embeddings.documentInputs.length, 1);
     });
 
@@ -2085,8 +2094,8 @@ void main() {
         replyExpected: false,
         deadline: '',
       );
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'Priya is waiting on your number');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'Priya is waiting on your number');
       await store.enqueueWork('extract', 'email', 'm1');
       final drafting = scripted([answer()], schemaName: 'draft_reply');
       final worker = AiWorker(

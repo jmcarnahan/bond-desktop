@@ -1,6 +1,6 @@
 @Skip('live — needs the golden set, and a server for all of it but the gate '
     'replay. Run: make golden (bulk), make golden-prose (prose), '
-    'make golden-storyline (storyline confirm), make golden-gate (the '
+    'make golden-storyline (storyline member_of), make golden-gate (the '
     "app's own gates, offline) or make golden-decision (the decision model)")
 library;
 
@@ -14,6 +14,9 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
+import 'package:bond_inbox/services/decision/storyline_thread_input.dart'
+    show storylineThreadTextFor;
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -23,8 +26,7 @@ import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/llm/message_block.dart'
     show threadDigestCap;
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
-import 'package:bond_inbox/services/llm/storyline_tasks.dart';
+import 'package:bond_inbox/services/storyline_judge.dart' show StorylineJudge;
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -101,16 +103,16 @@ const String _converseCaveat =
 
 void main() {
   /// `make golden`: the golden set through the app's per-message pipeline as
-  /// it now runs — the decision pass for every classification field, the
-  /// needs-you ladder, and ONE message-text call for the text.
+  /// it now runs — the decision pass for every classification field and for
+  /// needs-you, and ONE message-text call for the text.
   ///
   /// Per item: the live decision model (`DECIDE_URL`, heads from
   /// `DECIDE_HEADS`; the state rendered from the packer's parts exactly as
   /// the decision leg renders it) answers gate, category, urgency, the two
-  /// booleans, intent and importance; needs-you is the app's ladder (the
-  /// deterministic floor, then the decision's p(yes) against the policy bars,
-  /// and `NeedsYouTask` on the bulk slot only inside the band — the app's own
-  /// rule, minus the cold-outreach bar a golden item cannot evaluate); and
+  /// booleans, intent and importance; needs-you is the app's one rule, the
+  /// decision's p(yes) at or above the slider's default ([needsYouAt] at
+  /// [NeedsYouTuning.defaultThreshold]), with no floor and no language model;
+  /// an item with no decision answer records no needs-you at all; and
   /// `MessageTextTask` on the bulk slot writes summary, action items,
   /// deadline, topics and project. ONE run file in the scorer's shape carries
   /// all of it — `label` and `evidence` are absent (neither exists any more)
@@ -226,7 +228,6 @@ void main() {
       final master = target.collector();
       var retries = 0;
       final decisionMs = <int>[];
-      var band = 0;
       final startedAt = DateTime.now();
 
       try {
@@ -243,8 +244,8 @@ void main() {
           )..onReasoningLeak = master.noteLeak;
 
           // The decision pass. A decision that fails costs the item its
-          // classification and its ladder; the text still runs, as the app's
-          // text stage would for a message whose triage errored.
+          // classification and its needs-you; the text still runs, as the
+          // app's text stage would for a message whose triage errored.
           DecisionAnswers? decidedAnswers;
           try {
             final sw = Stopwatch()..start();
@@ -258,7 +259,8 @@ void main() {
               truncated: decided.truncated,
             );
             // An ownerless decision's needs-you head is never used by the app
-            // (`message_decisions.owner_known`): the ladder goes to the LLM.
+            // (`message_decisions.owner_known`): it clears the probability,
+            // so the item records no needs-you.
             if (owner != null) decidedAnswers = decided.answers;
           } on LlmException catch (e) {
             entry.calls['decision'] = GoldenCall(
@@ -267,43 +269,10 @@ void main() {
             );
           }
 
-          // The needs-you ladder: floor, then the decision's probability,
-          // then the language model inside the band.
-          if (item.floorSaysYes) {
-            entry.needsYou = floorOut();
-          } else {
-            final settled = decidedAnswers == null
-                ? null
-                : decidedNeedsYouOut(decidedAnswers);
-            if (settled != null) {
-              entry.needsYou = settled;
-            } else {
-              if (decidedAnswers != null) band++;
-              try {
-                final needsYou = await retryingUnavailable(
-                  () => runTask(
-                    client,
-                    const NeedsYouTask(),
-                    NeedsYouInput(
-                      message: item.message,
-                      thread: item.threadFor(ctx),
-                      threadDigest: item.digestFor(ctx),
-                      ownerName: GoldenDefines.ownerName,
-                      ownerAddress: GoldenDefines.ownerAddress,
-                      now: item.now,
-                    ),
-                    // The handler's own parameters, both of them.
-                    temperature: 0,
-                    maxTokens: 256,
-                    think: BenchTarget.allowReasoning,
-                  ),
-                  onRetry: () => retries++,
-                );
-                entry.needsYou = needsYouOut(needsYou);
-              } on LlmException catch (_) {
-                // Recorded by the observer, with its outcome.
-              }
-            }
+          // Needs-you: the app's one rule over the decision's probability.
+          // No decision answer, no needs-you — never a language model.
+          if (decidedAnswers != null) {
+            entry.needsYou = decidedNeedsYouOut(decidedAnswers);
           }
 
           // The message text: the one generative call per kept message, with
@@ -338,11 +307,7 @@ void main() {
           final out = entry.classifier;
           final needsYou = entry.needsYou;
           final text = entry.text;
-          final needsYouMs = (needsYou?.floor ?? false)
-              ? 'floor'
-              : itemCalls['needs_you'] == null
-                  ? 'decided'
-                  : _ms(itemCalls['needs_you']);
+          final needsYouMs = needsYou == null ? '—' : 'decided';
           lines[index] = '${item.id.padRight(40)} '
               'decision ${entry.calls['decision']?.ms ?? '—'}ms  '
               'needs_you $needsYouMs  '
@@ -353,7 +318,7 @@ void main() {
                   '/reply_expected=${out.replyExpected} '
                   '${out.intent}/${out.importance}'}  '
               'ny=${needsYou == null ? '—' : '${needsYou.verdict}'
-                  '(${needsYou.confidence ?? 'floor'})'}  '
+                  '(${needsYou.confidence ?? '—'})'}  '
               '${text == null ? '—' : 'items=${text.actionItems.length} '
                   'topics=${text.topics.length} '
                   'deadline=${text.deadline.isNotEmpty}'}';
@@ -384,7 +349,8 @@ void main() {
           '${decisionMs.isEmpty ? '—' : percentile(sortedDecision, 0.5)} ms, '
           'p95 ${decisionMs.isEmpty ? '—' : percentile(sortedDecision, 0.95)} '
           'ms, owner ${owner == null ? 'NOT set' : 'set'}, model '
-          '${heads.model}; needs-you band (asked the model): $band\n'
+          '${heads.model}; needs-you at p(yes) >= '
+          '${NeedsYouTuning.defaultThreshold}\n'
           '${_ctxLine(ctx, k, items, wall)}\n'
           '${carried == null ? '' : 'digests: $carried items carry one, '
               '$trimmed trimmed to $threadDigestCap\n'}'
@@ -422,7 +388,7 @@ void main() {
               'p95_ms': decisionMs.isEmpty
                   ? null
                   : percentile(sortedDecision, 0.95),
-              'needs_you_band': band,
+              'needs_you_threshold': NeedsYouTuning.defaultThreshold,
             },
             'golden': {
               'path': GoldenDefines.setPath,
@@ -764,32 +730,27 @@ void main() {
     timeout: const Timeout(Duration(minutes: 90)),
   );
 
-  /// The confirm task against the gold registry, item by item.
+  /// The decision model's `member_of` against the gold registry, item by item.
   ///
-  /// **What it measures.** `ConfirmMembershipTask` alone — "does this thread
+  /// **What it measures.** The membership judgement alone — "does this thread
   /// belong to this storyline" — asked of every golden item against a BOUNDED
   /// candidate list: the item's gold storyline, every registry storyline gold
   /// marks forbidden on it, and three more drawn by a seeded shuffle. Each
   /// registry storyline arrives as the app's own [Storyline] with its charter
-  /// as the criterion and its people drawn from the set; each candidate card is
-  /// built the way `enrichedCardForConversationRow` builds one, from a bulk run
-  /// file's topics and summary.
+  /// as the criterion; each thread is the app's own thread text
+  /// (`storylineThreadTextFor`), read from the golden mailbox seeded exactly
+  /// as the sweep leg seeds it, and the question goes through the app's own
+  /// [StorylineJudge].
   ///
   /// **What it does NOT measure.** Everything around the call: the sweep that
-  /// proposes storylines, the embeddings and thresholds that shortlist them,
-  /// the recruit laps, the chaining, and the owner's kept and removed examples
-  /// — a gold storyline has no owner history, so both fences ride in empty.
-  /// Those are code, and the golden set says the stage they sit around has
-  /// never once been right; this run asks whether the MODEL is the reason.
-  /// Nor is it the app's economics: the app asks one confirmation per
-  /// assignment and this asks four or five per message.
+  /// proposes storylines, the embeddings that retrieve them, the recruit
+  /// laps, the chaining. Those are code; this run asks whether the MODEL is
+  /// right. Nor is it the app's economics: the app asks up to six judgements
+  /// per assignment and this asks four or five per message.
   test(
     'the golden set through storyline confirm',
     () async {
       final set = await _loadOrFail();
-      final k = checkK(GoldenDefines.k);
-      final charterCap = checkCharterCap(GoldenDefines.charterCap);
-      const target = BenchTarget.bulk;
 
       if (GoldenDefines.registryPath.isEmpty) {
         fail('GOLDEN_REGISTRY is not defined — run via make golden-storyline '
@@ -798,26 +759,19 @@ void main() {
       }
       final registry = await loadGoldenRegistry(GoldenDefines.registryPath);
       if (GoldenDefines.runPath.isEmpty) {
-        fail('GOLDEN_RUN=<bulk run file from make golden> is not defined — a '
-            'candidate card carries that run\'s extraction topics and triage '
-            'summary, exactly as the app\'s card carries the newest inbound '
-            'message\'s, so a replay without one would judge a thinner card '
-            'than the app ever sends');
+        fail('GOLDEN_RUN=<bulk run file from make golden> is not defined — the '
+            'seeded mailbox carries that run\'s triage summaries and '
+            'extraction topics, exactly as the sweep leg\'s does');
       }
       final cards = await loadGoldenCards(GoldenDefines.runPath);
       if (cards.size == 0) {
-        // A STORYLINE run file is a JSON array of the same shape and carries
-        // no topics and no summary, so pointing GOLDEN_RUN at one loads
-        // cleanly and then judges a hundred items on a card the app never
-        // sends. Ninety minutes and a whole ledger row, lost silently.
         fail('the run file at ${GoldenDefines.runPath} carries no cards — '
             'GOLDEN_RUN wants a BULK run file from make golden (a storyline '
             'run file has the same shape and no topics or summary)');
       }
 
-      // Per slug once: the storyline object is the same on every prompt it
-      // appears in. Its PEOPLE are not — they depend on which candidate is
-      // being asked about — so they are computed per call below.
+      // Per slug once: the storyline object is the same on every question it
+      // appears in.
       final storylines = <String, Storyline>{};
       for (final slug in registry.slugs) {
         storylines[slug] = registry.bySlug[slug]!.toAppStoryline();
@@ -843,31 +797,12 @@ void main() {
       }
 
       final calls = candidates.values.fold(0, (sum, list) => sum + list.length);
-      // What the old "no participants" count really measured: a registry
-      // storyline no golden item is filed under, which has nobody whatever is
-      // excluded.
+      // A registry storyline no golden item is filed under.
       final filedSlugs = {
         for (final item in set.items) item.gold.storylineId,
       };
       final storylinesWithoutItems =
           registry.slugs.where((slug) => !filedSlugs.contains(slug)).length;
-      // And the count the exclusion creates: a gold candidate whose storyline
-      // has no OTHER golden thread, so it is judged with an empty People line.
-      // Thinner than the app's prompt, which penalises rather than flatters —
-      // but a reader has to know how much of the gold-accept rate was asked
-      // that way. From the set alone; no call needed.
-      final goldPeopleEmpty = set.items
-          .where((item) =>
-              registry.bySlug.containsKey(item.gold.storylineId) &&
-              participantsFor(
-                item.gold.storylineId,
-                set,
-                excludingConversation: item.conversationKey,
-              ).isEmpty)
-          .length;
-      final overCap = registry.storylines
-          .where((storyline) => storyline.charter.length > charterCap)
-          .length;
       final carded =
           set.items.where((item) => cards.byId.containsKey(item.id)).length;
 
@@ -876,10 +811,9 @@ void main() {
         'storyline: ${registry.storylines.length} storylines, '
         '${registry.antiSlugs.length} anti, $calls candidate calls over '
         '${set.items.length} items, $storylinesWithoutItems storylines with '
-        'no item in the set, $goldPeopleEmpty gold candidates judged with an '
-        'empty People line, $missingGold gold slugs missing from the '
-        'registry, $overCap charters over the task\'s $charterCap-char clamp, '
-        'cards from the run for $carded of ${set.items.length} items',
+        'no item in the set, $missingGold gold slugs missing from the '
+        'registry, cards from the run for $carded of ${set.items.length} '
+        'items',
       );
 
       // Built up front, in set order, so the run file's rows come out in the
@@ -902,245 +836,196 @@ void main() {
             '${GoldenDefines.registryPath} and the set do not belong to each '
             'other');
       }
-      final warmupClient = target.client();
-      for (var i = 0; i < BenchTarget.warmup; i++) {
-        try {
-          // Retried like every other call, for the bulk half's reason: a
-          // throttled first call is not a server that is down.
-          await retryingUnavailable(
-            () => runTask(
-              warmupClient,
-              ConfirmMembershipTask(charterCap: charterCap),
-              ConfirmInput(
-                storyline: storylines[firstCandidates.first]!,
-                storylineParticipants: participantsFor(
-                  firstCandidates.first,
-                  set,
-                  excludingConversation: first.conversationKey,
-                ),
-                candidateCard: candidateCardFor(first, cards.byId[first.id]),
-              ),
-              temperature: 0,
-              think: BenchTarget.allowReasoning,
-            ),
-          );
-        } on LlmException catch (e) {
-          _warmupFailed('storyline_membership', e, target);
-        }
-      }
 
+      final db = vecTestDb();
+      final store = MessageStore(db);
       final shared = http.Client();
-      final master = target.collector();
+      final master = _decisionCollector();
       var retries = 0;
-      final startedAt = DateTime.now();
 
       try {
-        await forEachBounded(set.items.indexed, k, (pair) async {
-          final (index, item) = pair;
-          final entry = entries[index];
-          // A LIST rather than a map by label: every confirmation on this item
-          // carries the same label, `storyline_membership`, so a map keyed by
-          // it would keep the last call and silently drop the three or four
-          // the item also paid for.
-          final itemRecords = <LlmCallRecord>[];
-          final client = target.client(
-            httpClient: shared,
-            onCall: (r) {
-              master.record(r);
-              itemRecords.add(r);
-            },
-          )..onReasoningLeak = master.noteLeak;
-
-          // Built once per item: the card is what varies between ITEMS and is
-          // constant across an item's candidates, which is also the order the
-          // task puts its fences in so a server's prefix cache stays warm.
-          final card = candidateCardFor(item, cards.byId[item.id]);
-          final outcomes = <ConfirmOutcome>[];
-
-          // Sequentially, in candidate order. The concurrency of this run is
-          // GOLDEN_K items, never candidates within an item: the four prompts
-          // of one item share their storyline-fence prefix only if they arrive
-          // one after another.
-          for (final slug in candidates[item.id]!) {
-            ConfirmResult? result;
-            try {
-              result = await retryingUnavailable(
-                () => runTask(
-                  client,
-                  ConfirmMembershipTask(charterCap: charterCap),
-                  ConfirmInput(
-                    storyline: storylines[slug]!,
-                    // Per candidate, not per slug: this thread is never among
-                    // the members the storyline is described by, because in
-                    // the app a candidate is by construction not yet one. A
-                    // whole-set union would hand the model the candidate's own
-                    // people back as the storyline's, on every gold question
-                    // it is asked. 453 scans of a hundred items costs nothing
-                    // against the call they precede.
-                    storylineParticipants: participantsFor(
-                      slug,
-                      set,
-                      excludingConversation: item.conversationKey,
-                    ),
-                    candidateCard: card,
-                  ),
-                  // The handler's own temperature: the same thread judged
-                  // against the same storyline twice must give the same
-                  // answer (storyline_service.dart).
-                  temperature: 0,
-                  think: BenchTarget.allowReasoning,
-                ),
-                onRetry: () => retries++,
-              );
-            } on LlmException catch (_) {
-              // Recorded by the observer, with its outcome.
-            }
-            outcomes.add(ConfirmOutcome(
-              slug: slug,
-              kind: kindOf(item, slug),
-              result: result,
-            ));
-          }
-
-          final derived = deriveStorylineId(outcomes);
-          entry.storylineId = derived.id;
-          if (itemRecords.isNotEmpty) {
-            entry.calls['storyline_membership'] = summariseCalls(itemRecords);
-          }
-          tally.add(item, outcomes, derived);
-
-          final totalMs =
-              itemRecords.fold<int>(0, (sum, r) => sum + r.durationMs);
-          final forbidden = outcomes
-              .where((o) => o.kind == CandidateKind.forbidden)
-              .toList();
-          final extra =
-              outcomes.where((o) => o.kind == CandidateKind.extra).toList();
-          // Ids, counts, milliseconds and enums. No slug, no title, no
-          // evidence sentence and no card text: the registry's slugs are
-          // derived from real project names, and scrollback is how they leak.
-          lines[index] = '${item.id.padRight(40)} '
-              'calls ${outcomes.length}  ${totalMs}ms  '
-              'gold=${goldCell(outcomes)}  '
-              'forbidden ${forbidden.where((o) => o.accepted).length}'
-              '/${forbidden.where((o) => o.result != null).length}  '
-              'extra ${extra.where((o) => o.accepted).length}'
-              '/${extra.where((o) => o.result != null).length}  '
-              'derived=${derivedBucket(item, derived)}'
-              '${derived.tie ? ' tie' : ''}';
-        });
-      } finally {
-        shared.close();
-        final wall = DateTime.now().difference(startedAt);
-        final items = set.items.length;
-        final cost = costSummary(
-          tasks: master.tasks,
-          url: target.url,
-          model: target.model,
-          items: items,
+        // The mailbox the thread texts are read from. The vectors the seeding
+        // writes are not read here: an embedding server that is down costs
+        // this leg nothing but the count below.
+        final report = await seedGoldenMailbox(
+          store,
+          set,
+          cards,
+          variant: shippedClusteringCard,
+          embeddings: EmbeddingsClient(),
+          ownerName: GoldenDefines.ownerName ?? '',
+          ownerAddress: GoldenDefines.ownerAddress ?? '',
         );
-
-        // A Converse row samples at the model's default, and a reader
-        // comparing it with a local row has to be told so here.
-        final caveat =
-            target.wire == LlmWire.bedrockConverse ? '$_converseCaveat\n' : '';
-
-        // The calls MADE, which is what a rate has to be divided by. `calls`
-        // is what the shortlist PLANNED: the two agree on a pass where nothing
-        // failed and nothing was retried, and where they disagree the planned
-        // number flatters a server that refused half of them. Both are
-        // printed, so a reader can see which pass this was.
-        final callsMade = _callsMade(master);
-
         // ignore: avoid_print
-        print(
-          '\n${master.banner}\n'
-          '$caveat'
-          '\n${master.table()}\n'
-          '\n${lines.whereType<String>().join('\n')}\n'
-          '\n${tally.table()}\n'
-          '\n${_failureLine(master, retries)}\n'
-          'k $k, charter cap $charterCap, $items items, '
-          '$callsMade of $calls calls in '
-          '${wall.inSeconds}s, '
-          '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min, '
-          '${msgsPerMinute(callsMade, wall).toStringAsFixed(1)} calls/min\n'
-          '\n${_costBlock(cost, target.url)}\n',
-        );
+        print(report.table());
 
-        final written = [
-          for (final entry in entries)
-            if (entry.attempted) entry,
-        ];
-        final paths = await _storylineBench.writeRun(
-          entries: written,
-          // The label carries the half, so `slug()` names the file
-          // `…-storyline-<stamp>.json`. A bulk run and a storyline run
-          // under one BENCH_LABEL would otherwise differ by a timestamp
-          // alone, and feeding the wrong one back as GOLDEN_RUN is
-          // exactly the mistake the zero-cards guard above catches.
-          label: '${target.label} storyline',
-          collectors: [master],
-          startedAt: startedAt,
-          extra: (runPath) => {
-            'run_file': runPath,
-            'cards_from': GoldenDefines.runPath,
-            'k': k,
-            'wire': target.wireName,
-            'retries': retries,
-            'items': items,
-            'calls': calls,
-            'calls_made': callsMade,
-            'wall_ms': wall.inMilliseconds,
-            msgsPerMinKey: msgsPerMinute(items, wall),
-            // The calls MADE, failures included, from Round F on. Before it
-            // this divided `calls`, the number the shortlist planned.
-            'calls_per_min': msgsPerMinute(callsMade, wall),
-            costKey: cost,
-            'storyline': {
-              ...tally.toJson(),
-              'registry': {
-                'path': GoldenDefines.registryPath,
-                'storylines': registry.storylines.length,
-                'anti': registry.antiSlugs.length,
-                'storylines_without_items': storylinesWithoutItems,
-                'gold_people_empty': goldPeopleEmpty,
-                'charter_cap': charterCap,
-                'charters_over_cap': overCap,
-                'cards_from_run': carded,
-              },
-            },
-            'golden': {
-              'path': GoldenDefines.setPath,
-              'generated': set.generated,
-              'items': items,
-              'block_mismatches': _blockMismatches(set),
-              'directness_mismatches': _directnessMismatches(set),
-            },
+        final itemRecords = <String, List<LlmCallRecord>>{};
+        String? current;
+        final decider = await _storylineDecider(
+          client: shared,
+          onCall: (r) {
+            master.record(r);
+            final id = current;
+            if (id != null) (itemRecords[id] ??= []).add(r);
           },
         );
-        _storylineBench.printPaths(
-          runPath: paths.runPath,
-          resultPath: paths.resultPath,
-        );
+        final judge = StorylineJudge(decision: decider, store: store);
+
+        // Thrown away: the first request pays for the weights and the graph,
+        // which is not a per-message cost. A warmup that fails is a server
+        // that is down, and the run stops there.
+        try {
+          await judge.memberOf(storylines[firstCandidates.first]!, [
+            (source: first.source, key: first.conversationKey),
+          ]);
+        } on LlmUnavailableException {
+          fail('the decision server at ${DecisionClient.defaultBaseUrl} is not '
+              'answering — run make decide');
+        }
+
+        final startedAt = DateTime.now();
+        try {
+          // One item at a time on the calls' side: the item id the observer
+          // files a record under is the one being asked about, and a judgement
+          // is tens of milliseconds, so GOLDEN_K buys nothing here but a
+          // muddled per-item cost.
+          for (final (index, item) in set.items.indexed) {
+            final entry = entries[index];
+            current = item.id;
+            final thread = (source: item.source, key: item.conversationKey);
+            final outcomes = <ConfirmOutcome>[];
+
+            // In candidate order, one question per candidate: each storyline
+            // is its own state, and the order is what `deriveStorylineId`'s
+            // alphabetical tie-break is blind to.
+            for (final slug in candidates[item.id]!) {
+              double? p;
+              try {
+                p = (await retryingUnavailable(
+                  () => judge.memberOf(storylines[slug]!, [thread]),
+                  onRetry: () => retries++,
+                ))
+                    .single;
+              } on LlmException catch (_) {
+                // Recorded by the observer, with its outcome.
+              }
+              outcomes.add(ConfirmOutcome(
+                slug: slug,
+                kind: kindOf(item, slug),
+                p: p,
+              ));
+            }
+
+            final derived = deriveStorylineId(outcomes);
+            entry.storylineId = derived.id;
+            final records = itemRecords[item.id] ?? const <LlmCallRecord>[];
+            if (records.isNotEmpty) {
+              entry.calls['decision:member_of'] = summariseCalls(records);
+            }
+            tally.add(item, outcomes, derived);
+
+            final totalMs = records.fold<int>(0, (sum, r) => sum + r.durationMs);
+            final forbidden = outcomes
+                .where((o) => o.kind == CandidateKind.forbidden)
+                .toList();
+            final extra =
+                outcomes.where((o) => o.kind == CandidateKind.extra).toList();
+            // Ids, counts, milliseconds, probabilities and enums. No slug, no
+            // title and no thread text: the registry's slugs are derived from
+            // real project names, and scrollback is how they leak.
+            lines[index] = '${item.id.padRight(40)} '
+                'calls ${outcomes.length}  ${totalMs}ms  '
+                'gold=${goldCell(outcomes)}  '
+                'forbidden ${forbidden.where((o) => o.accepted).length}'
+                '/${forbidden.where((o) => o.p != null).length}  '
+                'extra ${extra.where((o) => o.accepted).length}'
+                '/${extra.where((o) => o.p != null).length}  '
+                'derived=${derivedBucket(item, derived)}'
+                '${derived.tie ? ' tie' : ''}';
+          }
+        } finally {
+          final wall = DateTime.now().difference(startedAt);
+          final items = set.items.length;
+          final callsMade = _callsMade(master);
+
+          // ignore: avoid_print
+          print(
+            '\n${master.banner}\n'
+            '\n${master.table()}\n'
+            '\n${lines.whereType<String>().join('\n')}\n'
+            '\n${tally.table()}\n'
+            '\n${_failureLine(master, retries)}\n'
+            '$items items, '
+            '$callsMade of $calls calls in '
+            '${wall.inSeconds}s, '
+            '${msgsPerMinute(items, wall).toStringAsFixed(1)} msgs/min, '
+            '${msgsPerMinute(callsMade, wall).toStringAsFixed(1)} calls/min\n',
+          );
+
+          final written = [
+            for (final entry in entries)
+              if (entry.attempted) entry,
+          ];
+          final paths = await _storylineBench.writeRun(
+            entries: written,
+            // The label carries the half, so `slug()` names the file
+            // `…-storyline-<stamp>.json`, never a bulk run's name.
+            label: 'decision storyline',
+            collectors: [master],
+            startedAt: startedAt,
+            extra: (runPath) => {
+              'run_file': runPath,
+              'cards_from': GoldenDefines.runPath,
+              'retries': retries,
+              'items': items,
+              'calls': calls,
+              'calls_made': callsMade,
+              'wall_ms': wall.inMilliseconds,
+              msgsPerMinKey: msgsPerMinute(items, wall),
+              'calls_per_min': msgsPerMinute(callsMade, wall),
+              'storyline': {
+                ...tally.toJson(),
+                'policy': {
+                  'accept_active': StorylinePolicy.acceptActive,
+                  'accept_suggested': StorylinePolicy.acceptSuggested,
+                },
+                'registry': {
+                  'path': GoldenDefines.registryPath,
+                  'storylines': registry.storylines.length,
+                  'anti': registry.antiSlugs.length,
+                  'storylines_without_items': storylinesWithoutItems,
+                  'cards_from_run': carded,
+                },
+              },
+              'golden': {
+                'path': GoldenDefines.setPath,
+                'generated': set.generated,
+                'items': items,
+                'block_mismatches': _blockMismatches(set),
+                'directness_mismatches': _directnessMismatches(set),
+              },
+            },
+          );
+          _storylineBench.printPaths(
+            runPath: paths.runPath,
+            resultPath: paths.resultPath,
+          );
+        }
+      } finally {
+        shared.close();
+        await db.close();
       }
 
-      // Shape, never quality — and there is unusually little shape left to
-      // assert. `ConfirmMembershipTask.validate` already fixes all three
-      // fields: `belongs` is an identity check against `true`, `confidence` is
-      // one of three words or `low`, and `evidence` is a clamped non-nullable
-      // String. So what remains is that every item got a row, that something
-      // answered at all, and the reasoning tripwire.
+      // Shape, never quality: every item got a row, and something answered.
       expect(entries, hasLength(set.items.length));
       expect(
         master.tasks.any((m) => m.n > 0),
         isTrue,
-        reason: 'no call succeeded — is the server up?',
+        reason: 'no call succeeded — is the decision server up?',
       );
-      _assertNoLeaks(master);
     },
-    // A hundred items times four or five confirmations, on a candidate that
-    // may answer in twenty seconds a call.
+    // A hundred items times four or five judgements, each tens of
+    // milliseconds, plus the seeding's embeddings.
     timeout: const Timeout(Duration(minutes: 90)),
   );
 
@@ -1256,7 +1141,7 @@ void main() {
       }
       final variant = parseSweepCard(GoldenDefines.sweepCardRaw);
       final stage = parseSweepStage(GoldenDefines.sweepStageRaw);
-      final groupingMode = parseSweepGrouping(GoldenDefines.sweepGroupingRaw);
+      final charterCheck = parseSweepCharter(GoldenDefines.sweepCharterRaw);
       final possibleHoldsRoom =
           parseSweepPossibleRoom(GoldenDefines.sweepPossibleRoomRaw);
       final roomRule = sweepRoomRuleName(possibleHoldsRoom);
@@ -1264,7 +1149,10 @@ void main() {
 
       final db = vecTestDb();
       final store = MessageStore(db);
-      final confirmCollector = BenchTarget.bulk.collector();
+      // The confirms are the decision model's `member_of` since the
+      // decision-questions round; the name is kept so the tables below read
+      // as they always did.
+      final confirmCollector = _decisionCollector();
       final nameCollector = BenchTarget.prose.collector();
       final startedAt = DateTime.now();
 
@@ -1284,7 +1172,8 @@ void main() {
         );
         // ignore: avoid_print
         print(
-          'stage ${stage.name}, grouping ${groupingMode.name}, '
+          'stage ${stage.name}, '
+          'charter ${charterCheck.name}, '
           'card ${variant.wireName}, room $roomRule, '
           'prefix length ${report.prefixLength}, dims ${report.dims}, '
           'cards from the run for '
@@ -1297,14 +1186,14 @@ void main() {
               '(EMBED_URL ${EmbeddingsClient.defaultBaseUrl}, make embed)');
         }
         if (report.embedFailures > 0) {
-          // The row would MIX card variants. A thread the seeding failed to
-          // embed is embedded later by `_reembed`, which builds its card under
-          // the app's own flag rather than under SWEEP_CARD — so one thread of
-          // the pool would sit in the other variant's geometry and the A/B
-          // would be comparing two mailboxes.
+          // The row would be uneven. A thread the seeding failed to embed is
+          // embedded later by `vectorFor` inside the assign pass, from an
+          // embedding server that already failed it once — so the pool the
+          // sweep reads would be missing threads the other variant's row had,
+          // and the A/B would be comparing two mailboxes.
           fail('${report.embedFailures} threads did not embed — fix the '
-              'embedding server and rerun rather than scoring a pool that '
-              'mixes two SWEEP_CARD variants');
+              'embedding server and rerun rather than scoring an uneven '
+              'pool');
         }
 
         if (stage == SweepStage.vector) {
@@ -1318,16 +1207,32 @@ void main() {
           return;
         }
 
+        // After the vector stage's return: `make golden-vector` asks no model
+        // and needs no heads file.
+        final decider =
+            await _storylineDecider(onCall: confirmCollector.record);
+
+        if (stage == SweepStage.pairs) {
+          await _readThePairs(
+            store: store,
+            set: set,
+            decider: decider,
+            collector: confirmCollector,
+            startedAt: startedAt,
+          );
+          return;
+        }
+
         // The app's own log, because the sweep's per-pass counts — the series
-        // it seeded and excluded, the clusters it refused, the outliers it
-        // dropped — are written there and nowhere else. The run records a row
+        // it seeded and excluded, the clusters it refused, the naming calls it
+        // made — are written there and nowhere else. The run records a row
         // after each pass and sums them afterwards, rather than the bench
         // keeping a second set of counters that could disagree with the
         // app's.
         final log = ActivityLog(store);
         addTearDown(log.dispose);
-        // Every cluster the sweep judged, as it was formed and before the
-        // namer narrowed or refused it. The store keeps no record of a
+        // Every cluster the sweep judged, as the grouping proposed it and
+        // before the namer wrote a word about it. The store keeps no record of a
         // declined cluster, so this seam is the only place its gold purity can
         // be read from.
         final judged = <JudgedCluster>[];
@@ -1339,26 +1244,19 @@ void main() {
               store,
               BenchTarget.prose.client(onCall: nameCollector.record)
                 ..onReasoningLeak = nameCollector.noteLeak,
-              confirmClient:
-                  BenchTarget.bulk.client(onCall: confirmCollector.record)
-                    ..onReasoningLeak = confirmCollector.noteLeak,
+              // The app's own judge over the seeded store; the seeded bodies
+              // are whole, so there is nothing for a body fetch to do.
+              judge: StorylineJudge(decision: decider, store: store),
               embeddings: EmbeddingsClient(),
               activityLog: log,
-              // No `groupClient`: the grouping call goes to the prose client,
-              // exactly as the naming call does.
-              groupingMode: groupingMode,
+              // SWEEP_CHARTER, defaulting to what the app ships.
+              charterCheck: charterCheck,
               // SWEEP_POSSIBLE_ROOM, defaulting to what the app ships.
               possibleHoldsRoom: possibleHoldsRoom,
-              // The overlap rule counts shared people who are not the owner,
-              // so the bench has to name the owner the way the app does or
-              // every mailbox-wide participant would buy the lower gate.
-              owner: () async => GoldenDefines.ownerName == null &&
-                      GoldenDefines.ownerAddress == null
-                  ? null
-                  : (
-                      name: GoldenDefines.ownerName,
-                      address: GoldenDefines.ownerAddress
-                    ),
+              // SWEEP_CARD: the card `vectorFor` rebuilds and hash-checks, so
+              // the assign pass reads the seeding's vectors instead of
+              // re-embedding them under the shipped card.
+              clusteringCard: variant,
               clusterObserver: !observe
                   ? null
                   : (threads, outcome) => judged.add((
@@ -1494,8 +1392,8 @@ void main() {
         final shortlist = [
           for (final thread in report.threads)
             // `embedded` is the belt to the guard above's braces: a thread
-            // with no vector would be embedded by `_reembed` inside the assign
-            // pass, under the app's flag rather than under SWEEP_CARD.
+            // with no vector would be embedded by `vectorFor` inside the
+            // assign pass, after the sweep had already read the pool.
             if (thread.keptInbound &&
                 thread.embedded &&
                 !filed.containsKey(
@@ -1698,23 +1596,16 @@ void main() {
               (callsByKind[metrics.task] ?? 0) + metrics.n + metrics.failures;
         }
 
-        // The five per-pass counts, summed off the sweep's own activity rows.
+        // The per-pass counts, summed off the sweep's own activity rows.
         // Read after the loop rather than per pass, so a pass the log
         // suppressed as quiet simply contributes nothing.
-        var sweptIncoherent = 0;
         var sweptLint = 0;
-        var sweptOutliers = 0;
+        var sweptCharterModel = 0;
         var sweptSeries = 0;
         var sweptSeriesExcluded = 0;
         var sweptFragments = 0;
         var sweptFolded = 0;
-        // The four the model-read grouping writes, zero on a tree running
-        // `GroupingMode.cosine` — which is the point of reading them in both
-        // modes rather than only in the one that moves them.
-        var sweptGroupCalls = 0;
-        var sweptGrouped = 0;
-        var sweptGroupFailed = 0;
-        var sweptGroupUnfit = 0;
+        var sweptNamerCalls = 0;
         for (final row in await store.recentActivity(limit: 1000)) {
           if (row['kind'] != 'storyline_sweep') continue;
           final detail = ActivityEvent.fromRow(row).detail;
@@ -1728,33 +1619,25 @@ void main() {
                 'extract ${at('extract')}, embed ${at('embed')}, '
                 'triage ${at('triage')}');
           }
-          sweptIncoherent += at('incoherent');
           sweptLint += at('lint');
-          sweptOutliers += at('outliers');
+          sweptCharterModel += at('charter_model');
           sweptSeries += at('series');
           sweptSeriesExcluded += at('series_excluded');
           sweptFragments += at('fragments');
           sweptFolded += at('folded');
-          sweptGroupCalls += at('grouping_calls');
-          sweptGrouped += at('grouped');
-          sweptGroupFailed += at('grouping_failed');
-          sweptGroupUnfit += at('grouping_unfit');
+          sweptNamerCalls += at('namer_calls');
         }
 
         final tally = SweepTally(
           formed: membership.storylines,
           tombstoned: tombstoned,
           lintRejected: sweptLint,
-          incoherent: sweptIncoherent,
+          charterModelRejected: sweptCharterModel,
           seriesSeeded: sweptSeries,
           seriesExcluded: sweptSeriesExcluded,
-          outliersDropped: sweptOutliers,
           fragmentsJoined: sweptFragments,
           fragmentsFolded: sweptFolded,
-          groupingCalls: sweptGroupCalls,
-          grouped: sweptGrouped,
-          groupingFailed: sweptGroupFailed,
-          groupingUnfit: sweptGroupUnfit,
+          namerCalls: sweptNamerCalls,
           purityByStoryline: {
             for (final entry in membership.threadsByStoryline.entries)
               entry.key: purityOf(entry.value, goldByThread),
@@ -1809,15 +1692,14 @@ void main() {
             : await writeGoldenRun(
                 entries,
                 bench: 'golden-sweep',
-                // Both slots in the label: a sweep row is a pair of models,
-                // the confirms on one and the names on the other, and a row
-                // naming one of them could not be read a week later. The
-                // declared stage makes no naming call at all, so its label
-                // names the one slot it dialled.
+                // Both models in the label: a sweep row is a pair of them,
+                // the confirms on the decision model and the names on the
+                // prose slot, and a row naming one of them could not be read
+                // a week later. The declared stage makes no naming call at
+                // all, so its label names the one model it asked.
                 label: stage == SweepStage.declared
-                    ? '${BenchTarget.bulk.label} declared'
-                    : '${BenchTarget.bulk.label} + '
-                        '${BenchTarget.prose.label} sweep',
+                    ? 'decision declared'
+                    : 'decision + ${BenchTarget.prose.label} sweep',
                 outDir: BenchTarget.outDir,
               );
         final timingPath = await _sweepBench.writeResult(
@@ -1828,7 +1710,7 @@ void main() {
             'cards_from': GoldenDefines.runPath,
             // On both stages, so the two are one row read two ways.
             'stage': stage.name,
-            'grouping': groupingMode.name,
+            'charter': charterCheck.name,
             // Zero on every stage but `declared`.
             'declared': slugById.length,
             'recruit_calls': recruitCalls,
@@ -1901,8 +1783,9 @@ void main() {
         await db.close();
       }
     },
-    // A sweep pass is a naming call on the prose slot plus a confirm per
-    // member on the bulk slot, and the loop runs until nothing is proposed.
+    // A sweep pass is a naming call on the prose slot plus a `member_of` per
+    // member on the decision model, and the loop runs until nothing is
+    // proposed.
     timeout: const Timeout(Duration(minutes: 90)),
   );
 
@@ -2186,10 +2069,11 @@ void main() {
         '$truncated truncated to ${heads.maxTokens} tokens\n'
         'gate drops: policy ${drops(policy)}, argmax ${drops(argmax)}, '
         'differ on $differ items\n'
-        'needs_you in the app band [0.35, 0.65): '
+        'needs_you at the app\'s slider '
+        '(p(yes) >= ${NeedsYouTuning.defaultThreshold}): '
         '${policy.where((e) {
           final p = e.classifier!.probabilities['needs_you_yes']! as double;
-          return p >= 0.35 && p < 0.65;
+          return needsYouAt(p, NeedsYouTuning.defaultThreshold);
         }).length} items (the run files score p(yes) >= 0.5)\n',
       );
 
@@ -2289,6 +2173,83 @@ String? _goldGateReason(GoldenItem item) {
 /// `GOLDEN_RUN`, and the gate replay reads no message body — so a header line
 /// saying `ctx tail3` above any of those three was describing a knob the run
 /// never touched, and a typo in it failed a run that would not have used it.
+/// The decision client the storyline legs judge membership through: this
+/// Mac's heads over `DECIDE_URL`, the decision legs' own recipe, so a
+/// storyline row and a decision row read the same model.
+///
+/// Or a Kev 4B wrapper, when `DECIDE_URL` is one ([_decideUrlIsSystemOne]):
+/// the client is built as the app builds Your server's, so the questions go
+/// out on the app's own systemone wire and no heads file is needed here.
+Future<DecisionClient> _storylineDecider({
+  void Function(LlmCallRecord record)? onCall,
+  http.Client? client,
+}) async {
+  if (await _decideUrlIsSystemOne(client)) {
+    return DecisionClient(
+      resolveTarget: _decideTarget,
+      heads: _noHeadsForKev,
+      client: client,
+      onCall: onCall,
+      isYourServer: (_) => true,
+    );
+  }
+  final headsPath = decideHeadsPath();
+  if (!File(headsPath).existsSync()) {
+    fail('no decision heads at $headsPath — run make decide-install, or '
+        'pass --dart-define=DECIDE_HEADS=<path>');
+  }
+  final heads = await DecisionHeads.load(File(headsPath));
+  return DecisionClient(
+    resolveTarget: () => const LlmTarget(
+      baseUrl: DecisionClient.defaultBaseUrl,
+      model: DecisionClient.defaultModel,
+    ),
+    heads: () => heads,
+    client: client,
+    onCall: onCall,
+  );
+}
+
+LlmTarget _decideTarget() => const LlmTarget(
+      baseUrl: DecisionClient.defaultBaseUrl,
+      model: DecisionClient.defaultModel,
+    );
+
+/// A Kev server answers there, so its client never reads heads; a call that
+/// reached for them found an encoder-heads server after all.
+DecisionHeads _noHeadsForKev() => throw StateError(
+      'DECIDE_URL was taken for a Kev 4B server, but it answered as an '
+      'encoder — pass DECIDE_HEADS and a /v1/embeddings address instead',
+    );
+
+/// Whether `DECIDE_URL` is a Kev 4B wrapper: its path ends in
+/// `/v1/systemone`, or the server's listing marks it one (the app's own
+/// detection, `DecisionClient.detectKind`). A listing that does not answer
+/// reads as not Kev, and the heads recipe then says what is missing.
+Future<bool> _decideUrlIsSystemOne(http.Client? client) async {
+  const url = DecisionClient.defaultBaseUrl;
+  if (Uri.tryParse(url)?.path.endsWith('/v1/systemone') ?? false) return true;
+  final probe = DecisionClient(
+    resolveTarget: _decideTarget,
+    heads: _noHeadsForKev,
+    client: client,
+    isYourServer: (_) => true,
+  );
+  return await probe.detectKind(
+        url: url,
+        model: DecisionClient.defaultModel,
+      ) ==
+      DecisionServerKind.systemOne;
+}
+
+/// A collector for the decision model's calls, which the storyline legs
+/// record under `decision:member_of`.
+CallCollector _decisionCollector() => CallCollector(
+      label: 'decision',
+      url: DecisionClient.defaultBaseUrl,
+      model: DecisionClient.defaultModel,
+    );
+
 Future<GoldenSet> _loadOrFail() async {
   if (GoldenDefines.setPath.isEmpty) {
     fail('GOLDEN_SET is not defined — run via make golden / make golden-prose '
@@ -2320,14 +2281,15 @@ Future<GoldenSet> _loadOrFail() async {
 /// The names are the ones every existing file in `BENCH_OUT` already carries,
 /// and they are what `bench_compare` and the ledger read a row by, so none of
 /// them moved when the four tests came onto [LiveBench] in Round F. The sweep
-/// keeps two, because its two STAGES share one body and one seeding and write
-/// under a name each.
+/// keeps three, because its stages share one body and one seeding and the
+/// vector and pairs stages write under a name of their own.
 const LiveBench _triageBench = LiveBench('golden-bulk');
 const LiveBench _proseBench = LiveBench('golden-prose');
 const LiveBench _storylineBench = LiveBench('golden-storyline');
 const LiveBench _gatesBench = LiveBench('golden-gate');
 const LiveBench _sweepBench = LiveBench('golden-sweep');
 const LiveBench _vectorBench = LiveBench('golden-vector');
+const LiveBench _pairsBench = LiveBench('golden-pairs');
 const LiveBench _decisionBench = LiveBench('golden-decision');
 
 /// [load], with a decode failure rethrown as a sentence naming the FILE.
@@ -2644,6 +2606,115 @@ Future<void> _readTheVectorAlone({
     },
   );
   _vectorBench.printPaths(resultPath: resultPath);
+}
+
+/// The decision model's `same_effort`, read on its own —
+/// `make golden-pairs`, the sweep test under `SWEEP_STAGE=pairs`.
+///
+/// The pool is the vector stage's, by the same rule, and the pairs are the
+/// same same-effort and cross-effort lists [pairCosinesOf] reads by cosine
+/// ([poolPairsOf]), so this row and a `golden-vector` row are one question
+/// answered two ways. Each thread's text is the app's own
+/// (`storylineThreadTextFor`), and the pairs go through the app's own judge
+/// (`StorylineJudge.sameEffortOfTexts`, the mean over both orders). Pairs
+/// with a side gold files nowhere are not asked: they separate nothing.
+///
+/// No run file and nothing to score. It prints and records the AUC, the p at
+/// each recall and the cross-effort pairs it would link there, and the
+/// cosine stage's separation line over the same p's — counts, ratios and
+/// probabilities, never a thread.
+Future<void> _readThePairs({
+  required MessageStore store,
+  required GoldenSet set,
+  required DecisionClient decider,
+  required CallCollector collector,
+  required DateTime startedAt,
+}) async {
+  final threads = <String, ({String source, String key})>{};
+  for (final row in await store.conversationsWithEmbeddings(
+    embedModel: EmbeddingsClient.modelTag,
+    sources: const ['email', 'teams'],
+  )) {
+    final key = row['conversation_key'] as String? ?? '';
+    if (key.isEmpty) continue;
+    if ((row['state'] as String?) == 'done') continue;
+    final blob = row['embedding'];
+    if (blob is! Uint8List || decodeEmbedding(blob).isEmpty) continue;
+    final source = row['source'] as String? ?? 'email';
+    threads[threadKeyOf(source, key)] = (source: source, key: key);
+  }
+  if (threads.isEmpty) {
+    fail('the seeded pool holds no vector under ${EmbeddingsClient.modelTag} — '
+        'nothing to pair');
+  }
+
+  final pairs =
+      poolPairsOf(keys: threads.keys, goldByThread: goldSlugByThread(set));
+  final texts = <String, String>{};
+  var previewRows = 0;
+  for (final MapEntry(:key, value: thread) in threads.entries) {
+    final text =
+        await storylineThreadTextFor(store, thread.source, thread.key);
+    texts[key] = text.text;
+    previewRows += text.previewRows;
+  }
+
+  final judge = StorylineJudge(decision: decider, store: store);
+  final asked = [...pairs.sameEffort, ...pairs.crossEffort];
+  final watch = Stopwatch()..start();
+  final ps = await judge.sameEffortOfTexts([
+    for (final (a, b) in asked) (texts[a]!, texts[b]!),
+  ]);
+  watch.stop();
+  final same = ps.sublist(0, pairs.sameEffort.length);
+  final cross = ps.sublist(pairs.sameEffort.length);
+  final reading = pairReadingOf(sameEffort: same, crossEffort: cross);
+  final separation = separationOf(sameEffort: same, crossEffort: cross);
+  // `systemone` or `heads`, never the listed name or the file's sha.
+  final backend = (await decider.modelIdentity()).split(':').first;
+
+  // ignore: avoid_print
+  print(
+    'pairs:\n'
+    '  stage pairs · backend $backend · pool ${threads.length} threads · '
+    'preview rows $previewRows · with none ${pairs.withNone.length} '
+    '(not asked) · ${watch.elapsedMilliseconds} ms\n'
+    '  ${pairReadingLine(reading)}\n'
+    '  ${separationLine(separation)}\n',
+  );
+
+  final resultPath = await _pairsBench.writeResult(
+    label: 'decision $backend · same_effort',
+    startedAt: startedAt,
+    collectors: [collector],
+    extra: {
+      'cards_from': GoldenDefines.runPath.split('/').last,
+      'pairs': {
+        'backend': backend,
+        'pool_threads': threads.length,
+        'preview_rows': previewRows,
+        'same': reading.same,
+        'cross': reading.cross,
+        'with_none_not_asked': pairs.withNone.length,
+        'wall_ms': watch.elapsedMilliseconds,
+        'auc': reading.auc,
+        'at_recall': {
+          for (final point in reading.points)
+            '${point.recallPct}': {
+              'p': point.at,
+              'false_link_pct': point.falseLinkPct,
+            },
+        },
+        'separation': separationJson(separation),
+      },
+      'golden': {
+        'path': GoldenDefines.setPath.split('/').last,
+        'generated': set.generated,
+        'items': set.items.length,
+      },
+    },
+  );
+  _pairsBench.printPaths(resultPath: resultPath);
 }
 
 /// The display names on a stored `participants_json`, the way every card

@@ -16,6 +16,9 @@ import '../providers/prefs_provider.dart'
         defaultMcpServerUrl,
         mcpDeployedUrl;
 import '../screens/consent_screen.dart' show CloudDraftsConsentPane;
+import '../services/decision/decision_client.dart' show DecisionServerKind;
+import '../services/decision/needs_you_predicate.dart'
+    show NeedsYouTuning, normalizeNeedsYouThreshold;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../services/models/managed_model_status.dart' show ManagedModelStatus;
@@ -24,7 +27,6 @@ import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
 import 'model_servers_form.dart' show ModelServersForm, ServerFormRole;
-import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
 import 'settings_context_section.dart';
@@ -94,8 +96,14 @@ enum SettingsScope { all, ai }
 /// providers itself, so the host owns every wire and a test can drive the whole
 /// screen with nothing but closures.
 class SettingsScreen extends StatefulWidget {
-  /// Where the Needs You cut sits now, 0..1.
+  /// The owner's Needs You slider: the decision model's needs-you
+  /// probability at or above which a message needs them (`needsYouAt`),
+  /// within [NeedsYouTuning.minThreshold]..[NeedsYouTuning.maxThreshold].
   final double threshold;
+
+  /// Whether an older build stored custom Needs You rules text. It is never
+  /// read now; the section says so in one quiet line.
+  final bool oldNeedsYouRules;
 
   final String aboutMe;
 
@@ -182,30 +190,6 @@ class SettingsScreen extends StatefulWidget {
   /// to must not offer one.
   final VoidCallback? onHome;
 
-  /// The stored needs-you rules, verbatim. Empty means the app's own
-  /// [needsYouDefaultRules] are in force.
-  final String needsYouRules;
-
-  /// How many needs-you judgements are queued right now — the whole queue,
-  /// not only what the last Save put there.
-  ///
-  /// The section's summary says so while the re-judge a Save started is still
-  /// running, which is the only feedback the owner gets that editing the rules
-  /// did anything at all: the verdicts move minutes later, on a queue this
-  /// screen does not show. The wording is "judging", not "re-judging", because
-  /// the count cannot tell a Save's rows from a sync's, and a summary that
-  /// called a fresh backlog a re-judge would be claiming an edit that never
-  /// happened.
-  final int needsYouRejudging;
-
-  final String needsYouDefaultRules;
-  final String needsYouFixedTail;
-  final int needsYouRulesMaxLength;
-
-  /// Fired by the rules editor's Save and by nothing else. Null hides the
-  /// editor and leaves the Needs You section as the threshold alone.
-  final void Function(String value)? onNeedsYouRulesSaved;
-
   /// Whether sending a reply also clears the thread out of Needs You. It sits
   /// in the Needs You section rather than beside the composer because it is a
   /// rule about the PILE, and it is off by default: see
@@ -245,6 +229,9 @@ class SettingsScreen extends StatefulWidget {
   final String decisionUrl;
   final String decisionModel;
   final bool decisionKeyStored;
+
+  /// What the decision remote turned out to be, or null while unknown.
+  final DecisionServerKind? decisionKind;
   final String generativeUrl;
   final String generativeModel;
   final bool generativeKeyStored;
@@ -527,6 +514,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     this.scope = SettingsScope.all,
     required this.threshold,
+    this.oldNeedsYouRules = false,
     required this.aboutMe,
     required this.onThresholdChanged,
     required this.onAboutMeChanged,
@@ -552,12 +540,6 @@ class SettingsScreen extends StatefulWidget {
     this.targetAccountLabel,
     this.onSignIn,
     this.onSignOutOfServer,
-    this.needsYouRules = '',
-    this.needsYouRejudging = 0,
-    this.needsYouDefaultRules = '',
-    this.needsYouFixedTail = '',
-    this.needsYouRulesMaxLength = 4000,
-    this.onNeedsYouRulesSaved,
     this.replySendMarksDone = false,
     this.onReplySendMarksDoneChanged,
     this.storylineNewestFirst = false,
@@ -571,6 +553,7 @@ class SettingsScreen extends StatefulWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
     this.generativeKeyStored = false,
@@ -671,6 +654,14 @@ class SettingsScreen extends StatefulWidget {
   static const Key forgetResyncKeepKey =
       ValueKey('settings-forget-resync-keep');
 
+  /// The quiet line saying an older build's Needs You rules are unused.
+  static const Key oldNeedsYouRulesKey =
+      ValueKey('settings-old-needs-you-rules');
+
+  /// The line under the Needs You slider that states its number.
+  static const Key needsYouThresholdLineKey =
+      ValueKey('settings-needs-you-threshold-line');
+
   /// The cloud-draft controls: the standing switch under Suggested replies,
   /// and the ledger line and cap field under Processing. Keyed for the reason
   /// the buttons above are — each one's label is also most of the caption
@@ -706,7 +697,7 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  late double _threshold = widget.threshold.clamp(0.0, 1.0);
+  late double _threshold = normalizeNeedsYouThreshold(widget.threshold);
   late bool _showActivityLog = widget.showActivityLog;
   late NotifyStyle _notifyStyle = widget.notifyStyle;
   late DraftPolicy _draftPolicy = widget.draftPolicy;
@@ -714,9 +705,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
   late bool _replySendMarksDone = widget.replySendMarksDone;
 
-  /// Ten stops. Enough that the slider feels like it has an opinion, few enough
-  /// that the same drag lands on the same value twice.
-  static const int _divisions = 10;
+  /// One stop per [NeedsYouTuning.step] from end to end: eighteen, so every
+  /// stop is a threshold the stored pref can hold and the number under the
+  /// slider is the number the queries read.
+  static const int _divisions = 18;
 
   /// The one handle the screen keeps on the connection section's own state.
   ///
@@ -815,7 +807,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// The last about-me text actually handed to the host. Cancel restores it,
   /// Save replaces it, and it is what "dirty" is measured against — the same
-  /// contract [NeedsYouRulesEditor] keeps for the rules beside it.
+  /// contract a free text keeps anywhere in this pane.
   late String _aboutMeSaved = widget.aboutMe;
 
   /// What the about-me prompt clamps to, enforced on the field. A cap the
@@ -825,9 +817,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const String _aboutMeBlurb =
       'Two steps of the pipeline read this: the one that decides whether a '
       'message is actually waiting on a reply from you, and the one that '
-      'writes the draft. Nothing else does — the Needs You rules below are a '
-      'separate text, and this one is not in that prompt. The first 600 '
-      'characters are what reaches the model.';
+      'writes the draft. Nothing else does. The first 600 characters are '
+      'what reaches the model.';
 
   @override
   void initState() {
@@ -891,7 +882,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // answer would be reporting a setting that is no longer in force. No
     // `setState`: the framework rebuilds after this runs.
     if (old.threshold != widget.threshold) {
-      _threshold = widget.threshold.clamp(0.0, 1.0);
+      _threshold = normalizeNeedsYouThreshold(widget.threshold);
     }
     if (old.showActivityLog != widget.showActivityLog) {
       _showActivityLog = widget.showActivityLog;
@@ -932,12 +923,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    // NOTHING is saved here. Both texts on this screen — about me and the
-    // Needs You rules — commit on their own Save and on nothing else, so
-    // Cancel means cancel and leaving means leaving. The dialog this replaced
-    // saved about-me on the way out, which needed a scheduleMicrotask to
-    // survive being unmounted by its own backend-switch callback; with no
-    // write here, that whole hazard is gone.
+    // NOTHING is saved here. The about-me text commits on its own Save and on
+    // nothing else, so Cancel means cancel and leaving means leaving. The
+    // dialog this replaced saved about-me on the way out, which needed a
+    // scheduleMicrotask to survive being unmounted by its own backend-switch
+    // callback; with no write here, that whole hazard is gone.
     _aboutMe.removeListener(_onAboutMeChanged);
     _aboutMe.dispose();
     _cloudCapFocus.removeListener(_onCloudCapFocusChanged);
@@ -1248,6 +1238,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     decisionUrl: widget.decisionUrl,
     decisionModel: widget.decisionModel,
     decisionKeyStored: widget.decisionKeyStored,
+    decisionKind: widget.decisionKind,
     generativeUrl: widget.generativeUrl,
     generativeModel: widget.generativeModel,
     generativeKeyStored: widget.generativeKeyStored,
@@ -2208,37 +2199,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ── Needs You ─────────────────────────────────────────────────────────────
 
-  /// Five words for ten stops. The slider is a feel, not a number, and a
-  /// summary that said "0.7" would be reporting an implementation detail at
-  /// somebody who moved a slider.
-  String _thresholdWording() {
-    if (_threshold >= 0.8) return 'Only the critical';
-    if (_threshold >= 0.6) return 'Close to critical';
-    if (_threshold >= 0.4) return 'A middle cut';
-    if (_threshold >= 0.2) return 'Leaning generous';
-    return 'Anything plausible';
-  }
+  /// The slider's threshold as the percentage the owner sees on every
+  /// message, so the two read as one number.
+  int get _thresholdPercent => (_threshold * 100).round();
 
-  /// Whether the owner has replaced the app's own rules. It reads the WIDGET
-  /// prop rather than editor-local state, so a Save inside the editor only
-  /// moves this line because the host rebuilds — which is why `SettingsHost`
-  /// watches the prefs rather than reading them.
-  bool get _rulesAreCustom => widget.needsYouRules.trim().isNotEmpty;
+  String _needsYouSummary() => 'At $_thresholdPercent% or more';
 
-  String _needsYouSummary() {
-    final rules = widget.onNeedsYouRulesSaved == null
-        ? ''
-        : _rulesAreCustom
-        ? ' · custom rules'
-        : ' · default rules';
-    // Last, after what the rules ARE, because it is the transient half: the
-    // rules are the state, this is a queue draining behind them.
-    final count = widget.needsYouRejudging;
-    final rejudging = count == 0
-        ? ''
-        : ' · judging $count ${count == 1 ? 'message' : 'messages'}';
-    return '${_thresholdWording()}$rules$rejudging';
-  }
+  /// A slider position as the threshold it stands for. The slider runs the
+  /// OTHER way from the threshold (right is more mail, which is a LOWER cut),
+  /// so a position is reflected across the range rather than read as is.
+  static double _thresholdAt(double position) => normalizeNeedsYouThreshold(
+        NeedsYouTuning.maxThreshold + NeedsYouTuning.minThreshold - position,
+      );
 
   Widget _needsYouBody() {
     return Column(
@@ -2249,21 +2221,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
           style: BondType.body.copyWith(fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: BondSpacing.s4),
-        // The direction is the thing worth stating: the slider raises a score
-        // threshold, so RIGHT means more mail, and a label-less slider would
-        // leave that a coin flip.
+        // The direction is the thing worth stating: the slider lowers a
+        // probability threshold as it goes, so RIGHT means more mail, and a
+        // label-less slider would leave that a coin flip.
         Slider(
-          value: 1 - _threshold,
+          min: NeedsYouTuning.minThreshold,
+          max: NeedsYouTuning.maxThreshold,
+          value: NeedsYouTuning.maxThreshold +
+              NeedsYouTuning.minThreshold -
+              _threshold,
           divisions: _divisions,
-          onChanged: (value) => setState(() => _threshold = 1 - value),
-          onChangeEnd: (value) => widget.onThresholdChanged(1 - value),
+          onChanged: (value) =>
+              setState(() => _threshold = _thresholdAt(value)),
+          onChangeEnd: (value) =>
+              widget.onThresholdChanged(_thresholdAt(value)),
         ),
         // Both halves flex: the labels are long enough relative to the pane
         // that a fixed Row overflows at a large text scale.
         Row(
           children: [
             Expanded(
-              child: Text('Only the critical', style: BondType.caption),
+              child: Text('Only the surest', style: BondType.caption),
             ),
             Expanded(
               child: Text(
@@ -2274,19 +2252,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ),
-        // Under the slider because it refines the same question the slider
-        // tunes: the slider says how much gets through, this says what "needs
-        // you" means in the first place.
-        if (widget.onNeedsYouRulesSaved case final onSave?) ...[
-          const SizedBox(height: BondSpacing.s24),
-          NeedsYouRulesEditor(
-            value: widget.needsYouRules,
-            defaultRules: widget.needsYouDefaultRules,
-            fixedTail: widget.needsYouFixedTail,
-            maxLength: widget.needsYouRulesMaxLength,
-            onSave: onSave,
+        const SizedBox(height: BondSpacing.s8),
+        // The number itself, because it is the same number every message
+        // shows beside its reason: a row at 72% is in Needs You exactly when
+        // this line says 70% or less.
+        Text(
+          'Needs you at $_thresholdPercent% or more',
+          key: SettingsScreen.needsYouThresholdLineKey,
+          style: BondType.body,
+        ),
+        Text(
+          "The decision model's confidence that a message needs you. Each "
+          'message shows its own percentage.',
+          style: BondType.caption,
+        ),
+        if (widget.oldNeedsYouRules)
+          Text(
+            'Your earlier Needs You rules are no longer used; the slider is '
+            'the one control.',
+            key: SettingsScreen.oldNeedsYouRulesKey,
+            style: BondType.caption,
           ),
-        ],
         // Last in the section because it is about leaving the pile rather than
         // about what lands in it, and it is the one control here that acts on
         // threads already judged.

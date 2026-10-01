@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -8,10 +9,11 @@ import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
-import 'attention.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
+import 'decision/decision_questions.dart' show decisionQhash;
+import 'decision/needs_you_predicate.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
 // `show`: the one thing the sync wants from the embedding client is the tag
@@ -46,6 +48,18 @@ int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
 /// deep window drains over several passes instead of being cut down to its
 /// newest this-many forever.
 const int backlogEnqueueCap = 150;
+
+/// The install-time re-decide's one-shot: its value IS the question-set hash
+/// ([decisionQhash]) it last ran to the end for, so a build reading a new
+/// decision model — a new hash — runs it again, and one reading the same
+/// model never does.
+///
+/// NOT in `MessageStore.derivedOneShotPrefs`, deliberately: Clear AI results
+/// empties `message_decisions` and re-pends every kept message's triage, which
+/// decides each of them again under the current model — so the pref still
+/// tells the truth after a clear, and re-running the one-shot would find
+/// nothing to do.
+const String redecideQhashKey = 'decision_redecide_qhash';
 
 /// How many rows a retired-tag one-shot re-embeds per sync.
 ///
@@ -152,6 +166,16 @@ abstract class MailSync {
 
   Future<void> ensureBodies(String conversationKey);
 
+  /// The bodies of [sourceMessageIds] in [conversationKey] and nothing else,
+  /// for the storyline judge: the rendered rows still showing their preview.
+  /// No attachment text or digest is queued — a membership question is not a
+  /// reason to spend an extraction — and a row that already has its body is
+  /// not fetched again.
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  );
+
   /// One message's body and headers, for a caller that has a message rather
   /// than a thread — the triage worker, which needs the real body to classify
   /// and the headers to gate on, and cannot wait for a human to open the
@@ -213,10 +237,11 @@ class SyncService implements MailSync {
   /// and answers [syncFloorDays].
   final int Function()? _lookbackDays;
 
-  /// The user's attention floor, for the one-shot backfill below. A callback
-  /// for [_lookbackDays]'s reason — the slider moves under a service built
-  /// once — and null for every caller that predates the backfill, which then
-  /// judges history against [AttentionTuning.defaultThreshold].
+  /// The owner's Needs You slider, for the one-shot chip backfill and its
+  /// lowering twin below. A callback for [_lookbackDays]'s reason — the slider
+  /// moves under a service built once — and null for every caller that
+  /// predates the backfill, which then judges history against
+  /// [NeedsYouTuning.defaultThreshold].
   final Future<double> Function()? _threshold;
 
   /// The registered local directories, or null for every caller that does not
@@ -229,35 +254,80 @@ class SyncService implements MailSync {
   /// In the app: `GateRepairService.repairAll`.
   final Future<({int repaired, bool complete})> Function()? _repairGated;
 
+  /// The install-time re-decide ([redecideQhashKey]), or null on a build
+  /// wired without it. In the app: `TriageQueue.redecideStale`.
+  final Future<({int redecided, bool complete})> Function()? _redecide;
+
+  /// The re-decide running now, or null — the latch that keeps a second pass
+  /// from starting another over the same messages. Not awaited by the pass:
+  /// up to two thousand decisions must not hold new mail's sync behind them.
+  /// Per instance, so a provider rebuild (a backend switch) can start a second
+  /// run beside one still going; that is harmless, because each run re-reads
+  /// the stale list and a message decided twice is written the same way.
+  Future<void>? _redeciding;
+
+  /// The re-decide a pass started, for a test to await. Null when none runs.
+  Future<void>? get redecideInFlight => _redeciding;
+
   SyncService(
     this._mail,
     this._store, {
     ActivityLog? activityLog,
     PipelineProgress? progress,
     Future<String?> Function()? userAddress,
-    Future<double> Function()? attentionThreshold,
+    Future<double> Function()? needsYouThreshold,
     ContextStore? contextStore,
     Future<({int repaired, bool complete})> Function()? repairGatedConversations,
+    this._redecide,
     this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _repairGated = repairGatedConversations,
         _context = contextStore,
         _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress,
-        _threshold = attentionThreshold;
+        _threshold = needsYouThreshold;
 
   /// The settle machine's reader, degraded its way — see
-  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot
+  /// `NotificationCoordinator._needsYouThreshold`. A preference that cannot
   /// be read is a default, never a failed sync.
   Future<double> _thresholdOrDefault() async {
     final read = _threshold;
-    if (read == null) return AttentionTuning.defaultThreshold;
+    if (read == null) return NeedsYouTuning.defaultThreshold;
     try {
       return await read();
     } catch (e) {
-      debugPrint('sync: reading the attention threshold failed: $e');
-      return AttentionTuning.defaultThreshold;
+      debugPrint('sync: reading the needs-you threshold failed: $e');
+      return NeedsYouTuning.defaultThreshold;
     }
+  }
+
+  /// Starts the re-decide when its pref is not this build's hash and none is
+  /// running. The pref is written only when a run ends complete; a park or
+  /// the processing switch leaves it open and the next pass resumes, because
+  /// what was re-decided has dropped out of the list. A throw is logged and
+  /// leaves it open too — a re-decide is never a failed sync.
+  void _startRedecide() {
+    final redecide = _redecide;
+    if (redecide == null || _redeciding != null) return;
+    late final Future<void> run;
+    run = () async {
+      try {
+        if (await _store.getPref(redecideQhashKey) == decisionQhash) return;
+        final outcome = await redecide();
+        if (outcome.complete) {
+          await _store.setPref(redecideQhashKey, decisionQhash);
+        }
+        // No activity row of its own: a park is already on the triage
+        // queue's row, and a `sync_mail` row would move the last-sync stamp.
+        debugPrint('sync: re-decided ${outcome.redecided} messages'
+            '${outcome.complete ? '' : ', to be resumed'}');
+      } catch (e) {
+        debugPrint('sync: the install-time re-decide failed: $e');
+      } finally {
+        if (identical(_redeciding, run)) _redeciding = null;
+      }
+    }();
+    _redeciding = run;
   }
 
   @override
@@ -460,36 +530,43 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_model_revive', '1');
       }
 
-      // The other half of that catch-up, on the home screen's side. The v10
-      // verdict column arrived AFTER these rows settled, so the `needs_you`
-      // snapshot each of them took never saw it: a message the pass later
-      // judged yes carries `needs_you_verdict = 1` beside `needs_you = 0`, and
-      // nothing else in the app would ever reconcile the two. Raise-only, and
+      // The other half of that catch-up, on the home screen's side. The
+      // `needs_you` snapshot each settled row took was taken under the rule of
+      // its day, so a message that needs the owner by its probability now can
+      // carry `needs_you = 0`, and nothing else in the app would ever
+      // reconcile the two. Raise-only, and
       // guarded on the thread not being done and having no reply newer than
       // the message — a chip raised months late must not land on something the
       // user has already answered. Null until it runs, like the revive above.
+      //
+      // The `_p` keys are the v21 pair. The older `needs_you_flag_backfill`
+      // and `needs_you_flag_veto` ran under the verdict rule and are set on
+      // every machine that ran an earlier build, so the probability rule
+      // reconciles under keys of its own, once.
       int? backfilledNeedsYou;
-      if (await _store.getPref('needs_you_flag_backfill') == null) {
+      if (await _store.getPref('needs_you_flag_backfill_p') == null) {
         backfilledNeedsYou = await _progress.backfillNeedsYou(
           threshold: await _thresholdOrDefault(),
         );
-        await _store.setPref('needs_you_flag_backfill', '1');
+        await _store.setPref('needs_you_flag_backfill_p', '1');
       }
 
-      // And its lowering twin: the chips that settled on triage's ask before
-      // the judge's no was allowed to outrank it (`notifyWorthy`). Once, on
-      // the same idiom, and null until it runs.
+      // And its lowering twin: the chips `notifyWorthy` would not grant today
+      // (below the slider or undecided, or a thread done or in Later). Once,
+      // on the same idiom, and null until it runs.
       int? vetoedNeedsYou;
-      if (await _store.getPref('needs_you_flag_veto') == null) {
-        vetoedNeedsYou = await _progress.lowerVetoedNeedsYou();
-        await _store.setPref('needs_you_flag_veto', '1');
+      if (await _store.getPref('needs_you_flag_veto_p') == null) {
+        vetoedNeedsYou = await _progress.lowerVetoedNeedsYou(
+          threshold: await _thresholdOrDefault(),
+        );
+        await _store.setPref('needs_you_flag_veto_p', '1');
       }
 
       // The hedges an older build stored as a no. A yes below the confidence
-      // bar is written NULL now, which buys no interruption and no veto, but
-      // it used to be written 0, and 0 outranks triage's ask everywhere. The
-      // old ones cannot be told from a real no, so every in-window verdict-0
-      // inbound, mail and chat, is judged again. After the needs-you one-shots
+      // bar used to be written as a verdict of 0, which the v21 step carried
+      // across as a probability of 0.0. The old ones cannot be told from a
+      // real no, so every in-window 0.0 inbound, mail and chat, is judged
+      // again. After the needs-you one-shots
       // above; the extract and needs-you backlog enqueues ran earlier in this
       // pass, which does not matter here, because the requeue revives the
       // existing work rows rather than waiting for an enqueue. Bounded by this
@@ -505,6 +582,25 @@ class SyncService implements MailSync {
             await _store.requeueZeroNeedsYouVerdicts(sinceIso: floor);
         await _store.setPref('needs_you_hedge_rejudge', '1');
       }
+
+      // The install-time re-decide: once per question-set hash, see
+      // [redecideQhashKey]. Started, not awaited — see [_redeciding].
+      _startRedecide();
+
+      // Every pass, not once: the triage pass writes an ownerless decision's
+      // probability when the keychain has not answered yet, and it is untrusted
+      // until the needs-you pass decides the message again with the owner
+      // (`MessageStore.requeueOwnerlessNeedsYou`). Self-exhausting: a
+      // re-decision records the owner, and the row stops matching. Both
+      // sources in one statement, which is why `teams_sync.dart` does not
+      // repeat it. Reported only when it found something. Skipped while the
+      // owner is unknown (this pass could not resolve the signed-in address):
+      // the pass would only keep each probability as it is, so the sweep
+      // would be a whole queue of no-ops on every sync.
+      final ownerless = _userAddress == null
+          ? 0
+          : await _store.requeueOwnerlessNeedsYou();
+      final int? requeuedOwnerless = ownerless > 0 ? ownerless : null;
 
       // Exchange's first-contact tip, off the rows stored before the ingest
       // learned to strip it. Once, on the same one-shot idiom as the two
@@ -688,7 +784,7 @@ class SyncService implements MailSync {
       // way, and BEFORE the sweep requeue so the sweep reads what this queued.
       //
       // The `storyline` kind is the vehicle rather than a re-extraction: the
-      // assign pass reaches `_reembed` before any membership check, so a
+      // assign pass embeds the thread before any membership check, so a
       // thread already inside a storyline gets its new vector too, which is
       // what the member centroids need. The one thing that pass returns on
       // first is a thread with no kept inbound message, and such threads are
@@ -952,6 +1048,7 @@ class SyncService implements MailSync {
           'backfilled_needs_you': ?backfilledNeedsYou,
           'vetoed_needs_you': ?vetoedNeedsYou,
           'requeued_needs_you_hedges': ?requeuedNeedsYouHedges,
+          'requeued_needs_you_ownerless': ?requeuedOwnerless,
           'stripped_sender_tips': ?strippedSenderTips,
           'stale_mail_bodies': ?staleMailBodies,
           'tidied_mail_previews': ?tidiedMailPreviews,
@@ -1709,6 +1806,22 @@ class SyncService implements MailSync {
     }
   }
 
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {
+    final wanted = sourceMessageIds.toSet();
+    if (wanted.isEmpty) return;
+    final thread =
+        await _store.loadThread(conversationKey, sources: const [_source]);
+    for (final message in thread) {
+      if (!wanted.contains(message.id)) continue;
+      if (message.bodyText?.isNotEmpty == true && !message.bodyStale) continue;
+      await _fetchDetailInto(message.id, queueAttachmentWork: false);
+    }
+  }
+
   /// The tier-two fetch for one message.
   ///
   /// Everything the triage worker needs that a delta page does not carry: the
@@ -1730,7 +1843,14 @@ class SyncService implements MailSync {
   /// the body only when one came back, and a permanent refusal through
   /// [MessageStore.clearBodyStale], which keeps the old text. A transient
   /// failure rethrows and keeps the mark, so the next open tries again.
-  Future<void> _fetchDetailInto(String sourceMessageId) async {
+  ///
+  /// [queueAttachmentWork] false still stores the attachment rows the detail
+  /// lists, but queues no `attachment_text` for them: the storyline fetch
+  /// ([ensureBodiesFor]) wants the body alone.
+  Future<void> _fetchDetailInto(
+    String sourceMessageId, {
+    bool queueAttachmentWork = true,
+  }) async {
     // A local echo's id was minted by this app before the server had the
     // message, and its body was written by the hand that sent it. Asking
     // Graph for it is a 400 at best; every body fetch — triage's, Restore's,
@@ -1843,6 +1963,7 @@ class SyncService implements MailSync {
       sourceMessageId,
       rawAttachments,
       extraRows: links.rows,
+      queueWork: queueAttachmentWork,
     );
   }
 
@@ -1904,6 +2025,7 @@ class SyncService implements MailSync {
     String sourceMessageId,
     Object? rawAttachments, {
     List<Map<String, Object?>> extraRows = const [],
+    bool queueWork = true,
   }) async {
     if ((rawAttachments is! List || rawAttachments.isEmpty) &&
         extraRows.isEmpty) {
@@ -1937,6 +2059,7 @@ class SyncService implements MailSync {
     if (rows.isEmpty) return;
 
     await _store.upsertAttachments(_source, sourceMessageId, rows);
+    if (!queueWork) return;
 
     // Read back rather than judged from the maps above, because the policy asks
     // about the MESSAGE too — a gated message queues nothing — and because the

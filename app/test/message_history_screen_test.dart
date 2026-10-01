@@ -63,6 +63,7 @@ MessageHistory _history({
   List<Map<String, Object?>> activity = const [],
   Map<String, Object?>? progress,
   double threshold = 0.5,
+  bool? decidedNow,
 }) =>
     MessageHistory.assemble(
       source: 'email',
@@ -74,7 +75,7 @@ MessageHistory _history({
             'from_name': 'Dana Whitfield',
             'received_at': '2026-09-03T09:00:00Z',
             'triage_status': 'triaged',
-            'needs_you_verdict': 1,
+            'needs_you_p': 0.9,
             'needs_you_reason': 'Dana asked for the DPA',
             'urgency': 'soon',
             'category': 'request',
@@ -97,6 +98,7 @@ MessageHistory _history({
       blocks: blocks,
       activity: activity,
       threshold: threshold,
+      decidedNow: decidedNow,
     );
 
 Future<void> _pump(
@@ -115,7 +117,6 @@ Future<void> _pump(
   void Function(String)? onAddBack,
   VoidCallback? onKeepInInbox,
   VoidCallback? onSendToLater,
-  VoidCallback? onEditRules,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1000, 1400));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -139,7 +140,6 @@ Future<void> _pump(
         onAddBack: onAddBack,
         onKeepInInbox: onKeepInInbox,
         onSendToLater: onSendToLater,
-        onEditRules: onEditRules,
       ),
     ),
   ));
@@ -204,10 +204,9 @@ void main() {
     expect(find.textContaining('settle: done'), findsOneWidget);
     // Judgements carry the reason the app wrote down at the time.
     expect(
-      find.text('Needs you: yes — Dana asked for the DPA'),
+      find.text('Needs you: 90% — Dana asked for the DPA'),
       findsOneWidget,
     );
-    expect(find.textContaining('vs threshold 0.50'), findsOneWidget);
     // The work list speaks the log's names for the stages, not the queue's
     // column values.
     expect(find.textContaining('Needs You · pending · attempt 1'),
@@ -219,27 +218,57 @@ void main() {
     expect(storylines, ['s1']);
   });
 
-  testWidgets('a hedge reads "not sure", and a never-judged row "not judged"',
-      (tester) async {
-    Map<String, Object?> message(Object? reason) => {
+  testWidgets('the probability reads as a percentage, and an undecided row '
+      '"not decided"', (tester) async {
+    Map<String, Object?> message(double? p, Object? reason) => {
           'conversation_key': 'c1',
           'subject': 'Renewal paperwork',
           'from_name': 'Dana Whitfield',
           'received_at': '2026-09-03T09:00:00Z',
           'triage_status': 'triaged',
-          'needs_you_verdict': null,
+          'needs_you_p': p,
           'needs_you_reason': reason,
         };
 
     await _pump(
       tester,
-      AsyncValue.data(_history(message: message('Dana may want the DPA'))),
+      AsyncValue.data(
+          _history(message: message(0.4, 'Dana may want the DPA'))),
     );
-    expect(find.text('Needs you: not sure — Dana may want the DPA'),
-        findsOneWidget);
+    // The number itself, whichever side of the slider it falls. 0.4 is under
+    // the history's own slider of 0.5, so the templated reason is not shown:
+    // it would claim an ask about a message that needs nothing.
+    expect(find.text('Needs you: 40%'), findsOneWidget);
+    expect(find.textContaining('Dana may want the DPA'), findsNothing);
 
-    await _pump(tester, AsyncValue.data(_history(message: message(null))));
-    expect(find.text('Needs you: not judged'), findsOneWidget);
+    await _pump(
+        tester, AsyncValue.data(_history(message: message(null, null))));
+    expect(find.text('Needs you: not decided'), findsOneWidget);
+
+    // Floored, not rounded: 0.496 is under the slider of 0.5 and never
+    // reads "50%".
+    await _pump(
+        tester, AsyncValue.data(_history(message: message(0.496, null))));
+    expect(find.text('Needs you: 49%'), findsOneWidget);
+
+    // An earlier model's carried verdict: no decision under this build's
+    // questions, so no percentage.
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        message: message(1.0, 'Dana may want the DPA'),
+        decidedNow: false,
+      )),
+    );
+    expect(
+      find.text('Needs you: — (earlier model) — Dana may want the DPA'),
+      findsOneWidget,
+    );
+    await _pump(
+      tester,
+      AsyncValue.data(_history(message: message(1.0, null), decidedNow: true)),
+    );
+    expect(find.text('Needs you: 100%'), findsOneWidget);
   });
 
   testWidgets('a dropped message offers Restore and nothing that would run '
@@ -607,7 +636,6 @@ void main() {
       onRetry: () {},
       onRejudge: () {},
       onIgnore: () {},
-      onEditRules: () {},
     );
 
     expect(
@@ -622,7 +650,6 @@ void main() {
       MessageHistoryScreen.retryKey,
       MessageHistoryScreen.rejudgeKey,
       MessageHistoryScreen.ignoreKey,
-      MessageHistoryScreen.editRulesKey,
     ]) {
       expect(find.byKey(key), findsNothing, reason: '$key');
     }

@@ -33,6 +33,7 @@ import 'package:http/testing.dart';
 import 'fixtures/fake_attachment_bytes.dart';
 import 'fixtures/fake_pdf_renderer.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The whole screen, with sqlite real and every socket faked.
 ///
@@ -73,6 +74,12 @@ class _Tokens implements TokenStore {
 }
 
 class _FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   int syncCalls = 0;
 
   @override
@@ -151,6 +158,8 @@ void main() {
       'gate_reason': teamsSourceGate,
       if (withFile) 'has_attachments': 1,
     });
+    // Over the slider, so the chat is in Needs You.
+    await store.writeNeedsYouP('teams', '$key-m1', p: 0.9);
     if (withFile) {
       await store.upsertAttachments('teams', '$key-m1', [
         {
@@ -196,6 +205,7 @@ void main() {
       'received_at': at,
       'body_text': body,
     });
+    await seedNeedsYou(store, 'email', '$key-m1');
     await store.upsertConversation({
       'conversation_key': key,
       'subject': subject,

@@ -121,11 +121,11 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
 
 ```
 -m /models/<file> --embeddings --pooling mean -c 2048 -ub 2048 -b 2048 -np 1 -ngl 99
---host 0.0.0.0 --port 8080 --alias bond-decide-mbl-v2swap [--api-key-file /opt/bond/api.key]
+--host 0.0.0.0 --port 8080 --alias bond-decide-mbl-v3 [--api-key-file /opt/bond/api.key]
 ```
 
 - **The file.** PATH is the GGUF `make decide-install` put on this Mac:
-  `~/Library/Application Support/com.bondinbox.app/models/local_bond-decide/bond-decide-mbl-v2swap-f16.gguf`
+  `~/Library/Application Support/com.bondinbox.app/models/local_bond-decide/bond-decide-mbl-v3-f16.gguf`
   (quote it, since the folder has a space, and write `"$HOME/Library/…"`
   rather than `~`, which does not expand inside quotes). `up` and `restart` copy it to
   `/opt/bond/decide/` on the box over scp, into `incoming/` first, and move it
@@ -137,12 +137,16 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
   only if the file is there; `/opt/bond/serve.sh decide` itself refuses to
   start when the GGUF is not a regular file, so Docker never creates a
   directory in its place.
-- **The heads stay on the Mac.** Only the GGUF travels. The nine heads,
-  temperatures and softmax run in the app, off `decide-heads.json` in the
-  local models folder, so a Mac pointed at a box's decision server still needs
-  `make decide-install`. `--decide-gguf` refuses a `.json`.
-- **The name.** Served as `bond-decide-mbl-v2swap` (`--decide-served`), the
-  name the app asks a box for.
+- **The heads stay on the Mac.** Only the GGUF travels. The heads (the nine
+  message fields and the three storyline questions), temperatures and softmax
+  run in the app, off `decide-heads.json` in the local models folder, so a Mac
+  pointed at a box's decision server still needs `make decide-install`.
+  `--decide-gguf` refuses a `.json`.
+- **The name.** Served as `bond-decide-mbl-v3` (`--decide-served`), the
+  name the app asks a box for. That is the v2 model, whose schema-1 heads file
+  this build refuses; the v3 install updates the file name and the export, and
+  until then a v2 decide slot parks the app's decision pass the same way a v2
+  install on the Mac does.
 - **Order and memory.** The decide slot starts after the vLLM slots, because
   vLLM measures free GPU memory when it starts. It needs about 1.5 GB: room
   enough beside the 27B alone (92% of the card) and tight beside the 27B and
@@ -160,6 +164,34 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
   `--decide-gguf`, on a box that runs no decide slot, names nothing and says
   so on stderr. On the box, `/opt/bond/serve.sh decide` restarts it by hand,
   with any extra llama-server flags appended.
+
+## Kev on the box
+
+The Decision role's **Your server** may also be Kev 4B, the decision model
+that answers the questions itself, rather than ModernBERT in the decide slot.
+The app tells the two apart on its own at Connect (Kev's `/v1/models` lists
+the question hash, `qhash`), says which one it found under the form, and
+sends Kev one `POST …/v1/systemone` per message or storyline state; how is in
+`docs/pipeline/10-model-routing.md`, "The decision client". Kev's answers
+come back calibrated, so no heads file is needed on the Mac.
+
+This round ships the APP side only. Serving Kev on the box is jev-prototype's
+wrapper, `distill/serve_bond_kev.py` (its J6), started by hand beside the 27B
+with vLLM's memory share lowered so both fit on the card. `tools/inference.sh`
+does not start it; automating that belongs to the model-bundles round. Point
+Decision → Your server at the wrapper's endpoint, for example:
+
+```
+https://box.example.com/decide/v1/systemone        Kev behind the box's front door
+http://127.0.0.1:18302/v1/systemone                Kev through an SSH tunnel
+```
+
+The first needs the front door's `/decide/` route pointed at the wrapper in
+place of the decide slot, by hand, for the same reason.
+
+The address must end in `/v1/systemone` (or `/v1/embeddings`); the app asks
+`/v1/models` and `/v1/systemone` beside it, under the same path prefix, with
+the same key.
 
 ## What the test checks
 
@@ -213,7 +245,7 @@ make golden-prose       PROSE_URL=… PROSE_MODEL=qwen3.8 PROSE_LABEL=…
 and, for the bulk slot (the next port up), the same three as `BENCH_URL` /
 `BENCH_MODEL=qwen3-4b` / `BENCH_LABEL` on `make bench`, `make drain` and
 `make golden`. The decide slot is two ports up (18102 on the first tunnel):
-`http://localhost:18102/v1/embeddings`, model `bond-decide-mbl-v2swap`. The
+`http://localhost:18102/v1/embeddings`, model `bond-decide-mbl-v3`. The
 tunnel always forwards all three ports; a forward to a slot the box does not
 run answers nothing. A tunnel opened by an older copy of the script forwards
 only two, and the script closes and reopens it. The tunnel dies when this Mac sleeps or the
@@ -302,14 +334,15 @@ The URLs the app wants:
 
 ```
 https://box.example.com/prose/v1/chat/completions   model qwen3.8                  Generative model
-https://box.example.com/decide/v1/embeddings        model bond-decide-mbl-v2swap   Decision model
+https://box.example.com/decide/v1/embeddings        model bond-decide-mbl-v3   Decision model
 ```
 
 Each is a role's **Your server** address in Settings → Models. A build with
 `BOND_BOX_URL=https://box.example.com` in `.env` derives both itself
 (`/prose/v1/chat/completions` and `/decide/v1/embeddings`), so they need no
-typing. The Decision model's heads file stays on the Mac: run
-`make decide-install` there even when the decision server is the box. The
+typing. With ModernBERT in the decide slot, the Decision model's heads file
+stays on the Mac: run `make decide-install` there even when the decision
+server is the box. Kev on the box (below) needs no file on the Mac. The
 `/bulk/` slot is for the benches only. The key is typed into the app and kept
 in the keychain. From a terminal:
 

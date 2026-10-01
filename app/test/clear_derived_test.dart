@@ -14,6 +14,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/services/cloud_drafts.dart' show DraftRoutes;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
@@ -402,6 +403,23 @@ void main() {
     final label = await store.createLabel('FYI only', tone: 'success');
     await store.applyLabels('email', 'conv-1', [label.id]);
 
+    // One storyline press, logged as a decision label: the owner's word, like
+    // the vocabulary above, and nothing a re-run would write back.
+    await store.writeDecisionLabels([
+      (
+        question: 'member_of',
+        answer: 'yes',
+        storylineId: 'sl-1',
+        source: 'email',
+        conversationKey: 'conv-1',
+        otherSource: null,
+        otherConversationKey: null,
+        title: 'Invoice 4471',
+        charter: 'Getting invoice 4471 paid.',
+        origin: 'add',
+      ),
+    ]);
+
     // Configuration, which neither reset may touch.
     await store.setSenderPref('eric@example.com', 'later');
     await store.setPref('backend_mode', 'sdk');
@@ -437,7 +455,7 @@ void main() {
       expect(classified.length, classified.toSet().length);
       expect(MessageStore.derivedTables, hasLength(17));
       expect(MessageStore.syncedTables, hasLength(7));
-      expect(MessageStore.keptTables, hasLength(5));
+      expect(MessageStore.keptTables, hasLength(6));
     });
 
     test('name every retired clustering one-shot', () {
@@ -565,6 +583,20 @@ void main() {
       );
     });
 
+    test('keeps the storyline labels the owner pressed', () async {
+      await seedEverything();
+
+      await store.clearDerived();
+
+      // The storylines they were pressed on are derived and gone; the labels
+      // are the owner's word and stay, with the words they answered.
+      expect(await rows('storylines'), 0);
+      final labels = await store.decisionLabels();
+      expect(labels.single['question'], 'member_of');
+      expect(labels.single['answer'], 'yes');
+      expect(labels.single['charter'], 'Getting invoice 4471 paid.');
+    });
+
     test('keeps the verdicts ingest wrote and re-pends the rest', () async {
       // The four ingest wrote, which nothing would write a second time.
       await seedMessage('out-1',
@@ -634,7 +666,7 @@ void main() {
             source,
             id,
             fakeDecision(fakeAnswers(gateDrop: 0.9, dropReason: 'outbound')),
-            qhash: 'test',
+            qhash: decisionQhash,
             ownerKnown: true,
           );
       await seedMessage('learned-out',
@@ -747,7 +779,8 @@ void main() {
         "summary = 'An old summary', needs_action = 1, "
         "action_items_json = '[]', label = 'work', reply_expected = 1, "
         "deadline = 'Friday', needs_you_verdict = 1, "
-        "needs_you_reason = 'addressed you', addressed_me = 1",
+        "needs_you_reason = 'addressed you', needs_you_p = 0.8, "
+        'addressed_me = 1',
       );
 
       await store.clearDerived();
@@ -773,6 +806,7 @@ void main() {
         'deadline',
         'needs_you_verdict',
         'needs_you_reason',
+        'needs_you_p',
       ]) {
         expect(row[column], isNull, reason: column);
       }
@@ -1276,6 +1310,9 @@ void main() {
       // written about mail that is gone.
       expect(await rows('conversation_labels'), 0);
       expect(await rows('labels'), 0);
+      // The storyline labels too: each names a thread of the mailbox this
+      // wipe just deleted.
+      expect(await rows('decision_labels'), 0);
       // And the sender rule beside them, to show this is a deliberate
       // difference rather than the identity flag doing the work.
       expect(await store.getSenderPref('eric@example.com'), 'later');

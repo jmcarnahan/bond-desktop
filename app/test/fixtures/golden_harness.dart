@@ -4,17 +4,15 @@ import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart';
+import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
-// `show`: the two things this file wants from the storyline service are the
-// charter clamp the app ships and the grouping mode a define can pick, so a
-// harness default cannot drift from either.
-import 'package:bond_inbox/services/storyline_service.dart'
-    show GroupingMode, StorylineTuning;
+// `show`: what this file wants from the storyline service is the charter
+// check a define can pick, so a harness default cannot drift from it.
+import 'package:bond_inbox/services/storyline_service.dart' show CharterCheck;
 
 import 'bench_stats.dart';
 import 'golden_prices.dart';
@@ -66,21 +64,12 @@ class GoldenDefines {
   /// nobody a path.
   static const String registryPath = String.fromEnvironment('GOLDEN_REGISTRY');
 
-  /// The bulk run file whose extraction topics and triage summary build each
-  /// candidate card — the app's card carries the newest inbound message's
-  /// extraction and summary, so a replay without them would judge a thinner
-  /// card than the app sends.
+  /// The bulk run file whose extraction topics and triage summary the
+  /// storyline legs seed into the mailbox (`storyline_seed.dart`) — the app's
+  /// clustering card carries the newest inbound message's extraction and
+  /// summary, so a replay without them would embed a thinner card than the
+  /// app does.
   static const String runPath = String.fromEnvironment('GOLDEN_RUN');
-
-  /// How much of a storyline's charter the confirm reads, in characters. The
-  /// default IS the app's own `StorylineTuning.charterCap`, read off it rather
-  /// than copied, so a replay nobody passed a define to measures the clamp the
-  /// app ships. The define exists so one set of cards can be replayed at
-  /// several caps.
-  static const int charterCap = int.fromEnvironment(
-    'GOLDEN_CHARTER_CAP',
-    defaultValue: StorylineTuning.charterCap,
-  );
 
   /// Which clustering card the sweep replay embeds, by name. Parsed by
   /// `parseClusteringCardVariant`, which refuses anything that is not one of
@@ -92,34 +81,36 @@ class GoldenDefines {
       String.fromEnvironment('SWEEP_CARD', defaultValue: 'topics');
 
   /// How much of the sweep replay runs: `vector` stops after the seeding and
-  /// reads the clustering vector alone, `full` is the whole filing path, and
+  /// reads the clustering vector alone, `full` is the whole filing path,
   /// `declared` skips the clustering entirely and recruits into storylines
-  /// declared from the registry. Parsed by [parseSweepStage], which refuses
-  /// anything else.
+  /// declared from the registry, and `pairs` asks the decision model's
+  /// `same_effort` over the pool pairs. Parsed by [parseSweepStage], which
+  /// refuses anything else.
   ///
-  /// One test body and one seeding serve all three, which is what keeps the
+  /// One test body and one seeding serve all four, which is what keeps the
   /// readings of one mailbox from drifting apart. `full` is the default
   /// because it is what `make golden-sweep` has always run.
   static const String sweepStageRaw =
       String.fromEnvironment('SWEEP_STAGE', defaultValue: 'full');
 
-  /// Which pass decides what goes together on a sweep replay: `cosine`,
-  /// `model` or `pool`. Parsed by [parseSweepGrouping], which refuses
-  /// anything else.
+  /// Which check a named cluster's charter faces on a sweep replay: `model`
+  /// (the decision model's `charter_specific`, what ships) or `lint` (the
+  /// regex lint). Parsed by [parseSweepCharter], which refuses anything else;
+  /// handed to the service as `charterCheck`.
   ///
-  /// A define rather than a `sed` of `StorylineTuning.groupingMode`, for the
-  /// reason every other knob here is one: a row has to name the mode it was
+  /// A define rather than a `sed` of `StorylineTuning.charterCheck`, for the
+  /// reason every other knob here is one: a row has to name the check it was
   /// taken under, and a constant edited for one run and forgotten is how two
   /// rows from different trees end up in one table. The default follows the
-  /// app, so a run nobody passed a mode to measures the mode that ships.
-  static const String sweepGroupingRaw =
-      String.fromEnvironment('SWEEP_GROUPING', defaultValue: 'cosine');
+  /// app, so a run nobody passed a check to measures the check that ships.
+  static const String sweepCharterRaw =
+      String.fromEnvironment('SWEEP_CHARTER', defaultValue: 'model');
 
   /// Whether a `possible` storyline spends a slot of the sweep's room: `0`
   /// (what the app ships — suggested rows only) or `1` (the old rule, both
   /// count). Parsed by [parseSweepPossibleRoom], which refuses anything else;
   /// handed to the service as `possibleHoldsRoom`. A define and not a `sed` of
-  /// `StorylineTuning.possibleHoldsRoom`, for [sweepGroupingRaw]'s reason.
+  /// `StorylineTuning.possibleHoldsRoom`, for [sweepCharterRaw]'s reason.
   static const String sweepPossibleRoomRaw =
       String.fromEnvironment('SWEEP_POSSIBLE_ROOM', defaultValue: '0');
 
@@ -140,9 +131,9 @@ class GoldenDefines {
       resolveEmbedPrefix(sweepEmbedPrefixRaw);
 
   /// The owner's name, or null when the define is empty or only whitespace.
-  /// Null and not the empty string: `NeedsYouInput` takes a `String?` and
-  /// omits the owner line entirely for null, which is the honest rendering of
-  /// "this machine did not say who the owner is".
+  /// Null and not the empty string: a null owner is omitted from every input
+  /// that names one, which is the honest rendering of "this machine did not
+  /// say who the owner is".
   static String? get ownerName =>
       ownerNameRaw.trim().isEmpty ? null : ownerNameRaw.trim();
 
@@ -231,10 +222,8 @@ String decisionConfidenceWord(double pYes) {
 
 /// One item's decision answers, as the run file records them.
 ///
-/// needs_you is `p(yes) >= 0.5` in BOTH rules: that is the row of record's
-/// verdict. The app's own reading is banded (yes at 0.65, no below 0.35,
-/// the generative model in between — D6), which a run file of one model's
-/// answers cannot express; the band's size is what the agreement leg counts.
+/// needs_you is the app's own rule in BOTH gate rules: [needsYouAt] at the
+/// slider's shipped default ([NeedsYouTuning.defaultThreshold]).
 GoldenClassifierOut classifierOut(
   DecisionAnswers a, {
   required DecisionGateRule rule,
@@ -261,7 +250,7 @@ GoldenClassifierOut classifierOut(
     urgency: a['urgency'].choice,
     needsAction: a.p('needs_action', 'yes') >= DecisionPolicy.booleanYes,
     replyExpected: a.p('reply_expected', 'yes') >= DecisionPolicy.replyYes,
-    needsYouVerdict: pNeedsYou >= 0.5,
+    needsYouVerdict: needsYouAt(pNeedsYou, NeedsYouTuning.defaultThreshold),
     needsYouConfidence: decisionConfidenceWord(pNeedsYou),
     intent: a['intent'].choice,
     importance: a['importance'].choice,
@@ -311,6 +300,12 @@ enum SweepStage {
   /// and no naming call: what the recruit can do from a charter a person
   /// wrote, which is the ceiling the sweep is measured against.
   declared,
+
+  /// Seed the mailbox, then ask the decision model's `same_effort` over the
+  /// same same-effort and cross-effort pool pairs the vector stage reads by
+  /// cosine, and stop. The decision model is the only model dialled: the
+  /// pair question's own separation, read against the cosine's.
+  pairs,
 }
 
 /// The stage `SWEEP_STAGE` names, or a thrown [ArgumentError].
@@ -323,28 +318,27 @@ SweepStage parseSweepStage(String raw) => switch (raw.trim().toLowerCase()) {
       'vector' => SweepStage.vector,
       'full' => SweepStage.full,
       'declared' => SweepStage.declared,
+      'pairs' => SweepStage.pairs,
       _ => throw ArgumentError.value(
           raw,
           'SWEEP_STAGE',
-          'must be one of vector, full, declared',
+          'must be one of vector, full, declared, pairs',
         ),
     };
 
-/// The grouping mode `SWEEP_GROUPING` names, or a thrown [ArgumentError].
+/// The charter check `SWEEP_CHARTER` names, or a thrown [ArgumentError].
 ///
-/// Loud rather than defaulted, for [parseSweepStage]'s reason: the three modes
-/// are three different experiments, they cost three different numbers of prose
-/// calls, and a typo that quietly ran the shipped one would record a row
-/// against a question nobody asked.
-GroupingMode parseSweepGrouping(String raw) =>
+/// Loud rather than defaulted, for [parseSweepStage]'s reason: the two checks
+/// are two different experiments, and a typo that quietly ran the shipped one
+/// would record a row against a question nobody asked.
+CharterCheck parseSweepCharter(String raw) =>
     switch (raw.trim().toLowerCase()) {
-      'cosine' => GroupingMode.cosine,
-      'model' => GroupingMode.model,
-      'pool' => GroupingMode.pool,
+      'model' => CharterCheck.model,
+      'lint' => CharterCheck.lint,
       _ => throw ArgumentError.value(
           raw,
-          'SWEEP_GROUPING',
-          'must be one of cosine, model, pool',
+          'SWEEP_CHARTER',
+          'must be one of model, lint',
         ),
     };
 
@@ -381,21 +375,6 @@ int checkK(int k) {
   return k;
 }
 
-/// [cap] if it names a charter clamp, or a thrown [ArgumentError]. Loud rather
-/// than clamped for [checkK]'s reason: a cap of zero would send the confirm a
-/// storyline with no description at all and record the result as a measurement
-/// of the cap somebody typed.
-int checkCharterCap(int cap) {
-  if (cap < 1) {
-    throw ArgumentError.value(
-      cap,
-      'GOLDEN_CHARTER_CAP',
-      'must be a positive integer',
-    );
-  }
-  return cap;
-}
-
 /// The message-text stage's answer, as the run file records it. A straight
 /// copy: the scorer reads these fields by name, so anything clever here would
 /// be scoring a transformation rather than the model. `deadline` needs no null
@@ -409,59 +388,24 @@ GoldenTextOut textOut(MessageTextResult r) => GoldenTextOut(
       project: r.project,
     );
 
-/// The needs-you answer the app's ladder settles from the decision model
-/// alone, or null when p(yes) sits in the band and the generative model is
-/// asked (`NeedsYouHandler`, D6): yes at [DecisionPolicy.needsYouYes] and
-/// above, no below [DecisionPolicy.needsYouNo]. The confidence word is the
-/// head's, as the decision leg records it, and the evidence is the app's own
-/// TEMPLATED `needs_you_reason` ([needsYouYesReason] / [needsYouNoReason]),
-/// so a decided item carries evidence the way the app's row does.
-///
-/// The ONE bar the replay cannot reproduce is the cold-outreach one
-/// ([DecisionPolicy.needsYouYesCold]): the app decides "cold" from the
-/// owner's own sender history, which a golden item does not carry, so the
-/// replay uses the ordinary bar throughout.
-GoldenNeedsYouOut? decidedNeedsYouOut(DecisionAnswers a) {
+/// The needs-you answer the app reads off the decision model: yes when
+/// p(needs_you = yes) is at or above the owner's slider ([needsYouAt], at
+/// [threshold], the shipped default unless a sweep says otherwise), no below
+/// it. Never null: there is no band and no language model. The confidence
+/// word is the head's, as the decision leg records it, and the evidence is the
+/// app's own TEMPLATED `needs_you_reason` ([needsYouYesReason]), which the app
+/// writes beside the probability whatever its value.
+GoldenNeedsYouOut decidedNeedsYouOut(
+  DecisionAnswers a, {
+  double threshold = NeedsYouTuning.defaultThreshold,
+}) {
   final pYes = a.p('needs_you', 'yes');
-  if (pYes >= DecisionPolicy.needsYouYes) {
-    return GoldenNeedsYouOut(
-      verdict: true,
-      confidence: decisionConfidenceWord(pYes),
-      evidence: needsYouYesReason(a),
-    );
-  }
-  if (pYes < DecisionPolicy.needsYouNo) {
-    return GoldenNeedsYouOut(
-      verdict: false,
-      confidence: decisionConfidenceWord(pYes),
-      evidence: needsYouNoReason,
-    );
-  }
-  return null;
+  return GoldenNeedsYouOut(
+    verdict: needsYouAt(pYes, threshold),
+    confidence: decisionConfidenceWord(pYes),
+    evidence: needsYouYesReason(a),
+  );
 }
-
-/// The needs-you answer, as the HANDLER would have written it down.
-///
-/// Not a straight copy, and deliberately so: the shipping verdict is
-/// `needsYou && confidence != 'low'` (`lib/services/needs_you_handler.dart`,
-/// the `verdict` local), because a low-confidence yes is a no in this app. A
-/// replay that recorded the model's raw boolean would score a pipeline that
-/// does not exist. The raw confidence rides along beside the derived verdict
-/// so a reader can still see which of the two the model actually said.
-GoldenNeedsYouOut needsYouOut(NeedsYouResult r) => GoldenNeedsYouOut(
-      verdict: r.needsYou && r.confidence != 'low',
-      confidence: r.confidence,
-      evidence: r.evidence,
-    );
-
-/// The needs-you answer for an item the deterministic floor already settles.
-///
-/// No confidence, because the floor states none — it is a rule about how a
-/// message was addressed, not a judgement — and `floor: true` so a reader can
-/// tell the model's recall from the floor's rather than reading one number
-/// that mixes them.
-GoldenNeedsYouOut floorOut() =>
-    const GoldenNeedsYouOut(verdict: true, floor: true);
 
 /// The reply decision, as the run file records it: the decision model's
 /// p(reply_expected = yes) against [DecisionPolicy.replyYes] — the bar the

@@ -405,25 +405,6 @@ void main() {
       expect(await store.blocksOf('sl-2'), isEmpty);
     });
 
-    test('userMembersOf is the hand-filed threads, newest first', () async {
-      await seedStoryline('sl-1');
-      await store.addStorylineMember('sl-1', 'email', 'auto1', addedBy: 'auto');
-      await store.addStorylineMember('sl-1', 'email', 'u1', addedBy: 'user');
-      await store.addStorylineMember('sl-1', 'email', 'u2', addedBy: 'user');
-      await db.customUpdate(
-        "UPDATE storyline_members SET added_at = "
-        "CASE conversation_key WHEN 'u1' THEN '2026-09-01T10:00:00Z' "
-        "ELSE '2026-09-02T10:00:00Z' END",
-      );
-
-      expect(
-        (await store.userMembersOf('sl-1')).map((m) => m.conversationKey),
-        ['u2', 'u1'],
-      );
-      // The automatic members are still members, and still read by membersOf.
-      expect(await store.membersOf('sl-1'), hasLength(3));
-    });
-
     test('removing without block records nothing', () async {
       await seedStoryline('sl-1');
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');

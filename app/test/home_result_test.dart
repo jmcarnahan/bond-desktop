@@ -36,7 +36,7 @@ HomeFeedRow _row({
   bool needsYou = false,
   String? urgency,
   String? updatedAt,
-  bool? needsYouVerdict,
+  double? needsYouP,
   String? needsYouReason,
   String? gateReason,
   String? bucket,
@@ -44,6 +44,8 @@ HomeFeedRow _row({
   String? storylineEvidence,
   String? storylineAddedBy,
   bool workOpen = false,
+  String? threadState,
+  String? threadLastOutboundAt,
 }) =>
     HomeFeedRow(
       source: source,
@@ -65,7 +67,7 @@ HomeFeedRow _row({
       needsYou: needsYou,
       urgency: urgency,
       updatedAt: updatedAt ?? _minutesAgo(1),
-      needsYouVerdict: needsYouVerdict,
+      needsYouP: needsYouP,
       needsYouReason: needsYouReason,
       gateReason: gateReason,
       bucket: bucket,
@@ -73,6 +75,8 @@ HomeFeedRow _row({
       storylineEvidence: storylineEvidence,
       storylineAddedBy: storylineAddedBy,
       workOpen: workOpen,
+      threadState: threadState,
+      threadLastOutboundAt: threadLastOutboundAt,
     );
 
 HomeResult _line(HomeFeedRow row) => resultLine(row, now: _now);
@@ -236,7 +240,7 @@ void main() {
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: 'a receipt, nobody is asked for anything',
         )).detail,
         'a receipt, nobody is asked for anything',
@@ -253,23 +257,23 @@ void main() {
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: '   ',
         )).detail,
         'no ask found',
       );
     });
 
-    test('not_worthy under a YES verdict names the clause that said no, '
+    test('not_worthy over the slider names the clause that said no, '
         'never the reason that said yes', () {
-      // The judge said this wants the owner; the sweep set it aside anyway.
+      // The model said this wants the owner; the sweep set it aside anyway.
       // Quoting "asks for the DPA" under "Nothing to do" would be the app
       // contradicting itself in one line.
       expect(
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: true,
+          needsYouP: 0.9,
           needsYouReason: 'asks for the DPA by Friday',
           bucket: 'later',
           bucketReason: 'user',
@@ -280,10 +284,10 @@ void main() {
         _line(_row(
           dropped: true,
           dropReason: 'not_worthy',
-          needsYouVerdict: true,
+          needsYouP: 0.9,
           needsYouReason: 'asks for the DPA by Friday',
         )).detail,
-        'below the attention threshold',
+        'below the Needs You slider when it settled',
       );
     });
 
@@ -368,7 +372,7 @@ void main() {
     test('a direct Teams message is named as one', () {
       final result = _line(_row(
         source: 'teams',
-        needsYou: true,
+        needsYouP: 0.9,
         needsYouReason: 'teams_direct',
       ));
 
@@ -382,7 +386,7 @@ void main() {
     test('a sentence the model wrote is passed through as written', () {
       expect(
         _line(_row(
-          needsYou: true,
+          needsYouP: 0.9,
           needsYouReason: 'asks you to confirm Thursday',
         )).detail,
         'asks you to confirm Thursday',
@@ -391,30 +395,82 @@ void main() {
 
     test('no reason at all still says who decided', () {
       expect(
-        _line(_row(needsYou: true)).detail,
+        _line(_row(needsYouP: 0.9)).detail,
         'the app thinks this wants you',
       );
       expect(
-        _line(_row(needsYou: true, needsYouReason: '  ')).detail,
+        _line(_row(needsYouP: 0.9, needsYouReason: '  ')).detail,
         'the app thinks this wants you',
       );
     });
 
     test('urgent turns the sentence red', () {
       expect(
-        _line(_row(needsYou: true, urgency: 'urgent')).tone,
+        _line(_row(needsYouP: 0.9, urgency: 'urgent')).tone,
         BondTone.error,
       );
       expect(
-        _line(_row(needsYou: true, urgency: 'high')).tone,
+        _line(_row(needsYouP: 0.9, urgency: 'high')).tone,
         BondTone.attention,
+      );
+    });
+
+    test('follows the slider with no pipeline run', () {
+      // One stored row, two slider positions: the label is read against the
+      // slider on every build, never off the settle-time snapshot.
+      final row = _row(needsYouP: 0.4, needsYouReason: 'asks for a date');
+      expect(resultLine(row, now: _now, threshold: 0.30).text, 'Needs you');
+      expect(resultLine(row, now: _now, threshold: 0.45).kind,
+          HomeResultKind.nothing);
+      expect(
+        askLine(row, resultLine(row, now: _now, threshold: 0.30),
+                threshold: 0.30)
+            .ask,
+        isTrue,
+      );
+      expect(
+        askLine(row, resultLine(row, now: _now, threshold: 0.45),
+                threshold: 0.45)
+            .ask,
+        isFalse,
+      );
+    });
+
+    test('the snapshot alone never raises the label', () {
+      // Settled as owed under an older rule or a lower slider; the
+      // probability says otherwise now.
+      expect(
+        _line(_row(needsYou: true, needsYouP: 0.1)).kind,
+        HomeResultKind.nothing,
+      );
+    });
+
+    test('a done, deferred or answered thread is not Needs you', () {
+      expect(_line(_row(needsYouP: 0.9, threadState: 'done')).kind,
+          isNot(HomeResultKind.needsYou));
+      expect(_line(_row(needsYouP: 0.9, bucket: 'later')).kind,
+          HomeResultKind.later);
+      // The owner wrote after it arrived (the row is received at 09:00).
+      expect(
+        _line(_row(
+          needsYouP: 0.9,
+          threadLastOutboundAt: '2026-09-03T10:00:00Z',
+        )).kind,
+        HomeResultKind.nothing,
+      );
+      expect(
+        _line(_row(
+          needsYouP: 0.9,
+          threadLastOutboundAt: '2026-09-03T08:00:00Z',
+        )).kind,
+        HomeResultKind.needsYou,
       );
     });
 
     test('outranks the filing it also has', () {
       expect(
         _line(_row(
-          needsYou: true,
+          needsYouP: 0.9,
           storylineId: 's1',
           storylineTitle: 'Website redesign',
         )).kind,
@@ -433,7 +489,7 @@ void main() {
       final result = _underNeedsYou(_row(
         dropped: true,
         dropReason: 'not_worthy',
-        needsYouVerdict: false,
+        needsYouP: 0.1,
         needsYouReason: 'nothing here is addressed to you',
       ));
 
@@ -453,7 +509,7 @@ void main() {
     test('the judge\'s own words are the clause when the verdict was a yes',
         () {
       final result = _underNeedsYou(_row(
-        needsYouVerdict: true,
+        needsYouP: 0.9,
         needsYouReason: 'asks you to confirm Thursday',
       ));
 
@@ -462,7 +518,7 @@ void main() {
       // — so its sentence is not borrowed.
       expect(
         _underNeedsYou(_row(
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: 'nothing addressed to you',
         )).detail,
         'the thread is still owed an answer',
@@ -647,7 +703,7 @@ void main() {
     test('a recorded NO carries its reason into the tooltip', () {
       expect(
         _line(_row(
-          needsYouVerdict: false,
+          needsYouP: 0.1,
           needsYouReason: 'a calendar invite you already accepted',
         )).tooltip,
         'Nothing to do — a calendar invite you already accepted',
@@ -669,7 +725,7 @@ void main() {
 
     test('a needs-you row prefers the thread\'s ask over everything', () {
       final result = ask(_row(
-        needsYou: true,
+        needsYouP: 0.9,
         needsYouReason: 'asks you to confirm Thursday',
         ctaText: 'Confirm Thursday with Sarah',
         summary: 'Sarah proposes moving the launch',
@@ -682,7 +738,7 @@ void main() {
     test('then the judge\'s reason, then the reason clause', () {
       expect(
         ask(_row(
-          needsYou: true,
+          needsYouP: 0.9,
           needsYouReason: 'asks you to confirm Thursday',
           summary: 'Sarah proposes moving the launch',
         )).text,
@@ -692,12 +748,12 @@ void main() {
       // No ask and no reason: the clause the Result cell put down is what is
       // left, and it is better than a blank.
       expect(
-        ask(_row(needsYou: true)).text,
+        ask(_row(needsYouP: 0.9)).text,
         'the app thinks this wants you',
       );
       // Whitespace is not an ask.
       expect(
-        ask(_row(needsYou: true, ctaText: '   ', needsYouReason: '  ')).text,
+        ask(_row(needsYouP: 0.9, ctaText: '   ', needsYouReason: '  ')).text,
         'the app thinks this wants you',
       );
     });
@@ -715,7 +771,7 @@ void main() {
       final result = ask(_row(
         dropped: true,
         dropReason: 'newsletter',
-        needsYou: true,
+        needsYouP: 0.9,
         ctaText: 'Reply to the newsletter',
         summary: 'This week in widgets',
       ));
@@ -749,7 +805,7 @@ void main() {
     for (final row in [
       _row(dropped: true, dropReason: 'newsletter'),
       _row(outcome: 'pending', settle: 'pending'),
-      _row(needsYou: true),
+      _row(needsYouP: 0.9),
       _row(storylineId: 's1', storylineTitle: 'Website redesign'),
       _row(bucket: 'later'),
       _row(draft: 'done'),

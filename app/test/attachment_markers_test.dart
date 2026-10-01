@@ -3,7 +3,6 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/attachments/attachment_markers.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/message_block.dart';
-import 'package:bond_inbox/services/llm/needs_you_task.dart';
 import 'package:bond_inbox/services/llm/message_text_task.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -187,14 +186,6 @@ void main() {
       );
     });
 
-    test('the needs-you verdict', () {
-      expectClean(
-        const NeedsYouTask().buildUserMessage(
-          NeedsYouInput(message: chat(), now: now, thread: [chat()]),
-        ),
-      );
-    });
-
     test('the draft', () {
       expectClean(
         const DraftTask().buildUserMessage(
@@ -239,11 +230,6 @@ void main() {
       expectClean(
         const MessageTextTask().buildUserMessage(
           MessageTextInput(linked(), now, thread: [linked()]),
-        ),
-      );
-      expectClean(
-        const NeedsYouTask().buildUserMessage(
-          NeedsYouInput(message: linked(), now: now, thread: [linked()]),
         ),
       );
       expectClean(

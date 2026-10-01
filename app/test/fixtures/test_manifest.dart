@@ -104,7 +104,7 @@ ModelFile testDecideFile() => ModelFile(
       role: ModelRole.decide,
       displayName: 'Test Decide',
       repo: 'local/bond-decide',
-      file: 'bond-decide-mbl-v2swap-f16.gguf',
+      file: 'bond-decide-mbl-v3-f16.gguf',
       revision: '',
       sizeBytes: 2048,
       sha256: 'e' * 64,

@@ -386,6 +386,43 @@ void main() {
     });
   });
 
+  group('the storyline fetch', () {
+    test('fetches only the named messages and queues no attachment work',
+        () async {
+      graph.deltaMessages = [
+        for (final id in ['m1', 'm2', 'm3'])
+          _deltaMessage(id: id, hasAttachments: true),
+      ];
+      for (final id in ['m1', 'm2', 'm3']) {
+        graph.attachments[id] = [_graphAttachment(id: 'att-$id')];
+      }
+      await sync.syncNow();
+
+      await sync.ensureBodiesFor('conv-1', ['m2']);
+
+      // One detail, for the one row the judge named.
+      expect(graph.detailCalls, 1);
+      expect((await store.getMessageRow('email', 'm2'))!['body_text'],
+          'Signed copy attached.');
+      expect((await store.getMessageRow('email', 'm1'))!['body_text'], isNull);
+      // The rows the detail listed are stored; nothing is queued to read
+      // them — a membership question is not a reason to spend an extraction.
+      expect(await store.attachmentsForMessage('email', 'm2'), hasLength(1));
+      expect(await workItems(), isEmpty);
+    });
+
+    test('a message that already has its body is not fetched again',
+        () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1')];
+      await sync.syncNow();
+      await sync.ensureBodiesFor('conv-1', ['m1']);
+
+      await sync.ensureBodiesFor('conv-1', ['m1']);
+
+      expect(graph.detailCalls, 1);
+    });
+  });
+
   group('a file attached as a link', () {
     // Outlook's "attach as link" is not a Graph attachment: the message says
     // `hasAttachments: false`, lists nothing, and carries the file as a

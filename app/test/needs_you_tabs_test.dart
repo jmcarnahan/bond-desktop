@@ -1,6 +1,5 @@
 import 'package:bond_inbox/models/label_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/needs_you_tabs.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -82,7 +81,8 @@ void main() {
     // partitions the inbox by.
     expect(asked.length + waiting.length, rows.length);
     for (final c in rows) {
-      expect(isWaitingRow(c) ? waiting.contains(c) : asked.contains(c), isTrue);
+      final isWaiting = c.state != ConversationState.needsReply;
+      expect(isWaiting ? waiting.contains(c) : asked.contains(c), isTrue);
     }
   });
 

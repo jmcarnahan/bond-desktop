@@ -40,6 +40,12 @@ import 'fixtures/test_db.dart';
 /// header counting the membership from before the user's last action.
 
 class _FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   /// How many times the screen has asked for a pull. The launch sync is one
   /// of them, so the button tests read this before and after their tap.
   int syncs = 0;

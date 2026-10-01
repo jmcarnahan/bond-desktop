@@ -54,10 +54,6 @@ List<String> recipientsFromJson(Object? raw) =>
 
 /// sqlite has no bool: STRICT columns hold 0/1 integers. Null stays null —
 /// "not triaged yet" is not the same as "no action needed".
-///
-/// `HomeFeedRow.fromRow` reads `needs_you_verdict` with the stricter `== 1`;
-/// the store writes only 0/1/NULL, so the two readings agree on every stored
-/// value. Keep them agreeing if either moves.
 bool? _boolFromInt(Object? raw) => raw == null ? null : raw != 0;
 
 /// Where a conversation sits in the reply lifecycle. An unrecognized value
@@ -213,16 +209,17 @@ class Conversation {
   /// A thread carries as many of these as the owner has put on it.
   final List<Label> labels;
 
-  /// WHY this thread wants the owner, in the words the needs-you pass wrote:
-  /// `'teams_direct'` from the deterministic floor, or the model's own evidence
-  /// sentence. Null when nothing on the thread has been judged to need them.
+  /// WHY this thread wants the owner: the decision model's templated sentence
+  /// (`needsYouYesReason`). Rows written before v21 may still carry
+  /// `'teams_direct'`, the retired Teams floor's token, or a language model's
+  /// evidence sentence. Null when nothing on the thread has been decided.
   ///
-  /// Read at read time by the subquery in `loadConversations`, off the newest
-  /// KEPT inbound message whose verdict was YES — the only kind of row that can
-  /// answer this question. A reason attached to a `false` verdict explains why a
-  /// message does NOT want the owner, and showing it here would answer the
-  /// opposite of what was asked. Null on every read that does not run the
-  /// subquery, which reads as "nothing to show" rather than as a wrong sentence.
+  /// Read at read time by the subquery in `loadConversations`, off the KEPT
+  /// inbound message after the owner's last reply with the HIGHEST needs-you
+  /// probability — the message [needsYouP] is taken from, so the reason
+  /// explains the number beside it. Null on every read that does not run the
+  /// subquery, which reads as "nothing to show" rather than as a wrong
+  /// sentence.
   ///
   /// [needsYouReasonWords] is the one place these turn into words on screen.
   final String? needsYouReason;
@@ -236,30 +233,32 @@ class Conversation {
   /// Whether the sender of the newest kept inbound message is waiting on an
   /// answer, as triage v2 judged it. TRI-STATE, and the null arm is the point:
   /// null means no v2 pass has ever judged that message, which is NOT "no reply
-  /// expected" (`schema.drift` says so at the column, and [isNeedsYou] is
-  /// written on that distinction).
+  /// expected" (`schema.drift` says so at the column).
   ///
   /// Read at read time by the subquery in `loadConversations`; null on every
   /// read that does not run it, which reads as "nobody has judged", never as a
   /// judgement.
   final bool? replyExpected;
 
-  /// Whether the needs-you pass has vetoed this THREAD: its newest kept
-  /// inbound was judged no, AND no kept inbound newer than the thread's last
-  /// outbound carries a yes (with no outbound at all, no kept inbound does).
+  /// The thread's needs-you probability: the HIGHEST `needs_you_p` among its
+  /// kept inbound messages received after the owner's last reply (every kept
+  /// inbound when the owner never wrote on it). An older ask still unanswered
+  /// keeps counting; once the owner replies, only newer messages count.
   ///
-  /// Computed in SQL by `MessageStore`'s one veto fragment, the same one the
-  /// Needs You tile and filter read, and never recomputed here from partial
-  /// data. A no on the newest message alone is not enough: the judge rates
-  /// THAT message, so a reply-all "adding Jordan for visibility" judged no
-  /// must not hide an older ask the owner has not answered.
-  ///
-  /// It outranks triage's ask and `reply_expected` in [isNeedsYou]: the judge
-  /// reads the thread before the message and answers the narrower question —
-  /// is this the owner's — where triage answers "does anyone owe a reply".
-  /// False on every read that did not run the fragment, which leaves the
-  /// thread where the other terms put it.
-  final bool needsYouVetoed;
+  /// Computed in SQL by `MessageStore.threadNeedsYouPSql`, the same
+  /// expression the Needs You tile and filter read, and never recomputed here
+  /// from partial data. [isNeedsYou] compares it against the owner's slider.
+  /// Null when no such message has been decided, and on every read that did
+  /// not run the expression, which reads as "needs nobody".
+  final double? needsYouP;
+
+  /// Whether the message [needsYouP] comes off was decided under the question
+  /// set this build reads — a `message_decisions` row under `decisionQhash`.
+  /// False is a p an earlier model left, which the surfaces do not draw as a
+  /// percentage when it is exactly 1.0 or 0.0 (v21's carried-over verdicts,
+  /// `needsYouFromEarlierModel`). Null on every read that does not run the
+  /// check, which leaves only those two exact values in question.
+  final bool? needsYouDecidedNow;
 
   /// The envelope address of the newest KEPT inbound message — who the thread
   /// is waiting on. Null on every read that does not run the subquery in
@@ -300,7 +299,8 @@ class Conversation {
     this.needsYouReasonMessageId,
     this.needsYouReasonAt,
     this.replyExpected,
-    this.needsYouVetoed = false,
+    this.needsYouP,
+    this.needsYouDecidedNow,
     this.latestInboundFrom,
   });
 
@@ -384,7 +384,8 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
-      needsYouVetoed: needsYouVetoed,
+      needsYouP: needsYouP,
+      needsYouDecidedNow: needsYouDecidedNow,
       latestInboundFrom: latestInboundFrom,
     );
   }
@@ -422,7 +423,8 @@ class Conversation {
       needsYouReasonMessageId: needsYouReasonMessageId,
       needsYouReasonAt: needsYouReasonAt,
       replyExpected: replyExpected,
-      needsYouVetoed: needsYouVetoed,
+      needsYouP: needsYouP,
+      needsYouDecidedNow: needsYouDecidedNow,
       latestInboundFrom: latestInboundFrom,
     );
   }
@@ -506,9 +508,11 @@ class Conversation {
       // Null survives as null, exactly as it does on [Message.replyExpected]:
       // a message triage v2 has never judged is not a message it judged "no".
       replyExpected: _boolFromInt(row['reply_expected']),
-      // The thread veto, computed by the store's one fragment; absent reads
-      // as no veto.
-      needsYouVetoed: _boolFromInt(row['needs_you_vetoed']) ?? false,
+      // The thread's needs-you probability, computed by the store's one
+      // expression; absent reads as undecided.
+      needsYouP: (row['needs_you_p'] as num?)?.toDouble(),
+      // Off the same `nr` row, and null on every read that does not run it.
+      needsYouDecidedNow: _boolFromInt(row['needs_you_decided_now']),
       // The last subquery, and null on every read that does not run it — which
       // reads as "cannot tell who this is from", and [isExternalTo] answers
       // false to that rather than calling an unknown sender a stranger.
@@ -598,15 +602,16 @@ class Message {
   /// words ("Friday", "before the 15th"). Null when the message named none.
   final String? deadline;
 
-  /// The needs-you pass's verdict on this message, tri-state: true = it wants
-  /// the owner, false = judged not to, null = never judged. Null is NOT false —
-  /// the unjudged rows are the pass's worklist — so nothing here may collapse
-  /// it into a bool.
-  final bool? needsYouVerdict;
+  /// The decision model's probability that this message needs the owner,
+  /// 0..1, or null when nothing has decided it yet. Null is NOT a low
+  /// probability — an undecided message is not a judged one — and
+  /// `needsYouAt` is the one place it is compared against the owner's slider.
+  final double? needsYouP;
 
-  /// Why the pass answered as it did: `'teams_direct'` from the deterministic
-  /// floor, or the model's own evidence sentence. Null when nothing has judged
-  /// the message, which is not the same as a verdict with no reason given.
+  /// Why the probability is what it is: the decision model's templated
+  /// sentence (`needsYouYesReason`). Rows written before v21 may still carry
+  /// `'teams_direct'`, the retired Teams floor's token, or a language model's
+  /// evidence sentence. Null when nothing has decided the message.
   final String? needsYouReason;
 
   /// Local-only optimistic bubble.
@@ -650,7 +655,7 @@ class Message {
     this.addressedMe = false,
     this.replyExpected,
     this.deadline,
-    this.needsYouVerdict,
+    this.needsYouP,
     this.needsYouReason,
     this.pendingSend = false,
     this.attachments = const [],
@@ -699,7 +704,7 @@ class Message {
         addressedMe: addressedMe,
         replyExpected: replyExpected,
         deadline: deadline,
-        needsYouVerdict: needsYouVerdict,
+        needsYouP: needsYouP,
         needsYouReason: needsYouReason,
         pendingSend: pendingSend,
         attachments: attachments,
@@ -803,7 +808,7 @@ class Message {
       addressedMe: json['addressed_me'] as bool? ?? false,
       replyExpected: json['reply_expected'] as bool?,
       deadline: json['deadline'] as String?,
-      needsYouVerdict: json['needs_you_verdict'] as bool?,
+      needsYouP: (json['needs_you_p'] as num?)?.toDouble(),
       needsYouReason: json['needs_you_reason'] as String?,
     );
   }
@@ -847,7 +852,7 @@ class Message {
       // Tri-state, exactly as `reply_expected` above: a row the needs-you pass
       // has never reached is not a row it judged "no", and the Why panel says
       // which of the two it is looking at.
-      needsYouVerdict: _boolFromInt(row['needs_you_verdict']),
+      needsYouP: (row['needs_you_p'] as num?)?.toDouble(),
       needsYouReason: row['needs_you_reason'] as String?,
     );
   }

@@ -97,6 +97,7 @@ void main() {
     String? reason,
     String? reasonAt,
     String? reasonMessageId,
+    double? needsYouP,
     TranscriptJumps? jumps,
     VoidCallback? onOpenReply,
     VoidCallback? onReopen,
@@ -134,6 +135,7 @@ void main() {
             needsYouReason: reason,
             needsYouReasonAt: reasonAt,
             needsYouReasonMessageId: reasonMessageId,
+            needsYouP: needsYouP,
             labels: threadLabels,
           ),
           messages: messages,
@@ -257,6 +259,24 @@ void main() {
       );
 
       expect(lineText(tester), 'Why: Direct message');
+    });
+
+    testWidgets("the thread's probability sits between the reason and the "
+        'stamp', (tester) async {
+      await pump(
+        tester,
+        messages: messages,
+        ctaText: null,
+        reason: 'Asks you to confirm the launch date.',
+        reasonAt: at,
+        needsYouP: 0.72,
+      );
+
+      expect(
+        lineText(tester),
+        'Why: Asks you to confirm the launch date. · 72% · '
+        '${formatTimestamp(at)}',
+      );
     });
 
     testWidgets('the banner answers first when there is one', (tester) async {

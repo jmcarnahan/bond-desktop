@@ -416,7 +416,7 @@ void main() {
       Future<Conversation> load() async =>
           (await store.loadConversations()).firstWhere((c) => c.id == 'c-new');
 
-      test('comes off the newest kept inbound that answered yes', () async {
+      test('comes off the newest of equally probable kept inbound', () async {
         await store.upsertMessage(messageRow(
           id: 'old',
           conversationKey: 'c-new',
@@ -427,10 +427,10 @@ void main() {
           conversationKey: 'c-new',
           receivedAt: '2026-08-28T10:00:00Z',
         ));
-        await store.writeNeedsYouVerdict('email', 'old',
-            verdict: true, reason: 'An older ask nobody answered.');
-        await store.writeNeedsYouVerdict('email', 'new',
-            verdict: true, reason: 'teams_direct');
+        await store.writeNeedsYouP('email', 'old',
+            p: 0.9, reason: 'An older ask nobody answered.');
+        await store.writeNeedsYouP('email', 'new',
+            p: 0.9, reason: 'teams_direct');
 
         final c = await load();
         // One message names all three, because all three subqueries order the
@@ -441,7 +441,8 @@ void main() {
         expect(c.needsYouReasonAt, '2026-08-28T10:00:00Z');
       });
 
-      test('ignores a verdict of no, whatever it wrote', () async {
+      test('comes off the highest probability, not the newest message',
+          () async {
         await store.upsertMessage(messageRow(
           id: 'yes',
           conversationKey: 'c-new',
@@ -452,16 +453,17 @@ void main() {
           conversationKey: 'c-new',
           receivedAt: '2026-08-28T10:00:00Z',
         ));
-        await store.writeNeedsYouVerdict('email', 'yes',
-            verdict: true, reason: 'Asks you to confirm the date.');
-        // A reason written under a NO answers the opposite question: it says
-        // why the message does not want the owner.
-        await store.writeNeedsYouVerdict('email', 'no',
-            verdict: false, reason: 'An automated digest; nothing is asked.');
+        await store.writeNeedsYouP('email', 'yes',
+            p: 0.9, reason: 'Asks you to confirm the date.');
+        // The newer message is less likely to need the owner, so the reason
+        // shown beside the thread's probability must be the older one's.
+        await store.writeNeedsYouP('email', 'no',
+            p: 0.1, reason: 'An automated digest; nothing is asked.');
 
         final c = await load();
         expect(c.needsYouReason, 'Asks you to confirm the date.');
         expect(c.needsYouReasonMessageId, 'yes');
+        expect(c.needsYouP, 0.9);
       });
 
       test('a message the gate threw out never explains the thread', () async {
@@ -479,10 +481,10 @@ void main() {
           fromAddress: 'builds@ci.example.com',
           receivedAt: '2026-08-28T10:00:00Z',
         ));
-        await store.writeNeedsYouVerdict('email', 'human',
-            verdict: true, reason: 'Asks you to confirm the date.');
-        await store.writeNeedsYouVerdict('email', 'bot',
-            verdict: true, reason: 'The build finished.');
+        await store.writeNeedsYouP('email', 'human',
+            p: 0.9, reason: 'Asks you to confirm the date.');
+        await store.writeNeedsYouP('email', 'bot',
+            p: 0.9, reason: 'The build finished.');
         await store.writeTriage('email', 'bot',
             status: 'skipped', gateReason: 'auto_generated');
 
@@ -497,8 +499,8 @@ void main() {
           conversationKey: 'c-new',
           receivedAt: '2026-08-28T10:00:00Z',
         ));
-        await store.writeNeedsYouVerdict('email', 'chat',
-            verdict: true, reason: 'teams_direct');
+        await store.writeNeedsYouP('email', 'chat',
+            p: 0.9, reason: 'teams_direct');
         await store.writeTriage('email', 'chat',
             status: 'skipped', gateReason: 'teams_source');
 
@@ -512,13 +514,74 @@ void main() {
           direction: 'outbound',
           receivedAt: '2026-08-28T10:00:00Z',
         ));
-        await store.writeNeedsYouVerdict('email', 'mine',
-            verdict: true, reason: 'You asked them a question.');
+        await store.writeNeedsYouP('email', 'mine',
+            p: 0.9, reason: 'You asked them a question.');
 
         final c = await load();
         expect(c.needsYouReason, isNull);
         expect(c.needsYouReasonMessageId, isNull);
         expect(c.needsYouReasonAt, isNull);
+      });
+
+      // The thread's needs-you probability, the number `isNeedsYou` compares
+      // against the owner's slider.
+      test('needsYouP is the highest over the unanswered kept inbound',
+          () async {
+        for (final (id, at, p) in [
+          ('ask', '2026-08-28T08:00:00Z', 0.8),
+          ('cc', '2026-08-28T09:00:00Z', 0.2),
+          ('bot', '2026-08-28T10:00:00Z', 0.95),
+        ]) {
+          await store.upsertMessage(
+              messageRow(id: id, conversationKey: 'c-new', receivedAt: at));
+          await store.writeNeedsYouP('email', id, p: p, reason: 'Why $id.');
+        }
+        // The gate threw the bot out, so its probability counts for nothing.
+        await store.writeTriage('email', 'bot',
+            status: 'skipped', gateReason: 'auto_generated');
+
+        final c = await load();
+        // An older ask still unanswered keeps counting past a newer bystander.
+        expect(c.needsYouP, 0.8);
+        expect(c.needsYouReasonMessageId, 'ask');
+        expect(c.needsYouReason, 'Why ask.');
+      });
+
+      test('an owner reply resets it to the messages after the reply',
+          () async {
+        await store.upsertMessage(messageRow(
+            id: 'ask',
+            conversationKey: 'c-new',
+            receivedAt: '2026-08-28T08:00:00Z'));
+        await store.writeNeedsYouP('email', 'ask', p: 0.8, reason: 'Asks.');
+        await store.upsertMessage(messageRow(
+            id: 'thanks',
+            conversationKey: 'c-new',
+            receivedAt: '2026-08-28T10:00:00Z'));
+        await store.writeNeedsYouP('email', 'thanks',
+            p: 0.1, reason: 'Says thanks.');
+        await store.upsertConversation({
+          ...conversationRow(
+            key: 'c-new',
+            state: 'needs_reply',
+            lastMessageAt: '2026-08-28T10:00:00Z',
+          ),
+          'last_outbound_at': '2026-08-28T09:00:00Z',
+        });
+
+        final c = await load();
+        expect(c.needsYouP, 0.1);
+        expect(c.needsYouReasonMessageId, 'thanks');
+      });
+
+      test('needsYouP is null when nothing unanswered has been decided',
+          () async {
+        await store
+            .upsertMessage(messageRow(id: 'm1', conversationKey: 'c-new'));
+
+        final c = await load();
+        expect(c.needsYouP, isNull);
+        expect(c.needsYouReason, isNull);
       });
 
       test('reply_expected is the newest kept inbound\'s own judgement',
@@ -638,8 +701,8 @@ void main() {
           conversationKey: 'c-new',
           receivedAt: askedAt,
         ));
-        await store.writeNeedsYouVerdict('email', 'asked',
-            verdict: true, reason: 'Asks you to confirm the date.');
+        await store.writeNeedsYouP('email', 'asked',
+            p: 0.9, reason: 'Asks you to confirm the date.');
         await store.upsertMessage(messageRow(
           id: 'followup',
           fromAddress: 'sam@contoso.example.com',
@@ -1053,78 +1116,30 @@ void main() {
       expect(row.data['category'], 'other');
     });
 
-    test('writeNeedsYouVerdict round-trips all three states and the reason',
-        () async {
-      await store.upsertMessage(messageRow(id: 'm1'));
-
-      // Never judged is the state the row arrives in, and it is a real answer
-      // rather than a missing one: the unjudged rows are the worklist.
-      final fresh = (await store.getMessageRow('email', 'm1'))!;
-      expect(fresh['needs_you_verdict'], isNull);
-      expect(fresh['needs_you_reason'], isNull);
-
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'teams_direct');
-      final yes = (await store.getMessageRow('email', 'm1'))!;
-      expect(yes['needs_you_verdict'], 1);
-      expect(yes['needs_you_reason'], 'teams_direct');
-
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: false, reason: 'Nobody is waiting on an answer.');
-      final no = (await store.getMessageRow('email', 'm1'))!;
-      expect(no['needs_you_verdict'], 0);
-      expect(no['needs_you_reason'], 'Nobody is waiting on an answer.');
-
-      // And back to unjudged, which is what puts a row a later pass has to
-      // reconsider back on the worklist.
-      await store.writeNeedsYouVerdict('email', 'm1', verdict: null);
-      final cleared = (await store.getMessageRow('email', 'm1'))!;
-      expect(cleared['needs_you_verdict'], isNull);
-      // The same rule `label` and `deadline` take: a blank reason and a reason
-      // nobody wrote must read alike.
-      expect(cleared['needs_you_reason'], isNull);
-    });
-
-    test('a re-sync of the same message does not clobber the verdict',
+    test('a re-sync of the same message does not clobber the probability',
         () async {
       // The conflict branch of `upsertMessage` names its columns, and these
       // two are not among them — which is what keeps a delta pull that
       // re-offers a chat from erasing a judgement the pass already made.
       await store.upsertMessage(messageRow(id: 'm1', source: 'teams'));
-      await store.writeNeedsYouVerdict('teams', 'm1',
-          verdict: true, reason: 'teams_direct');
+      await store.writeNeedsYouP('teams', 'm1',
+          p: 0.9, reason: 'teams_direct');
 
       await store.upsertMessage(
           messageRow(id: 'm1', source: 'teams', bodyText: 'Edited body'));
 
       final row = (await store.getMessageRow('teams', 'm1'))!;
       expect(row['body_text'], 'Edited body');
-      expect(row['needs_you_verdict'], 1);
+      expect(row['needs_you_p'], 0.9);
       expect(row['needs_you_reason'], 'teams_direct');
     });
 
-    test('writeNeedsYouVerdict only touches the addressed (source, id) pair',
-        () async {
-      await store.upsertMessage(messageRow(id: 'shared', source: 'email'));
-      await store.upsertMessage(messageRow(id: 'shared', source: 'teams'));
-
-      await store.writeNeedsYouVerdict('teams', 'shared',
-          verdict: true, reason: 'teams_direct');
-
-      final rows = await db
-          .customSelect('SELECT source, needs_you_verdict FROM messages '
-              'ORDER BY source')
-          .get();
-      expect(rows[0].data['needs_you_verdict'], isNull);
-      expect(rows[1].data['needs_you_verdict'], 1);
-    });
-
-    test('writeTriage leaves the needs-you verdict alone', () async {
+    test('writeTriage leaves the needs-you probability alone', () async {
       // Two stages, two sets of columns. A triage that ran after the pass must
       // not undo it, and neither may the pass undo a triage.
       await store.upsertMessage(messageRow(id: 'm1'));
-      await store.writeNeedsYouVerdict('email', 'm1',
-          verdict: true, reason: 'teams_direct');
+      await store.writeNeedsYouP('email', 'm1',
+          p: 0.9, reason: 'teams_direct');
 
       await writeTriaged(
         store,
@@ -1134,7 +1149,7 @@ void main() {
       );
 
       final row = (await store.getMessageRow('email', 'm1'))!;
-      expect(row['needs_you_verdict'], 1);
+      expect(row['needs_you_p'], 0.9);
       expect(row['triage_status'], 'triaged');
     });
 

@@ -38,9 +38,9 @@ class MessageHistoryNotifier extends StateNotifier<AsyncValue<MessageHistory>> {
   final String source;
   final String sourceMessageId;
 
-  /// The attention bar, read live on every load rather than captured once: it
-  /// is a preference the owner can move, and a score shown against a stale
-  /// threshold explains the wrong decision.
+  /// The Needs You slider, read live on every load rather than captured once:
+  /// it is a preference the owner can move, and a probability read against a
+  /// stale threshold explains the wrong decision.
   final Future<double> Function() threshold;
 
   StreamSubscription<ProgressTick>? _ticks;
@@ -101,6 +101,9 @@ class MessageHistoryNotifier extends StateNotifier<AsyncValue<MessageHistory>> {
         conversationKey: conversationKey,
       );
       final bar = await threshold();
+      // Only whether one exists: an earlier model's carried verdict is not
+      // drawn as a percentage.
+      final decided = await _store.decisionFor(source, sourceMessageId);
 
       if (seq != _fetchSeq || !mounted) return;
       state = AsyncValue.data(
@@ -117,6 +120,7 @@ class MessageHistoryNotifier extends StateNotifier<AsyncValue<MessageHistory>> {
           blocks: blocks,
           activity: activity,
           threshold: bar,
+          decidedNow: decided != null,
         ),
       );
     } catch (e, stack) {
@@ -171,7 +175,7 @@ final messageHistoryProvider = StateNotifierProvider.autoDispose.family<
       source: key.source,
       sourceMessageId: key.id,
       bus: ref.watch(progressBusProvider),
-      threshold: attentionThresholdReader(store),
+      threshold: needsYouThresholdReader(store),
     );
     unawaited(notifier.load());
     return notifier;

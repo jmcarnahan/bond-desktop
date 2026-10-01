@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -17,6 +18,11 @@ List<double> _softmax(List<double> logits) {
 
 Matcher _refusal(String words) => isA<LlmFormatException>()
     .having((e) => e.message, 'message', contains(words));
+
+/// A wrong-width vector: the server's fault, so it parks.
+Matcher _widthPark(String words) => isA<DecisionMisconfiguredException>()
+    .having((e) => e.message, 'message', contains(words))
+    .having((e) => parkReasonFor(e), 'park word', 'decision_misconfigured');
 
 void main() {
   group('apply', () {
@@ -92,10 +98,10 @@ void main() {
       expect(answers.p('gate', 'keep'), 0.0);
     });
 
-    test('a vector of the wrong width is refused', () {
+    test('a vector of the wrong width parks as misconfigured', () {
       expect(
         () => syntheticHeads().apply(List.filled(768, 1.0)),
-        throwsA(_refusal('768')),
+        throwsA(_widthPark('768')),
       );
     });
 
@@ -104,6 +110,53 @@ void main() {
       final answers = syntheticHeads().apply(syntheticVector());
       expect(answers.p('gate', 'maybe'), 0);
       expect(() => answers['colour'], throwsArgumentError);
+    });
+  });
+
+  group('pYes', () {
+    test("softmax((W·v + b) / T) at yes, per storyline question", () {
+      final heads = DecisionHeads.fromJson(syntheticHeadsJson(
+        biases: {
+          'member_of': [0.2, -0.1],
+        },
+        temperatures: {'member_of': 0.7, 'same_effort': 0.3},
+      ));
+      final vector = syntheticVector({
+        yesAxisOf(StorylineQuestion.memberOf): 0.9,
+        yesAxisOf(StorylineQuestion.memberOf) + 1: 0.4,
+        yesAxisOf(StorylineQuestion.sameEffort): -0.5,
+      });
+      expect(
+        heads.pYes(StorylineQuestion.memberOf, vector),
+        closeTo(_softmax([(0.9 + 0.2) / 0.7, (0.4 - 0.1) / 0.7])[0], 1e-9),
+      );
+      expect(
+        heads.pYes(StorylineQuestion.sameEffort, vector),
+        closeTo(_softmax([-0.5 / 0.3, 0.0])[0], 1e-9),
+      );
+      // Nothing written on charter_specific's axes: an even tie.
+      expect(heads.pYes(StorylineQuestion.charterSpecific, vector),
+          closeTo(0.5, 1e-12));
+    });
+
+    test('the storyline axes do not move a message field', () {
+      final heads = syntheticHeads();
+      final plain = heads.apply(syntheticVector());
+      final moved = heads.apply(syntheticVector({
+        yesAxisOf(StorylineQuestion.sameEffort): 9.0,
+      }));
+      expect(moved.fields.keys, decisionFields);
+      for (final field in decisionFields) {
+        expect(moved[field].probabilities, plain[field].probabilities);
+      }
+    });
+
+    test('a vector of the wrong width parks as misconfigured', () {
+      expect(
+        () => syntheticHeads()
+            .pYes(StorylineQuestion.memberOf, List.filled(768, 1.0)),
+        throwsA(_widthPark('768')),
+      );
     });
   });
 
@@ -127,14 +180,16 @@ void main() {
 
   group('fromJson refuses a file it cannot trust', () {
     Map<String, Object?> fieldNamed(Map<String, Object?> json, String name) =>
-        (json['fields'] as List)
+        (json['questions'] as List)
             .cast<Map<String, Object?>>()
-            .firstWhere((f) => f['name'] == name);
+            .firstWhere((f) => f['id'] == name);
 
     test('the real header is accepted', () {
       final heads = syntheticHeads();
       expect(heads.model, 'bond-decide-synthetic');
       expect(heads.qhash, DecisionHeads.expectedQhash);
+      expect(DecisionHeads.expectedQhash, 'f495a7dc48aa34d5');
+      expect(decisionQhash, DecisionHeads.expectedQhash);
       expect(heads.hidden, 1024);
       expect(heads.maxTokens, 2048);
     });
@@ -148,9 +203,80 @@ void main() {
 
     test('another schema', () {
       expect(
-        () => DecisionHeads.fromJson(syntheticHeadsJson(schema: 2)),
-        throwsA(_refusal('schema')),
+        () => DecisionHeads.fromJson(syntheticHeadsJson(schema: 3)),
+        throwsA(_refusal('schema 3, not 2')),
       );
+    });
+
+    test('a schema-1 file is the older model, and says so', () {
+      expect(
+        () => DecisionHeads.fromJson(syntheticHeadsJson(schema: 1)),
+        throwsA(isA<DecisionOlderModelException>()
+            .having((e) => e.message, 'message', DecisionHeads.olderModelText)
+            .having((e) => parkReasonFor(e), 'park word',
+                'decision_older_model')),
+      );
+      expect(
+        DecisionHeads.olderModelText,
+        'The installed decision model is an older version that this app no '
+        'longer reads. Install the current decision model to resume sorting '
+        'new mail.',
+      );
+      // Plain words for an owner who may not be a developer: no command.
+      expect(DecisionHeads.olderModelText, isNot(contains('make')));
+    });
+
+    test('another renderer set', () {
+      expect(
+        () => DecisionHeads.fromJson(
+            syntheticHeadsJson(renderer: 'bond-state/1')),
+        throwsA(_refusal('renderer bond-state/1')),
+      );
+    });
+
+    test('a hidden width other than 1024', () {
+      expect(
+        () => DecisionHeads.fromJson(
+            {...syntheticHeadsJson(), 'hidden': 768}),
+        throwsA(_refusal('hidden width of 768')),
+      );
+      // Optional: the rows say the width anyway.
+      final json = syntheticHeadsJson()..remove('hidden');
+      expect(DecisionHeads.fromJson(json).hidden, 1024);
+    });
+
+    test('the width is read off the rows, and must be 1024', () {
+      expect(
+        () => DecisionHeads.fromJson(syntheticHeadsJson(hidden: 768)),
+        throwsA(_refusal('heads 768 wide, not 1024')),
+      );
+      // A storyline row that disagrees with the first message row.
+      final json = syntheticHeadsJson();
+      ((fieldNamed(json, 'charter_specific')['weight'] as List).last as List)
+          .add(0.0);
+      expect(() => DecisionHeads.fromJson(json),
+          throwsA(_refusal('charter_specific weight row that is not 1024')));
+    });
+
+    test('a question on the wrong renderer', () {
+      final json = syntheticHeadsJson();
+      fieldNamed(json, 'member_of')['renderer'] = 'pair';
+      expect(() => DecisionHeads.fromJson(json),
+          throwsA(_refusal('member_of on renderer pair')));
+    });
+
+    test('storyline options reordered', () {
+      final json = syntheticHeadsJson();
+      fieldNamed(json, 'same_effort')['options'] = ['no', 'yes'];
+      expect(() => DecisionHeads.fromJson(json),
+          throwsA(_refusal('options for same_effort')));
+    });
+
+    test('a storyline question missing', () {
+      final json = syntheticHeadsJson();
+      (json['questions'] as List).removeLast();
+      expect(() => DecisionHeads.fromJson(json),
+          throwsA(_refusal('12 decision questions')));
     });
 
     test('another pooling', () {
@@ -162,7 +288,7 @@ void main() {
 
     test('fields out of order', () {
       final json = syntheticHeadsJson();
-      final fields = json['fields'] as List;
+      final fields = json['questions'] as List;
       final first = fields[0];
       fields[0] = fields[1];
       fields[1] = first;
@@ -172,9 +298,9 @@ void main() {
 
     test('a field missing', () {
       final json = syntheticHeadsJson();
-      (json['fields'] as List).removeLast();
+      (json['questions'] as List).removeAt(3);
       expect(() => DecisionHeads.fromJson(json),
-          throwsA(_refusal('decision fields')));
+          throwsA(_refusal('decision questions')));
     });
 
     test('options renamed or reordered', () {

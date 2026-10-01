@@ -234,6 +234,18 @@ void main() {
       expect(connected.single.url, _decisionUrl);
     });
 
+    testWidgets("a decision address may be a Kev server's systemone "
+        'endpoint', (tester) async {
+      const kev = 'https://box.example.com/decide/v1/systemone';
+      await open(tester, role: dec, url: kev);
+      await connect(tester, dec);
+
+      expect(find.text(ModelServersForm.decisionEndpointRefusalText),
+          findsNothing);
+      expect(asked.single.$1, kev);
+      expect(connected.single.url, kev);
+    });
+
     testWidgets('typing again clears the sentence', (tester) async {
       await open(tester);
       await type(tester, ModelServersForm.urlKey(gen), 'box.example.com');

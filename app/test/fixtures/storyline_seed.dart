@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/clustering_card.dart';
 import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/gates.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:bond_inbox/services/storyline_cards.dart' show clusteringCardFor;
 
 import 'golden_set.dart';
 import 'golden_storyline.dart';
@@ -390,11 +391,14 @@ Future<SeedReport> seedGoldenMailbox(
       // corpus the app never has, which is the one thing this bench must not
       // measure.
       final stored = await store.getConversationRow(source, key);
-      // The data the app's own routing picks for [variant] — the thread's
-      // recent messages for `thread`, the newest one for every other card.
-      final card = clusteringCardForConversationRow(
+      // Through the app's one entry for a thread's card: the thread text for
+      // `text`, else the data the store's routing picks for [variant] — the
+      // thread's recent messages for `thread`, the newest one otherwise.
+      final card = await clusteringCardFor(
+        store,
+        source,
+        key,
         stored!,
-        await store.clusteringCardData(source, key, variant: variant),
         variant: variant,
       );
       final result = await embeddings.embedResult(card, prefix: prefix);
@@ -405,7 +409,7 @@ Future<SeedReport> seedGoldenMailbox(
         // The first vector's width, kept because a candidate model that is not
         // 768 wide is a different geometry and the row has to say so.
         if (dims == 0) dims = vector.length;
-        // The identical write `StorylineService._reembed` makes, tag included.
+        // The identical write `StorylineService.vectorFor` makes, tag included.
         await store.upsertConversationAi(
           source,
           key,

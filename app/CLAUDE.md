@@ -90,7 +90,8 @@ enforce the ones that are commands.
   body and the same seeding as `golden-sweep`, stopped after the embedding,
   one embed server and no model call. A new live STAGE goes inside the
   existing test body under a define, never as a second test name.
-  `SWEEP_STAGE=declared` and `make golden-declared` are the same shape again.
+  `SWEEP_STAGE=declared` and `make golden-declared` are the same shape again,
+  and so are `SWEEP_STAGE=pairs` and `make golden-pairs`.
 - Read only SCALAR fields off a sweep timing JSON. `extra.sweep.coverage`
   carries a `by_slug` map keyed by the registry's slugs, which name real
   efforts, so print `coverage.mean` and nothing under it. The same rule holds
@@ -169,7 +170,13 @@ enforce the ones that are commands.
   round every lane's chat calls go to the ONE generative model (drafts may go
   to Cloud drafts), so the lanes are an ORDER cut, not a server cut: a new
   handler goes on the lane whose ordering it needs, and order ACROSS lanes is
-  enqueue-and-pump, not list position. Triage makes no chat call but still
+  enqueue-and-pump, not list position. Extraction decides by the clustering
+  card's hash whether a thread's assign is owed, queues it and pumps the
+  storyline lane per row (`onStorylineQueued`, `onDraftQueued`'s shape), so
+  an assign never waits for the whole extraction backlog; it never embeds
+  the card (`vectorFor` does, in the assign pass). The fast lane's message
+  text is `LlmTargetSpec.textParallel` wide (8 on the build's box, else at
+  least 3). Triage makes no chat call but still
   shares `fastDrainGateProvider` for the yield ticket, so a triage pump can wait
   behind a message-text call already in flight. A handler that must wake the drain it runs INSIDE is handed
   the worker through a `late final` local in the lane's body, never
@@ -199,7 +206,7 @@ enforce the ones that are commands.
   all three together; a new segmented control is `SettingsSegments<T>`.
 - The settings SURFACE is `SettingsHost` (`screens/settings_host.dart`), not
   the inbox: it owns the probe and every writer only settings calls
-  (`_saveNeedsYouRules`, the two resets and `_resetPipeline`,
+  (the two resets and `_resetPipeline`,
   `_reloadAfterBackendChange`, `_connectionStatus`, `_connectMicrosoft`), and
   the inbox binds it once for both rungs in
   `_settingsHost`. A new settings-only mutator goes on the host. Two methods
@@ -207,29 +214,74 @@ enforce the ones that are commands.
   because the sidebar's own switch calls it, and `_waitForPullsToSettle` with
   its `_quietTimeout`, because it reads the `_mailPulling`/`_teamsPulling`
   flags the inbox's syncs write.
-- The clustering card is ONE recipe (`clusteringCardForConversationRow` in
-  `clustering_card.dart`, whose `ClusteringCardVariant` holds the seven cards
-  and `shippedClusteringCard` names the one that ships, `topics`; `thread` and
-  `topicsUntitled` are bench-only variants from the decision-model round,
-  measured 58/98 against the shipped card's 59/98) behind
-  `EmbeddingsClient.modelTag`; a tag bump orphans every stored
-  conversation vector by construction, so it ships with a one-shot re-embed
-  in `sync_service.dart` (Round A's pref idiom).
+- The clustering card is ONE recipe behind ONE entry: `clusteringCardFor(store,
+  source, key, row, {variant})` in `storyline_cards.dart`, which every place
+  that embeds a THREAD goes through (the assign pass's `_keptVectorFor`, the
+  only writer of a conversation vector, whose test face is `vectorFor`, and
+  the golden seed). `text` is the thread
+  text the decision model reads (`storylineThreadTextFor`) and cannot be built
+  by `buildClusteringCard` (it throws); every other variant is
+  `clusteringCardForConversationRow` in `clustering_card.dart`, whose
+  `ClusteringCardVariant` holds the nine cards and `shippedClusteringCard`
+  names the one that ships, `topics`; `thread` and `topicsUntitled` are
+  bench-only variants from the decision-model round (58/98 against the
+  shipped card's 59/98), and `text` and `excerpt`, the cards buildable before
+  extraction, read 45/98 and 47/98 against `topics`' 60/98 on 2026-09-30 and
+  do not ship (nor does the namer on the message excerpt, 55/98). The
+  assign pass hash-checks the card, so a bench under another `SWEEP_CARD`
+  passes `StorylineService(clusteringCard:)` or every thread re-embeds under
+  the shipped card; extraction queues the assign only once the thread's
+  newest kept message has its text, and the pass re-checks the card when it
+  ends (`assignRecheckLaps`). Behind `EmbeddingsClient.modelTag`; a tag
+  bump orphans every stored conversation vector by construction, so it ships
+  with a one-shot re-embed in `sync_service.dart` (Round A's pref idiom).
 - `_accepts` in `storyline_service.dart` is the one membership rule at all
-  five confirm sites (assign, recruit, sweep member, probe, audit), and a
-  `suggested` storyline needs `high`. It and `_confirm` stayed in the service
-  through the split, because one rule at five sites is not a seam.
+  five confirm sites (assign, recruit, sweep member, probe, audit): the
+  decision model's `member_of` p against `StorylinePolicy`
+  (`storyline_judge.dart`) — `acceptSuggested` for a `suggested` storyline,
+  `acceptActive` for a kept one. `_confirm` asks `StorylineJudge.memberOf`,
+  ONE batch per storyline per lap, and a decision exception propagates and
+  parks the lane; no language model is asked about membership (the
+  `storyline_membership` stage is gone). Both stayed in the service through
+  the split, because one rule at five sites is not a seam. `acceptActive`
+  0.50, `acceptSuggested` 0.74 and `charterSpecificTau` 0.50 (validated at 0.50 only) are FITTED on
+  the v3 student (2026-09-30) and move only with a `make golden-storyline`,
+  `golden-declared` or `golden-sweep` row on each side; a test's `member_of`
+  yes must clear 0.74 for a suggested storyline. Storyline tests script `member_of`
+  through `scriptedJudge(store, llm)` (`fake_decision_client.dart`): a
+  `{'p': …}` step under the `member_of` schema name, one call per thread.
+- The sweep groups by COSINE (`StorylineGrouper.candidates`, the one reader
+  of `clusterLinkThreshold`, `clusterCoherenceFloor` and the split ladder):
+  cosine PROPOSES the clusters and the decision model JUDGES them — the namer
+  (`NameStorylineTask`) only WRITES (no `coherent`/`outliers`),
+  `StorylineTuning.charterCheck` (`CharterCheck.model`: `charter_specific` at
+  `charterSpecificTau`; `CharterCheck.lint`: the regex, `SWEEP_CHARTER=lint`)
+  files a refused cluster `possible`, and each member is confirmed on
+  `member_of`. `maxQuestionsPerPass` counts NAMING calls only, and
+  `ensureReady` runs before the first naming call. A pair grouping on
+  `same_effort` (cosine proposed pairs, average linkage over the judged pairs,
+  a `pair_decisions` cache) was measured on the v3 golden sweep (57/98 at
+  best against cosine's 60/98, because `same_effort`'s p on the golden pool
+  is compressed near zero) and REMOVED on 2026-09-30, with its v23 table:
+  unused code does not stay as a dark arm. The `same_effort` head stays in
+  the contract (`StorylineQuestion.sameEffort`, `DecisionClient.askPairs`,
+  `StorylineJudge.sameEffortOfTexts`), and `make golden-pairs` is how a
+  future `same_effort` model is measured before a grouping on it is built
+  again. `GroupThreadsTask`, the `storyline_group` stage and the
+  `model`/`pool` modes are gone too. Storyline service tests answer
+  `charter_specific` through `sweepJudge` (`storyline_service_test.dart`: a
+  yes unless the test scripts it) with `{'p': …}` like `member_of`.
 - The storyline service is four files now and one public face: the user
   actions in `storyline_edits.dart` (`StorylineEdits`), the clustering in
   `storyline_grouper.dart` (`StorylineGrouper`), the shared card statics in
   `storyline_cards.dart`, and `storyline_service.dart` keeping one-line
-  delegates so its twenty-two importers, six in `lib` and sixteen in `test`, did
+  delegates so its twenty importers, six in `lib` and fourteen in `test`, did
   not change. A new pass goes in the file whose job it is, and the service gets
   a delegate only if callers outside already reach for it.
 - A cluster the models DECLINE is a `possible` storyline WITH its members, in
   the rail under **Possible · N** with Keep and Dismiss, never a member-less
   tombstone. `_filePossible` in `storyline_service.dart` is the one insert site
-  for all three reasons (namer, charter lint, too few confirm survivors);
+  for both reasons (the charter check, too few confirm survivors);
   `dismissedHashExistsAny` and `expireStaleSuggestions` read `possible` as well
   as their old status, and every pool, assign, recruit, refresh, recap and
   home-feed query names `('suggested','active')` and so leaves a possible
@@ -262,9 +314,12 @@ enforce the ones that are commands.
   went red with "Can't re-open a database after closing it"; a test that builds
   a worker `addTearDown(worker.dispose)`.
 - The sweep is re-armed by the fast lane only after a drain that processed
-  something (`AiWorker.lastDrainCount`), and it defers above three floors read
-  from ONE `pipelinePulse`; the sync-time `requeueSweep()` is the durable
-  trigger.
+  something (`AiWorker.lastDrainCount`), and it defers above three floors
+  read from ONE `pipelinePulse`: `sweepExtractFloor` (10), `sweepTriageFloor`
+  (20) and `sweepAssignFloor` (10, the `storyline` KIND via
+  `PipelinePulse.kindCount`, not the stage, which also counts the asking
+  sweep row); no `embed_message` floor, since search vectors never fed the
+  pool. The sync-time `requeueSweep()` is the durable trigger.
 - A `StorylineTuning` number moves only with a `make golden-sweep` row on each
   side, and a diagnostic flip of one is a single shell command that puts the
   constant back before it exits.
@@ -377,7 +432,10 @@ enforce the ones that are commands.
   third-party refusal) and refuses under the field rather than letting a host
   throw past a fire-and-forget press; the model name is DISCOVERED from
   `/v1/models`, and an origin change sends `clearKey`. A decision on Your
-  server still reads this Mac's heads file, so its status needs that file too.
+  server that is ModernBERT still reads this Mac's heads file, so its status
+  needs that file too; a Kev server does not, a kind not yet known names no
+  install, and the kind line `settings-decision-kind` says which (the host
+  asks `detectKind` once per address when it opens).
   `SettingsHost` wires `onUseDecision`, `onUseGenerative`, `onCheckDecision`
   and `onRemoveKey` (null takes a control off), and every role write is
   followed by `supervisor.ensurePreset()`, which restarts the router only when
@@ -542,35 +600,126 @@ enforce the ones that are commands.
   state. The date line is the Mac's LOCAL zone, as in training: render on the
   Mac, never on a server. The golden leg composes through the same
   `renderDecisionStateFromParts`, so the two cannot drift.
-  `decisionRendererVersion` (`'bond-state/1'`) beside it names the state
-  format for the next round's model bundles (a bundle naming another is
-  refused); it is bumped only with a change to the bytes, fixtures and all.
+  `decisionRendererVersion` (`'bond-state/2'`) beside it names the WHOLE
+  renderer set, the heads file carries it and `DecisionHeads.fromJson`
+  refuses another; it is bumped only with a change to the bytes of any
+  renderer in the set, fixtures and all. The storyline texts (thread, pair,
+  membership, charter) are `services/decision/storyline_state.dart`, a port of
+  jev-prototype `distill/eval_questions/renderers.py`, pinned by
+  `test/fixtures/decision/render_cases_v2.json` (jev
+  `distill/export/render_fixtures_v2.py`, never edited by hand). The Python
+  pitfalls: caps count code points (`runes`); whitespace is the fixture's
+  `str.isspace()` set, never `trim()` or `\s` (U+FEFF, U+180E and U+200B are
+  not whitespace); collapsing comes before the Re/Fw strip; and the people
+  de-dup is `pyLower` (Python `str.lower()`: `İ` → `i̇`, final sigma), never
+  `toLowerCase`.
+- The decision role has TWO server kinds (`DecisionServerKind`) behind one
+  `DecisionClient` API: `encoderHeads` (ModernBERT on llama-server, heads in
+  Dart) and `systemOne` (Kev 4B behind jev's wrapper, `POST
+  <base>/v1/systemone` with the plain question texts from
+  `decision_questions.dart`, answers calibrated THERE, nothing applied in
+  Dart). A managed or hand-started target is always encoder-heads and costs no
+  request; only a target the provider's `isYourServer` names is asked `GET
+  <base>/v1/models` once (a `qhash` entry → systemone, refused unless it is
+  `decisionQhash` over `bond-state/2`; anything else → encoder plus the
+  identity probe; a listing that is not a 2xx JSON object is "no listing"),
+  cached under the probe's key and dropped with it on any unavailable,
+  unauthorized or misconfigured throw. The systemone path never calls
+  `heads()`; a malformed answer or a 404 on `/v1/systemone` parks
+  `decision_misconfigured`. Your server's sentences never say `make decide`.
+  A test that points a real client at a `MockClient` with `isYourServer`
+  answering yes answers `GET …/v1/models` too; without it (every older test)
+  no listing is asked. The provider's HTTP client is
+  `decisionHttpClientProvider`, the seam a wiring test overrides.
 - The heads file (`decide-heads.json`, installed beside the GGUF under
   `<models>/local_bond-decide/` by `make decide-install`) is needed on THIS
-  Mac even when the decision server is remote: the nine heads, temperatures
-  and softmax run in Dart. `decisionHeadsProvider` re-reads it when its mtime
-  moves and refuses a file whose `qhash` differs from
-  `DecisionHeads.expectedQhash`; a missing file parks the decision pass.
+  Mac for the encoder-heads kind even when its server is remote: the heads, temperatures and
+  softmax run in Dart. It is SCHEMA 2 with 12 `questions`: the nine message
+  fields (renderer `message`, `decisionFields` order), then `same_effort`
+  (`pair`), `member_of` (`membership`) and `charter_specific` (`charter`),
+  each `yes`/`no`. `apply` answers the nine; `pYes(question, vector)` answers
+  one storyline question. `decisionHeadsProvider` re-reads it when its mtime
+  moves and refuses a file whose `qhash` is not `decisionQhash`
+  (`'f495a7dc48aa34d5'`, `decision_questions.dart`, the one place it is
+  named). A schema-1 file (the older model) throws
+  `DecisionOlderModelException` (in `llm_client.dart`, so `parkReasonFor`
+  can name it), park `decision_older_model`, with `DecisionHeads.olderModelText`
+  in plain words and no command; Settings adds a quieter `For developers:
+  make decide-install` line. A missing file parks the decision pass. Tests
+  build heads from `test/fixtures/decision_heads_fixture.dart`
+  (`syntheticHeadsJson`, schema 2, one axis per option, `yesAxisOf`).
+  `MessageStore.decisionFor` answers null for a row stored under another
+  qhash, and every `writeDecision` passes `decisionQhash`.
 - The `DecisionPolicy` constants (`services/decision/decision_policy.dart`:
-  `gateDrop`, `needsYouYes`, `needsYouYesCold`, `needsYouNo`, `booleanYes`,
-  `replyYes`) were fitted on the golden set and move only with a golden row
-  on each side (`make golden-decision`, plus `make golden-prose` for
-  `replyYes`), the `StorylineTuning` rule.
+  `gateDrop`, `booleanYes`, `replyYes`) were fitted on the golden set and move
+  only with a golden row on each side (`make golden-decision`, plus `make
+  golden-prose` for `replyYes`), the `StorylineTuning` rule.
+- Needs You is ONE predicate: `needsYouAt(p, threshold)` / `needsYouAtSql` /
+  `MessageStore.threadNeedsYouPSql`; the slider (`needs_you_threshold`,
+  default 0.35) is the only control; every reader goes through it; no
+  language model is asked about needs-you, and the attention score only
+  orders. A THREAD's p is the MAX over its kept inbound messages after its
+  last outbound (all kept inbound when it has none), not the newest one's, so
+  a bystander's reply-all cannot hide an older unanswered ask; that is
+  deliberate, do not "fix" it to the newest. `needs_you_verdict`,
+  `attention_threshold` and `needs_you_rules` are inert.
+- The storyline questions' thread text (`storylineThreadTextFor`,
+  `services/decision/storyline_thread_input.dart`) mirrors jev-prototype
+  `distill/storyline_data/corpus.py`, the code the training threads were
+  built with, not the plan's prose: subject and participants as the
+  `conversations` row derives them (re-derived from the thread's own messages
+  oldest first), shown = outbound plus kept inbound, `who` = `You` / name /
+  address, an empty body takes the decision state's attachment stand-in. Where
+  the rows cannot match it (unfetched bodies render Graph's preview, so
+  `StorylineJudge` fetches `previewIds` first; recipient names; a renamed
+  Teams chat) the file's header lists it. Re-read corpus.py before changing
+  anything here; a change to the bytes is a change to what the model was
+  trained on.
+- `decision_labels` (v22) is KEPT: the owner's storyline presses logged as
+  labels for the storyline questions (`member_of`, `charter_specific`), with
+  the storyline's title and charter at the press. Written ONLY by
+  `StorylineEdits` at an owner press (Keep and Dismiss of a suggestion or
+  possible row, add, remove, a charter written — Allow again writes none,
+  lifting a veto is not a yes), never by an automatic pass; Clear AI results keeps it and `wipeAll` deletes it.
+- The install-time re-decide (`TriageQueue.redecideStale`) runs the DECISION
+  pass again for the last 30 days of kept inbound messages decided under
+  another qhash (at most 2,000, newest first), writing only the decision row,
+  the four triage fields, `needs_you_p`, the extraction's intent and
+  importance, the thread's CTA fold and the chip, through `applyDecision`
+  (`triage_queue.dart`), the ONE writer the claim, the re-decide and the
+  needs-you pass's re-decide share. The mail sync starts it unawaited on the
+  pref `decision_redecide_qhash`, whose value IS the qhash it finished for; a
+  run is complete when it did not park. A 4xx message is SETTLED
+  (`settleFailedDecision`: the current qhash plus a `redecide_failed` mark in
+  `answers_json`, which `decisionFor` reads as no decision), so it leaves the
+  stale list; a park or the processing switch leaves it owed. It asks nothing while triage is parked on the decision
+  model, and logs a park once per qhash and reason per app run. Not in
+  `derivedOneShotPrefs`: a clear re-triages everything.
 - `message_decisions` is DERIVED (Clear AI results empties it; the triage
   pass writes it again), keyed by `(source, source_message_id)`. The four
   `*_p` columns are the probabilities read by hand; `answers_json` is every
   option's calibrated probability plus `owner_known`. A row decided WITHOUT an
-  owner line (the keychain had not answered yet) has an untrusted `needs_you_p`,
-  so that message's needs-you goes to the language model. A learned drop can
+  owner line (the keychain had not answered yet) has an untrusted
+  `needs_you_p`: triage still writes it to `messages.needs_you_p` and it is
+  SHOWN, every mail sync (and Retry owed stages) requeues the needs-you pass
+  for it (`requeueOwnerlessNeedsYou`), and the pass decides the message again
+  once the owner is known, keeping the p as it is while the owner is still
+  unknown. A learned drop can
   carry an ingest word (`outbound`, a chat's `auto_generated`), so Clear AI
   results tells it from an ingest verdict by the `message_decisions` row
   (`clearDerived`'s `keptGate`, read before that table is emptied).
 - An inbox-level widget test that builds a triage queue overrides
   `decisionClientProvider` with `keepingDecisionClient()`
-  (`test/fixtures/fake_decision_client.dart`: keep, needs-you 0.5 so the band
-  still asks the scripted model). Without it the real client finds no heads
+  (`test/fixtures/fake_decision_client.dart`: keep, needs-you 0.5, over the
+  slider's 0.35 default so a kept message reads as needing the owner). Without
+  it the real client finds no heads
   file under `flutter test` and parks every message, which shows up as rows
   stuck at "triaging" or as RenderFlex overflows, not as a clear failure.
+  `FakeDecisionClient`'s storyline `ask` answers `defaultYes` for any state no
+  `yes(question, contains, p)` script matches, and `defaultYes` is 0.0, so an
+  unscripted `member_of` files NOTHING: a storyline
+  test that expects a filing scripts its yes (or builds
+  `FakeDecisionClient.storyline(defaultYes: …)`).
 - Generated drift schema files (`drift_schemas/bond/drift_schema_vN.json`,
   `test/drift/bond/generated/`) are never deleted or rewritten by hand from a
   session; the hook blocks it. Design around a schema bump you do not need:

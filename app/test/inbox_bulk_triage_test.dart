@@ -38,6 +38,7 @@ import 'fixtures/fake_attachment_bytes.dart';
 import 'fixtures/fake_pdf_renderer.dart';
 import 'fixtures/png_fixture.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// Bulk triage over a real store — requirement 12c: the selection, the bar,
 /// one bar and one undo per bulk act, and select-similar.
@@ -47,6 +48,12 @@ import 'fixtures/test_db.dart';
 /// position.
 
 class _FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   @override
   Future<void> syncNow() async {}
 
@@ -159,6 +166,7 @@ void main() {
       'received_at': received,
       'body_text': 'the hero paragraph',
     });
+    await seedNeedsYou(store, 'email', '$key-m1');
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
@@ -204,7 +212,6 @@ void main() {
   }) async {
     await tester.binding.setSurfaceSize(Size(width, height));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

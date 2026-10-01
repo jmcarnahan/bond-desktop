@@ -4,7 +4,7 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart'
-    show needsYouNoReason, needsYouYesReason;
+    show needsYouYesReason;
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -72,6 +72,11 @@ const Map<String, dynamic> _textAnswer = {
   'topics': ['launch date'],
   'project': 'Website redesign',
 };
+
+/// An owner the keychain has answered, so a decision is made with the owner
+/// line and the needs-you pass trusts it.
+Future<OwnerIdentity?> _owner() async =>
+    (name: 'Ada Park', address: 'ada@example.com');
 
 const Map<String, dynamic> _needsYouAnswer = {
   'evidence': 'Sarah asks the owner to confirm the date.',
@@ -152,7 +157,7 @@ void main() {
   }) {
     final gate = DrainGate();
     // The order is the assertion in most of this file, so the reading is
-    // `schemas` — `decision`, `message_text`, `needs_you` — rather than a call
+    // `schemas` — `decision`, `message_text` — rather than a call
     // count, which cannot tell a drain that ran twice from one that ran
     // backwards.
     final llm = ScriptedLlm(
@@ -164,18 +169,20 @@ void main() {
           },
     );
     final embed = FakeEmbeddings();
+    // One decision client for both, as the app shares `decisionClientProvider`.
+    final decision = ScriptedDecisionClient(llm);
     final worker = AiWorker(
       store,
       gate: gate,
       handlers: [
-        NeedsYouHandler(store, llm),
+        NeedsYouHandler(store, decisionClient: decision),
         ExtractHandler(store, llm, embed.client),
       ],
     );
     addTearDown(worker.dispose);
     final triage = TriageQueue(
       store,
-      decisionClient: ScriptedDecisionClient(llm),
+      decisionClient: decision,
       gate: gate,
       // No `ensureBody`: there is no Graph here, and the seeded row already
       // carries the body a detail fetch would have written.
@@ -228,7 +235,7 @@ void main() {
       final stored = (await store.decisionFor('email', 'm1'))!;
       expect(stored.ownerKnown, isTrue);
       final row = (await store.getMessageRow('email', 'm1'))!;
-      expect(row['needs_you_verdict'], 1);
+      expect(row['needs_you_p'], closeTo(0.9, 1e-9));
       expect(row['needs_you_reason'], needsYouYesReason(stored.answers));
       expect(await statusOf('needs_you', 'm1'), 'done');
       // The draft was queued on the decision's reply probability, with no
@@ -260,8 +267,10 @@ void main() {
       expect(p.llm.schemas, isNot(contains('needs_you')));
 
       final row = (await store.getMessageRow('email', 'm1'))!;
-      expect(row['needs_you_verdict'], 0);
-      expect(row['needs_you_reason'], needsYouNoReason);
+      expect(row['needs_you_p'], closeTo(0.1, 1e-9));
+      // The template rides beside any probability; the slider reads the p.
+      expect(row['needs_you_reason'],
+          needsYouYesReason((await store.decisionFor('email', 'm1'))!.answers));
       expect(await statusOf('needs_you', 'm1'), 'done');
       expect(await draftRows('m1'), 0);
     });
@@ -339,7 +348,9 @@ void main() {
   test('a kept message is extracted exactly once, and only after triage',
       () async {
     await seedFreshMessage();
-    final p = pipeline();
+    // The owner known, so triage's decision stands and the needs-you pass
+    // asks nothing.
+    final p = pipeline(owner: _owner);
 
     await p.worker.pump();
     // Nothing yet — pinned here so the assertion below is about ORDER rather
@@ -360,7 +371,7 @@ void main() {
     expect(p.llm.schemas.first, 'decision');
     expect(p.llm.schemas.where((c) => c == 'decision').length, 1);
     expect(p.llm.schemas.where((c) => c == 'message_text').length, 1);
-    expect(p.llm.schemas, contains('needs_you'));
+    expect(p.llm.schemas, isNot(contains('needs_you')));
     // The decision wrote the row; the text call wrote its words AFTER it.
     expect(p.llm.schemas.indexOf('message_text'),
         greaterThan(p.llm.schemas.indexOf('decision')));
@@ -370,15 +381,16 @@ void main() {
     expect((await store.getConversationRow('email', 'conv-1'))!['cta_text'],
         'Confirm the launch date');
 
-    // The fan-out extraction owns: the thread is embedded and queued for
-    // filing, which is what must not happen for gated mail.
-    expect(await embeddingOf('conv-1'), isNotNull);
+    // The fan-out extraction owns: the thread is queued for filing, which is
+    // what must not happen for gated mail. Extraction no longer embeds it —
+    // the assign pass on the storyline lane does, and this pipeline has none.
     expect(await storylineRows(), 1);
+    expect(await embeddingOf('conv-1'), isNull);
   });
 
   test('a priority ref is refused before triage and taken after it', () async {
     await seedFreshMessage();
-    final p = pipeline();
+    final p = pipeline(owner: _owner);
 
     // The caller names the message as urgent while it is still untriaged,
     // which is the one way a priority claim could become a hole in the
@@ -402,7 +414,8 @@ void main() {
     expect(await statusOf('needs_you', 'm1'), 'done');
     expect(p.llm.schemas.first, 'decision');
     expect(p.llm.schemas.where((c) => c == 'message_text').length, 1);
-    expect(p.llm.schemas.where((c) => c == 'needs_you').length, 1);
+    expect(p.llm.schemas.where((c) => c == 'decision').length, 1);
+    expect(p.llm.schemas, isNot(contains('needs_you')));
     expect(await store.getExtraction('email', 'm1'), isNotNull);
   });
 
@@ -436,10 +449,11 @@ void main() {
       expect(await statusOf('needs_you', id), 'done');
     }
     // Two messages, two of each call: a row claimed by both paths would show
-    // up here as a third.
+    // up here as a third. Triaged by hand with no decision stored, so the
+    // needs-you pass decides each once, with the decision model.
     expect(p.llm.schemas.where((c) => c == 'message_text').length, 2);
-    expect(p.llm.schemas.where((c) => c == 'needs_you').length, 2);
-    expect(p.llm.schemas, isNot(contains('decision')));
+    expect(p.llm.schemas.where((c) => c == 'decision').length, 2);
+    expect(p.llm.schemas, isNot(contains('needs_you')));
   });
 
   test('a drain with nothing pending does not wake the worker', () async {

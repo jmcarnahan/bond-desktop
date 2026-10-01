@@ -51,13 +51,15 @@ reply** stays exempt there: an asked-for draft is the owner overruling it.
 both read off the stored row rather than re-judging it, and both compare
 sqlite's INTEGER flags against 1:
 
-- `asksForAReply` — five signals, any one is enough: `needs_you_verdict == 1`,
+- `asksForAReply` — five signals, any one is enough: the message needs the
+  owner (`needsYouAt(needs_you_p, threshold)` at their Needs You slider),
   `reply_expected == 1`, `needs_action == 1`, `urgency` of `urgent` or `high`,
   or a non-empty `deadline`.
-- `prefetchWorthy` — three of those five: `needs_you_verdict == 1`, or
-  `urgency` of `urgent` or `high`. It drops `reply_expected` (triage's guess
-  from one message in isolation) and `deadline` (a date a newsletter carries
-  too), which are the two that fire on ordinary mail.
+- `prefetchWorthy` — one of those five: the needs-you predicate itself, the
+  same rule that fills Needs You. It drops the four that fire on ordinary
+  mail: `reply_expected` (triage's guess from one message in isolation),
+  `needs_action`, `deadline` (a date a newsletter carries too) and the urgency
+  word, which the needs-you probability already reads.
 
 Outbound answers false in both.
 
@@ -106,17 +108,17 @@ so a policy-skipped stage, which is `skipped`, is left alone, and a genuinely
 stuck one is queued under this handler's own guards. A Retry is a person
 asking.
 
-Which matters most under `needsYou`, where the needs-you verdict is
-load-bearing: if that stage errored for a message its verdict is NULL, the
+Which matters most under `needsYou`, where the needs-you probability is
+load-bearing: if it was never settled for a message it is NULL, the
 message reads `not_prefetched`, and its draft stage is `skipped` — terminal, so
 a Retry does not re-offer it. **Draft reply** is the way to get that draft.
 
 The reply DECISION below applies to every prefetch whatever the policy, and
-never to a press. The
-`needs_you_verdict` signal both pre-gates read is the needs-you stage's read of
-the whole message (see [11-needs-you.md](11-needs-you.md)); `NeedsYouHandler`
-drains before extraction, so the verdict is on the row by the time either gate
-reads it.
+never to a press. The needs-you signal both pre-gates read is the decision
+model's probability for the whole message against the owner's slider (see
+[11-needs-you.md](11-needs-you.md)); triage writes it, and `NeedsYouHandler`
+drains before extraction to settle any it left missing, so it is on the row by
+the time either gate reads it.
 
 ## Reply decision — should we spend drafting time at all
 
@@ -332,7 +334,8 @@ delete. Without that wait, an answer landing a moment later would write a
 
 **The standing rule.** `cloud_drafts_standing` (default off, Settings →
 Suggested replies) improves a draft with nobody pressing anything, for
-messages where `needs_you_verdict = 1` and `urgency` is `urgent` or `high` —
+messages that need the owner (`needs_you_p` at or above their Needs You
+slider) and whose `urgency` is `urgent` or `high` —
 the same two words `ExtractHandler.asksForAReply` reads. It runs **after** the
 local draft is stored, inside the same activity row, which is the whole safety
 of it: whatever the second call does, an answer is already in the box. The row

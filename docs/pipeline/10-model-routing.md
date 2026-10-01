@@ -6,8 +6,8 @@ rather than a stored map:
 
 | Role | What it does | Where it can run |
 |------|--------------|------------------|
-| **Decision** | The fine-tuned ModernBERT classifier: one embedding call per message, nine heads applied in Dart | this Mac (Managed) or Your server |
-| **Generative** | Every piece of text: summaries, digests, briefs, storyline names and recaps, needs-you in the band, drafts | this Mac (Managed: the 27B or the 4B) or Your server |
+| **Decision** | Every choice-shaped answer, twelve questions: the nine message fields (one call per message) and the three storyline questions. The fine-tuned ModernBERT classifier (one embedding call, heads applied in Dart from this Mac's heads file) on this Mac or at a llama-server URL; a Kev 4B server (`/v1/systemone`) answers the questions itself and needs no files here | this Mac (Managed) or Your server |
+| **Generative** | Every piece of text: summaries, digests, briefs, storyline names and recaps, drafts | this Mac (Managed: the 27B or the 4B) or Your server |
 | **Embeddings** | Clustering and search vectors | this Mac, always; not a choice |
 
 Plus one optional target that is not a role: **cloud drafts**, the one place a
@@ -26,10 +26,21 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | Stage | Role |
 |-------|------|
 | `decision` | Decision |
-| `needs_you`, `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
-| `storyline_membership`, `storyline_group`, `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
+| `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
+| `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `embeddings` | Embeddings, not routed |
+
+There is no storyline-membership or storyline-grouping stage: whether a thread
+belongs to a storyline is the decision model's `member_of`, which threads the
+sweep groups is the cosine clustering (a pair grouping on the decision model's
+`same_effort` was measured and removed), and whether a charter names one specific
+effort is its `charter_specific`, all asked through `StorylineJudge` on the
+decision client (the calls are labelled `decision:<question id>`). A decision
+failure parks the storyline lane as it parks triage (see
+[06-storylines.md](06-storylines.md#membership-on-the-decision-model)). The
+`storyline_group` stage and its task were deleted in the decision-questions
+round.
 
 There is no reply-decision stage: whether a prefetched draft is wanted is the
 decision model's `reply_expected` probability, stored at triage and read by
@@ -55,18 +66,19 @@ row).
 **Classification is the decision model's; text is one generative call
 (Phases 5–6).** The triage queue runs one decision pass per kept inbound
 message and makes NO language-model call: the learned gate, urgency,
-category, the two booleans, the needs-you verdict outside its band and the
+category, the two booleans, the needs-you probability and the
 intent/importance filed into the extraction blob come from it (see
 [03-triage.md](03-triage.md) and [11-needs-you.md](11-needs-you.md)). The
 message's text is ONE generative call, the `message_text` stage
 (`MessageTextTask`, run by `ExtractHandler` under work kind `extract`: summary,
 action items, deadline, topics, project — see
 [04-extraction.md](04-extraction.md)). The retired `triage` and `extraction`
-stage rows are gone from `pipelineStages`; a per-message pipeline now costs
-the decision pass, the needs-you band when the decision is unsure, and one
-`message_text` call (plus the draft, when one is written). The label a call
-records (`LlmCallRecord.label`) is its schema: `decision`, `message_text`,
-`needs_you`, …
+stage rows are gone from `pipelineStages`, and so is `needs_you`: no
+language model is asked about needs-you at all (the owner's slider over the
+decision model's probability is the one rule). A per-message pipeline costs the
+decision pass and one `message_text` call (plus the draft, when one is
+written). The label a call records (`LlmCallRecord.label`) is its schema:
+`decision`, `message_text`, `attachment_digest`, …
 
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
@@ -96,7 +108,7 @@ Each role's spec resolves in the same order, per call:
 |---|---|---|
 | Your server: id | `box-prose` | `box-decide` |
 | Your server: URL | `box_big_url`, else `$BOND_BOX_URL/prose/v1/chat/completions` | `decision_url`, else `$BOND_BOX_URL/decide/v1/embeddings` |
-| Your server: model | `box_big_model` (discovered), else `qwen3.8` (`boxProseModel`) | `decision_model` (discovered), else `bond-decide-mbl-v2swap` (`boxDecideModel`) |
+| Your server: model | `box_big_model` (discovered), else `qwen3.8` (`boxProseModel`) | `decision_model` (discovered), else `bond-decide-mbl-v3` (`boxDecideModel`) |
 | Your server: width | 4 when the URL follows the build, 1 for a stored address | 1 |
 | Managed: id, URL | `local-generative`, `<router>/v1/chat/completions` | `local-decision`, `<router>/v1/embeddings` |
 | Managed: model | `managedGenerativeIdFor(tier, generative_managed_model)`: `bond-prose` (27B) or `bond-bulk` (4B) | `bond-decide` |
@@ -111,11 +123,19 @@ Each role's spec resolves in the same order, per call:
   compiled box serves both under one origin: `/prose` is its vLLM 27B and
   `/decide` its llama.cpp decision slot (`tools/inference.sh --decide-gguf`,
   `docs/inference-endpoint.md`).
-- **The width.** The compiled box's prose slot is vLLM with several sequences,
-  so a URL that follows the build is four wide; a stored address is one at a
-  time, because a one-slot llama-server queues the rest past the generative
-  client's ninety-second ceiling. The managed generative width is
-  `prose_parallel` (1–8, default 1).
+- **The width.** Two numbers on `LlmTargetSpec`: `parallel` (drafts) and
+  `textParallel` (message text — extraction and the attachment digests; 1–8,
+  default 3). A URL that follows the build is four wide for drafts and EIGHT
+  for message text. The compiled box's PROSE-ONLY profile runs vLLM at
+  `--max-num-seqs 16` (`tools/inference.sh`), which leaves the rest to the
+  storyline lane; with a bulk slot (`--bulk-model`) the prose slot has 8
+  sequences and vLLM queues the extra requests, their wait counting against
+  the client's 120 s timeout. The digests share extraction's eight: they
+  drain after it on the same lane, one kind at a time. A stored address is
+  one at a time for drafts, because a one-slot llama-server queues the rest past the
+  generative client's ninety-second ceiling, and three for message text, the
+  width it always had. The managed generative width is `prose_parallel`
+  (1–8, default 1), and message text takes it but never fewer than three.
 - **The managed generative model.** `generative_managed_model` is `''` (by
   hardware tier: the 27B on the full tier, the 4B on the inbox tier),
   `bond-prose` or `bond-bulk`. The 27B on the inbox tier is refused by
@@ -263,10 +283,73 @@ plain POST.
 
 `DecisionClient` (`app/lib/services/decision/decision_client.dart`) renders a
 message's state (`decision_state.dart`, a byte-exact port of the training
-renderer), embeds it, and applies the heads (`decision_heads.dart`). The
-server is a stock llama-server serving the encoder as a mean-pooled embedding
-model: the managed router's `bond-decide`, `make decide` on `:8083`, or a
-box's `/decide/` slot.
+renderer) and has the decision server answer over it. The server is one of
+two KINDS (`DecisionServerKind`), and every caller uses the same API
+(`decide`, `decideBatch`, `decideStates`, `ask`, `askPairs`) whichever it is:
+
+- **encoder-heads** (`encoderHeads`): a stock llama-server serving the
+  ModernBERT encoder as a mean-pooled embedding model — the managed router's
+  `bond-decide`, `make decide` on `:8083`, or a box's `/decide/` slot. The
+  client embeds the state and applies this Mac's heads
+  (`decision_heads.dart`). Everything from **The identity probe** to **The
+  heads file** below is this kind.
+- **systemone** (`systemOne`): Kev 4B behind jev-prototype's wrapper
+  (`distill/serve_bond_kev.py`, contract §3.4 of
+  `PLAN-storyline-questions-training.md`) on the owner's server. It is asked
+  the questions' plain text and answers calibrated probabilities, so nothing
+  is applied in Dart and no file on this Mac is read.
+
+**How the kind is found.** A managed or hand-started target is always
+encoder-heads, with no extra request (the provider's `isYourServer` answers
+yes only for the decision spec's `box-decide` target at that address). A
+target on Your server is asked `GET <base>/v1/models` once, with the same
+key, where `<base>` is the configured URL up to its last `/v1/` segment
+(`systemOneUrlFor`, beside `tokenizeUrlFor`). A listed model carrying a
+`qhash` is a systemone server, and it is refused as `decision_misconfigured`
+unless the `qhash` is `decisionQhash` (`f495a7dc48aa34d5`) and the `renderer`
+is `bond-state/2`, each with a sentence naming the cause. Everything else is
+encoder-heads, and the identity probe then runs as before (and parks as
+before when `/tokenize` is missing too): a listing with no `qhash` entry, an
+empty `models: []` included, and any answer that is not a listing at all — a
+4xx other than 401/403/429, or a 200 that is not a JSON object. Only the
+server's condition keeps its mapping: transport, 5xx and 429 park as
+unavailable and 401/403 as the key. The kind is cached per client under the
+same normalised `baseUrl|model` key as the probe's pass, only on a success,
+and both are dropped whenever the server stops answering, refuses the key or
+answers as the wrong thing (`decision_misconfigured`, which is a kind of
+unavailable), so a restart or a re-pointed route that puts Kev where
+ModernBERT was, or a Kev still warming up, is asked afresh on the next call.
+**Connect** (`checkServer`) asks the kind first and the identity probe only
+for encoder-heads. When Settings opens with the decision role on Your server
+and the kind is not known yet, the host asks `detectKind` (one listing GET
+that fills the same cache) and redraws when it answers; `kindOf` answers the
+Models page's kind line from the cache. The unavailable sentences for Your
+server (either kind) name no `make decide`, which starts a server on this Mac;
+only the managed and hand-started targets keep that advice.
+
+**The systemone wire.** `POST <base>/v1/systemone` with `{"state": <rendered
+state>, "questions": {<id>: {"type": "choice", "instructions": <plain text>,
+"criteria": {<option>: null, …}}}}`: the texts are
+`systemOneMessageQuestions` and `StorylineQuestion.instructions`
+(`decision_questions.dart`), copied from the v5 handoff file and pinned by
+`decision_questions_test` against
+`test/fixtures/decision/systemone_questions_v5.json`, the criteria null in
+canonical option order. The FULL rendered state is sent, uncut: the wrapper
+owns Kev's context limit, and a state it refuses (a 413 or 422) is that one
+message's `LlmFormatException`. A message state carries all nine
+message questions in one request; a storyline state (pair, membership or
+charter) carries its one question, and `askPairs` asks both orders and
+averages as for the encoder. The answer is `{"answers": {<id>: {"type",
+"choice", "confidence", "probabilities": {<option>: p}}}}`; the probabilities
+are already calibrated, and the choice is re-derived here as their argmax in
+option order (`DecisionAnswers.fromProbabilities`). An answer missing an asked
+id, with option keys other than the question's, a value outside [0, 1] or a
+set that does not sum to 1 within 1e-3 is a `DecisionMisconfiguredException`
+(`decision_misconfigured`): a wrapper that answers one state that way answers
+them all that way, so the role parks. So does a 404/405 on `/v1/systemone`.
+Requests run at most 8 at once per call (`systemOneInFlight`), 15 s each, and one call is still
+one `onCall` record (`decision`, `decision:<id>`). A result's `model` is the
+name the wrapper listed; `truncated` is always false.
 
 - **The identity probe.** Before the first embedding a target gets, the
   client `POST`s `<prefix>/tokenize {"model", "content": "a", "add_special":
@@ -285,9 +368,28 @@ box's `/decide/` slot.
   the form instead of connecting; the form also takes the decision model's
   own name from a router's `/v1/models` (`bond-decide`, the box's served
   name, this build's, or the stored one) before the first id.
+- **The heads pairing.** After the probe, once per target and heads model,
+  the name of the GGUF the server serves must CONTAIN the heads file's
+  `model` (`bond-decide-mbl-v3` in `bond-decide-mbl-v3-f16.gguf`); the probe
+  cannot see this, since every ModernBERT tokenizes alike. For the managed
+  router the file is the manifest's decide entry (the provider's
+  `servedFile` hook: the router lists only preset ids); for Your server it
+  is read off the `/v1/models` listing the kind check already fetched; for a
+  hand-started server it is one `GET <base>/v1/models`. llama-server lists
+  its model path under `model`/`id`/`name` unless an alias replaced it, and
+  only a name ending `.gguf` counts (reduced to its last path segment). A
+  listing that names none, or no listing, SKIPS the check and is kept like a
+  pass; a mismatch is `DecisionModelMismatchException` (a
+  `DecisionMisconfiguredException`, park `decision_misconfigured`): "The
+  decision model file (<file>) does not match its heads file (<model>).
+  Install them together." It is forgotten with the probe's pass.
 - **The request.** `POST <url> {"model", "input", "embd_normalize": -1}` with
   `Authorization: Bearer` when the target has a key. `input` is a string for
-  one state, an array for a batch, or a flat int array for a token path.
+  one state, an array for a batch, or a flat int array for a token path. A
+  404 or 405 here is the server, not the message (`… does not offer
+  /v1/embeddings, which the decision model needs`): it parks
+  `decision_misconfigured` and drops the probe's and the kind's cache, as
+  `/tokenize` and `/v1/systemone` do.
 - **Raw vectors.** llama-server L2-normalises by default, and the heads were
   trained on the RAW pooled vector (a linear layer with a bias is not
   scale-invariant), so every request sends `embd_normalize: -1`. A vector
@@ -315,12 +417,24 @@ box's `/decide/` slot.
   `<models folder>/local_bond-decide/`, installed by `make decide-install`
   beside the GGUF. `decisionHeadsProvider` loads it through
   `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
-  needed even when the decision server is remote**, because the heads run
-  here. Missing, it throws `DecisionNotInstalledException` with "The
-  decision model is not installed. Run: make decide-install" (never cached,
-  so an install is seen at the next claim). A file this build refuses (not
-  JSON, another schema or question set) throws
-  `DecisionMisconfiguredException`, and that failure IS cached on the file's
+  needed even when an encoder-heads server is remote**, because the heads
+  run here; a systemone server never reads it. Missing, it throws
+  `DecisionNotInstalledException` with "The decision model is not installed.
+  Run: make decide-install" (never cached, so an install is seen at the next
+  claim). On Your server the kind is asked BEFORE the heads are read, so a
+  heads-less Mac whose ModernBERT server is down parks
+  `decision_unavailable` (the listing failed) rather than
+  `decision_not_installed`; the heads-file park follows once the server
+  answers. A file this build refuses (not
+  JSON, another schema, question set or renderer set) throws
+  `DecisionMisconfiguredException`. A schema-1 file (the first decision
+  model) throws its subclass `DecisionOlderModelException`, which parks
+  under its own `decision_older_model` with `DecisionHeads.olderModelText`
+  (`decisionOlderModelText` in `llm_client.dart`): "The installed decision
+  model is an older version that this app no longer reads. Install the
+  current decision model to resume sorting new mail." Plain words and no
+  command, because the owner reading it may not be a developer. That
+  failure IS cached on the file's
   mtime, so a bad file is parsed once rather than once per claim. Settings'
   **Check** does not drop the cache: rebuilding it would rebuild the decision
   client and the triage queue under it mid-drain.
@@ -330,17 +444,19 @@ What goes wrong, and what the owner sees:
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| Heads file refused (not JSON, schema, question set); the identity probe finds another tokenizer, or `/tokenize` answers 404 or 405; the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
 | Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
-| Any other 4xx | `LlmFormatException` | none: counted against the item | none |
+| Any other 4xx (a systemone 413/422 included) | `LlmFormatException` | none: counted against the item | none |
 
 Every fault that would fail every message alike parks: counting it per
 message would error the backlog and let each row flow on to its text with no
 decision. The one per-message fault is a 4xx the server gives this request.
 The activity log's words for the reasons are in `activity_log_panel.dart`
 (`decision model unreachable`, `decision model not installed`, `decision
-server misconfigured`, `the decision server refused the access key`), and the
+model is an older version`, `decision server misconfigured`, `the decision
+server refused the access key`), and the
 Models page
 carries the same park as one status line (`docs/settings.md`). The
 unreachable sentences name `make decide`, the hand-server fix; the URL in any
@@ -558,7 +674,10 @@ models folder with the `.downloadable` set.
 
 The decision model is not downloaded this round: `make decide-install` copies
 the GGUF and the heads file from the training export, sha256-pinned, into
-`local_bond-decide/`. Distributing it is an open packaging question.
+`local_bond-decide/`. Distributing it is an open packaging question. It copies the v3
+export (schema 2, sha256-pinned in the manifest); an older schema-1 install
+is refused (`olderModelText`, park `decision_older_model`;
+[03-triage.md](03-triage.md)).
 
 ### First run
 
@@ -602,7 +721,10 @@ ledger.
   `LlmClient` for a managed generative target carrying
   `LlmTarget.unavailable`) is `not_installed`; the decision client's own
   `DecisionNotInstalledException` is `decision_not_installed`, because its fix
-  is a command rather than a download; `DecisionMisconfiguredException` is
+  is a command rather than a download; `DecisionOlderModelException` (the
+  heads schema-1 refusal) is `decision_older_model`, ahead of its parent,
+  because its fix is an install rather than an address;
+  `DecisionMisconfiguredException` is
   `decision_misconfigured`, because waiting fixes neither of its causes (the
   address or the heads file), so its sentence claims no retry;
   `DecisionUnauthorizedException` is
@@ -634,6 +756,7 @@ ledger.
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
   | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
   | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+  | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
   | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
   | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |
@@ -654,8 +777,8 @@ behind a recap and a new message never waits behind either:
 
 | Lane | Kinds, in drain order | Server(s) | Gate | Provider |
 |---|---|---|---|---|
-| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
-| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative | `storylineDrainGateProvider` | `storylineWorkerProvider` |
+| Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | decision (`needs_you` re-decides), generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
+| Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative + decision (`member_of`, `charter_specific`; a decision failure parks the lane) | `storylineDrainGateProvider` | `storylineWorkerProvider` |
 | Draft | `draft` | generative, or cloud drafts | `draftDrainGateProvider` | `draftWorkerProvider` |
 
 The lanes were cut when the fast lane had a 4B of its own. With one generative
@@ -697,8 +820,11 @@ composer's **Draft reply** is disabled with `Processing is off`.
 **Order across lanes is enqueue-and-pump.** A fast handler writes the
 `storyline*` or `draft` row and wakes the owning lane: `AiWorker.onDrained`
 after every drain (fast wakes the other two; storyline wakes draft), and
-`ExtractHandler.onDraftQueued` per row. The fast lane re-arms the storyline
-sweep through `MessageStore.requeueSweep()` only after a drain that did work.
+`ExtractHandler.onDraftQueued` and `onStorylineQueued` per row — the second
+pumps the storyline lane as each thread's assign is queued, so assigns run
+while the extraction backlog is still walking rather than after it. The fast
+lane re-arms the storyline sweep through `MessageStore.requeueSweep()` only
+after a drain that did work.
 `AiWorkers.pumpAll()` is fast, then the other two together.
 
 **How wide the draft lane runs is a property of the draft TARGET.**
@@ -707,7 +833,10 @@ sweep through `MessageStore.requeueSweep()` only after a drain that did work.
 server following the build, 1 on a stored address or cloud drafts. A second
 closure, `streams`, lets a target that cannot stream (Converse) make the plain
 call. Recaps and refreshes stay at one because each writes the storyline it is
-about.
+about. The fast lane's message text runs at the target's `textParallel`
+the same way (`ExtractHandler(textParallel:)` and
+`AttachmentDigestHandler(textParallel:)`, each a closure over
+`specForStage('message_text')` read on every claim).
 
 **Two writers ride the storyline gate**: `GateRepairService.afterGate`'s three
 storyline writes (evict, clear the conversation embedding, delete the pending

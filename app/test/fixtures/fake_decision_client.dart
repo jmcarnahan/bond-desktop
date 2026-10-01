@@ -1,10 +1,14 @@
+import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/providers/app_providers.dart'
     show decisionClientProvider;
 import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/decision/decision_state.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTarget;
+import 'package:bond_inbox/services/storyline_judge.dart'
+    show StorylineJudge;
 import 'package:flutter_riverpod/flutter_riverpod.dart' show Override;
 
 import 'scripted_llm.dart';
@@ -86,7 +90,30 @@ class FakeDecisionClient extends DecisionClient {
   /// The `url|model` of every [checkServer] asked.
   final List<String> checks = [];
 
-  FakeDecisionClient(this.answer, {this.onDecide})
+  /// What [kindOf] answers for every address: not yet known unless a test
+  /// says.
+  DecisionServerKind? serverKind;
+
+  /// What [ask] answers: the p of the FIRST entry whose question matches and
+  /// whose substring the state contains, else [defaultYes]. `askPairs`
+  /// reaches [ask] with both orders of each pair, so a pair script matches
+  /// on a substring of either thread.
+  final List<({StorylineQuestion question, String contains, double p})>
+      yesScript = [];
+
+  /// [ask]'s answer for a state no [yesScript] entry matches. 0.0 by default,
+  /// so an unscripted `member_of` never files anything by accident: a test
+  /// that wants a yes says so.
+  double defaultYes;
+
+  /// Thrown by every [ask] when set — a `DecisionUnavailableException` to
+  /// park the storyline lane.
+  Object? askError;
+
+  /// Every [ask], one entry per call (a batch), in order.
+  final List<({StorylineQuestion question, List<String> states})> asks = [];
+
+  FakeDecisionClient(this.answer, {this.onDecide, this.defaultYes = 0.0})
       : super(
           resolveTarget: () =>
               const LlmTarget(baseUrl: 'http://fake', model: 'fake'),
@@ -97,6 +124,25 @@ class FakeDecisionClient extends DecisionClient {
   factory FakeDecisionClient.never() => FakeDecisionClient(
         (_) => throw StateError('this decision client must never be called'),
       );
+
+  /// A client for the storyline questions alone: [decide] is never called,
+  /// and [ask] answers [defaultYes] unless [yes] says otherwise.
+  factory FakeDecisionClient.storyline({double defaultYes = 0.0}) =>
+      FakeDecisionClient(
+        (_) => throw StateError('storyline fake: decide never called'),
+        defaultYes: defaultYes,
+      );
+
+  /// Scripts [ask]'s answer for [question] over a state containing
+  /// [contains]. Earlier scripts win.
+  void yes(StorylineQuestion question, String contains, double p) =>
+      yesScript.add((question: question, contains: contains, p: p));
+
+  /// The states of every [ask] for [question], flattened in call order.
+  List<String> statesFor(StorylineQuestion question) => [
+        for (final call in asks)
+          if (call.question == question) ...call.states,
+      ];
 
   /// Always answers [answers].
   factory FakeDecisionClient.fixed(DecisionAnswers answers,
@@ -111,6 +157,40 @@ class FakeDecisionClient extends DecisionClient {
   }
 
   @override
+  Future<List<double>> ask(
+    StorylineQuestion question,
+    List<String> states,
+  ) async {
+    asks.add((question: question, states: List.of(states)));
+    final error = askError;
+    if (error != null) throw error;
+    return [for (final state in states) yesFor(question, state)];
+  }
+
+  /// How many [ensureReady] checks were made.
+  int readyChecks = 0;
+
+  /// Ready unless [askError] is set, which it throws: a client that parks
+  /// every question is not ready either.
+  @override
+  Future<void> ensureReady() async {
+    readyChecks++;
+    final error = askError;
+    if (error != null) throw error;
+  }
+
+  /// The scripted p for one state — [ask]'s rule, for a subclass that
+  /// answers one state at a time.
+  double yesFor(StorylineQuestion question, String state) {
+    for (final entry in yesScript) {
+      if (entry.question == question && state.contains(entry.contains)) {
+        return entry.p;
+      }
+    }
+    return defaultYes;
+  }
+
+  @override
   Future<String?> checkServer({
     required String url,
     required String model,
@@ -118,6 +198,28 @@ class FakeDecisionClient extends DecisionClient {
   }) async {
     checks.add('$url|$model');
     return serverRefusal;
+  }
+
+  /// What [detectKind] finds, which [kindOf] answers from then on; null
+  /// leaves [kindOf] as it was.
+  DecisionServerKind? detectedKind;
+
+  /// The `url|model` of every [detectKind] asked.
+  final List<String> detects = [];
+
+  @override
+  DecisionServerKind? kindOf({required String url, required String model}) =>
+      serverKind;
+
+  @override
+  Future<DecisionServerKind?> detectKind({
+    required String url,
+    required String model,
+    String? bearer,
+  }) async {
+    detects.add('$url|$model');
+    serverKind = detectedKind ?? serverKind;
+    return detectedKind;
   }
 }
 
@@ -132,8 +234,8 @@ class FakeDecisionClient extends DecisionClient {
 ///
 /// What it answers, and what that means for a screen test:
 /// - gate: keep (p(drop) 0.05), so nothing is learned-gated;
-/// - needs_you: 0.5, INSIDE the band, so the needs-you pass still asks the
-///   language model and a scripted needs-you answer decides as before;
+/// - needs_you: 0.5, above the slider's default (0.35), so a kept message
+///   reads as needing the owner and no language model is asked about it;
 /// - needs_action and reply_expected: 0.2, so the triage booleans come from
 ///   THIS fake (no) — a screen test that needs a triaged ask seeds the
 ///   columns, or overrides this with its own [FakeDecisionClient];
@@ -176,6 +278,37 @@ class ScriptedDecisionClient extends FakeDecisionClient {
     );
     return fakeDecision(scriptedAnswers(json));
   }
+
+  /// A storyline question, one `completeJson` call on [llm] PER STATE under
+  /// the question's id as the schema name (`member_of`, `same_effort`,
+  /// `charter_specific`), whose `user` is the state. A step's map carries the
+  /// answer as `p`; a missing `p` is [defaultYes]. So a storyline test holds,
+  /// throws and counts judgements with the vocabulary it scripts its naming
+  /// calls with, and `llm.callsFor('member_of')` counts threads judged.
+  /// [asks] still records one entry per batch.
+  @override
+  Future<List<double>> ask(
+    StorylineQuestion question,
+    List<String> states,
+  ) async {
+    asks.add((question: question, states: List.of(states)));
+    final error = askError;
+    if (error != null) throw error;
+    final out = <double>[];
+    for (final state in states) {
+      final json = await llm.completeJson(
+        system: '',
+        user: state,
+        schema: const {},
+        schemaName: question.id,
+        // The decision model has no sampling; recorded as 0 so a test's
+        // temperature list reads the same as when a model confirmed.
+        temperature: 0,
+      );
+      out.add((json['p'] as num?)?.toDouble() ?? yesFor(question, state));
+    }
+    return out;
+  }
 }
 
 /// [ScriptedDecisionClient] over a fresh [ScriptedLlm] scripted with
@@ -203,3 +336,11 @@ DecisionAnswers scriptedAnswers(Map<String, dynamic> json) {
     importance: json['importance'] as String? ?? 'normal',
   );
 }
+
+/// A [StorylineJudge] over [store] whose `member_of` (and the other two
+/// storyline questions) are answered by [llm]'s script under the question's
+/// id — [ScriptedDecisionClient.ask]'s rule. How a storyline service test
+/// scripts its membership answers beside its naming ones: `{'p': 0.9}` under
+/// `member_of`, and `llm.callsFor('member_of')` counts the threads judged.
+StorylineJudge scriptedJudge(MessageStore store, ScriptedLlm llm) =>
+    StorylineJudge(decision: ScriptedDecisionClient(llm), store: store);

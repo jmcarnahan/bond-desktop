@@ -68,10 +68,11 @@ void main() {
   ) as List)
       .cast<Map<String, dynamic>>();
 
-  test('the renderer names the state format the model was trained on', () {
-    // A future model bundle declares the renderer it needs and a mismatch is
-    // refused, so this word moves only with the bytes the fixture pins.
-    expect(decisionRendererVersion, 'bond-state/1');
+  test('the renderer names the renderer set the model was trained on', () {
+    // The heads file names the renderer set it needs and a mismatch is
+    // refused, so this word moves only with the bytes the two fixtures pin
+    // (the message state here, the storyline texts in render_cases_v2.json).
+    expect(decisionRendererVersion, 'bond-state/2');
   });
 
   test('the fixture carries all forty cases', () {

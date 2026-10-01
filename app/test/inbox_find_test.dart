@@ -22,6 +22,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// The Find field, ⌘K and the Unread toggle, as the shell wires them.
 ///
@@ -31,6 +32,12 @@ import 'fixtures/test_db.dart';
 /// no such row.
 
 class _FakeSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   @override
   Future<void> syncNow() async {}
 
@@ -81,6 +88,7 @@ void main() {
       'is_read': unread ? 0 : 1,
       'body_text': 'the hero paragraph',
     });
+    await seedNeedsYou(store, 'email', '$key-m1');
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
@@ -104,10 +112,6 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    // Everything eligible reaches the rail. The scoring pass lands a few pumps
-    // in, and the default slider would cut rows this file is about; the slider
-    // has its own tests.
-    await store.setPref(attentionThresholdKey, '0');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/home_models.dart';
 import '../models/home_sort.dart';
 import '../providers/activity_provider.dart' show SyncStamps;
+import '../services/decision/needs_you_predicate.dart' show NeedsYouTuning;
 import '../theme/tokens.dart';
 import 'attachment_search_tile.dart';
 import 'context_search_tile.dart';
@@ -124,6 +125,10 @@ class HomePane extends StatefulWidget {
   /// Null leaves the directory tiles as statements — [onRetry]'s rule.
   final void Function(int fileId, String locator)? onOpenContextFile;
 
+  /// The owner's Needs You slider, handed to every row's Result cell. See
+  /// [HomeFeedRowTile.needsYouThreshold].
+  final double needsYouThreshold;
+
   const HomePane({
     super.key,
     required this.rows,
@@ -161,6 +166,7 @@ class HomePane extends StatefulWidget {
     this.onExitSearch,
     this.onRetry,
     this.onOpenHistory,
+    this.needsYouThreshold = NeedsYouTuning.defaultThreshold,
   });
 
   /// The sort menu, and one key per order in it.
@@ -678,6 +684,7 @@ class _HomePaneState extends State<HomePane> {
           now: widget.now,
           compact: compact,
           muteBar: true,
+          needsYouThreshold: widget.needsYouThreshold,
           onOpenThread: widget.onOpenThread,
           onOpenStoryline: widget.onOpenStoryline,
           onRetry: widget.onRetry,
@@ -728,6 +735,7 @@ class _HomePaneState extends State<HomePane> {
                     // answer. A search result under the same filter is
                     // whatever the query found and carries no such promise.
                     threadNeedsYou: widget.filter == HomeFilter.needsYou,
+                    needsYouThreshold: widget.needsYouThreshold,
                     animateIn: widget.entering.contains(key),
                     fading: widget.fading.contains(key),
                     collapsing: widget.collapsing.contains(key),

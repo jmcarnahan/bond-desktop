@@ -438,7 +438,10 @@ void main() {
       gate: gate,
       handlers: [
         ExtractHandler(store, llm, fakeEmbeddings()),
-        NeedsYouHandler(store, llm),
+        NeedsYouHandler(
+          store,
+          decisionClient: FakeDecisionClient.fixed(fakeAnswers()),
+        ),
       ],
     );
 
@@ -461,7 +464,7 @@ void main() {
     expect(message['triage_status'], 'triaged',
         reason: 'the gate that took it the first time must not fire again');
     expect(message['gate_reason'], null);
-    expect(message['needs_you_verdict'], isNotNull);
+    expect(message['needs_you_p'], isNotNull);
     expect(await store.getExtraction('email', 'm1'), isNotNull);
     // Chained by the extract handler rather than queued by the restore.
     expect(await workStatus('draft', 'm1'), 'pending');

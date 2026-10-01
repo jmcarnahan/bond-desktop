@@ -1,0 +1,125 @@
+{
+ "message_fields_hash": "6eba387492208260",
+ "qhash": "f495a7dc48aa34d5",
+ "message": [
+  {
+   "id": "gate",
+   "instructions": "Keep this message in the reader's inbox (a person wrote it, or a machine asks the reader something personally), or drop it as machine traffic nobody needs to read?",
+   "options": [
+    "keep",
+    "drop"
+   ]
+  },
+  {
+   "id": "drop_reason",
+   "instructions": "If this message were dropped from the inbox, which kind of traffic is it?",
+   "options": [
+    "newsletter",
+    "no_reply",
+    "auto_generated",
+    "monitoring",
+    "ticket_system",
+    "identity_service",
+    "share_notification",
+    "machine_sender",
+    "digest",
+    "cold_outreach",
+    "outbound",
+    "empty",
+    "other"
+   ]
+  },
+  {
+   "id": "category",
+   "instructions": "Is this message work, personal, a notification, or other?",
+   "options": [
+    "work",
+    "personal",
+    "notification",
+    "other"
+   ]
+  },
+  {
+   "id": "urgency",
+   "instructions": "How urgent is this message for the reader: low, normal, high or urgent?",
+   "options": [
+    "low",
+    "normal",
+    "high",
+    "urgent"
+   ]
+  },
+  {
+   "id": "needs_action",
+   "instructions": "Does the reader need to do something because of this message?",
+   "options": [
+    "yes",
+    "no"
+   ]
+  },
+  {
+   "id": "reply_expected",
+   "instructions": "Is the sender waiting on an answer from the reader?",
+   "options": [
+    "yes",
+    "no"
+   ]
+  },
+  {
+   "id": "needs_you",
+   "instructions": "Does the owner of this inbox need to look at this message or act on it personally?",
+   "options": [
+    "yes",
+    "no"
+   ]
+  },
+  {
+   "id": "intent",
+   "instructions": "What does the sender want: a request, a question, an approval, scheduling, fyi, a transactional record, or something social?",
+   "options": [
+    "request",
+    "question",
+    "approval",
+    "scheduling",
+    "fyi",
+    "transactional",
+    "social"
+   ]
+  },
+  {
+   "id": "importance",
+   "instructions": "How much does this message matter to the reader's day: low, normal or high?",
+   "options": [
+    "low",
+    "normal",
+    "high"
+   ]
+  }
+ ],
+ "storyline": [
+  {
+   "id": "same_effort",
+   "instructions": "Are these two threads about the same specific project, event or topic, not merely the same team, sender or kind of message?",
+   "options": [
+    "yes",
+    "no"
+   ]
+  },
+  {
+   "id": "member_of",
+   "instructions": "Does this thread belong to the storyline above: is it part of the one specific effort its title and charter describe, not merely about the same people, team or kind of message?",
+   "options": [
+    "yes",
+    "no"
+   ]
+  },
+  {
+   "id": "charter_specific",
+   "instructions": "Does this describe one specific effort, rather than a person, team or category?",
+   "options": [
+    "yes",
+    "no"
+   ]
+  }
+ ]
+}

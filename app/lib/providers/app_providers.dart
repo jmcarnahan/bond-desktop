@@ -3,6 +3,7 @@ import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -24,7 +25,6 @@ import '../services/attachments/attachment_digest_handler.dart';
 import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
 import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
-import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
@@ -44,7 +44,6 @@ import '../services/draft_stream.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
-import '../services/external_sender.dart';
 import '../services/gate_repair_service.dart';
 import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
@@ -82,7 +81,11 @@ import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/restore_service.dart';
+import '../services/sample/sample_backends.dart';
+import '../services/sample/sample_data.dart';
+import '../services/sample/sample_env.dart';
 import '../services/storyline_handler.dart';
+import '../services/storyline_judge.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
@@ -192,6 +195,14 @@ final mcpStackProvider = Provider<({McpAuthSession auth, BondMcpClient client})>
   },
 );
 
+/// The recorded sample a sandbox build serves (`BOND_SAMPLE_DIR`), parsed
+/// once and shared by the four data backends. Read only in a sandbox build:
+/// every arm that watches it is behind `sampleModeOn`, so a normal build never
+/// starts the parse.
+final sampleDataProvider = Provider<Future<SampleData>>(
+  (ref) => SampleData.load(sampleDirDefine),
+);
+
 /// The three providers the app consumes, and the one switch between the two
 /// backends.
 ///
@@ -201,6 +212,13 @@ final mcpStackProvider = Provider<({McpAuthSession auth, BondMcpClient client})>
 /// here, and every one of them follows. That is the entire mechanism; nothing
 /// invalidates anything by hand.
 final authSessionProvider = Provider<AuthSession>((ref) {
+  // The sample sandbox arm comes FIRST in all five, before the mode is read,
+  // so a sandbox build never watches `mcpStackProvider` and never opens an
+  // MCP connection. Only the manifest is read for the session, so the auth
+  // gate answers before the full parse finishes.
+  if (sampleModeOn) {
+    return SampleAuthSession(SampleOwner.load(sampleDirDefine));
+  }
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? ref.watch(graphAuthProvider)
@@ -702,20 +720,20 @@ final pipelineProgressProvider = Provider<PipelineProgress>(
   ),
 );
 
-/// The user's attention floor, read fresh on every call.
+/// The Needs You slider, read fresh on every call: the store-level twin of
+/// [AppPrefs.needsYouThreshold] for the services that cannot import the
+/// providers.
 ///
-/// A shared closure rather than three copies of the same four lines, because
-/// three things now judge against this number and they have to judge against
-/// the SAME one: the settle machine deciding whether to interrupt, the
-/// needs-you handler moving a chip after a re-verdict, and the sync's one-shot
-/// backfill raising chips over history. A slider read differently by any of
-/// them is a tile disagreeing with the toast it came from.
-Future<double> Function() attentionThresholdReader(MessageStore store) =>
-    () async {
-      final raw = await store.getPref(attentionThresholdKey);
-      return (raw == null ? null : double.tryParse(raw)) ??
-          AttentionTuning.defaultThreshold;
-    };
+/// A shared closure rather than copies of the same lines, because several
+/// things judge against this number and they have to judge against the SAME
+/// one: the settle machine deciding whether to interrupt, the needs-you
+/// handler moving a chip after a re-decision, the sync's backfill raising
+/// chips over history, and the text and draft passes choosing what to do
+/// first. A slider read differently by any of them is a tile disagreeing with
+/// the toast it came from. Parsed the one way, by
+/// [MessageStore.needsYouThreshold].
+Future<double> Function() needsYouThresholdReader(MessageStore store) =>
+    store.needsYouThreshold;
 
 /// The settle machine. Watches ONLY the store and the log, so a backend
 /// switch — which rebuilds the session, both backends, the sync service and
@@ -727,7 +745,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
     store,
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
-    attentionThreshold: attentionThresholdReader(store),
+    needsYouThreshold: needsYouThresholdReader(store),
   );
   unawaited(coordinator.start());
   ref.onDispose(coordinator.dispose);
@@ -735,6 +753,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
 });
 
 final mailBackendProvider = Provider<MailBackend>((ref) {
+  if (sampleModeOn) return SampleMailBackend(ref.watch(sampleDataProvider));
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphMail(ref.watch(graphAuthProvider))
@@ -747,6 +766,7 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
 /// reason: a session pointed at the Bond server must not be searching Graph
 /// directly with a token it does not hold.
 final peopleBackendProvider = Provider<PeopleBackend>((ref) {
+  if (sampleModeOn) return SamplePeopleBackend(ref.watch(sampleDataProvider));
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphPeople(ref.watch(graphAuthProvider))
@@ -775,6 +795,9 @@ final profilePhotosProvider = Provider<ProfilePhotos>((ref) {
 /// `skipped/no_extractor` from Graph. Bytes, inline images and OneDrive
 /// thumbnails are identical on both.
 final attachmentBackendProvider = Provider<AttachmentBackend>((ref) {
+  if (sampleModeOn) {
+    return SampleAttachmentBackend(ref.watch(sampleDataProvider));
+  }
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphAttachmentBackend(ref.watch(graphAuthProvider))
@@ -871,8 +894,10 @@ final attentionServiceProvider = Provider<AttentionService>(
 );
 
 /// Typed as [MailSync], not [SyncService], so a test can override it with a
-/// stand-in that never touches the network.
-final syncServiceProvider = Provider<MailSync>(
+/// stand-in that never touches the network. Typed out on the declaration as
+/// well: the re-decide reads [triageQueueProvider] at call time and the queue
+/// watches this provider, an inference cycle (never a build-time one).
+final Provider<MailSync> syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
     ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
@@ -888,8 +913,8 @@ final syncServiceProvider = Provider<MailSync>(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
     // For the one-shot needs-you backfill, which judges history against the
-    // same floor the settle machine judges live mail against.
-    attentionThreshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    // same slider the settle machine judges live mail against.
+    needsYouThreshold: needsYouThresholdReader(ref.watch(messageStoreProvider)),
     // `ref.read` inside the closure, never `watch`: watching would rebuild
     // this provider — and abort the drain running on it — the moment someone
     // moved the setting, the same hazard [stageLlmClientProvider] documents
@@ -904,10 +929,15 @@ final syncServiceProvider = Provider<MailSync>(
     // pumps elsewhere in this file give.
     repairGatedConversations: () =>
         ref.read(gateRepairServiceProvider).repairAll(),
+    // The install-time re-decide, on the triage queue that owns the decision
+    // writers. `read` inside the closure too: the queue watches this provider
+    // for its body fetch.
+    redecide: () => ref.read(triageQueueProvider).redecideStale(),
   ),
 );
 
 final teamsBackendProvider = Provider<TeamsBackend>((ref) {
+  if (sampleModeOn) return SampleTeamsBackend(ref.watch(sampleDataProvider));
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphTeams(ref.watch(graphAuthProvider))
@@ -1066,6 +1096,10 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     gate: ref.watch(fastDrainGateProvider),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // The slider a decision's chip rule reads (`applyDecision`): a re-decided
+    // settled message whose answer crosses it has its chip moved.
+    needsYouThreshold:
+        needsYouThresholdReader(ref.watch(messageStoreProvider)),
     // The processing switch — see [processingProvider] and [_enabledReader].
     enabled: _enabledReader(ref),
     // The knock on the worker's door. Extraction and needs-you are no longer
@@ -1172,6 +1206,14 @@ final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
   });
 });
 
+/// The decision client's HTTP client: the one seam a test overrides with a
+/// `MockClient` to see which requests the app's own wiring makes.
+final decisionHttpClientProvider = Provider<http.Client>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return client;
+});
+
 /// The decision model's client, on the triage path: [triageQueueProvider]
 /// runs one decision per kept inbound message before the text call.
 ///
@@ -1179,27 +1221,62 @@ final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
 /// through the NOTIFIER at the top of every call — the managed router's
 /// `/v1/embeddings` under `bond-decide`, the owner's decision server with its
 /// own key, or the hand-started `make decide` server — so a prefs write
-/// rebuilds nothing. The heads come off this Mac's disk whichever server
-/// embeds, and a missing heads file is a [DecisionUnavailableException],
-/// which parks the pass rather than failing it.
+/// rebuilds nothing. For an encoder-heads server the heads come off this
+/// Mac's disk, and a missing heads file is a [DecisionUnavailableException],
+/// which parks the pass rather than failing it. A target on Your server is
+/// asked its kind first, and a systemone server (Kev) never reads the heads.
 final decisionClientProvider = Provider<DecisionClient>((ref) {
   final heads = ref.watch(decisionHeadsProvider);
   return DecisionClient(
     resolveTarget: () =>
         ref.read(appPrefsProvider.notifier).targetForStage('decision'),
     heads: heads.current,
+    client: ref.watch(decisionHttpClientProvider),
     onCall: ref.watch(activityLogProvider).noteLlmCall,
+    // Your server is the decision spec's `box-decide` target at that same
+    // address. READ at the call, on the resolver's rule; a container torn
+    // down mid-drain answers no, and the call takes the encoder path it
+    // took before there was a second kind.
+    isYourServer: (target) {
+      try {
+        final spec = ref.read(appPrefsProvider).decisionSpec;
+        return spec.id == boxDecideId && spec.url == target.baseUrl;
+      } catch (_) {
+        return false;
+      }
+    },
+    // The file the managed router serves for the decision role, for the
+    // heads pairing check: the router lists only its preset ids, and the
+    // preset serves the manifest's file. Null for any other target (the
+    // client reads that server's own listing), and for a container without
+    // a manifest, which skips the check rather than refusing.
+    servedFile: (target) {
+      try {
+        final prefs = ref.read(appPrefsProvider);
+        final spec = prefs.decisionSpec;
+        if (!prefs.managedServer ||
+            spec.id != localDecisionId ||
+            spec.url != target.baseUrl) {
+          return null;
+        }
+        return ref.read(modelManifestProvider).byRoleOrNull(ModelRole.decide)
+            ?.file;
+      } catch (_) {
+        return null;
+      }
+    },
   );
 });
 
 /// A decision Connect's last question before it writes: is the server at
-/// [url] the decision model? `/v1/models` cannot say — llama-server lists
-/// whatever name it was started with — so this is the client's own identity
-/// probe, with the key the write would store: the typed one, else the stored
-/// one unless the host changed ([clearKey]). Throws the sentence as an
-/// [ArgumentError], which the form draws under its field, and nothing is
-/// written. Settings and the wizard both call it, so neither says Connected
-/// over the embedding model's port.
+/// [url] the decision model? For llama-server `/v1/models` cannot say — it
+/// lists whatever name it was started with — so this is the client's own
+/// kind check and identity probe ([DecisionClient.checkServer]; a Kev server
+/// is told by the question hash it lists), with the key the write would
+/// store: the typed one, else the stored one unless the host changed
+/// ([clearKey]). Throws the sentence as an [ArgumentError], which the form
+/// draws under its field, and nothing is written. Settings and the wizard
+/// both call it, so neither says Connected over the embedding model's port.
 Future<void> refuseWrongDecisionServer(
   DecisionClient client,
   AppPrefsNotifier prefs, {
@@ -1304,7 +1381,7 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
     // stage on any of the three.
     pumpWork: () => ref.read(aiWorkersProvider).pumpAll(),
     // For the settle backstop a Retry runs when a row owes no stage at all.
-    threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    threshold: needsYouThresholdReader(ref.watch(messageStoreProvider)),
     // An Ignore is a gate arriving after the pipeline has already run.
     onGated: (source, id) => ref
         .read(gateRepairServiceProvider)
@@ -1327,23 +1404,16 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
 /// directly and six read this provider; the fast lane is what every one of
 /// them means by "the worker".
 ///
-/// Its own load on the generative server is one kind at a time at K=3 —
-/// needs-you, then extraction — and the gate it shares with the triage drain
+/// Its own load on the generative server is one kind at a time — needs-you,
+/// then extraction at the target's text width (`LlmTargetSpec.textParallel`),
+/// then the attachment digests at the same width — and the gate it shares
+/// with the triage drain
 /// orders the two (triage itself calls only the decision model since the
 /// decision-model round; see [fastDrainGateProvider]). The storyline and
 /// draft lanes are on gates of their own and dial the same generative model,
 /// so the SERVER queues whatever they add.
 final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
-  // Named before it is built, because one handler below has to reach it: the
-  // digest's requeue wakes the drain it is running inside, and a `ref.read` of
-  // THIS provider from inside its own body is what Riverpod's
-  // `_debugAssertCanDependOn` refuses — "A provider cannot depend on itself" —
-  // on a `read` as much as on a `watch`. Every debug build threw it out of the
-  // handler's `run` from the first digest that carried an ask. A late local is
-  // assigned by the time any handler runs and reads no provider at all; it is
-  // the same shape [_lane] uses for its own `onDrained`.
-  late final AiWorker worker;
-  worker = _lane(
+  final worker = _lane(
     ref,
     handlers: [
       // First, and it drains completely before extraction starts. The verdict
@@ -1354,28 +1424,24 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // written yet.
       NeedsYouHandler(
         ref.watch(messageStoreProvider),
-        // The generative model, like every text stage. See
-        // [stageLlmClientProvider].
-        ref.watch(stageLlmClientProvider('needs_you')),
+        // The decision model, for a message whose decision is missing or was
+        // made without the owner known. The same client the triage pass uses.
+        decisionClient: ref.watch(decisionClientProvider),
         activityLog: ref.watch(activityLogProvider),
-        // A verdict this pass CHANGES has to move the chip beside it, and
+        // An answer this pass CHANGES has to move the chip beside it, and
         // moving it means re-asking `notifyWorthy` — which needs the recorder
-        // to write through and the same floor the settle machine used.
+        // to write through and the owner's slider.
         progress: ref.watch(pipelineProgressProvider),
-        attentionThreshold:
-            attentionThresholdReader(ref.watch(messageStoreProvider)),
+        needsYouThreshold:
+            needsYouThresholdReader(ref.watch(messageStoreProvider)),
         owner: _ownerLookup(ref),
-        // The owner's own organisation, so the handler can tell a stranger's
-        // first approach from a colleague's question. Same shape as `owner`
-        // above and for the same reason: the account is a keychain read, and
-        // most builds of this provider never drain.
-        ownerDomains: _ownerDomainsLookup(ref),
       ),
-      // The message-text stage next (kind `extract`), and it drains completely
-      // before either storyline handler starts. That order is the point: it is
-      // what writes the embeddings both storyline passes compare, so running
-      // them alongside it would have them clustering a mailbox half of which
-      // has no vector yet.
+      // The message-text stage next (kind `extract`). The thread's clustering
+      // card is built from what it writes, so it is what decides, by the
+      // card's hash, whether a thread's storyline assign is owed; it queues
+      // the assign and wakes the storyline lane per thread, and the assign
+      // pass embeds the card (`StorylineService.vectorFor`). The sweep still
+      // waits for this backlog (`StorylineTuning.sweepExtractFloor`).
       ExtractHandler(
         ref.watch(messageStoreProvider),
         // The message-text stage: the one generative call per kept message.
@@ -1399,6 +1465,16 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
             unawaited(ref.read(draftWorkerProvider).pump());
           } catch (_) {}
         },
+        // The storyline lane, woken as each thread's assign is queued, on
+        // `onDraftQueued`'s reasoning and shape: a `read` of a DIFFERENT
+        // lane's provider inside the closure, guarded. Without it the lane
+        // was woken only by this drain's end, so every assign waited for the
+        // whole extraction backlog.
+        onStorylineQueued: () {
+          try {
+            unawaited(ref.read(storylineWorkerProvider).pump());
+          } catch (_) {}
+        },
         // When a reply is written ahead of being asked for — the user's
         // setting, read at the moment each message finishes rather than
         // captured here. `ref.read` inside the closure, never `watch`, in
@@ -1406,14 +1482,19 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // reason: a watch would rebuild this provider, and the worker holding
         // it mid-drain, the moment somebody moved the control.
         draftPolicy: () => ref.read(appPrefsProvider).draftPolicy,
+        // How many message-text calls are in flight: the target's text width,
+        // read on every claim for [draftPolicy]'s reason.
+        textParallel: () =>
+            ref.read(appPrefsProvider).specForStage('message_text')
+                ?.textParallel ??
+            3,
       ),
-      // After extraction and before the storylines. After, because the summary
-      // it embeds is the text stage's and the drain order keeps the
-      // generative server's slots for extraction while there is extraction
-      // left to do. Before, because it talks to no model at all: a park here
-      // is a park on the embedding server, and it parks only its own kind,
-      // so a missing `make embed` must never be allowed to sit in front of
-      // the storyline queue.
+      // After extraction. The summary it embeds is the text stage's, and the
+      // drain order keeps the generative server's slots for extraction while
+      // there is extraction left to do. It talks to no chat model: a park
+      // here is a park on the embedding server, and it parks only its own
+      // kind. The search vector only; search vectors never fed the storyline
+      // pool.
       EmbedHandler(
         ref.watch(messageStoreProvider),
         ref.watch(embeddingsClientProvider),
@@ -1421,11 +1502,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       ),
       // Reading the documents, then understanding them — in that order,
       // because the digest below has nothing to read until the words are
-      // stored. Both sit here, after the message embeddings and ahead of the
-      // storylines, so a recap written later in this same drain can see a
-      // digest that landed at the top of it. Neither is in the notification
-      // settle set: an attachment must never hold up a verdict about the
-      // message it came with.
+      // stored. Both sit here, after the message text and the message
+      // embeddings: the drain reaches a kind only when every kind above it
+      // claims nothing, so attachments run after message text. Neither is in
+      // the notification settle set: an attachment must never hold up a
+      // verdict about the message it came with.
       //
       // The text handler talks to no chat model, so a park here is a park on
       // the embedding server and it parks only its own kind.
@@ -1442,13 +1523,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(stageLlmClientProvider('attachment_digest')),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
-        // The worker this handler runs inside — the late local above, never a
-        // `ref.read` of this lane's own provider: Riverpod asserts
-        // self-dependency on a `read` too, and the note at the top of this
-        // body says what that cost. `pump` on a running drain only sets a
-        // flag and hands back that drain's future, which is why it is not
-        // awaited: see [AttachmentDigestHandler].
-        onRequeue: () => unawaited(worker.pump()),
+        // The same text width as extraction, read the same way.
+        textParallel: () =>
+            ref.read(appPrefsProvider).specForStage('message_text')
+                ?.textParallel ??
+            3,
       ),
       // The owner's own directories, read here and nowhere else in the drain.
       // It talks to no chat model — the embedding server is its only server —
@@ -1526,10 +1605,11 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
     wakes: [storylineWorkerProvider, draftWorkerProvider],
     // The sweep stands down over an unsettled mailbox, so something has to
     // tell it the mailbox settled, and a fast lane that has just gone quiet
-    // IS that signal: extraction, embedding and the needs-you judgement all
-    // drain here. Gated on the count because `onDrained` fires after an empty
-    // drain too — a Restore or a Regenerate enqueues a row directly, and an
-    // ungated requeue would run a whole sweep after every idle pump.
+    // IS that signal: extraction, which fills the pool, and the needs-you
+    // judgement both drain here. Gated on the count because `onDrained` fires
+    // after an empty drain too — a Restore or a Regenerate enqueues a row
+    // directly, and an ungated requeue would run a whole sweep after every
+    // idle pump.
     // `requeueWork` never touches a `processing` sweep, and the requeue both
     // syncs make stays the durable trigger under this one.
     //
@@ -1559,7 +1639,10 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
 /// them, recap after the sweep.
 ///
 /// Off the fast lane entirely, which is the point: a twelve-to-twenty-three
-/// second recap used to sit in front of the next message's triage.
+/// second recap used to sit in front of the next message's triage. Woken by
+/// the extract handler as each assign is queued (`onStorylineQueued`) as
+/// well as by the fast lane's end, so an assign runs while the rest of the
+/// extraction backlog is still walking.
 final Provider<AiWorker> storylineWorkerProvider = Provider<AiWorker>((ref) {
   final storylines = ref.watch(storylineServiceProvider);
   return _lane(
@@ -1711,7 +1794,7 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
 ///
 /// A callback, not a value: the account is a keychain read, and both callers
 /// are built by plenty that never drains. Each caller asks once, on the first
-/// item that reaches a model. Until the answer arrives the needs-you prompt
+/// item that reaches a model. Until the answer arrives the needs-you decision
 /// names no owner and the storyline overlap rule counts everyone as not the
 /// owner, which is the stricter reading of both.
 OwnerLookup _ownerLookup(Ref ref) => () =>
@@ -1722,32 +1805,6 @@ OwnerLookup _ownerLookup(Ref ref) => () =>
                   name: account.displayName,
                   address: account.mail ?? account.userPrincipalName,
                 ),
-        );
-
-/// Which mail domains count as INSIDE the owner's organisation, from the same
-/// account [_ownerLookup] reads.
-///
-/// One domain, taken off the signed-in address, and no way yet for the owner to
-/// add a second. That is a deliberate floor rather than the finished feature:
-/// an owner with a parent company, an acquired brand or a personal address that
-/// is really theirs has more than one, and the list they would type belongs in
-/// Settings. Until it exists, the one domain the app can KNOW is better than
-/// none — see [isColdOutreach] for why a wrong answer here costs a ranking and
-/// never a message.
-///
-/// Normalised exactly the way `IdentityGuard` normalises the owner's address —
-/// `mail` first, `userPrincipalName` behind it, trimmed and lower-cased — so the
-/// two never disagree about who the owner is. An account that has not arrived,
-/// or one with no address at all, yields the EMPTY set, which
-/// [isExternalAddress] reads as "cannot tell" and answers false to: no account
-/// means no strangers, which is the reading that changes nothing.
-Future<Set<String>> Function() _ownerDomainsLookup(Ref ref) => () =>
-    ref.read(authSessionProvider).storedAccount.then(
-          (account) => ownerDomainsOf(
-            account == null
-                ? null
-                : account.mail ?? account.userPrincipalName,
-          ),
         );
 
 /// Reads the processing switch, for a drain that asks on every launch
@@ -1922,23 +1979,42 @@ final parkedProvider = StreamProvider.autoDispose<ParkedFact>((ref) {
 /// be harmless — it is a provider because the handlers and the notifier must
 /// agree on the same store.
 ///
-/// Five of the six storyline passes carry their own client, each on its own
-/// stage, so the activity log labels each call by its stage. Every stage
-/// resolves to the one generative model since the decision-model round
-/// ([stageLlmClientProvider]).
+/// The language-model passes carry their own client, each on its own stage,
+/// so the activity log labels each call by its stage. Every stage resolves to
+/// the one generative model since the decision-model round
+/// ([stageLlmClientProvider]). Membership is not one of them: every
+/// "does this thread belong here" is the decision model's `member_of`,
+/// through the [StorylineJudge] on the decision client.
 ///
 /// The same embedding client the extraction handler holds, deliberately: a
 /// thread whose embed failed there is one this service re-embeds itself when
 /// the assignment pass reaches it, and two clients would mean two dedupe sets
 /// and two rows in the activity panel for one server being down.
-final storylineServiceProvider = Provider<StorylineService>(
+///
+/// Typed out: the judge's body fetch reads [syncServiceProvider] at call
+/// time, and the sync reaches this provider through the gate repair, so the
+/// three declarations form an inference cycle (never a build-time one).
+final Provider<StorylineService> storylineServiceProvider =
+    Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
     ref.watch(stageLlmClientProvider('storyline_name')),
-    confirmClient: ref.watch(stageLlmClientProvider('storyline_membership')),
-    // Dark until `StorylineTuning.groupingMode` says otherwise, and routable
-    // anyway: the stage exists so that turning it on is a setting.
-    groupClient: ref.watch(stageLlmClientProvider('storyline_group')),
+    judge: StorylineJudge(
+      decision: ref.watch(decisionClientProvider),
+      store: ref.watch(messageStoreProvider),
+      // A mail thread's rendered rows that still show Graph's preview have
+      // their bodies fetched before it is judged, because training read every
+      // message's own body — those rows only, and no attachment work queued
+      // (`ensureBodiesFor`). Teams has no body fetch to ask for, so a chat is
+      // judged on what is stored. `ref.read` at the call, never `watch`: the
+      // sync provider rebuilding must not rebuild this one mid-drain.
+      ensureBodies: (source, conversationKey, ids) async {
+        if (source != 'email') return;
+        await ref
+            .read(syncServiceProvider)
+            .ensureBodiesFor(conversationKey, ids);
+      },
+    ),
     refreshClient: ref.watch(stageLlmClientProvider('storyline_refresh')),
     recapClient: ref.watch(stageLlmClientProvider('storyline_recap')),
     activityLog: ref.watch(activityLogProvider),
@@ -1950,9 +2026,6 @@ final storylineServiceProvider = Provider<StorylineService>(
     progress: ref.watch(pipelineProgressProvider),
     // The library, for the recap's directory footer and the charter offer.
     contextStore: ref.watch(contextStoreProvider),
-    // The overlap rule in `assignConversation` counts shared people who are
-    // not the owner; the same closure the needs-you handler takes.
-    owner: _ownerLookup(ref),
   ),
 );
 

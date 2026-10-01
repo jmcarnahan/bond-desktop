@@ -5,10 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart'
 import '../models/home_models.dart';
 import '../models/message_history.dart';
 import '../models/storyline_models.dart' show storylineStatusLabel;
+import '../services/decision/needs_you_predicate.dart' show needsYouAt;
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/home_result.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/needs_you_reason.dart'
+    show needsYouFromEarlierModel, needsYouPercentWords;
 import '../widgets/pane_surface.dart';
 import '../widgets/source_glyph.dart';
 import '../widgets/stage_bar.dart';
@@ -111,11 +114,6 @@ class MessageHistoryScreen extends StatefulWidget {
   /// beside it.
   final VoidCallback? onSendToLater;
 
-  /// Opens Settings, where the Needs You rules are edited. There is no deep
-  /// link to the section — opening Settings IS the navigation — so this is a
-  /// door rather than a jump.
-  final VoidCallback? onEditRules;
-
   /// Whether to draw the pane's own title bar. False for a host that seats the
   /// story under a header of its own — a side panel — and only wants the
   /// sections.
@@ -140,7 +138,6 @@ class MessageHistoryScreen extends StatefulWidget {
     this.onAddBack,
     this.onKeepInInbox,
     this.onSendToLater,
-    this.onEditRules,
     this.chrome = true,
   });
 
@@ -156,7 +153,6 @@ class MessageHistoryScreen extends StatefulWidget {
       ValueKey('history-add-to-storyline');
   static const ValueKey<String> keepKey = ValueKey('history-keep');
   static const ValueKey<String> laterKey = ValueKey('history-later');
-  static const ValueKey<String> editRulesKey = ValueKey('history-edit-rules');
 
   /// The per-storyline buttons, keyed by the storyline they act on: one
   /// message's thread can sit in several storylines and be blocked from
@@ -345,7 +341,8 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
       ]);
     }
 
-    final result = resultLine(row, now: widget.now);
+    final result =
+        resultLine(row, now: widget.now, threshold: history.threshold);
     final style =
         BondType.small.copyWith(color: bondToneColors[result.tone]!.foreground);
     final storylineId = row.storylineId;
@@ -438,28 +435,33 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
   }
 
   /// Every judgement the app made about this message, with the reason it wrote
-  /// down at the time. The score is shown against the threshold it was
-  /// measured against, because neither number means anything alone.
+  /// down at the time. The needs-you answer is the decision model's
+  /// probability as the percentage the Settings slider is set in, so the two
+  /// read as one number.
   List<Widget> _judgements(MessageHistory history) {
     final lines = <String>[];
 
     final why = history.needsYouReason?.trim() ?? '';
-    // A NULL verdict with a reason is a hedge: the pass leaned yes below its
-    // confidence bar and stored no verdict, so triage decides. With no reason
-    // it has never been judged at all.
-    final verdict = switch (history.needsYouVerdict) {
-      null => why.isEmpty ? 'not judged' : 'not sure',
-      true => 'yes',
-      false => 'no',
-    };
-    lines.add('Needs you: $verdict${why.isEmpty ? '' : ' — $why'}');
+    // NULL has never been decided at all, which is not 0%.
+    final p = history.needsYouP;
+    // An earlier model's carried verdict is not drawn as 100% or 0%: no model
+    // said that number (`needsYouFromEarlierModel`).
+    final verdict = p != null &&
+            needsYouFromEarlierModel(p, decidedNow: history.decidedNow)
+        ? '— (earlier model)'
+        : needsYouPercentWords(p, decidedNow: history.decidedNow) ??
+            'not decided';
+    // The reason is templated whatever the probability, so it rides only on a
+    // message over the owner's slider, where it is an answer
+    // (`home_result.dart` keeps the same rule).
+    final showWhy = why.isNotEmpty && needsYouAt(p, history.threshold);
+    lines.add('Needs you: $verdict${showWhy ? ' — $why' : ''}');
 
     final score = history.attentionScore;
     lines.add(
       'Attention: ${history.bucket ?? 'inbox'} — '
       '${history.bucketReason ?? 'no rule'}; '
-      'score ${score == null ? '—' : score.toStringAsFixed(2)} '
-      'vs threshold ${history.threshold.toStringAsFixed(2)}',
+      'score ${score == null ? '—' : score.toStringAsFixed(2)}',
     );
 
     final triage = [
@@ -729,7 +731,9 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
   List<Widget> _actions(MessageHistory history) {
     final row = history.row;
     final dropped = row?.dropped ?? false;
-    final retryable = row != null && resultLine(row, now: widget.now).retryable;
+    final retryable = row != null &&
+        resultLine(row, now: widget.now, threshold: history.threshold)
+            .retryable;
 
     final restore = widget.onRestore;
     final retry = widget.onRetry;
@@ -739,7 +743,6 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     final addToStoryline = widget.onAddToStoryline;
     final keep = widget.onKeepInInbox;
     final later = widget.onSendToLater;
-    final editRules = widget.onEditRules;
 
     final buttons = <Widget>[
       if (restore != null && dropped)
@@ -819,12 +822,6 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
           'Send to Later',
           key: MessageHistoryScreen.laterKey,
           onPressed: later,
-        ),
-      if (editRules != null)
-        _quietButton(
-          'Edit Needs You rules',
-          key: MessageHistoryScreen.editRulesKey,
-          onPressed: editRules,
         ),
     ];
 

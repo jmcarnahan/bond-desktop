@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
@@ -1129,58 +1127,6 @@ void main() {
       // stops promising a digest that is never coming.
       final stored = (await store.attachmentsForMessage('email', 'm1')).single;
       expect(stored['digest_status'], 'skipped');
-    });
-  });
-
-  group('counting the documents that ask for something', () {
-    Future<void> digest(String attachmentId, {List<String> asks = const []}) =>
-        store.setAttachmentDigest(
-          'email',
-          'm1',
-          attachmentId,
-          status: 'done',
-          digestJson: jsonEncode(
-            AttachmentDigest(
-              evidence: 'A lease addendum.',
-              kind: 'contract',
-              summary: 'The rent rises.',
-              facts: const ['2,600 from January'],
-              asks: asks,
-            ).toJson(),
-          ),
-        );
-
-    test('a digest with asks counts and one without does not', () async {
-      await seedMessage('m1');
-      await store.upsertAttachments('email', 'm1', [
-        row('att-a'),
-        row('att-b', ordinal: 1),
-      ]);
-
-      await digest('att-a', asks: const ['Sign page four']);
-      await digest('att-b');
-
-      // A LIKE over the encoded JSON rather than a JSON1 extract: `toJson`
-      // writes all five keys always, and `jsonEncode` emits `"asks":[` with no
-      // spaces.
-      expect(await store.attachmentsWithAsks('email', 'm1'), 1);
-    });
-
-    test('a digest that has not been written yet counts for nothing',
-        () async {
-      await seedMessage('m1');
-      await store.upsertAttachments('email', 'm1', [row('att-a')]);
-
-      expect(await store.attachmentsWithAsks('email', 'm1'), 0);
-    });
-
-    test('another message\'s asks are not this one\'s', () async {
-      await seedMessage('m1');
-      await seedMessage('m2', key: 'conv-2');
-      await store.upsertAttachments('email', 'm1', [row('att-a')]);
-      await digest('att-a', asks: const ['Sign page four']);
-
-      expect(await store.attachmentsWithAsks('email', 'm2'), 0);
     });
   });
 

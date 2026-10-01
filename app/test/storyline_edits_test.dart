@@ -239,4 +239,159 @@ void main() {
     // No members, so no hash was ever asked for.
     expect(hashedFor, isEmpty);
   });
+
+  /// The owner's presses, logged as labels for the decision model's
+  /// storyline questions (`decision_labels`). One test per press, and one for
+  /// each press that must NOT write.
+  group('decision labels', () {
+    const charter = 'Everything about the move to Harbour Lane: the survey, '
+        'the lease and the fit-out.';
+
+    /// A storyline of [status] holding one member per key.
+    Future<void> seedStoryline(
+      String id, {
+      String status = 'active',
+      List<String> keys = const [],
+    }) async {
+      await store.insertStoryline(
+        id: id,
+        title: 'Harbour Lane move',
+        charter: charter,
+        status: status,
+        createdBy: 'auto',
+      );
+      for (final key in keys) {
+        await seedThread(key, 'm-$key');
+        await store.addStorylineMember(id, 'email', key, addedBy: 'auto');
+      }
+    }
+
+    /// Every label as `question/answer/key/origin`, oldest first.
+    Future<List<String>> labels() async => [
+          for (final row in await store.decisionLabels())
+            '${row['question']}/${row['answer']}/'
+                '${row['conversation_key']}/${row['origin']}',
+        ];
+
+    test('keeping a suggestion says yes for every member', () async {
+      await seedStoryline('sl-1', status: 'suggested', keys: ['c1', 'c2']);
+
+      await edits().keepSuggestion('sl-1');
+
+      expect(await labels(), [
+        'member_of/yes/c1/keep',
+        'member_of/yes/c2/keep',
+      ]);
+      // The storyline's words at the press, so the label still says what it
+      // answered after a rename or a new charter.
+      final row = (await store.decisionLabels()).first;
+      expect(row['storyline_id'], 'sl-1');
+      expect(row['title'], 'Harbour Lane move');
+      expect(row['charter'], charter);
+      expect(row['source'], 'email');
+    });
+
+    test('keeping a possible row says yes for the survivors only', () async {
+      await seedStoryline('sl-p', status: 'possible', keys: ['c1', 'c2', 'c3']);
+      // c3 was taken by a live storyline meanwhile, so Keep drops it.
+      await seedStoryline('sl-live', status: 'active');
+      await store.addStorylineMember('sl-live', 'email', 'c3', addedBy: 'auto');
+
+      await edits().keepSuggestion('sl-p');
+
+      expect(await labels(), [
+        'member_of/yes/c1/keep',
+        'member_of/yes/c2/keep',
+      ]);
+    });
+
+    test('dismissing a question says no for every member', () async {
+      await seedStoryline('sl-1', status: 'suggested', keys: ['c1', 'c2']);
+
+      await edits().dismissSuggestion('sl-1');
+
+      expect(await labels(), [
+        'member_of/no/c1/dismiss',
+        'member_of/no/c2/dismiss',
+      ]);
+    });
+
+    test('retiring a kept storyline writes no label', () async {
+      // "Done with it" says nothing about whether the threads belonged.
+      await seedStoryline('sl-1', keys: ['c1']);
+
+      await edits().dismissSuggestion('sl-1');
+
+      expect(await labels(), isEmpty);
+    });
+
+    test('filing by hand says yes, taking out says no', () async {
+      await seedStoryline('sl-1');
+      await seedThread('c1', 'm1');
+
+      await edits().addThread('sl-1', 'email', 'c1');
+      await edits().removeThread('sl-1', 'email', 'c1');
+
+      expect(await labels(), [
+        'member_of/yes/c1/add',
+        'member_of/no/c1/remove',
+      ]);
+    });
+
+    test('Allow again writes no label: lifting a veto is not a yes',
+        () async {
+      await seedStoryline('sl-1');
+      await seedThread('c1', 'm1');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+
+      await edits().unblockThread('sl-1', 'email', 'c1');
+
+      expect(await labels(), isEmpty);
+    });
+
+    test('a charter the owner writes says it is one specific effort',
+        () async {
+      await seedStoryline('sl-1');
+
+      await edits().setCharter('sl-1', '  Only the survey.  ');
+
+      final row = (await store.decisionLabels()).single;
+      expect(row['question'], 'charter_specific');
+      expect(row['answer'], 'yes');
+      expect(row['origin'], 'charter_edit');
+      // The new words, trimmed as they were saved.
+      expect(row['charter'], 'Only the survey.');
+      expect(row['title'], 'Harbour Lane move');
+      expect(row['conversation_key'], isNull);
+    });
+
+    test('clearing a charter writes no label', () async {
+      await seedStoryline('sl-1');
+
+      await edits().setCharter('sl-1', '   ');
+
+      expect(await labels(), isEmpty);
+    });
+
+    test('declaring a storyline labels its charter', () async {
+      final id = await edits().declareStoryline(
+        title: 'Harbour Lane move',
+        charter: charter,
+      );
+
+      final row = (await store.decisionLabels()).single;
+      expect(row['storyline_id'], id);
+      expect(row['question'], 'charter_specific');
+      expect(row['charter'], charter);
+    });
+
+    test('a gate eviction is not the owner\'s word and writes none',
+        () async {
+      await seedStoryline('sl-1', keys: ['c1']);
+
+      await edits().evictGatedThread('email', 'c1');
+
+      expect(await labels(), isEmpty);
+    });
+  });
 }

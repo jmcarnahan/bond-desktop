@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../services/decision/needs_you_predicate.dart' show needsYouAt;
 import 'attachment_models.dart';
 import 'context_models.dart';
 
@@ -77,7 +78,9 @@ String homeMetricsWindowLabel(Duration window) => window.inHours < 48
 /// [needsYou], [urgency] and [storylineId] are SNAPSHOTS, frozen when the app
 /// settled the message. That is what makes scrolling back through history
 /// honest: a thread that has since gone quiet still shows the verdict the user
-/// was actually given at the time.
+/// was actually given at the time. The row's "Needs you" LABEL is not one of
+/// them: it is [needsYouLive], read against the slider on every build, so a
+/// slider move relabels Home with no pipeline run.
 ///
 /// The reason fields are the opposite and are meant to be: [needsYouReason],
 /// [gateReason], [bucketReason], [storylineEvidence] and the rest are the
@@ -160,6 +163,12 @@ class HomeFeedRow {
   /// to agree with.
   final String? threadState;
 
+  /// When the owner last wrote on the thread (`conversations.last_outbound_at`).
+  /// A message received at or before it has been answered, and
+  /// [needsYouLive] reads it for exactly that. Null when the owner never wrote
+  /// on the thread, or on a read that did not select it.
+  final String? threadLastOutboundAt;
+
   /// Whether the message carries a file somebody could open.
   ///
   /// NOT `messages.has_attachments`, which is 1 for a Teams quote-reply as
@@ -176,12 +185,12 @@ class HomeFeedRow {
   /// clock's zero, and empty only on a path that predates the column.
   final String updatedAt;
 
-  /// The needs-you judgement as it stands on the message. Null is its own
-  /// answer — nothing has judged this one yet — and is why it is not a plain
-  /// bool: "no" and "not asked" send a reader to different places.
-  final bool? needsYouVerdict;
+  /// The decision model's needs-you probability for the message, 0..1. Null
+  /// is its own answer — nothing has decided this one yet — and is not a low
+  /// probability: "no" and "not asked" send a reader to different places.
+  final double? needsYouP;
 
-  /// Why the verdict went that way, in the judge's own words.
+  /// What the probability rests on, in the decision's own words.
   final String? needsYouReason;
 
   /// Why triage let the message through, or did not. Distinct from
@@ -244,9 +253,10 @@ class HomeFeedRow {
     this.summary,
     this.ctaText,
     this.threadState,
+    this.threadLastOutboundAt,
     this.hasFile = false,
     this.updatedAt = '',
-    this.needsYouVerdict,
+    this.needsYouP,
     this.needsYouReason,
     this.gateReason,
     this.triageStatus = 'pending',
@@ -281,17 +291,11 @@ class HomeFeedRow {
         summary: row['summary'] as String?,
         ctaText: row['cta_text'] as String?,
         threadState: row['thread_state'] as String?,
+        threadLastOutboundAt: row['thread_last_outbound_at'] as String?,
         hasFile: (row['has_file'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
-        // Three-valued on purpose: null stays null, and only a stored 1 is a
-        // yes. Anything else the column could hold is a no. `Message.fromRow`
-        // reads the same column through its `_boolFromInt` (non-zero is a
-        // yes); the store normalises the column to 0/1/NULL, so the two agree
-        // on every value it can hold — keep them agreeing if either moves.
-        needsYouVerdict: switch (row['needs_you_verdict'] as num?) {
-          null => null,
-          final n => n.toInt() == 1,
-        },
+        // Null stays null: an undecided message is not a low one.
+        needsYouP: (row['needs_you_p'] as num?)?.toDouble(),
         needsYouReason: row['needs_you_reason'] as String?,
         gateReason: row['gate_reason'] as String?,
         triageStatus: row['triage_status'] as String? ?? 'pending',
@@ -302,6 +306,23 @@ class HomeFeedRow {
         storylineAddedBy: row['storyline_added_by'] as String?,
         workOpen: (row['work_open'] as num?)?.toInt() == 1,
       );
+
+  /// Whether this message needs the owner NOW, at [threshold]: its own
+  /// probability at or above the slider (`needsYouAt`), its thread not `done`,
+  /// not filed `later`, and not answered since it arrived — the rail's rule
+  /// (`MessageStore.threadNeedsYouPSql`) for one message.
+  ///
+  /// Home's "Needs you" label reads this and not [needsYou], the settle-time
+  /// snapshot: the snapshot is taken once, and a slider move or a re-decide
+  /// that left the label behind would put "Needs you" beside a Why panel
+  /// saying "below your line". `MessageStore.pipelinePulse` counts the same
+  /// rule in SQL.
+  bool needsYouLive(double threshold) {
+    if (!needsYouAt(needsYouP, threshold)) return false;
+    if (threadState == 'done' || bucket == 'later') return false;
+    final outbound = threadLastOutboundAt ?? '';
+    return outbound.isEmpty || outbound.compareTo(receivedAt) < 0;
+  }
 
   /// The pair the feed is keyed and cursored by. A message id is only unique
   /// within its connector, so neither half stands alone.
@@ -349,9 +370,10 @@ class HomeFeedRow {
         summary: summary,
         ctaText: ctaText,
         threadState: threadState,
+        threadLastOutboundAt: threadLastOutboundAt,
         hasFile: hasFile,
         updatedAt: updatedAt,
-        needsYouVerdict: needsYouVerdict,
+        needsYouP: needsYouP,
         needsYouReason: needsYouReason,
         gateReason: gateReason,
         // Not carried over, unlike the reason beside it: `restoreMessage`
@@ -687,10 +709,18 @@ class PipelinePulse {
 
   /// Settled, dropped and judged-needs-you inside [homePulseWindow] — measured
   /// on `message_progress.updated_at`, which is when the pipeline last wrote
-  /// about the row rather than when the message arrived.
+  /// about the row rather than when the message arrived. [recentNeedsYou] is
+  /// those rows that need the owner NOW at the slider
+  /// ([HomeFeedRow.needsYouLive]), not the settle-time snapshot.
   final int recentSettled;
   final int recentDropped;
   final int recentNeedsYou;
+
+  /// `work_items.task_kind` → items waiting plus being worked, for the kinds
+  /// [kindStages] names, BEFORE they collapse onto a stage. The storyline
+  /// sweep's settle gate reads the assign kind alone ([kindCount]), where
+  /// the `storyline` stage also counts the sweep row asking.
+  final Map<String, int> outstandingByKind;
 
   const PipelinePulse({
     this.queued = const {},
@@ -698,6 +728,7 @@ class PipelinePulse {
     this.recentSettled = 0,
     this.recentDropped = 0,
     this.recentNeedsYou = 0,
+    this.outstandingByKind = const {},
   });
 
   /// Pipeline order — the order any narration walks. Triage first because it
@@ -749,4 +780,8 @@ class PipelinePulse {
   /// unconditionally.
   int countFor(String stage) =>
       (queued[stage] ?? 0) + (running[stage] ?? 0);
+
+  /// Pending plus processing rows of one `task_kind`, zero for a kind nothing
+  /// is queued under ([outstandingByKind]).
+  int kindCount(String kind) => outstandingByKind[kind] ?? 0;
 }

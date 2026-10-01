@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../models/home_models.dart';
+import '../services/decision/needs_you_predicate.dart';
 import '../theme/tokens.dart';
 import 'stage_bar.dart';
 
@@ -170,20 +171,22 @@ const Map<String, String> _laterReasons = {
 /// Why a settled message was judged not worth the owner's attention.
 ///
 /// `not_worthy` is the notify sweep's word for "the predicate said no", and
-/// the predicate has more than one clause. When the verdict itself was a no,
-/// the judge's reason is the answer. When the verdict was a YES the message
-/// was set aside for a different reason — the thread sits in Later, or its
-/// attention score fell under the threshold — and quoting a reason that says
-/// "this wants you" under "Nothing to do" would be the app contradicting
-/// itself in one line.
-String _notWorthyReason(HomeFeedRow row) {
+/// the predicate has more than one clause. When the probability sits below the
+/// slider, the decision's reason is the answer. When it clears the slider now
+/// the message was set aside for a different reason — the thread sits in
+/// Later, or the slider stood higher when it settled — and quoting a reason
+/// that says "this wants you" under "Nothing to do" would be the app
+/// contradicting itself in one line.
+String _notWorthyReason(HomeFeedRow row, double threshold) {
   final reason = row.needsYouReason?.trim() ?? '';
-  return switch (row.needsYouVerdict) {
-    false when reason.isNotEmpty => reason,
-    true when row.bucket == 'later' => 'the thread is in Later',
-    true => 'below the attention threshold',
-    _ => 'no ask found',
-  };
+  final p = row.needsYouP;
+  if (p == null) return 'no ask found';
+  if (!needsYouAt(p, threshold)) {
+    return reason.isNotEmpty ? reason : 'no ask found';
+  }
+  return row.bucket == 'later'
+      ? 'the thread is in Later'
+      : 'below the Needs You slider when it settled';
 }
 
 /// What the row says about HOW it came to be filed, or null when it has
@@ -235,6 +238,7 @@ HomeResult resultLine(
   HomeFeedRow row, {
   required DateTime now,
   bool threadNeedsYou = false,
+  double threshold = NeedsYouTuning.defaultThreshold,
 }) {
   final states = HomeStageBar.statesOf(row);
   final errored = _erroredStage(states);
@@ -248,7 +252,7 @@ HomeResult resultLine(
       !stalled &&
       row.outcome != 'pending') {
     final reason = row.needsYouReason?.trim() ?? '';
-    final detail = row.needsYouVerdict == true && reason.isNotEmpty
+    final detail = needsYouAt(row.needsYouP, threshold) && reason.isNotEmpty
         ? reason
         : 'the thread is still owed an answer';
     return HomeResult(
@@ -266,7 +270,7 @@ HomeResult resultLine(
     final gate = row.gateReason?.trim() ?? '';
     final text = homeDropLabel(reason);
     final detail = switch (reason) {
-      'not_worthy' => _notWorthyReason(row),
+      'not_worthy' => _notWorthyReason(row, threshold),
       'gated' when gate.isNotEmpty => gate.replaceAll('_', ' '),
       _ => null,
     };
@@ -331,7 +335,9 @@ HomeResult resultLine(
     );
   }
 
-  if (row.needsYou) {
+  // Live against the slider, not the settle-time snapshot: see
+  // [HomeFeedRow.needsYouLive].
+  if (row.needsYouLive(threshold)) {
     return HomeResult(
       HomeResultKind.needsYou,
       'Needs you',
@@ -368,15 +374,17 @@ HomeResult resultLine(
     );
   }
 
-  // The judge's own words when it has any: "nothing to do" is a verdict, and a
-  // verdict a reader cannot see the reason for is one they cannot disagree
-  // with. Only under a recorded NO — the reason column can hold a stale
-  // sentence from a verdict that was never re-run.
+  // The decision's own words when it has any: "nothing to do" is a verdict,
+  // and a verdict a reader cannot see the reason for is one they cannot
+  // disagree with. Only under a decided probability below the slider — the
+  // reason column can hold a stale sentence from an answer never re-run.
   final verdictReason = row.needsYouReason?.trim() ?? '';
   return HomeResult(
     HomeResultKind.nothing,
     'Nothing to do',
-    detail: row.needsYouVerdict == false && verdictReason.isNotEmpty
+    detail: row.needsYouP != null &&
+            !needsYouAt(row.needsYouP, threshold) &&
+            verdictReason.isNotEmpty
         ? verdictReason
         : null,
     tone: BondTone.neutral,
@@ -413,8 +421,9 @@ HomeAsk askLine(
   HomeFeedRow row,
   HomeResult result, {
   bool threadNeedsYou = false,
+  double threshold = NeedsYouTuning.defaultThreshold,
 }) {
-  if (threadNeedsYou || (row.needsYou && !row.dropped)) {
+  if (threadNeedsYou || (row.needsYouLive(threshold) && !row.dropped)) {
     final cta = row.ctaText?.trim() ?? '';
     if (cta.isNotEmpty) return (text: cta, ask: true);
     final reason = row.needsYouReason?.trim() ?? '';

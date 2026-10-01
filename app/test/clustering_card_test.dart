@@ -70,6 +70,9 @@ void main() {
 
     test('all five are four segments, dropped ones empty and not absent', () {
       for (final variant in ClusteringCardVariant.values) {
+        // The thread text is not four segments and is not built here — see
+        // 'the text and excerpt variants' below.
+        if (variant == ClusteringCardVariant.text) continue;
         expect(
           cardFor(variant).split(' | '),
           hasLength(4),
@@ -201,6 +204,11 @@ void main() {
         parseClusteringCardVariant('topics_untitled'),
         ClusteringCardVariant.topicsUntitled,
       );
+      expect(parseClusteringCardVariant('text'), ClusteringCardVariant.text);
+      expect(
+        parseClusteringCardVariant(' Excerpt '),
+        ClusteringCardVariant.excerpt,
+      );
     });
 
     test('refuses anything else, loudly', () {
@@ -224,6 +232,93 @@ void main() {
       }
       expect(ClusteringCardVariant.subjectTopics.wireName, 'subject_topics');
       expect(ClusteringCardVariant.topics.wireName, 'topics');
+      expect(ClusteringCardVariant.text.wireName, 'text');
+      expect(ClusteringCardVariant.excerpt.wireName, 'excerpt');
+    });
+  });
+
+  group('the text and excerpt variants', () {
+    test('the text card cannot be built from four segments', () {
+      // It is the thread text, which needs the store: `clusteringCardFor`
+      // in `storyline_cards.dart` is the one way to it.
+      expect(
+        () => buildClusteringCard(
+          subject: 'Launch date',
+          participants: const [],
+          topics: const [],
+          summary: 'Shipping Thursday.',
+          variant: ClusteringCardVariant.text,
+        ),
+        throwsArgumentError,
+      );
+      expect(
+        () => cardFor(ClusteringCardVariant.text),
+        throwsArgumentError,
+      );
+    });
+
+    test('the excerpt card is the subject and the newest message, nothing else',
+        () {
+      final withBody = {
+        ...cardData,
+        'body_text': 'Could you sign the addendum by Friday?',
+        'body_preview': 'Could you sign',
+      };
+      expect(
+        clusteringCardForConversationRow(row, withBody,
+            variant: ClusteringCardVariant.excerpt),
+        'Addendum for the River Street suite |  |  | '
+        'Could you sign the addendum by Friday?',
+      );
+      // No body yet: the card is still four segments, the last one empty,
+      // and the summary never stands in for it.
+      expect(
+        cardFor(ClusteringCardVariant.excerpt),
+        'Addendum for the River Street suite |  |  | ',
+      );
+    });
+
+    test('newestMessageExcerpt prefers the body, then the preview', () {
+      expect(
+        newestMessageExcerpt({
+          'body_text': 'The full body.',
+          'body_preview': 'The preview.',
+        }),
+        'The full body.',
+      );
+      // An unfetched body is empty, and Graph's preview is what there is.
+      expect(
+        newestMessageExcerpt({'body_text': '', 'body_preview': 'The preview.'}),
+        'The preview.',
+      );
+      expect(newestMessageExcerpt({'body_preview': 'The preview.'}),
+          'The preview.');
+      expect(newestMessageExcerpt(null), '');
+      expect(newestMessageExcerpt(const {}), '');
+    });
+
+    test('newestMessageExcerpt strips markers and collapses whitespace', () {
+      expect(
+        newestMessageExcerpt({
+          'body_text': '  Here is the plan.\n\n[[att:plan.pdf]]\t  See above.  ',
+        }),
+        'Here is the plan. See above.',
+      );
+      // Collapsing is the thread text's own rule, not only after a marker.
+      expect(
+        newestMessageExcerpt({'body_text': 'One\n\ntwo   three'}),
+        'One two three',
+      );
+    });
+
+    test('newestMessageExcerpt caps at 300 code points, not code units', () {
+      // Each emoji is ONE code point and TWO UTF-16 units: a unit count would
+      // stop at 150 of them and could split one in half.
+      final emoji = '\u{1F333}' * 400;
+      final excerpt = newestMessageExcerpt({'body_text': emoji});
+      expect(excerpt.runes.length, 300);
+      expect(excerpt.length, 600);
+      expect(excerpt, '\u{1F333}' * 300);
     });
   });
 

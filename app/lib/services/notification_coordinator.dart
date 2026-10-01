@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
-import 'attention.dart';
+import 'decision/needs_you_predicate.dart';
 import 'notify/settled_event.dart';
 import 'notify_worthy.dart';
 import 'pipeline_progress.dart';
@@ -87,6 +87,8 @@ class NotificationCoordinator {
   /// Where each settle lands for the home screen.
   final PipelineProgress _pipeline;
 
+  /// The owner's Needs You slider, the cut `notifyWorthy` compares each
+  /// message's needs-you probability against.
   final Future<double> Function()? _threshold;
   final DateTime Function() _clock;
 
@@ -106,12 +108,12 @@ class NotificationCoordinator {
   NotificationCoordinator(
     this._store, {
     ActivityLog? activityLog,
-    Future<double> Function()? attentionThreshold,
+    Future<double> Function()? needsYouThreshold,
     DateTime Function()? clock,
     PipelineProgress progress = const PipelineProgress.disabled(),
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress,
-        _threshold = attentionThreshold,
+        _threshold = needsYouThreshold,
         _clock = clock ?? (() => DateTime.now().toUtc());
 
   /// Fires once per message that earned a mention. Broadcast: the ribbon and
@@ -227,7 +229,7 @@ class NotificationCoordinator {
 
     // Once per sweep, not once per row: the threshold is one preference read
     // and every candidate is judged against the same number.
-    final threshold = await _attentionThreshold();
+    final threshold = await _needsYouThreshold();
     final nowIso = _iso(_clock());
 
     for (final row in rows) {
@@ -287,13 +289,13 @@ class NotificationCoordinator {
     }
   }
 
-  Future<double> _attentionThreshold() async {
-    if (_threshold == null) return AttentionTuning.defaultThreshold;
+  Future<double> _needsYouThreshold() async {
+    if (_threshold == null) return NeedsYouTuning.defaultThreshold;
     try {
       return await _threshold();
     } catch (e) {
-      debugPrint('notify: reading the attention threshold failed: $e');
-      return AttentionTuning.defaultThreshold;
+      debugPrint('notify: reading the needs-you threshold failed: $e');
+      return NeedsYouTuning.defaultThreshold;
     }
   }
 
@@ -324,13 +326,14 @@ class NotificationCoordinator {
     }
     final deadline = row['deadline_at'] as String? ?? '';
     if (deadline.compareTo(nowIso) <= 0) {
-      // A deadline settle with no attention score scores zero, writes
-      // `needs_you = 0`, and nothing ever comes back to it. So hold once more:
-      // the score is stamped by the list load's attention sweep, which runs
-      // every minute the app is open, and one more deadline's grace is the same
-      // bound the deadline itself already asks the user to accept. Past that
-      // grace it settles on what it has, because a candidate held forever is
-      // worse than one judged on a missing score.
+      // A deadline settle with no attention score has not been filed yet: the
+      // sweep that stamps the score is the one that files a thread Later, and
+      // a Later thread interrupts nobody. So hold once more: the score is
+      // stamped by the list load's attention sweep, which runs every minute
+      // the app is open, and one more deadline's grace is the same bound the
+      // deadline itself already asks the user to accept. Past that grace it
+      // settles on what it has, because a candidate held forever is worse than
+      // one judged on a missing filing.
       if (row['attention_score'] == null) {
         final grace = DateTime.tryParse(deadline);
         if (grace != null &&

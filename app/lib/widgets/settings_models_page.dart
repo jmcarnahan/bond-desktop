@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../providers/app_providers.dart' show ParkedFact;
+import '../services/decision/decision_client.dart' show DecisionServerKind;
+import '../services/llm/llm_client.dart' as llm show decisionOlderModelText;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart'
     show
@@ -73,6 +75,11 @@ class SettingsModelsPage extends StatefulWidget {
   final String decisionModel;
   final bool decisionKeyStored;
 
+  /// What the decision remote turned out to be, once a Connect or a call has
+  /// asked it; null before then, and the page says what it said before
+  /// there were two kinds.
+  final DecisionServerKind? decisionKind;
+
   /// The same three for the generative remote.
   final String generativeUrl;
   final String generativeModel;
@@ -132,6 +139,7 @@ class SettingsModelsPage extends StatefulWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
     this.generativeKeyStored = false,
@@ -153,6 +161,9 @@ class SettingsModelsPage extends StatefulWidget {
   static const Key generativeManagedKey =
       ValueKey('settings-generative-managed');
   static const Key decisionStatusKey = ValueKey('settings-decision-status');
+  static const Key decisionKindKey = ValueKey('settings-decision-kind');
+  static const Key decisionOlderHintKey =
+      ValueKey('settings-decision-older-hint');
   static const Key generativeStatusKey = ValueKey('settings-generative-status');
   static const Key embedStatusKey = ValueKey('settings-embed-status');
   static const Key checkDecisionKey = ValueKey('settings-role-check-decision');
@@ -218,6 +229,25 @@ class SettingsModelsPage extends StatefulWidget {
       'The decision server is not the decision model, or its heads file does '
       'not match this build. Check its address here, or run make '
       'decide-install.';
+
+  /// The installed heads file is the older decision model's, which this
+  /// build no longer reads: the same plain sentence the rail and the heads
+  /// refusal say, with no command in it.
+  static const String decisionOlderModelText = llm.decisionOlderModelText;
+
+  /// The quieter line under [decisionOlderModelText], for a developer who
+  /// installs the model by hand: the same command, and folder, that
+  /// [decisionNotInstalledIn] names.
+  static String decisionOlderModelHintIn(String? dir) => dir == null
+      ? 'For developers: make decide-install'
+      : 'For developers: make decide-install '
+          "DECIDE_DIR='${dir.replaceAll("'", "'\\''")}'";
+
+  /// Under Your server's decision form, what the server is.
+  static const String systemOneKindText =
+      'Kev 4B on your server (answers there; no files needed on this Mac)';
+  static const String encoderKindText =
+      "ModernBERT on your server (uses this Mac's heads file)";
 
   /// The decision server refused the key, whichever way the generative
   /// model is placed.
@@ -390,6 +420,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       'not_installed' => SettingsModelsPage.notInstalledText,
       'decision_not_installed' =>
         SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir),
+      'decision_older_model' => SettingsModelsPage.decisionOlderModelText,
       'decision_misconfigured' => SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized' => SettingsModelsPage.decisionUnauthorizedText,
       _ => null,
@@ -478,6 +509,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     final onServer = _decisionOnServer;
     final row = _row('decision');
     final check = widget.onCheckDecision;
+    final status = _decisionStatus(row);
     return [
       _heading(SettingsModelsPage.decisionTitle),
       _placementSegments(
@@ -522,6 +554,19 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           thirdPartyRefusal: ModelServersForm.decisionThirdPartyRefusalText,
         ),
         const SizedBox(height: BondSpacing.s12),
+        if (!_decisionEditing && widget.decisionKind != null) ...[
+          Text(
+            key: SettingsModelsPage.decisionKindKey,
+            switch (widget.decisionKind!) {
+              DecisionServerKind.systemOne =>
+                SettingsModelsPage.systemOneKindText,
+              DecisionServerKind.encoderHeads =>
+                SettingsModelsPage.encoderKindText,
+            },
+            style: BondType.caption,
+          ),
+          const SizedBox(height: BondSpacing.s8),
+        ],
       ] else
         ?_detail(row),
       Row(
@@ -529,7 +574,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           Expanded(
             child: Text(
               key: SettingsModelsPage.decisionStatusKey,
-              _decisionStatus(row),
+              status,
               style: BondType.small,
             ),
           ),
@@ -543,6 +588,14 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           ],
         ],
       ),
+      if (status == SettingsModelsPage.decisionOlderModelText) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(
+          key: SettingsModelsPage.decisionOlderHintKey,
+          SettingsModelsPage.decisionOlderModelHintIn(widget.decideInstallDir),
+          style: BondType.caption,
+        ),
+      ],
     ];
   }
 
@@ -553,11 +606,15 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     // to restart onto a preset with the decision model in it, behind whatever
     // else that preset loads. Once the files are on disk the row is the
     // fresher fact, so a Check after `make decide-install` stops saying Not
-    // installed.
-    final stale = row != null && row.headsOnDisk && (onServer || row.onDisk);
+    // installed. A Kev server reads no file on this Mac, so for it the park
+    // is stale the moment the role is on it.
+    final kev = onServer && widget.decisionKind == DecisionServerKind.systemOne;
+    final stale =
+        kev || (row != null && row.headsOnDisk && (onServer || row.onDisk));
     if (_parked(const {
       'decision_unavailable',
       'decision_not_installed',
+      'decision_older_model',
       'decision_misconfigured',
       'decision_unauthorized',
     })
@@ -565,7 +622,9 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       if (widget.parked?.reason != 'decision_not_installed' || !stale) {
         return parked;
       }
-      if (!onServer && !_decisionEditing) {
+      // Off the server `stale` already implies a row; this says so to the
+      // type system.
+      if (!onServer && !_decisionEditing && row != null) {
         return SettingsModelsPage.loaded(row, widget.serverState)
             ? SettingsModelsPage.installedLoadedText
             : SettingsModelsPage.installedLoadingText;
@@ -573,9 +632,13 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     }
     if (_decisionEditing) return SettingsModelsPage.untilConnectText;
     if (onServer) {
-      // The heads run here whichever server embeds (D12): without the heads
-      // file a connected server still cannot decide anything.
-      if (row != null && !row.headsOnDisk) {
+      // An encoder-heads server's heads run here (D12): without the heads
+      // file it still cannot decide anything. A Kev server answers there and
+      // needs none, and a server whose kind is not known yet is not told to
+      // install a file it may not need: the host is asking it.
+      if (widget.decisionKind == DecisionServerKind.encoderHeads &&
+          row != null &&
+          !row.headsOnDisk) {
         return SettingsModelsPage.decisionNotInstalledIn(
             widget.decideInstallDir);
       }

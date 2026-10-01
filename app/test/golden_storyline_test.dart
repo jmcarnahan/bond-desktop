@@ -1,9 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
-import 'package:bond_inbox/services/llm/storyline_tasks.dart';
+import 'package:bond_inbox/services/storyline_judge.dart' show StorylinePolicy;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/golden_set.dart';
@@ -11,9 +10,9 @@ import 'fixtures/golden_storyline.dart';
 
 /// The storyline replay's pure half, against the FICTIONAL fixtures.
 ///
-/// Everything the live run decides around a model call: which card a candidate
-/// is judged as, which answers the service would have accepted, which storyline
-/// a set of answers derives, and what the whole pass tallied. The live test
+/// Everything the live run decides around a model call: which answers the
+/// service would have accepted, which storyline a set of answers derives, and
+/// what the whole pass tallied. The live test
 /// itself is `@Skip`'d and can be covered by nothing, so this is where a change
 /// to any of that has to fail.
 void main() {
@@ -133,41 +132,6 @@ void main() {
     );
   });
 
-  test('a candidate card is the app\'s card, Re:/Fwd: stripped', () {
-    final item = _itemWithSubject(
-      rawFixture,
-      'email:fx-keep-tail',
-      'Re: Fwd: Addendum for the River Street suite',
-    );
-    const card = GoldenCard(
-      topics: ['the addendum', 'the allowance'],
-      summary: 'A term is still open.',
-    );
-
-    final built = candidateCardFor(item, card);
-    expect(
-      built,
-      buildConversationCard(
-        subject: 'Addendum for the River Street suite',
-        participants: item.conversationParticipants,
-        topics: card.topics,
-        summary: card.summary,
-      ),
-    );
-    expect(built, startsWith('Addendum for the River Street suite | '));
-  });
-
-  test('a card the run file has nothing for keeps its two blank segments', () {
-    final item = set.byId['email:fx-keep-tail']!;
-    // Four segments, always: the app's card is the same shape whether or not
-    // the thread was ever enriched, which is what makes it hashable.
-    expect(
-      candidateCardFor(item, null),
-      'Addendum for the River Street suite | '
-      'Dana Whitfield, Alex Rivera, Priya Raman |  | ',
-    );
-  });
-
   // ── one confirmation ─────────────────────────────────────────────────
 
   test('a candidate is gold, forbidden or extra', () {
@@ -178,43 +142,35 @@ void main() {
     expect(kindOf(item, 'spring-portfolio-review'), CandidateKind.extra);
   });
 
-  test('an accept follows the service\'s rule, and low is not one', () {
-    expect(_outcome(belongs: true, confidence: 'high').accepted, isTrue);
-    expect(_outcome(belongs: true, confidence: 'medium').accepted, isTrue);
-
-    final hedged = _outcome(belongs: true, confidence: 'low');
-    expect(hedged.accepted, isFalse);
-    expect(hedged.lowYes, isTrue);
-
-    final no = _outcome(belongs: false, confidence: 'high');
-    expect(no.accepted, isFalse);
-    expect(no.lowYes, isFalse);
+  test('an accept follows the service\'s rule for a kept storyline', () {
+    expect(_outcome(p: 0.9).accepted, isTrue);
+    expect(_outcome(p: StorylinePolicy.acceptActive).accepted, isTrue);
+    expect(_outcome(p: 0.49).accepted, isFalse);
 
     const failed = ConfirmOutcome(
       slug: 'fx-effort-01',
       kind: CandidateKind.extra,
-      result: null,
+      p: null,
     );
     expect(failed.accepted, isFalse);
-    expect(failed.lowYes, isFalse);
   });
 
   // ── what a set of confirmations derives ──────────────────────────────
 
   test('no accept files the item nowhere', () {
     final derived = deriveStorylineId([
-      _outcome(slug: 'fx-b', belongs: false, confidence: 'high'),
-      _outcome(slug: 'fx-a', belongs: true, confidence: 'low'),
+      _outcome(slug: 'fx-b', p: 0.1),
+      _outcome(slug: 'fx-a', p: 0.4),
     ]);
     expect(derived.id, 'none');
     expect(derived.tie, isFalse);
   });
 
-  test('one high beats two mediums', () {
+  test('the highest p wins', () {
     final derived = deriveStorylineId([
-      _outcome(slug: 'fx-a', belongs: true, confidence: 'medium'),
-      _outcome(slug: 'fx-z', belongs: true, confidence: 'high'),
-      _outcome(slug: 'fx-b', belongs: true, confidence: 'medium'),
+      _outcome(slug: 'fx-a', p: 0.6),
+      _outcome(slug: 'fx-z', p: 0.9),
+      _outcome(slug: 'fx-b', p: 0.7),
     ]);
     expect(derived.id, 'fx-z');
     expect(derived.tie, isFalse);
@@ -222,8 +178,8 @@ void main() {
 
   test('a tie at the top goes alphabetically, and is counted', () {
     final derived = deriveStorylineId([
-      _outcome(slug: 'fx-z', belongs: true, confidence: 'high'),
-      _outcome(slug: 'fx-a', belongs: true, confidence: 'high'),
+      _outcome(slug: 'fx-z', p: 0.9),
+      _outcome(slug: 'fx-a', p: 0.9),
     ]);
     // Alphabetical, never candidate order: candidate order leads with gold,
     // and a tie-break that took the first would flatter every recall number.
@@ -233,8 +189,8 @@ void main() {
 
   test('a single accept is not a tie', () {
     final derived = deriveStorylineId([
-      _outcome(slug: 'fx-a', belongs: true, confidence: 'medium'),
-      _outcome(slug: 'fx-b', belongs: false, confidence: 'high'),
+      _outcome(slug: 'fx-a', p: 0.6),
+      _outcome(slug: 'fx-b', p: 0.1),
     ]);
     expect(derived.id, 'fx-a');
     expect(derived.tie, isFalse);
@@ -242,11 +198,11 @@ void main() {
 
   test('a failed candidate leaves the item unfiled, accept or no accept', () {
     final derived = deriveStorylineId([
-      _outcome(slug: 'fx-a', belongs: true, confidence: 'high'),
+      _outcome(slug: 'fx-a', p: 0.9),
       const ConfirmOutcome(
         slug: 'fx-b',
         kind: CandidateKind.extra,
-        result: null,
+        p: null,
       ),
     ]);
     expect(derived.id, isNull);
@@ -288,48 +244,33 @@ void main() {
 
   // ── the run's own arithmetic ─────────────────────────────────────────
 
-  test('the tally counts every kind, bucket and hedge', () {
+  test('the tally counts every kind and bucket', () {
     final tally = StorylineTally();
 
     // A `must` item that landed on gold, said yes to a trap, and said no to
     // the extra.
     final must = set.byId['email:fx-keep-tail']!;
     final mustOutcomes = [
-      _outcome(
-        slug: 'river-office-lease',
-        kind: CandidateKind.gold,
-        belongs: true,
-        confidence: 'high',
-      ),
+      _outcome(slug: 'river-office-lease', kind: CandidateKind.gold, p: 0.9),
       _outcome(
         slug: 'studio-website-redesign',
         kind: CandidateKind.forbidden,
-        belongs: true,
-        confidence: 'medium',
+        p: 0.6,
       ),
-      _outcome(
-        slug: 'spring-portfolio-review',
-        belongs: false,
-        confidence: 'high',
-      ),
+      _outcome(slug: 'spring-portfolio-review', p: 0.1),
     ];
     tally.add(must, mustOutcomes, deriveStorylineId(mustOutcomes));
 
-    // A `should` item that hedged on gold and lost a candidate to a failure,
-    // so it is unfiled — but its gold call ANSWERED, so it still counts in the
-    // should denominator.
+    // A `should` item under the bar on gold that lost a candidate to a
+    // failure, so it is unfiled — but its gold call ANSWERED, so it still
+    // counts in the should denominator.
     final should = set.byId['email:fx-reply']!;
     final shouldOutcomes = [
-      _outcome(
-        slug: 'river-office-lease',
-        kind: CandidateKind.gold,
-        belongs: true,
-        confidence: 'low',
-      ),
+      _outcome(slug: 'river-office-lease', kind: CandidateKind.gold, p: 0.4),
       const ConfirmOutcome(
         slug: 'spring-portfolio-review',
         kind: CandidateKind.extra,
-        result: null,
+        p: null,
       ),
     ];
     tally.add(should, shouldOutcomes, deriveStorylineId(shouldOutcomes));
@@ -337,16 +278,8 @@ void main() {
     // An item gold files nowhere, which this run also filed nowhere.
     final nowhere = set.byId['teams:fx-floor']!;
     final nowhereOutcomes = [
-      _outcome(
-        slug: 'river-office-lease',
-        belongs: false,
-        confidence: 'medium',
-      ),
-      _outcome(
-        slug: 'studio-website-redesign',
-        belongs: true,
-        confidence: 'low',
-      ),
+      _outcome(slug: 'river-office-lease', p: 0.2),
+      _outcome(slug: 'studio-website-redesign', p: 0.4),
     ];
     tally.add(nowhere, nowhereOutcomes, deriveStorylineId(nowhereOutcomes));
 
@@ -359,9 +292,6 @@ void main() {
     // Three extras were asked; the one that failed carries no answer to count.
     expect(tally.extraN, 3);
     expect(tally.extraAccepted, 0);
-    expect(tally.lowYes, 2);
-    expect(tally.acceptedHigh, 1);
-    expect(tally.acceptedMedium, 1);
     expect(tally.derivedGold, 1);
     expect(tally.derivedNone, 1);
     expect(tally.derivedOther, 0);
@@ -380,12 +310,7 @@ void main() {
     final tally = StorylineTally();
     final item = set.byId['email:fx-keep-tail']!;
     final outcomes = [
-      _outcome(
-        slug: 'river-office-lease',
-        kind: CandidateKind.gold,
-        belongs: true,
-        confidence: 'high',
-      ),
+      _outcome(slug: 'river-office-lease', kind: CandidateKind.gold, p: 0.9),
     ];
     tally.add(item, outcomes, deriveStorylineId(outcomes));
 
@@ -423,72 +348,25 @@ void main() {
   });
 
   test('the gold cell says how the gold candidate answered', () {
-    expect(goldCell([_outcome(belongs: true, confidence: 'high')]), '-');
-    expect(
-      goldCell([
-        _outcome(
-          kind: CandidateKind.gold,
-          belongs: true,
-          confidence: 'medium',
-        ),
-      ]),
-      'yes(medium)',
-    );
-    expect(
-      goldCell([
-        _outcome(kind: CandidateKind.gold, belongs: true, confidence: 'low'),
-      ]),
-      'low-yes',
-    );
-    expect(
-      goldCell([
-        _outcome(kind: CandidateKind.gold, belongs: false, confidence: 'high'),
-      ]),
-      'no',
-    );
+    expect(goldCell([_outcome(p: 0.9)]), '-');
+    expect(goldCell([_outcome(kind: CandidateKind.gold, p: 0.82)]),
+        'yes(0.82)');
+    expect(goldCell([_outcome(kind: CandidateKind.gold, p: 0.2)]), 'no(0.20)');
     expect(
       goldCell(const [
-        ConfirmOutcome(
-          slug: 'fx-a',
-          kind: CandidateKind.gold,
-          result: null,
-        ),
+        ConfirmOutcome(slug: 'fx-a', kind: CandidateKind.gold, p: null),
       ]),
       'failed',
     );
   });
 }
 
-/// One golden item rebuilt with a different subject, so the Re:/Fw: stripping
-/// can be exercised without a second fixture entry.
-GoldenItem _itemWithSubject(
-  Map<String, dynamic> rawFixture,
-  String id,
-  String subject,
-) {
-  final raw = (rawFixture['items']! as List)
-      .cast<Map<String, dynamic>>()
-      .firstWhere((entry) => entry['id'] == id);
-  final copy = jsonDecode(jsonEncode(raw)) as Map<String, dynamic>;
-  (copy['conversation']! as Map<String, dynamic>)['subject'] = subject;
-  return GoldenItem.fromJson(copy);
-}
-
 ConfirmOutcome _outcome({
   String slug = 'fx-effort-01',
   CandidateKind kind = CandidateKind.extra,
-  required bool belongs,
-  required String confidence,
+  required double p,
 }) =>
-    ConfirmOutcome(
-      slug: slug,
-      kind: kind,
-      result: ConfirmResult(
-        evidence: 'both mention the same thing',
-        belongs: belongs,
-        confidence: confidence,
-      ),
-    );
+    ConfirmOutcome(slug: slug, kind: kind, p: p);
 
 /// A call record in the shape the client emits one, for the arithmetic above.
 LlmCallRecord _record({
@@ -498,7 +376,7 @@ LlmCallRecord _record({
   String outcome = 'ok',
 }) =>
     LlmCallRecord(
-      label: 'storyline_membership',
+      label: 'decision:member_of',
       durationMs: ms,
       promptTokens: promptTokens,
       completionTokens: completionTokens,

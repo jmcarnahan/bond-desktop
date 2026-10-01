@@ -1,4 +1,5 @@
 import '../models/message_models.dart';
+import 'decision/needs_you_predicate.dart';
 
 /// Where in a long thread the owner is actually named.
 ///
@@ -31,18 +32,21 @@ import '../models/message_models.dart';
 /// whitespace is not an ask: the row would draw an empty orange line and the
 /// navigator would count a stop with nothing at it.
 ///
-/// An action item stops counting once the needs-you pass has said NO about
-/// the message. The extractor writes "things the reader must do" off any
-/// message with a task in it — a Jira broadcast describing somebody else's
-/// ticket comes back as "Review the issue…" — and `@ you` over that is a
-/// mention nobody made. The judge's no is the same one `isNeedsYou` lets
-/// outrank the ask; an unjudged message (null) keeps its items, on that
-/// rule's reading of null. [Message.addressedMe] is the connector's fact and
-/// no verdict overrules it.
-bool namesOwner(Message m) {
+/// An action item stops counting once the decision model has placed the
+/// message BELOW the owner's [threshold]. The extractor writes "things the
+/// reader must do" off any message with a task in it — a Jira broadcast
+/// describing somebody else's ticket comes back as "Review the issue…" — and
+/// `@ you` over that is a mention nobody made. It is the same rule
+/// `isNeedsYou` reads ([needsYouAt]); an undecided message (null) keeps its
+/// items, because undecided is not a no. [Message.addressedMe] is the
+/// connector's fact and no probability overrules it.
+bool namesOwner(
+  Message m, {
+  double threshold = NeedsYouTuning.defaultThreshold,
+}) {
   if (!m.inbound) return false;
   if (m.addressedMe) return true;
-  if (m.needsYouVerdict == false) return false;
+  if (m.needsYouP != null && !needsYouAt(m.needsYouP, threshold)) return false;
   return m.actionItems.any((item) => item.trim().isNotEmpty);
 }
 
@@ -54,9 +58,13 @@ bool namesOwner(Message m) {
 /// id: the per-row `GlobalKey`s the jump uses, the host's unfolded-row set, and
 /// the `needs_you_reason_message_id` a thread already carries. A blank id is
 /// skipped — a stop the scroll machinery could never find is not a stop.
-List<String> mentionIndexOf(List<Message> messages) => [
+List<String> mentionIndexOf(
+  List<Message> messages, {
+  double threshold = NeedsYouTuning.defaultThreshold,
+}) =>
+    [
       for (final m in messages)
-        if (m.id.isNotEmpty && namesOwner(m)) m.id,
+        if (m.id.isNotEmpty && namesOwner(m, threshold: threshold)) m.id,
     ];
 
 /// Where [messageId] sits in [index] when the reader steps, or null when there

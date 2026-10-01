@@ -36,6 +36,12 @@ import 'fixtures/test_db.dart';
 
 class _FakeSync implements MailSync {
   @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
+  @override
   Future<void> syncNow() async {}
 
   @override
@@ -472,7 +478,11 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('2 threads · 1 mail · 1 chat'), findsOneWidget);
+    // Both threads' messages are decided by `keepingDecisionClient` at a
+    // needs-you probability of 0.5, over the slider's 0.35 default, so both
+    // count as needing the owner.
+    expect(find.text('2 threads · 1 mail · 1 chat · 2 need you'),
+        findsOneWidget);
     await settleQueues(tester);
   });
 }

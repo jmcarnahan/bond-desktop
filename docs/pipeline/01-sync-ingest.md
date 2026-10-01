@@ -25,6 +25,24 @@ Microsoft data; everything after it runs against local rows.
   `requeueWork` and the doc comments distinguishing them (why storylines need
   the revive path rather than a plain enqueue).
 
+**Sample sandbox.** A build with `BOND_SAMPLE_DIR` set (a `local.mk` line
+the Makefile passes as a `--dart-define`) swaps all five backends for the ones
+in `app/lib/services/sample/`, which serve a recorded sample directory:
+a delta drain over its inbox and sent items, detail fetches that hand over the
+recorded HTML for the app's own converter, and its 1:1, group and meeting
+chats (never channels). Ingest, gates and everything after them run unchanged
+over it. It is read-only and opens its own database file,
+`bond_inbox-sample.db` (`databaseFileName` in `app/lib/data/db.dart`), because
+the identity guard runs only on a sign-in and the sandbox never signs in.
+A recording ends on a fixed date, so the one-day default finds nothing, and
+widening the window after that first pass ingests the sample as quiet
+backfill (triaged, but no thread state moves); **Forget everything and
+re-sync** clears the bootstrap floors so the next drain is a first run over
+the wide window. Chats carry no read state in the recording, so every chat
+message is stored as read and no chat bolds. Graph's `meetingMessageType` is
+not in the recording (its `meeting.type` is the event's kind), so meeting mail
+is recognised by its headers and subject only.
+
 **Windows and caps.** How far back a sync reaches is a preference — **one day**
 by default, set in Settings → Sync & data — and the AI pipeline reads that same
 window: mail inside the lookback is triaged, extracted, judged and embedded,
@@ -117,16 +135,20 @@ Both syncs call it after their embed backlog, and it reports `revived_owed_work`
 twins ride along) only when it queued any. See
 [04-extraction.md](04-extraction.md) and [11-needs-you.md](11-needs-you.md).
 
-The one-shot `needs_you_flag_backfill` runs once, beside the other one-shots,
-raising the Needs You chip on rows that settled before the verdict column
-existed. It reports `backfilled_needs_you` (see
-[11-needs-you.md](11-needs-you.md)). Its lowering twin, `needs_you_flag_veto`,
-runs once beside it and clears the settled chips that stood on triage's ask
-before a judged no was allowed to outrank it (`lowerVetoedNeedsYou`, ticking
-each row), reported as `vetoed_needs_you`. After them, `needs_you_hedge_rejudge`
-re-queues needs-you work once for every in-window inbound mail and chat
-message whose verdict is 0 (`requeueZeroNeedsYouVerdicts`), because earlier
-builds stored a hedge as 0 and a hedge is NULL now; it reports
+The one-shot `needs_you_flag_backfill_p` runs once, beside the other
+one-shots, raising the Needs You chip on settled rows whose message now clears
+the owner's slider. It reports `backfilled_needs_you` (see
+[11-needs-you.md](11-needs-you.md)). Its lowering twin,
+`needs_you_flag_veto_p`, runs once beside it and clears the settled chips
+`notifyWorthy` would not grant today (`lowerVetoedNeedsYou`, ticking each row),
+reported as `vetoed_needs_you`. The `_p` pair replaced the verdict-era
+`needs_you_flag_backfill` / `needs_you_flag_veto`, which had already closed on
+every installed machine. Every pass also requeues the needs-you pass for
+messages whose decision was made without the owner
+(`requeueOwnerlessNeedsYou`, reported as `requeued_needs_you_ownerless`). After them, `needs_you_hedge_rejudge` re-queues needs-you
+work once for every in-window inbound mail and chat message whose
+`needs_you_p` is 0.0 (`requeueZeroNeedsYouVerdicts`), because an older build's
+hedge could have become one; it reports
 `requeued_needs_you_hedges` and Clear AI results does not reset it. Every one-shot marker is deleted by
 `wipeAll`, so a sign-out-and-wipe lets them run again on the next account.
 

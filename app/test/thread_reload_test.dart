@@ -20,6 +20,7 @@ import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/triage_seed.dart';
 
 /// A message that lands DURING a sync reaches the open transcript on the same
 /// tick.
@@ -57,6 +58,12 @@ class _Tokens implements TokenStore {
 /// started BESIDE it finishes long before the row lands and is never repeated,
 /// which is precisely the bug. Without a delay here both orderings pass.
 class _WritingSync implements MailSync {
+  @override
+  Future<void> ensureBodiesFor(
+    String conversationKey,
+    List<String> sourceMessageIds,
+  ) async {}
+
   static const Duration drainTime = Duration(milliseconds: 400);
 
   final MessageStore store;
@@ -139,6 +146,7 @@ void main() {
       'received_at': _at(9),
       'body_text': 'the message that was already there',
     });
+    await seedNeedsYou(store, 'email', 'in-1');
     await store.upsertConversation({
       'conversation_key': 'c1',
       'subject': 'Homepage copy',

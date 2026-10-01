@@ -206,7 +206,8 @@ typedef _Selection = ({
 /// placements, because there the answer changes what a person should go and
 /// look at; `embed_unavailable` does not, because that server is on this Mac
 /// under either placement, `decision_unavailable`, `decision_not_installed`,
-/// `decision_misconfigured` and `decision_unauthorized` name the decision
+/// `decision_older_model`, `decision_misconfigured` and
+/// `decision_unauthorized` name the decision
 /// model rather than a machine, and `not_installed` is a generative model this Mac has not
 /// downloaded, which no server restart fixes.
 ///
@@ -252,6 +253,14 @@ String railProgressLine({
     case 'decision_not_installed':
       return 'The decision model is not installed · $waiting waiting · run '
           'make decide-install, then Check in Settings';
+    // The installed decision model is the older one, whose heads file this
+    // build no longer reads. Its fix is an install, not an address, and the
+    // sentence says so in plain words, with no command: whoever reads the
+    // rail may not be a developer. No retry cadence either.
+    case 'decision_older_model':
+      return 'The installed decision model is an older version that this '
+          'app no longer reads · $waiting waiting · install the current '
+          'decision model to resume sorting new mail';
     // A server that answers, but not as the decision model does (another
     // model's tokenizer, normalised vectors, no /tokenize), or a heads file
     // this build refuses. Waiting fixes neither, so no retry cadence is
@@ -1924,7 +1933,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         final rooms = peopleRooms(
           rows,
           owner: _ownerRecord,
-          threshold: ref.watch(appPrefsProvider).attentionThreshold,
+          threshold: ref.watch(appPrefsProvider).needsYouThreshold,
         );
         // Kept for [_submitFind], which needs exactly what the rail was
         // handed and runs long after this build has finished. Plain writes,
@@ -2510,7 +2519,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   List<Conversation> _triageRows(AppPrefs prefs) {
     final ranked = sortNeedsYou(
       prefs.needsYouSort,
-      needsYouRows(_rows, threshold: prefs.attentionThreshold),
+      needsYouRows(_rows, threshold: prefs.needsYouThreshold),
     );
     final rows = _section == RailSection.needsYou
         ? needsYouLabelRows(
@@ -3435,7 +3444,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ? {
             for (final c in needsYouRows(
               loaded.conversations,
-              threshold: prefs.attentionThreshold,
+              threshold: prefs.needsYouThreshold,
             ))
               (source: c.source, key: c.id),
           }
@@ -3678,7 +3687,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // threshold: two numbers for one pile is one number too many.
       needsYouCount: needsYouRows(
         conversations,
-        threshold: ref.watch(appPrefsProvider).attentionThreshold,
+        threshold: ref.watch(appPrefsProvider).needsYouThreshold,
       ).length,
       onSelect: _selectSection,
       accountName: _owner?.displayName ?? '',
@@ -3706,7 +3715,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       selectedLaterDay: _selectedLaterDay,
       laterCount: later.length,
       laterDays: laterDayCounts(conversations),
-      attentionThreshold: ref.watch(appPrefsProvider).attentionThreshold,
+      needsYouThreshold: ref.watch(appPrefsProvider).needsYouThreshold,
       // The same value the overview's control writes and `_submitFind` reads.
       // One pile, one order, three places it is drawn.
       needsYouSort: ref.watch(appPrefsProvider).needsYouSort,
@@ -4256,7 +4265,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       rooms: _rooms,
       find: _find,
       unreadOnly: _unreadOnly,
-      threshold: ref.read(appPrefsProvider).attentionThreshold,
+      threshold: ref.read(appPrefsProvider).needsYouThreshold,
       needsYouSort: ref.read(appPrefsProvider).needsYouSort,
       ownerDomains: _ownerDomains,
     );
@@ -4535,6 +4544,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final feed = ref.watch(homeFeedProvider);
     return HomePane(
       rows: feed.rows,
+      needsYouThreshold: ref.watch(appPrefsProvider).needsYouThreshold,
       // The previous value is carried through a re-read, so this is null only
       // before the very first one lands.
       metrics: ref.watch(homeMetricsProvider).valueOrNull,
@@ -4647,7 +4657,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           () => _pickingStorylineForThread = (source: source, id: threadKey),
         ),
         onKeepInInbox: _keepThread,
-        onEditRules: _openSettings,
       ),
     );
   }
@@ -5306,6 +5315,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       messages: shown,
       jumps: inSidePanel ? _sideJumps : _mainJumps,
       ownerDomains: _ownerDomains,
+      needsYouThreshold: ref.watch(appPrefsProvider).needsYouThreshold,
       // Read, not watched: the service is a session-long singleton, and each
       // avatar asks it for its own face.
       photos: ref.read(profilePhotosProvider),
@@ -5596,7 +5606,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       conversationKey: side.conversationKey,
       messageId: side.messageId,
     )));
-    final threshold = ref.watch(appPrefsProvider).attentionThreshold;
+    final threshold = ref.watch(appPrefsProvider).needsYouThreshold;
 
     // The thread panel's own naming rule: a chat carries no subject, so it is
     // named by who is on it.
@@ -7024,6 +7034,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       final archive = ref.watch(archiveProvider);
       return ArchivePane(
         conversations: conversations,
+        needsYouThreshold: ref.watch(appPrefsProvider).needsYouThreshold,
         sources: _sources,
         ownerDomains: _ownerDomains,
         // A day row is a Later row, so opening one puts the pane on the tab

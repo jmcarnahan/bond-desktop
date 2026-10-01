@@ -42,6 +42,7 @@ launch may lack it). Then:
 | `needs_action`, `reply_expected` | the decision heads' p(yes) ≥ `DecisionPolicy.booleanYes` / `replyYes` (both 0.50) |
 | `summary`, `action_items_json`, `deadline` | NOT written here — the message-text stage writes them (`MessageStore.writeMessageText`); `writeTriage` writes the classification only and never touches them, so they are NULL on a new row and a re-triaged message keeps the text it already had |
 | `label` | nothing writes it any more; NULL on every new row (old rows keep theirs, and the Why panel shows it only where present) |
+| `needs_you_p`, `needs_you_reason` | the decision's p(needs_you = yes) and its templated reason (`writeNeedsYouP`), written and shown whether or not the decision was made with the owner line; an ownerless decision's p is UNTRUSTED, and every mail sync requeues the needs-you pass to decide it again once the owner is known (see [11-needs-you.md](11-needs-you.md)) |
 
 The activity row carries `urgency`, `category`, `needs_action`,
 `reply_expected` (the decision's values) and `decision`: `gate=keep
@@ -54,6 +55,60 @@ decision server that is down (or a heads file that is not installed) throws
 format failure that spends one. `decisionClient` is a REQUIRED constructor
 argument: there is no triage without the decision model (tests pass a
 `FakeDecisionClient` / `ScriptedDecisionClient`).
+
+**The heads file and the question set.** The nine message heads live in
+`decide-heads.json` beside the three storyline questions' heads (schema 2,
+question set v5): `questions` lists the nine message fields in
+`decisionFields` order, renderer `message`, then `same_effort` (`pair`),
+`member_of` (`membership`) and `charter_specific` (`charter`), each with its
+options, weight, bias and temperature. `DecisionHeads.fromJson` checks all of
+it, plus `pooling: mean`, `max_tokens`, 1024-wide weight rows, the renderer
+set `bond-state/2` (`decisionRendererVersion`) and the question hash
+`f495a7dc48aa34d5` (`decisionQhash` in `decision_questions.dart`). Triage reads
+only the nine message fields (`DecisionHeads.apply`). The message state's bytes
+did not change from `bond-state/1`; the new version names the whole renderer
+set, storyline texts included ([06-storylines.md](06-storylines.md#storyline-questions-bond-state2)).
+A schema-1 file, meaning the first decision model's nine-field heads, is
+refused under its own park, `decision_older_model`, with a plain sentence and
+no command: "The installed decision model is an older version that this app
+no longer reads. Install the current decision model to resume sorting new
+mail."  `make decide-install` copies the v3 export (schema 2), so this park
+means an older install left in the models folder. A stored `message_decisions` row whose `qhash` is not
+`decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
+as no decision.
+
+**The install-time re-decide.** So a new model does not leave the recent
+mailbox undecided, the mail sync starts `TriageQueue.redecideStale` once per
+question-set hash (the pref `decision_redecide_qhash` holds the hash it last
+finished for). It runs the decision pass again — the same `decisionInputFor`
+state and the same writer, `applyDecision` — for the kept inbound (`triaged`) messages of the
+last 30 days whose decision row is under another hash or missing, newest
+first, at most 2,000 (`MessageStore.staleDecisionRefs`). It rewrites the
+`message_decisions` row, the four triage fields (urgency, category,
+needs_action, reply_expected, through the narrow `writeDecidedTriage`),
+`needs_you_p` with its sentence, and the intent and importance inside an
+extraction that already ran (`rewriteExtractionDecision`, topics and project
+untouched), and folds the thread's CTA as the claim does (`foldCtaUp`), so a
+quiet thread's urgency and category follow the new decision, and a settled
+row's Needs You chip moves when the new p crosses the slider. It never
+touches the text, the gate verdict or `triage_status`, and it never gates;
+nor does it revisit a message gated before (it reads only `triaged` rows), so
+a v2 learned-gate drop stays dropped, by design, with Restore as the way
+back. A message whose request earns a 4xx is SETTLED for the current hash
+(`MessageStore.settleFailedDecision`: its decision row takes the hash and a
+`redecide_failed` mark in `answers_json`, no schema change; `decisionFor`
+reads a marked row as no decision, the old numbers stay, and the next real
+decision clears the mark), so it leaves the stale list and is never asked
+again by this one-shot. Started unawaited so new mail's sync is not held
+behind it; a run is complete when it did not park. A decision park
+(unavailable, not installed, older model, misconfigured, unauthorized) or the
+processing switch ends it incomplete, the pref stays open, and the next sync
+resumes, since what was re-decided or settled has left the list. While triage
+itself is parked on the decision model it asks nothing, and a re-decide park
+is logged once per question set and reason per app run. Not in `derivedOneShotPrefs`: Clear AI results re-triages every message
+under the current model anyway. Older rows outside the window still read as
+undecided, and the raw SQL readers (the claim order's importance,
+`requeueOwnerlessNeedsYou`) read them as they stand.
 
 **The CTA rollup.** `foldCtaUp` (`app/lib/services/conversation_cta.dart`) is
 the ONE fold, called twice per message. Triage calls it with the decision's

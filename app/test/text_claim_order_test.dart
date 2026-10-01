@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -51,8 +51,10 @@ void main() {
       'triage_status': triageStatus,
     });
     if (needsYou) {
+      // Over the slider's default, which is what the claim reads when no
+      // slider has been saved.
       await db.customUpdate(
-        'UPDATE messages SET needs_you_verdict = 1 '
+        'UPDATE messages SET needs_you_p = 0.9 '
         'WHERE source_message_id = ?',
         variables: [Variable<String>(id)],
       );
@@ -62,7 +64,7 @@ void main() {
         'email',
         id,
         fakeDecision(fakeAnswers(importance: importance)),
-        qhash: DecisionHeads.expectedQhash,
+        qhash: decisionQhash,
         ownerKnown: true,
       );
     }
@@ -130,6 +132,16 @@ void main() {
       'high-later',
       'normal-later',
     ]);
+  });
+
+  test("needs-you is read at the owner's slider", () async {
+    // 0.9 needs the owner at a slider of 0.95 no more than a normal message
+    // does, so importance decides between the two.
+    await store.setPref(needsYouThresholdKey, '0.95');
+    await seed('ny-low', minute: 1, importance: 'low', needsYou: true);
+    await seed('high', minute: 2, importance: 'high');
+
+    expect(await drainOrder('extract'), ['high', 'ny-low']);
   });
 
   test('an owner-asked requeue jumps every priority key', () async {

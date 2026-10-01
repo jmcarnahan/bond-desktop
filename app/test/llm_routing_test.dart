@@ -6,10 +6,13 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart' show AccountInfo;
+import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
+import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/storyline_judge.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -45,22 +48,11 @@ ScriptedLlm routed(String label, Map<String, List<Object>> scripts) {
 /// A unit vector whose cosine against `[1, 0]` is exactly [c].
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
-Map<String, dynamic> confirmAnswer() => {
-      'evidence': 'Both concern the website redesign.',
-      'belongs': true,
-      'confidence': 'high',
-    };
-
-Map<String, dynamic> groupAnswer(List<int> threads) => {
-      'groups': [
-        {'threads': threads, 'why': 'All three are the homepage rebuild.'},
-      ],
-    };
-
 Map<String, dynamic> nameAnswer() => {
       'evidence': 'shared deal',
       'title': 'Website redesign',
       'summary': 'The studio is reviewing the homepage copy.',
+      'charter': 'The redesign of the Northline Studio website.',
     };
 
 /// The refresh pass's answer — the description coming back unchanged, which
@@ -80,6 +72,20 @@ Map<String, dynamic> recapAnswer() => {
       'open_items': <String>['Sarah owes the photo selects to Dana'],
       'decisions': <String>['The launch moved a week'],
     };
+
+/// A storyline lane that counts its pumps and drains nothing, so the fast
+/// lane's per-assign wake can be told from its end-of-drain wake.
+class _CountingLane extends AiWorker {
+  int pumps = 0;
+
+  _CountingLane(super.store) : super(handlers: const []);
+
+  @override
+  Future<void> pump({List<({String source, String id})> first = const []}) {
+    pumps++;
+    return Future.value();
+  }
+}
 
 void main() {
   late BondDatabase db;
@@ -132,9 +138,10 @@ void main() {
       'participants_json': '[{"name":"Sarah Chen"}]',
     });
     if (vector == null) return;
-    // The message the vector implies. An embedding is written by extraction,
-    // which does not run until triage has spoken, so a conversation with a
-    // vector and nothing kept behind it is a shape the app cannot produce —
+    // The message the vector implies. An embedding is written by the assign
+    // pass, which extraction queues only for a kept message, so a
+    // conversation with a vector and nothing kept behind it is a shape the
+    // app cannot produce —
     // and one the assign pass now closes as `AssignOutcome.gated` before it
     // asks any client anything, which is not what these tests are about.
     await store.upsertMessage({
@@ -149,11 +156,15 @@ void main() {
       'body_text': 'body of kept-$key',
       'triage_status': 'triaged',
     });
+    // Hashed over the card the assign pass would build now, so the vector
+    // reads as current and no embedding client is asked for it.
+    final row = await store.getConversationRow('email', key);
+    final card = await clusteringCardFor(store, 'email', key, row!);
     await store.upsertConversationAi(
       'email',
       key,
       embedding: encodeEmbedding(vector),
-      embeddedHash: 'h-$key',
+      embeddedHash: cardHash(card),
       embedModel: EmbeddingsClient.modelTag,
     );
   }
@@ -173,26 +184,34 @@ void main() {
   }
 
   group('StorylineService', () {
-    test('membership goes to the confirm client, naming to the primary',
+    /// A judge whose every `member_of` is a yes over both bars.
+    ({StorylineJudge judge, FakeDecisionClient decision}) yesJudge() {
+      final decision = FakeDecisionClient.storyline(defaultYes: 0.9);
+      return (
+        judge: StorylineJudge(decision: decision, store: store),
+        decision: decision,
+      );
+    }
+
+    test('membership goes to the decision model, naming to the primary',
         () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
       final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final (:judge, :decision) = yesJudge();
 
-      final service = StorylineService(store, primary, confirmClient: fast);
+      final service = StorylineService(store, primary, judge: judge);
       await service.assignConversation('email', 'c1');
       // The description is queued rather than written inline, so the flow has
       // two halves now — the drain is where the naming call lives.
       await service.refresh('sl-1');
 
-      // One flow, two servers: the membership question never touched the 27B
-      // and the naming never touched the small model.
-      expect(fast.schemas, ['storyline_membership']);
+      // One flow, two models: the membership question never touched a
+      // language model and the naming never touched the decision model.
+      expect(decision.asks.map((a) => a.question),
+          [StorylineQuestion.memberOf]);
       expect(primary.schemas, ['storyline_name']);
       // And it did the work, rather than routing tidily past a no-op.
       expect(await store.membersOf('sl-1'), hasLength(2));
@@ -200,15 +219,12 @@ void main() {
           'The studio is reviewing the homepage copy.');
     });
 
-    test('the sweep names on the primary and confirms on the fast client',
+    test('the sweep names on the primary and judges on the decision model',
         () async {
-      // Five unassigned threads, three of which link — the sweep proposes one
-      // storyline and names it. Three and not two because a cosine cluster
-      // under `proposeMinClusterSize` never reaches the namer at all. The
-      // cluster is a shortlist, not a verdict, so each of its threads is then
-      // confirmed against that name, and membership is a membership question
-      // wherever it is asked from: it goes to the small server exactly as an
-      // assignment's does.
+      // Five unassigned threads. The shipped cosine grouping forms c1–c3 into
+      // the one cluster and asks no pair question (`same_effort` is the
+      // decision bench arm's). The namer only writes; the charter check and
+      // each member's `member_of` are the decision model's.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed('c2',
           vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
@@ -218,100 +234,34 @@ void main() {
       final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final (:judge, :decision) = yesJudge();
 
-      await StorylineService(store, primary, confirmClient: fast).sweep();
+      await StorylineService(store, primary, judge: judge).sweep();
 
       expect(primary.schemas, ['storyline_name']);
-      expect(fast.schemas, [
-        'storyline_membership',
-        'storyline_membership',
-        'storyline_membership',
+      expect(decision.asks.map((a) => a.question), [
+        StorylineQuestion.charterSpecific,
+        StorylineQuestion.memberOf,
       ]);
+      expect(decision.statesFor(StorylineQuestion.memberOf), hasLength(3));
       expect(await store.loadStorylines(), hasLength(1));
     });
 
-    test('the neighbourhood grouping goes to the naming client by default',
-        () async {
-      // The dark path, exercised with the test-only override rather than by
-      // flipping the const the rest of the suite reads. Grouping is prose
-      // work of the same kind naming is, so it lands on the 27B — and the
-      // membership questions it produces still go to the small server.
-      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      await seed('c2',
-          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
-      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      await seed('c4', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
-      final primary = routed('primary', {
-        'storyline_group': [groupAnswer([1, 2, 3])],
-        'storyline_name': [nameAnswer()],
-      });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
-
-      await StorylineService(
-        store,
-        primary,
-        confirmClient: fast,
-        groupingMode: GroupingMode.model,
-      ).sweep();
-
-      expect(primary.schemas, ['storyline_group', 'storyline_name']);
-      expect(fast.schemas, [
-        'storyline_membership',
-        'storyline_membership',
-        'storyline_membership',
-      ]);
-    });
-
-    test('a group client takes the grouping off the naming client', () async {
-      // The third handle Phase 3 points at a stage of its own. Naming stays
-      // where it was, which is what makes this a split rather than a move.
-      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      await seed('c2',
-          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:30:00Z');
-      await seed('c3', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      final primary = routed('primary', {
-        'storyline_name': [nameAnswer()],
-      });
-      final grouper = routed('grouper', {
-        'storyline_group': [groupAnswer([1, 2, 3])],
-      });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
-
-      await StorylineService(
-        store,
-        primary,
-        confirmClient: fast,
-        groupClient: grouper,
-        groupingMode: GroupingMode.model,
-      ).sweep();
-
-      expect(grouper.schemas, ['storyline_group']);
-      expect(primary.schemas, ['storyline_name']);
-    });
-
-    test('without a confirm client everything stays on the one it was given',
-        () async {
+    test('without a judge a membership question throws, and asks no language '
+        'model', () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
-      final only = routed('only', {
-        'storyline_membership': [confirmAnswer()],
-        'storyline_name': [nameAnswer()],
-      });
+      final only = routed('only', {'storyline_name': [nameAnswer()]});
 
-      final service = StorylineService(store, only);
-      await service.assignConversation('email', 'c1');
-      await service.refresh('sl-1');
+      await expectLater(
+        StorylineService(store, only).assignConversation('email', 'c1'),
+        throwsA(isA<StateError>()),
+      );
 
-      // The pre-phase-3 behaviour, and what every other caller in the tests
-      // still relies on: one client answers both jobs.
-      expect(only.schemas, ['storyline_membership', 'storyline_name']);
+      // There is no fallback: a service built for the user actions alone has
+      // nobody to ask, and says so rather than guessing on the naming model.
+      expect(only.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
     });
   });
 
@@ -353,21 +303,18 @@ void main() {
       );
     });
 
-    test('storylineServiceProvider wires the split', () async {
+    test('storylineServiceProvider judges on the decision client', () async {
       await seedUnnamedStoryline();
       await seed('c1', vector: vectorAt(0.9));
       final primary = routed('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = routed('fast', {
-        'storyline_membership': [confirmAnswer()],
-      });
+      final decision = FakeDecisionClient.storyline(defaultYes: 0.9);
       final container = ProviderContainer(
         overrides: [
           dbProvider.overrideWithValue(db),
-          stageLlmClientProvider.overrideWith(
-            (ref, id) => id == 'storyline_membership' ? fast : primary,
-          ),
+          stageLlmClientProvider.overrideWith((ref, id) => primary),
+          decisionClientProvider.overrideWithValue(decision),
         ],
       );
       addTearDown(container.dispose);
@@ -376,9 +323,10 @@ void main() {
       await service.assignConversation('email', 'c1');
       await service.refresh('sl-1');
 
-      // The service tests above prove the service honours a confirm client;
-      // this one proves the wiring actually passes it.
-      expect(fast.schemas, ['storyline_membership']);
+      // The service tests above prove the service asks its judge; this one
+      // proves the wiring hands it the app's decision client.
+      expect(decision.asks.map((a) => a.question),
+          [StorylineQuestion.memberOf]);
       expect(primary.schemas, ['storyline_name']);
     });
 
@@ -391,13 +339,11 @@ void main() {
       // forgot one would be invisible with a single fake.
       final clients = {
         for (final id in [
-          'storyline_membership',
           'storyline_name',
           'storyline_refresh',
           'storyline_recap',
         ])
           id: routed(id, {
-            'storyline_membership': [confirmAnswer()],
             'storyline_name': [nameAnswer()],
             'storyline_refresh': [refineAnswer()],
             'storyline_recap': [recapAnswer()],
@@ -408,6 +354,9 @@ void main() {
           dbProvider.overrideWithValue(db),
           stageLlmClientProvider.overrideWith(
             (ref, id) => clients[id] ?? routed(id, const {}),
+          ),
+          decisionClientProvider.overrideWithValue(
+            FakeDecisionClient.storyline(defaultYes: 0.9),
           ),
         ],
       );
@@ -430,8 +379,6 @@ void main() {
       await service.refresh('sl-1');
       await service.recap('sl-1');
 
-      expect(clients['storyline_membership']!.schemas,
-          everyElement('storyline_membership'));
       expect(clients['storyline_name']!.schemas, ['storyline_name']);
       expect(clients['storyline_refresh']!.schemas, ['storyline_refresh']);
       expect(clients['storyline_recap']!.schemas, ['storyline_recap']);
@@ -651,6 +598,76 @@ void main() {
       await pumpEventQueue();
 
       expect(await store.workCounts('storyline_sweep'), {'pending': 1});
+    });
+
+    test('the fast lane wires the text width and the per-assign wake',
+        () async {
+      // The real `aiWorkerProvider`, so deleting either closure from the
+      // provider fails here rather than only in the handler tests, which pass
+      // the closures by hand. The storyline lane counts its pumps; the draft
+      // lane is idle; the message-text client holds each call a moment so
+      // the calls in flight can be counted.
+      final storyline = _CountingLane(store);
+      final idleDraft = AiWorker(store, handlers: const [], gate: DrainGate());
+      addTearDown(storyline.dispose);
+      addTearDown(idleDraft.dispose);
+      final text = ScriptedLlm()
+        ..scriptFor('message_text', [
+          (LlmCall _) async {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            return {
+              'summary': 'Sarah is asking whether the launch date holds.',
+              'action_items': <String>[],
+              'deadline': '',
+              'topics': ['launch date'],
+              'project': 'Website redesign',
+            };
+          },
+        ]);
+      final container = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          storylineWorkerProvider.overrideWithValue(storyline),
+          draftWorkerProvider.overrideWithValue(idleDraft),
+          stageLlmClientProvider('message_text').overrideWithValue(text),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+      container.read(processingProvider.notifier).set(true);
+      // This Mac's text width follows its slots past three.
+      await container.read(appPrefsProvider.notifier).setProseParallel(6);
+
+      for (var i = 0; i < 6; i++) {
+        final key = 'conv-${spellDigits('$i')}';
+        await store.upsertConversation({
+          'conversation_key': key,
+          'subject': 'Launch date',
+          'state': 'waiting',
+          'last_message_at': '2026-08-28T10:00:00Z',
+        });
+        await store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'm$i',
+          'conversation_key': key,
+          'direction': 'inbound',
+          'subject': 'Launch date',
+          'from_name': 'Sarah',
+          'from_address': 'sarah@example.com',
+          'received_at': '2026-08-28T10:00:00Z',
+          'body_text': 'Can we still ship on Thursday?',
+          'triage_status': 'triaged',
+        });
+        await store.enqueueWork('extract', 'email', 'm$i');
+      }
+
+      await container.read(aiWorkerProvider).pump();
+      await pumpEventQueue();
+
+      expect(text.maxInFlight, 6);
+      expect(await store.workCounts('storyline'), {'pending': 6});
+      // One pump per queued assign, plus the end-of-drain wake.
+      expect(storyline.pumps, greaterThan(1));
     });
 
     test('the fast lane leaves the sweep alone after a drain that did nothing',

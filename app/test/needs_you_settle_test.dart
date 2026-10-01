@@ -11,8 +11,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
-/// The needs-you verdict, rendered twice: once by `notifyWorthy` in Dart and
-/// once by `needsYouSql` in SQLite.
+/// The needs-you rule, rendered twice: once by `notifyWorthy` in Dart and once
+/// by `needsYouSql` in SQLite.
 ///
 /// They have to agree, and the failure they exist to prevent is a visible one.
 /// `notifyWorthy` decides the TOAST the user sees and the `needs_you` snapshot
@@ -22,9 +22,10 @@ import 'fixtures/triage_seed.dart';
 /// tile on the home screen contradicts the notification it came from, for one
 /// message, with nothing in the app able to say which is right.
 ///
-/// The tests below pin agreement on the clause this phase added, using a
-/// message whose triage asks nothing at all: the verdict is then the only
-/// thing either side can be answering.
+/// The tests below pin agreement on the one ask both sides read — the
+/// message's needs-you probability against the slider — using a message
+/// whose triage asks nothing at all, and then one whose triage asks
+/// everything, to show triage's asks are no part of either side.
 ///
 /// One divergence is intended and documented on both sides: the SQL carries an
 /// `is_read = 0` guard and the Dart does not. The coordinator's decision table
@@ -50,11 +51,11 @@ void main() {
 
   /// One unread inbound message on a scored thread, triaged as asking NOTHING
   /// — no reply expected, no action, normal urgency, no deadline, no CTA on the
-  /// conversation — carrying [verdict] in `needs_you_verdict`.
+  /// conversation — carrying [p] in `needs_you_p`.
   ///
   /// [triageAsks] flips triage to the Jira-broadcast shape instead: a reply
-  /// expected and an action item, the two asks a judged no now outranks.
-  Future<void> seed(bool? verdict, {bool triageAsks = false}) async {
+  /// expected and an action item, neither of which asks on either side.
+  Future<void> seed(double? p, {bool triageAsks = false}) async {
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': 'conv-onboarding',
@@ -87,11 +88,11 @@ void main() {
       replyExpected: triageAsks,
       deadline: '',
     );
-    if (verdict != null) {
-      await store.writeNeedsYouVerdict(
+    if (p != null) {
+      await store.writeNeedsYouP(
         'email',
         'm-onboarding',
-        verdict: verdict,
+        p: p,
         reason: 'names the owner and asks them to pick a date',
       );
     }
@@ -99,10 +100,10 @@ void main() {
     await store.writeAttentionScore('email', 'conv-onboarding', 0.9);
   }
 
-  /// What the SQL half says about the seeded message.
-  Future<int?> sqlVerdict() async {
+  /// What the SQL half says about the seeded message at [threshold].
+  Future<int?> sqlVerdict({double threshold = 0.5}) async {
     final rows = await db.customSelect(
-      'SELECT ${needsYouSql(threshold: '0.5')} AS needs_you '
+      'SELECT ${needsYouSql(threshold: '$threshold')} AS needs_you '
       'FROM messages m WHERE m.source = ? AND m.source_message_id = ?',
       variables: [Variable('email'), Variable('m-onboarding')],
     ).get();
@@ -112,7 +113,7 @@ void main() {
   /// What the Dart half says, off the REAL candidate row — the same map shape
   /// the sweep judges, rather than one hand-built here that could quietly stop
   /// matching what the store projects.
-  Future<bool> dartVerdict() async {
+  Future<bool> dartVerdict({double threshold = 0.5}) async {
     await store.admitNotifyCandidates(
       armedAtIso: armedAt,
       recencyFloorIso: recencyFloor,
@@ -122,80 +123,68 @@ void main() {
     final row = rows.singleWhere(
       (r) => r['source_message_id'] == 'm-onboarding',
     );
-    return notifyWorthy(row, threshold: 0.5);
+    return notifyWorthy(row, threshold: threshold);
   }
 
-  // The thread's CTA is an ask of THIS message only once its text landed:
-  // triage keeps the thread's older ask in place until the message-text
-  // stage refolds it (decision-model round, Phase 6).
-  group("a thread's CTA before this message's text landed", () {
-    Future<void> seedStaleAsk({required bool textLanded}) async {
-      await seed(null);
-      // Back to the state triage leaves: classified, no text yet.
-      await db.customUpdate(
-        'UPDATE messages SET summary = NULL, action_items_json = NULL '
-        'WHERE source_message_id = ?',
-        variables: [Variable('m-onboarding')],
-      );
-      if (textLanded) {
-        await store.writeMessageText('email', 'm-onboarding',
-            summary: 'Priya asks for a date.',
-            actionItems: const ['Pick a date'],
-            deadline: '');
-      }
-      await store.updateConversationTriage('email', 'conv-onboarding',
-          ctaText: 'An older message\'s ask', ctaUrgency: 'normal');
-      await store.writeAttentionScore('email', 'conv-onboarding', 0.9);
-    }
-
-    test('is not counted on either side', () async {
-      await seedStaleAsk(textLanded: false);
-
-      expect(await sqlVerdict(), 0);
-      expect(await dartVerdict(), isFalse);
-    });
-
-    test('is counted on both sides once the text has landed', () async {
-      await seedStaleAsk(textLanded: true);
-
-      expect(await sqlVerdict(), 1);
-      expect(await dartVerdict(), isTrue);
-    });
-  });
-
-  test('a judged yes is worthy on both sides', () async {
-    await seed(true);
-
-    expect(await sqlVerdict(), 1);
-    expect(await dartVerdict(), isTrue);
-  });
-
-  test('a judged no is unworthy on both sides', () async {
-    await seed(false);
+  test("a thread's CTA is no ask on either side", () async {
+    await seed(null);
+    await store.updateConversationTriage('email', 'conv-onboarding',
+        ctaText: 'Send the appraisal', ctaUrgency: 'urgent');
+    await store.writeAttentionScore('email', 'conv-onboarding', 0.9);
 
     expect(await sqlVerdict(), 0);
     expect(await dartVerdict(), isFalse);
   });
 
-  test('an unjudged message is unworthy on both sides', () async {
+  test('a probability over the slider is worthy on both sides', () async {
+    await seed(0.9);
+
+    expect(await sqlVerdict(), 1);
+    expect(await dartVerdict(), isTrue);
+  });
+
+  test('a probability exactly at the slider is worthy on both sides',
+      () async {
+    await seed(0.5);
+
+    expect(await sqlVerdict(threshold: 0.5), 1);
+    expect(await dartVerdict(threshold: 0.5), isTrue);
+  });
+
+  test('a probability below the slider is unworthy on both sides', () async {
+    await seed(0.1);
+
+    expect(await sqlVerdict(), 0);
+    expect(await dartVerdict(), isFalse);
+  });
+
+  test('an undecided message is unworthy on both sides', () async {
     await seed(null);
 
     expect(await sqlVerdict(), 0);
     expect(await dartVerdict(), isFalse);
   });
 
-  // The judge outranks triage on both sides: a broadcast triage read as a
-  // reply expected with an action item is still not the owner's once the
-  // needs-you pass has said so.
-  test('a judged no outranks triage\'s asks on both sides', () async {
-    await seed(false, triageAsks: true);
+  // Triage's asks are no part of the rule on either side: a broadcast read
+  // as a reply expected with an action item is not the owner's while its
+  // probability sits below the slider, nor while nothing has decided it.
+  test("a low probability outranks triage's asks on both sides", () async {
+    await seed(0.1, triageAsks: true);
 
     expect(await sqlVerdict(), 0);
     expect(await dartVerdict(), isFalse);
   });
 
-  test('triage\'s asks still stand while nothing has judged', () async {
+  test("triage's asks alone ask nothing on either side", () async {
     await seed(null, triageAsks: true);
+
+    expect(await sqlVerdict(), 0);
+    expect(await dartVerdict(), isFalse);
+  });
+
+  test('the attention score gates neither side', () async {
+    await seed(0.9);
+    await store.writeAttentionScore('email', 'conv-onboarding', 0.01);
 
     expect(await sqlVerdict(), 1);
     expect(await dartVerdict(), isTrue);
@@ -205,17 +194,16 @@ void main() {
     // D5's whole claim, pinned on the two predicates that still carry a
     // `bucket <> 'later'` clause. Neither of them was changed: what changed is
     // that the automatic filing can no longer put a thread with an unanswered
-    // judged yes into Later, so the clause only ever bites on a Later a person
-    // asked for.
+    // ask over the slider into Later, so the clause only ever bites on a Later
+    // a person asked for.
     const at = '2026-09-04T09:55:00.000Z';
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': 'conv-quiet',
       'subject': 'Quarter close notes',
       'state': 'waiting',
-      // On the conversation, not on the message: it lifts the thread's score
-      // over the threshold without adding a second ask for either predicate to
-      // answer.
+      // On the conversation, not on the message: triage's loudness, which
+      // lifts the thread's score and is no ask for either predicate.
       'cta_urgency': 'urgent',
       'last_message_at': at,
       'last_inbound_at': at,
@@ -252,8 +240,8 @@ void main() {
       'm-quiet',
       jsonEncode({'intent': 'fyi', 'importance': 'low'}),
     );
-    await store.writeNeedsYouVerdict('email', 'm-quiet',
-        verdict: true, reason: 'asks the owner to confirm the close date');
+    await store.writeNeedsYouP('email', 'm-quiet',
+        p: 0.9, reason: 'asks the owner to confirm the close date');
 
     // The sweep both scores and files, so it writes the bucket this asserts on
     // and the score both predicates read.
@@ -281,15 +269,16 @@ void main() {
     expect(notifyWorthy(row, threshold: 0.5), isTrue);
   });
 
-  test('the migration keeps a copy of the SQL that predates the column', () {
-    // `from7To8` replays on every v1..v7 database an at-or-past-v10 build
-    // opens, and `needs_you_verdict` does not exist until v10. The frozen arm
-    // is what keeps that migration from asking for a column that is not there
-    // yet; the default is what every live caller gets.
+  test('the migration keeps a copy of the SQL that predates the columns', () {
+    // `from7To8` replays on every v1..v7 database a newer build opens, and
+    // neither needs-you column exists yet when it runs. The frozen copy is
+    // what keeps that migration from asking for a column that is not there;
+    // the live rule is what every live caller gets. `progress_sql_test` pins
+    // the frozen text byte for byte.
     expect(
-      needsYouSql(threshold: '0.5', verdict: false),
-      isNot(contains('needs_you_verdict')),
+      needsYouSqlV8Frozen(backfillNeedsYouThreshold),
+      isNot(contains('needs_you')),
     );
-    expect(needsYouSql(threshold: '0.5'), contains('needs_you_verdict'));
+    expect(needsYouSql(threshold: '0.5'), contains('needs_you_p'));
   });
 }

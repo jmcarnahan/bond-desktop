@@ -11,9 +11,6 @@ void main() {
   group('the constants', () {
     test('are the values fitted on the golden set', () {
       expect(DecisionPolicy.gateDrop, 0.70);
-      expect(DecisionPolicy.needsYouYes, 0.65);
-      expect(DecisionPolicy.needsYouYesCold, 0.85);
-      expect(DecisionPolicy.needsYouNo, 0.35);
       expect(DecisionPolicy.booleanYes, 0.50);
       expect(DecisionPolicy.replyYes, 0.50);
     });
@@ -128,8 +125,9 @@ void main() {
       );
     });
 
-    test('the no reason', () {
-      expect(needsYouNoReason, 'Nothing here asks for you.');
+    test('needsYouP is the decision\'s p(yes), or null with no head', () {
+      expect(needsYouP(fakeAnswers(needsYou: 0.37)), closeTo(0.37, 1e-9));
+      expect(needsYouP(DecisionAnswers(const {})), isNull);
     });
   });
 }
