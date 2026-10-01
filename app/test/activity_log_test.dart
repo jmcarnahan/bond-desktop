@@ -180,6 +180,24 @@ void main() {
       expect(detailOf(await only())['resync'], isTrue);
     });
 
+    test('a refresh or recap that waited for a settled mailbox is quiet',
+        () async {
+      // Run per extraction burst on a cold start: its backlog counts are
+      // never zero, so the `unsettled` marker, not the numbers, is what
+      // keeps it out of the panel.
+      for (final kind in ['storyline_refresh', 'storyline_recap']) {
+        log.note({'unsettled': 1, 'extract': 40, 'triage': 0, 'assign': 12});
+        await log.record(kind, source: 'email', entityId: 'sl-1');
+      }
+      expect(await store.recentActivity(), isEmpty);
+
+      // The marker quiets only the kinds that are quiet already: the same
+      // note on a triage row is still a row.
+      log.note({'unsettled': 1});
+      await log.record('triage', entityId: 'm1');
+      expect((await only())['kind'], 'triage');
+    });
+
     test('only an ok pass is ever quiet, and only an ok pass stamps', () async {
       await log.record(
         'sync_mail',

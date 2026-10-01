@@ -219,9 +219,9 @@ provenance through the queue):
 |---|---|
 | `addThread` / `removeThread` | always — a user filing by hand is telling the app the group changed, and is looking at it |
 | `setCharter('')` | always — this is what makes the About block's "clearing it lets the model redraft" promise true |
-| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2`. The growth clause needs a recorded count — a described-but-uncounted row is a pre-feature one, and the sweep catch-up owns it. And on a sync drain the gate is moot anyway: any assignment moves `member_hash`, so the same drain's sweep catch-up queues the refresh whatever the gate said. What it really governs is drains with no pending sweep row — a UI pump |
+| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2`. The growth clause needs a recorded count — a described-but-uncounted row is a pre-feature one, and the sweep catch-up owns it. And on a sync drain over a settled mailbox the gate is moot anyway: any assignment moves `member_hash`, so the same drain's sweep catch-up queues the refresh whatever the gate said. What it really governs is drains with no pending sweep row — a UI pump — and a cold start, when the catch-up waits for the mailbox to settle |
 | `recruit` tail | when it filed ≥1 thread |
-| `sweep` catch-up | every live storyline where `refreshed_member_hash IS NOT member_hash` |
+| `sweep` catch-up | on a settled pass only: every live storyline where `refreshed_member_hash IS NOT member_hash` |
 
 The assign gate is the cost control: threads arrive one at a time all day, and
 re-describing on each would dial the 27B per filed thread to rewrite the same
@@ -241,6 +241,25 @@ than `!=` — `!=` answers NULL for the never-described rows that most need
 finding — and its NULL-on-both-sides case excludes the member-less tombstone
 an older build wrote for a declined cluster, as that row's `dismissed` status
 already does.
+
+**It waits for a settled mailbox.** `refresh` asks the sweep's three floors
+(below, *The settle gate*) after its convergence check and before its first
+write or call, and while any floor is exceeded it notes `unsettled: 1` with
+the `extract`, `triage` and `assign` counts and returns; the row closes
+`done`. The note is numbers only and `ActivityLog` treats the `unsettled`
+marker as quiet on these kinds, so the wait writes no panel row (the counts
+still reach an open panel on the transient event): on a cold start the pass
+runs on every extraction burst, and the sweep's own `deferred` row is the
+visible record of the wait. The storyline lane is one worker, and the owner's second replay of
+2026-10-01 had namer calls of 10–32 s under the eight-wide text load running
+between assigns while the assign backlog climbed to 40–65 and the pool stopped
+growing. A description written mid-cold-start is rewritten as soon as the
+members move again anyway. Nothing is lost: the deferred storyline's
+`refreshed_member_hash` still differs from its `member_hash`, so the sweep's
+catch-up queues it — and that catch-up runs only on a settled pass, or every
+unsettled wake would queue a refresh that defers at once. A refresh the owner
+caused (a charter edit during a cold start) waits too, and the first settled
+sweep brings it within a minute of settling.
 
 **Two branches.** Describing a storyline for the first time and re-describing
 one are different questions:
@@ -435,20 +454,34 @@ message — and converges as silence.
 | `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story. This is `removeThread`'s route in |
 | `_propose` | always, on the kept path — the recap handler drains after the sweep's, so a storyline born in this pass shows its recap in the same drain rather than a sync later |
 | `DraftNotifier._sendChat` | a chat reply the user sent from this app, per storyline the chat is filed in. **The only outbound row wired directly**, because it is the only one no ingest will ever see: the chat send writes its own row with the id Graph assigned, and the next pull skips it as already-known |
-| `sweep` catch-up | every live storyline holding a message the recap has not read: `recap_through` NULL, or a newer `received_at` than it. `staleRecapStorylineIds` repeats `recentStorylineMessages`' gate exclusion (`triage_status <> 'skipped'` unless `gate_reason = 'teams_source'`) and its own `received_at` guard, because the question asked must be the one the pass answers — a storyline queued over messages the recap cannot read would stamp no watermark and be queued again forever. A storyline with no qualifying messages at all is left alone for the same reason |
+| `sweep` catch-up | on a settled pass only: every live storyline holding a message the recap has not read: `recap_through` NULL, or a newer `received_at` than it. `staleRecapStorylineIds` repeats `recentStorylineMessages`' gate exclusion (`triage_status <> 'skipped'` unless `gate_reason = 'teams_source'`) and its own `received_at` guard, because the question asked must be the one the pass answers — a storyline queued over messages the recap cannot read would stamp no watermark and be queued again forever. A storyline with no qualifying messages at all is left alone for the same reason |
 
 The recap's catch-up matters more than the refresh's, because every other
 trigger here fires on a message *arriving*: a storyline that is already
 described and has had no new mail reaches none of them. That is every row the
 v10 backfill called described — none of which had ever been recapped — plus any
 recap wakeup a `processing` row swallowed. Like the refresh's, it runs at the
-head of `sweep` so an early return does not skip it.
+head of `sweep` so an early return does not skip it, and like the refresh's,
+only on a settled pass.
+
+**It waits for a settled mailbox**, as the refresh does and for the same
+reason — a 27B call of 7–21 s on the replay, holding the one storyline lane
+while a cold start's assigns queue behind it. The check sits after the
+staleness gate (an up-to-date recap stays a quiet return) and before the
+model; an unsettled one notes the refresh's quiet `unsettled: 1` with the
+three counts and returns. Its watermark stays behind the newest message, which
+is exactly what the settled catch-up selects. Two things the owner can see
+wait with it: a **Remove from storyline** during a cold start clears the recap
+text (see *Removing a thread*) and the rewrite waits for the mailbox to settle,
+so the storyline shows no recap until then; and a reply's recap (below) lands
+once the mailbox settles rather than on the sync that folded the reply in.
 
 It is also the **reply path**, and deliberately so. Every outbound row but the
 chat send's lands at ingest — the sent copy folding in from `sentitems`, or a
 reply sent from Outlook, a phone, or Teams itself arriving on a pull — and every
-sync ends by requeueing `storyline_sweep`, so the sync that folds a reply in is
-the drain that recaps it. Wiring a per-message requeue into the mail ingest
+sync ends by requeueing `storyline_sweep`, so on a settled mailbox the sync
+that folds a reply in is the drain that recaps it (during a cold start, the
+first settled sweep after it). Wiring a per-message requeue into the mail ingest
 would buy no latency and would cost a `storylineIdsFor` query per message inside
 `_ingestPage`'s page transaction, on first syncs that run to six figures. One
 indexed question per sync replaces it.
@@ -524,8 +557,9 @@ and what was decided stay on the storyline screen, where there is room to read
 them rather than skim past them. Beside the *Storylines* heading is a quiet
 **Sync**, which runs the ordinary sync (both connectors, exactly as the poll
 and the rail's refresh do) and reads *Syncing…* while it does: nothing
-storyline-shaped is needed, because that pass ends by requeueing the sweep and
-the sweep's catch-ups drain the refreshes and recaps that were owed. The same
+storyline-shaped is needed, because that pass ends by requeueing the sweep and,
+on a settled mailbox, the sweep's catch-ups drain the refreshes and recaps that
+were owed (during a cold start they wait for it to settle). The same
 button sits at the end of the storyline screen's own button row, so opening a
 storyline does not mean going back to the overview to ask for the pass that
 brings it up to date. It is one action and one flag: the screen owns the sync
@@ -821,8 +855,11 @@ remaining threads alone rather than carried forward from a paragraph that still
 narrates the thread that left. The recap pass is handed the previous recap and
 told to carry forward what is still true, and it has no way to know which
 sentence came from which thread, so nothing short of the clear could get the
-departed thread out of it. An addition clears nothing: new mail adds facts, it
-never invalidates the ones already written, and continuity is the point there.
+departed thread out of it. During a cold start the queued recap waits for a
+settled mailbox (*The recap pass*), so until then the storyline shows no
+recap at all rather than the old one. An addition clears nothing: new mail
+adds facts, it never invalidates the ones already written, and continuity is
+the point there.
 
 **The gate is the third remover.** Three things take a thread out, and the
 `blocked_by` on the block says which: the owner (`'user'`, an audit queued
@@ -902,9 +939,13 @@ sweep that is `processing` is at the server and is never doubled, and nothing
 here passes `refreshCreatedAt`: the pipeline noticing that the mailbox moved is
 not a person asking for something now.
 
-**The order inside the pass is an argument.** First the two catch-ups, the
-refresh and the recap, because they heal wakeups that were LOST and the pass
-returns early on most sweeps. Then the expiry. Then the pool's SIZE
+**The order inside the pass is an argument.** First the backlog, read once
+(`StorylineService._pulse`, the three floors below) and handed to the gate so
+it is not read twice. Then the two catch-ups, the refresh and the recap,
+because they heal wakeups that were LOST and the pass returns early on most
+sweeps — on a SETTLED pass only, because both passes wait for one and a
+catch-up on an unsettled pass would queue work that defers at once on every
+wake. Then the expiry. Then the pool's SIZE
 (`MessageStore.storylinePoolCount`, a COUNT whose clauses mirror the sweep's
 loop over `conversationsWithEmbeddings` — unassigned, unblocked, embedded, not
 done — so a deferred or room-full pass never reads a blob), then the settle

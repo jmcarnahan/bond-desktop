@@ -99,8 +99,10 @@ void main() {
   var thumbnailsForgotten = 0;
   var settleWaits = 0;
   Completer<void>? settleGate;
+  var refreshes = 0;
 
   setUp(() {
+    refreshes = 0;
     processingSetTo.clear();
     toasts.clear();
     thumbnailsForgotten = 0;
@@ -148,7 +150,7 @@ void main() {
               settleWaits++;
               await settleGate?.future;
             },
-            onRefreshNow: () async {},
+            onRefreshNow: () async => refreshes++,
             onSignOut: () async {},
             onOpenActivityLog: () {},
             onForgetThumbnails: () => thumbnailsForgotten++,
@@ -260,6 +262,28 @@ void main() {
     // message is back on the queue — the reset's own enqueue, not a sync's.
     expect(await store.workCounts('extract'), {'pending': 1});
     expect(thumbnailsForgotten, 1);
+  });
+
+  testWidgets('Forget everything and re-sync starts the inbox\'s pulls',
+      (tester) async {
+    await store.setPref(processingOnKey, 'false');
+    await pumpHost(tester);
+    await openSection(tester, 'Processing');
+    expect(refreshes, 0);
+
+    await tapKey(tester, SettingsScreen.forgetResyncKey);
+    await tapKey(tester, SettingsScreen.forgetResyncConfirmKey);
+    // Bounded, as the reset case above: the wipe, the cursor clear and the
+    // two pulls are a chain of store awaits, each one a frame here.
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+
+    // Mail and Teams together, through the inbox's own refresh, which
+    // raises the pull flags a second reset waits out: the minute poll pulls
+    // mail only, and without this a cold start's chats waited for a refresh
+    // press or a resume.
+    expect(refreshes, 1);
   });
 
   testWidgets("Forget all Needs You answers undoes every press and the line "

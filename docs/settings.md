@@ -821,8 +821,13 @@ The sync's own backlog calls are bounded by the lookback floor — right for a
 poll, wrong for a reset, which is the one path that re-pends mail older than
 the window — and they still run on every pass, idempotent over what the reset
 filed. **Forget everything and re-sync** queues nothing: it deletes the
-mailbox, so the next poll fetches the window again and ingest queues what it
-brings. See [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+mailbox, then starts the mail pull and the Teams pull together, through the
+inbox's own refresh (`SettingsHost.onRefreshNow`, the Sync button's path,
+which raises both pull flags a later reset waits out), so the window is
+fetched again at once and ingest queues what it brings. Teams goes with mail because the minute
+poll pulls mail only — without it a cold start's chats waited for a refresh
+press or a resume and landed minutes behind the mail. See
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
 
 **What the owner decided by hand survives a clear.** A message they restored
 keeps its `gate_override`, and one they ignored keeps `gate_reason = 'user'`

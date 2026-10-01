@@ -8002,17 +8002,25 @@ void main() {
         expect(detail['assign'], 11);
       });
 
-      test('a deferred pass still heals a refresh and still expires',
-          () async {
-        // The order inside the pass, read off one row. The catch-ups run
-        // before everything because they heal wakeups that were LOST, and the
-        // expiry runs before the deferral because a mailbox that never
-        // settles would otherwise never break its own deadlock.
+      /// A storyline owed both a refresh (its description is behind its
+      /// members) and a recap (its kept message was never read), with both
+      /// work rows closed — the shape only the sweep's heal can find.
+      Future<void> seedOwed() async {
         await seedStoryline(store);
         await store.updateStoryline('sl-1',
             memberHash: memberHashOf(['member']));
         await store.writeWork('storyline_refresh', 'email', 'sl-1',
             status: 'done');
+        await store.writeWork('storyline_recap', 'email', 'sl-1',
+            status: 'done');
+      }
+
+      test('a deferred pass still expires but heals nothing', () async {
+        // The expiry runs before the deferral because a mailbox that never
+        // settles would otherwise never break its own deadlock. The heal does
+        // not: refresh and recap wait for a settled mailbox, so queueing them
+        // now would only have them defer at once on every wake.
+        await seedOwed();
         await seedSuggestion('sl-stale', daysOld: 15);
         for (var i = 0; i < 11; i++) {
           await store.enqueueWork('storyline', 'email', 'q$i');
@@ -8023,8 +8031,148 @@ void main() {
         expect(detail['deferred'], 'unsettled');
         expect(detail['expired'], 1);
         expect((await store.getStoryline('sl-stale'))!.status, 'dismissed');
-        final work = await store.nextPendingWork('storyline_refresh');
-        expect(work?['entity_id'], 'sl-1');
+        expect(await store.nextPendingWork('storyline_refresh'), isNull);
+        expect(await store.nextPendingWork('storyline_recap'), isNull);
+      });
+
+      test('a settled pass heals the refresh and the recap', () async {
+        await seedOwed();
+
+        // Nothing unassigned to cluster, so no model is dialled either way.
+        await sweepAndRecord(fakeLlm(const {}));
+
+        expect((await store.nextPendingWork('storyline_refresh'))?['entity_id'],
+            'sl-1');
+        expect((await store.nextPendingWork('storyline_recap'))?['entity_id'],
+            'sl-1');
+      });
+    });
+
+    group('refresh and recap wait for a settled mailbox', () {
+      /// What a refresh or recap noted, recorded as the worker would. A
+      /// wait is QUIET — no stored row — so the note is read off the event
+      /// the log streams to an open panel, and [stored] says whether a row
+      /// was written.
+      Future<({Map<String, Object?> detail, bool stored})> noted(
+        ActivityLog log,
+        String kind,
+      ) async {
+        final before = (await store.recentActivity()).length;
+        final event = log.events.first;
+        await log.record(kind, source: 'email', entityId: 'sl-1');
+        final after = (await store.recentActivity()).length;
+        return (detail: (await event).detail, stored: after > before);
+      }
+
+      /// Eleven assigns outstanding: unsettled by the assign floor.
+      Future<void> queueAssigns() async {
+        for (var i = 0; i < 11; i++) {
+          await store.enqueueWork('storyline', 'email', 'q$i');
+        }
+      }
+
+      Future<void> drainAssigns() async {
+        for (var i = 0; i < 11; i++) {
+          await store.writeWork('storyline', 'email', 'q$i', status: 'done');
+        }
+      }
+
+      test('a refresh defers unsettled and runs once settled', () async {
+        // Never described, so the refresh is owed and would dial the namer.
+        // The member hash is written so the heal's SQL can see it too.
+        await seedStoryline(store);
+        await store.updateStoryline('sl-1',
+            memberHash: memberHashOf(['member']));
+        await queueAssigns();
+        final llm = fakeLlm({'storyline_refresh': [refineAnswer()]});
+        final log = ActivityLog(store);
+        addTearDown(log.dispose);
+        final service = StorylineService(store, llm,
+            judge: sweepJudge(store, llm), activityLog: log);
+
+        await service.refresh('sl-1');
+
+        final (:detail, :stored) = await noted(log, 'storyline_refresh');
+        expect(detail['unsettled'], 1);
+        expect(detail['assign'], 11);
+        expect(detail['extract'], 0);
+        expect(detail['triage'], 0);
+        // Quiet: a cold start runs this per extraction burst, and the
+        // sweep's own `deferred` row is the visible record of the wait.
+        expect(stored, isFalse);
+        expect(llm.calls, isEmpty);
+        // Still behind its members, which is what the settled heal selects.
+        expect((await store.getStoryline('sl-1'))!.refreshedMemberHash, isNull);
+        expect(await store.staleRefreshStorylineIds(), ['sl-1']);
+
+        await drainAssigns();
+        await service.refresh('sl-1');
+
+        expect(llm.schemas, ['storyline_refresh']);
+        expect((await store.getStoryline('sl-1'))!.refreshedMemberHash,
+            isNotNull);
+      });
+
+      test('a refresh with nothing to do stays quiet when unsettled',
+          () async {
+        // The convergence check comes first, so a described storyline never
+        // notes a wait for a pass that had nothing to defer.
+        await seedStoryline(store);
+        await markDescribed('sl-1', ['member']);
+        await queueAssigns();
+        final llm = fakeLlm(const {});
+        final log = ActivityLog(store);
+        addTearDown(log.dispose);
+
+        await StorylineService(store, llm,
+                judge: sweepJudge(store, llm), activityLog: log)
+            .refresh('sl-1');
+
+        expect((await noted(log, 'storyline_refresh')).detail['unsettled'],
+            isNull);
+        expect(llm.calls, isEmpty);
+      });
+
+      test('a recap defers unsettled and runs once settled', () async {
+        await seedStoryline(store, keptInbound: false);
+        await seedMessage(store, 'member', 'm1',
+            receivedAt: '2026-08-01T09:00:00Z', body: 'the copy looks good');
+        await queueAssigns();
+        final llm = fakeLlm({'storyline_recap': [recapAnswer()]});
+        final log = ActivityLog(store);
+        addTearDown(log.dispose);
+        final service = StorylineService(store, llm,
+            judge: sweepJudge(store, llm), activityLog: log);
+
+        await service.recap('sl-1');
+
+        final (:detail, :stored) = await noted(log, 'storyline_recap');
+        expect(detail['unsettled'], 1);
+        expect(detail['assign'], 11);
+        expect(stored, isFalse);
+        expect(llm.calls, isEmpty);
+        expect((await store.getStoryline('sl-1'))!.recapThrough, isNull);
+        expect(await store.staleRecapStorylineIds(), ['sl-1']);
+
+        await drainAssigns();
+        await service.recap('sl-1');
+
+        expect(llm.schemas, ['storyline_recap']);
+        expect((await store.getStoryline('sl-1'))!.recapThrough,
+            '2026-08-01T09:00:00Z');
+      });
+
+      test('an audit does not wait', () async {
+        // Decision-model work, and fast: a removal's re-judge runs whatever
+        // the backlog.
+        await seedStoryline(store);
+        await queueAssigns();
+        final llm = fakeLlm({'member_of': [confirmAnswer()]});
+
+        await StorylineService(store, llm, judge: sweepJudge(store, llm))
+            .audit('sl-1');
+
+        expect(llm.callsFor('member_of'), 1);
       });
     });
 

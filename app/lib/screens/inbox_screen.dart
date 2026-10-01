@@ -1180,9 +1180,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The Storylines pane's Sync: [_refreshAll] and nothing else.
   ///
   /// There is no second, storyline-shaped sync to build. The ordinary pull
-  /// ends by requeueing the sweep, and the sweep's catch-ups drain the
-  /// refreshes and recaps that were owed — so asking for mail is already
-  /// asking for the storylines to be brought up to date.
+  /// ends by requeueing the sweep, and on a settled mailbox the sweep's
+  /// catch-ups drain the refreshes and recaps that were owed — so asking for
+  /// mail is already asking for the storylines to be brought up to date.
+  /// During a cold start both wait for the mailbox to settle.
   Future<void> _syncNow() async {
     if (_syncing) return;
     setState(() => _syncing = true);

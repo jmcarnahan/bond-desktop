@@ -7139,8 +7139,10 @@ FROM storylines s''';
   /// sent must make the recap stale, or the recap goes on saying they owe an
   /// answer they have already given. It is also what makes this catch-up the
   /// prompt path rather than a slow one — every sync ends by requeueing
-  /// `storyline_sweep`, and the recap handler drains after the sweep's, so the
-  /// sync that folds a sent reply in is the drain that recaps it.
+  /// `storyline_sweep`, and the recap handler drains after the sweep's, so on
+  /// a settled mailbox the sync that folds a sent reply in is the drain that
+  /// recaps it. The sweep runs this only on a settled pass (the recap waits
+  /// for one), so during a cold start it is the first settled sweep after.
   ///
   /// The `received_at` guard is the same anti-loop for the timestampless: the
   /// recap takes its watermark from the newest message in the window and

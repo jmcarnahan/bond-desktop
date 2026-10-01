@@ -84,6 +84,9 @@ class SettingsHost extends ConsumerStatefulWidget {
 
   /// The list AND whatever thread is open, handed over as the future it is so
   /// the Sync section's button can hold 'Refreshing…' until both pulls land.
+  /// Also how Forget everything and re-sync starts its pulls: it is the
+  /// inbox's own path, so both pull flags go up and [waitForPullsToSettle]
+  /// sees them.
   final Future<void> Function() onRefreshNow;
 
   /// The rail's Sign out, the whole wipe.
@@ -684,6 +687,16 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     // a resumed cursor over an empty mailbox is the re-sync quietly not
     // happening.
     await store.clearSyncCursors();
+    // Both pulls now rather than at the next poll, and Teams with mail: the
+    // poll fetches mail only, and Teams waits for a refresh press or a
+    // resume, so a cold start's chats landed minutes behind its mail and took
+    // the fast lane from the text it was writing. The press is the owner's,
+    // which is the one thing that may start a Teams pull. Through the inbox's
+    // own refresh rather than the notifier, so both pull flags go up and a
+    // second reset pressed while this pull is still paging waits for it like
+    // any other — up to the settle timeout; see [_resetPipeline].
+    if (!mounted) return;
+    unawaited(widget.onRefreshNow());
   }
 
   /// What both resets do around the one statement that differs.
@@ -730,11 +743,18 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
   /// is the inbox's own two pull flags, which every pull that screen starts
   /// raises, polled a quarter-second at a time and given up on after the
   /// inbox's own settle timeout — see [SettingsHost.waitForPullsToSettle],
-  /// which is the seam this awaits. **The window it does not close** is a
-  /// pull started somewhere other than that screen, and a pull that outlasts
-  /// the timeout: for the mail rows that is harmless, since a message landing
-  /// a moment after the delete is simply `pending`, and for the cursor it is
-  /// why [_forgetAndResync] clears the cursors a second time on the way out.
+  /// which is the seam this awaits. [_forgetAndResync] starts its own pulls
+  /// through that screen too ([SettingsHost.onRefreshNow]), so they raise the
+  /// same flags. **The window it does not close** is a pull started somewhere
+  /// other than that screen, and a pull that outlasts the timeout: for the
+  /// mail rows that is harmless, since a message landing a moment after the
+  /// delete is simply `pending`, and for the cursor it is why
+  /// [_forgetAndResync] clears the cursors a second time on the way out. That
+  /// second clear covers only a pass that lands BEFORE it: a cold-start pull
+  /// still paging past the timeout (a second Forget pressed early in the
+  /// first one's re-sync) writes its cursor after the clear, and its own
+  /// re-sync joins that pass rather than starting a fresh one — the next
+  /// Forget, pressed once the pull is done, is the remedy.
   ///
   /// Throws rather than returning quietly when processing is on. The buttons
   /// are already inert, so this is unreachable from the UI, and a caller that

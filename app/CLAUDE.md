@@ -325,7 +325,13 @@ enforce the ones that are commands.
   and Forget everything; the gate reads the size from
   `storylinePoolCount`, a COUNT that mirrors the pool loop clause for clause,
   so keep the two in step). The sync-time
-  `requeueSweep()` is the durable trigger.
+  `requeueSweep()` is the durable trigger. The same floors (one reader,
+  `StorylineService._pulse`) make `refresh` and `recap` return, quietly
+  noted `unsettled: 1` (`ActivityLog` keeps that marker's row out of the
+  panel), before any call or write, so a cold start's single
+  storyline lane spends itself on assign and the sweep; the sweep's
+  stale-refresh/recap heal runs only on a settled pass, or every wake would
+  queue work that defers at once. Audit and recruit never defer.
 - A `StorylineTuning` number moves only with a `make golden-sweep` row on each
   side, and a diagnostic flip of one is a single shell command that puts the
   constant back before it exits.
