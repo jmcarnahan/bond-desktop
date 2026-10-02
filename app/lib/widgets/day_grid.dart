@@ -594,6 +594,15 @@ class _DayGridState extends State<DayGrid> {
             // "9 AM" down the side, the agenda's clock, whatever the
             // device's 24-hour setting says.
             timelineStringBuilder: _timeline,
+            // Hours only on the axis; see [_HourTimeLine].
+            timeline: (context, heightPerMinute, timeOfDayRange,
+                    eventBeingDragged, visibleDateTimeRange) =>
+                _HourTimeLine(
+              timeOfDayRange: timeOfDayRange,
+              heightPerMinute: heightPerMinute,
+              eventBeingDragged: eventBeingDragged,
+              visibleDateTimeRange: visibleDateTimeRange,
+            ),
           ),
         ),
       ),
@@ -626,4 +635,27 @@ class _DayGridState extends State<DayGrid> {
         ? DateFormat('h a').format(t)
         : DateFormat('h:mm a').format(t);
   }
+}
+
+/// kalender's timeline labels every 30, 15 or even 5 minutes as soon as the
+/// grid is tall enough for the text to fit (`segmentDuration`), which on a
+/// desktop window is a wall of "5:30 AM" down the side. An hour per label
+/// here, whatever the height: the half-hour lines still draw, and the labels
+/// a drag shows at a tile's ends keep their minutes, because those go
+/// through the string builder and not through this.
+class _HourTimeLine extends TimeLine {
+  const _HourTimeLine({
+    required super.timeOfDayRange,
+    required super.heightPerMinute,
+    required super.eventBeingDragged,
+    required super.visibleDateTimeRange,
+  });
+
+  @override
+  int segmentDuration(
+    KalenderTimeRange timeOfDayRange,
+    double heightPerMinute,
+    double itemHeight,
+  ) =>
+      60;
 }

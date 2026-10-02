@@ -122,6 +122,19 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
   }
 
+  testWidgets('the axis labels hours only, however tall the grid',
+      (tester) async {
+    // kalender's own timeline would label every 30, 15 or 5 minutes once
+    // the text fits; a desktop window fits them all. The hour lines read
+    // "9 AM"; the half hours are lines, not words.
+    await pumpGrid(tester);
+
+    expect(find.text('9 AM'), findsOneWidget);
+    expect(find.text('3 PM'), findsOneWidget);
+    expect(find.text('9:30 AM'), findsNothing);
+    expect(find.text('3:15 PM'), findsNothing);
+  });
+
   testWidgets('a timed event and an all-day event render by label',
       (tester) async {
     await pumpGrid(tester, events: [
