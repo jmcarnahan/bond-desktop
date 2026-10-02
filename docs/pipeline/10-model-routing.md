@@ -115,7 +115,7 @@ and no routing of its own; it follows the decision role wherever that runs.
 reads the `intent` answer triage already stored in `message_decisions` for a
 thread's newest inbound message, and a `needs_reply` thread whose answer is
 `scheduling` at p ≥ `DecisionPolicy.booleanYes` gets the thread header's
-**Find a time** and a row in today's "Scheduling asks · N"
+**Find a time** and a row in the Day column's "Scheduling asks · N"
 ([14-calendar.md](14-calendar.md#find-a-time)). A message the decision model
 never read is simply not an ask.
 

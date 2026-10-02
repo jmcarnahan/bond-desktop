@@ -47,7 +47,7 @@ class CommandOutcome {
   const CommandOutcome({
     required this.plan,
     required this.path,
-    required this.parsed,
+    this.parsed,
   });
 
   final CommandPlan plan;
@@ -57,8 +57,9 @@ class CommandOutcome {
   final CommandPath path;
 
   /// The parse the plan was made from, after the model's phrases and any
-  /// bound choice.
-  final ParsedCommand parsed;
+  /// bound choice. Null for a proposal that did not come from typed text (the
+  /// asks column's slot pick).
+  final ParsedCommand? parsed;
 }
 
 const String modelOffSentence = "The model isn't running; try a plainer "
@@ -148,7 +149,7 @@ class CommandRouter {
     await _activity.record(
       'calendar_command',
       detail: {
-        'action': outcome.parsed.action.wire,
+        'action': (outcome.parsed?.action ?? CommandAction.unknown).wire,
         'path': outcome.path.name,
         'outcome': outcome.plan.outcomeWord,
       },
@@ -166,9 +167,11 @@ class CommandRouter {
     required List<CommandBind> binds,
     required CommandOutcome? resume,
   }) async {
-    if (resume != null) {
-      final p = _bind(resume.parsed, binds,
-          now: now, zone: zone, events: events);
+    // An outcome with no parse (a slot picked in the asks column) has
+    // nothing to resume; the text is read afresh.
+    final resumed = resume?.parsed;
+    if (resume != null && resumed != null) {
+      final p = _bind(resumed, binds, now: now, zone: zone, events: events);
       return _finish(p, path: resume.path, now: now, zone: zone, today: today);
     }
 

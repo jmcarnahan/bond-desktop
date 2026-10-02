@@ -221,6 +221,21 @@ void main() {
     expect((plan.write as MoveEvent).startUtc, at(thu, 15));
   });
 
+  test('a resume with no parse (an asks-column proposal) reads the text '
+      'afresh', () async {
+    final three = mine('three', today, 15, 'Design sync');
+    final out = await submit(
+      'move my 3pm to Thursday',
+      events: [three],
+      resume: const CommandOutcome(
+          plan: CannotDo('nothing to resume'), path: CommandPath.lexicon),
+    );
+    expect(out.path, CommandPath.lexicon);
+    expect(out.parsed!.action, CommandAction.move);
+    final plan = out.plan as CalendarProposal;
+    expect((plan.write as MoveEvent).startUtc, at(thu, 15));
+  });
+
   test('an unclear one asks calendar_intent once, and Dart resolves the date',
       () async {
     llm.answer(
@@ -236,7 +251,7 @@ void main() {
     expect(llm.calls, hasLength(1));
     expect(llm.userMessages.single, contains('Now: Wed 14 Oct 2026'));
     expect(out.path, CommandPath.generative);
-    expect(out.parsed.action, CommandAction.create);
+    expect(out.parsed!.action, CommandAction.create);
     final plan = out.plan as CalendarProposal;
     final create = plan.write as CreateEvent;
     // The model sent words; the instant is the resolver's.
@@ -259,8 +274,8 @@ void main() {
         ));
     final out = await submit('catch up w/ Dana sometime');
     expect(llm.calls, hasLength(1));
-    expect(out.parsed.when.isEmpty, isTrue);
-    expect(out.parsed.people.unresolved, isEmpty);
+    expect(out.parsed!.when.isEmpty, isTrue);
+    expect(out.parsed!.people.unresolved, isEmpty);
     expect(directory.queries, isEmpty);
     // No time in the request: openings, never a proposal at a made-up time.
     expect(out.plan, isA<SlotChoice>());
@@ -279,7 +294,7 @@ void main() {
         ));
     final out = await submit('design sync w/ Dana next Tuesday 3pm pls');
     expect(llm.calls, hasLength(1));
-    expect(out.parsed.duration, isNull);
+    expect(out.parsed!.duration, isNull);
     final create = (out.plan as CalendarProposal).write as CreateEvent;
     // The default length, not the model's hour.
     expect(create.endUtc.difference(create.startUtc),
@@ -299,7 +314,7 @@ void main() {
       final out = await submit('invite Dana to lunch Friday');
       expect(llm.calls, hasLength(1));
       expect(out.path, CommandPath.lexicon);
-      expect(out.parsed.action, CommandAction.create);
+      expect(out.parsed!.action, CommandAction.create);
       expect(out.plan, isA<SlotChoice>());
     });
   });
@@ -412,7 +427,7 @@ void main() {
       final second = await press(text, first, 0);
       final create = (second.plan as CalendarProposal).write as CreateEvent;
       expect(create.attendees, ['rsmith@contoso.com']);
-      expect(second.parsed.people.unresolved, isEmpty);
+      expect(second.parsed!.people.unresolved, isEmpty);
       expect(directory.queries, ['Bob']);
     });
 
@@ -474,7 +489,7 @@ void main() {
           await submit('lunch with Danielle Friday 2pm', people: const [danB]);
       expect(llm.calls, hasLength(1));
       expect(directory.queries, isNot(contains('Dan')));
-      expect(out.parsed.people.matched, isEmpty);
+      expect(out.parsed!.people.matched, isEmpty);
       final create = (out.plan as CalendarProposal).write as CreateEvent;
       expect(create.attendees, isEmpty);
     });
@@ -550,7 +565,7 @@ void main() {
           events: [three]);
       expect(head.asked, ['put my 3pm on Thursday']);
       expect(out.path, CommandPath.head);
-      expect(out.parsed.action, CommandAction.move);
+      expect(out.parsed!.action, CommandAction.move);
       expect(llm.calls, isEmpty, reason: 'a head at 0.9 needs no model');
       final rows = [
         for (final r in await store.recentActivity(limit: 10))
@@ -571,7 +586,7 @@ void main() {
           events: [three]);
       expect(head.asked, hasLength(1));
       expect(out.path, CommandPath.lexicon);
-      expect(out.parsed.action, CommandAction.move);
+      expect(out.parsed!.action, CommandAction.move);
     });
 
     test('a head that is not there (null) or throws falls through', () async {
@@ -584,7 +599,7 @@ void main() {
             headed(head), 'move my 3pm to Thursday',
             events: [three]);
         expect(out.path, CommandPath.lexicon);
-        expect(out.parsed.action, CommandAction.move);
+        expect(out.parsed!.action, CommandAction.move);
       }
     });
 

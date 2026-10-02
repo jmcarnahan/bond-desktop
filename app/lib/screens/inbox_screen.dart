@@ -51,7 +51,7 @@ import '../services/calendar/brief_gatherer.dart' show briefQuickCheck;
 import '../services/calendar/meeting_brief_handler.dart' show BriefRequest;
 import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
 import '../services/calendar/calendar_writes.dart'
-    show CalendarWrite, MoveEvent;
+    show CalendarWrite, CreateEvent, MoveEvent;
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
 import '../services/calendar/command/command_lexicon.dart'
     show looksLikeCalendarCommand;
@@ -62,7 +62,8 @@ import '../services/calendar/command/command_types.dart'
     show CommandGuess, CommandPath, KnownPerson, ParsedCommand;
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
-import '../services/calendar/find_time.dart' show searchFindTime;
+import '../services/calendar/find_time.dart'
+    show findTimeReplyLine, findTimeSubject, searchFindTime;
 import '../services/calendar/scheduling_ask.dart' show schedulingAskKey;
 import '../services/calendar/overlaps.dart'
     show FreeSlot, Overlaps, overlapsForEvent;
@@ -132,6 +133,7 @@ import '../widgets/preview/preview_engines.dart';
 import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
+import '../widgets/scheduling_ask_rows.dart';
 import '../widgets/settings_screen.dart';
 import '../widgets/side_panel.dart';
 import '../widgets/sort_menu.dart';
@@ -512,6 +514,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Bumped on every submit, so an answer that arrives after a newer Enter,
   /// an Escape or a trip off the stop is dropped rather than drawn.
   int _commandSerial = 0;
+
+  /// Each scheduling ask's inline Find a time in the Day column, by
+  /// `'$source|$key'`: open or folded, the pills, the search and its answer,
+  /// and whether its invite went out. Session-only, like the rail's own
+  /// collapse state; an ask that stops being one simply stops being drawn.
+  final Map<String, _AskSearch> _askSearches = {};
+
+  /// The ask whose slot the standing proposal was built from, so the card's
+  /// write going through marks that ask. Cleared with the command
+  /// ([_forgetCommand]); [_proposalInvites] says whether its write invited
+  /// anybody (an ask with nobody else on it adds to the owner's calendar).
+  AskKey? _proposalAsk;
+  bool _proposalInvites = false;
 
   /// Words ⌘K's "Ask Day" row handed over, waiting for the bar to take them.
   /// One-shot: the bar submits them a frame after it sees them, and the
@@ -4279,6 +4294,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSelectDay: _selectDay,
       onOpenInvites: _openInvites,
       onOpenEvent: _openEvent,
+      // The Day column's asks, while there is a calendar to find time on.
+      schedulingAsks: calendar.shown && calendar.zone != null
+          ? _askRows(_schedulingAsksIn(conversations))
+          : const [],
+      askCallbacks: SchedulingAskCallbacks(
+        onToggle: _toggleAsk,
+        onMinutes: (source, key, minutes) =>
+            _changeAsk(source, key, (e) => e.minutes = minutes),
+        onWindow: (source, key, window) =>
+            _changeAsk(source, key, (e) => e.window = window),
+        onPickSlot: (source, key, slot) =>
+            unawaited(_pickAskSlot(source, key, slot)),
+        onPutInReply: (source, key) =>
+            unawaited(_askPutInReply(source, key)),
+        onOpen: (source, key) => _select(key, source: source),
+      ),
     );
   }
 
@@ -5131,12 +5162,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // mirror is hidden (SDK mode, a missing scope) there is none to ask.
       commandBar: shows ? _commandBar(zone, today) : null,
       planCard: shows ? _commandCard(zone, today) : null,
-      // Today's threads asking for a time. Only today: an ask is about now,
-      // and another day's agenda is about that day.
-      schedulingAsks: day == today
-          ? _schedulingAsksIn(conversations)
-          : const <Conversation>[],
-      onFindTime: _openFindTime,
       briefHeadlines: shows
           ? ref.watch(briefHeadlinesProvider(day)).valueOrNull ??
               const <String, String>{}
@@ -5343,6 +5368,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _commandBusy = false;
     _commandSerial += 1;
     _pendingCommandText = null;
+    _proposalAsk = null;
+    _proposalInvites = false;
   }
 
   void _clearCommand() {
@@ -5384,6 +5411,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _commandText = text;
       _commandBinds = binds;
       _pendingCommandText = null;
+      // A typed Enter is not the asks column's slot: its card must not mark
+      // the ask whose proposal it replaces. A choice pressed on that card
+      // answers it, so the mark stays.
+      if (choice == null) {
+        _proposalAsk = null;
+        _proposalInvites = false;
+      }
     });
     CommandOutcome outcome;
     final now = DateTime.now();
@@ -5514,6 +5548,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final outcome = _commandOutcome;
     if (outcome == null) return null;
     final serial = _commandSerial;
+    final ask = _proposalAsk;
+    final invites = _proposalInvites;
     return CommandPlanCard(
       key: ValueKey('command-plan-$serial'),
       plan: outcome.plan,
@@ -5523,6 +5559,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       writer: ref.read(calendarWritesProvider),
       onDone: (message, undo) {
         _calendarWriteDone(message, undo);
+        // A slot picked in the asks column: that ask folds, and says its
+        // invite went out when one did — even when a newer card stands now,
+        // because the write this card started did go through.
+        final entry = ask == null
+            ? null
+            : _askSearches['${ask.source}|${ask.key}'];
+        if (entry != null && mounted) {
+          setState(() {
+            entry.expanded = false;
+            if (invites) entry.invited = true;
+          });
+        }
         // Only the card this write came from: a new Enter while it was in
         // flight put up another card, and that one stands.
         if (serial == _commandSerial) _clearCommand();
@@ -5839,19 +5887,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ),
       );
     }
-    final owner = _ownerRecord.address?.trim().toLowerCase();
-    final seen = <String>{};
-    final people = <FindTimePerson>[
-      for (final p in thread.participants)
-        if ((p.email ?? '').trim().isNotEmpty &&
-            p.email!.trim().toLowerCase() != owner &&
-            // A Teams roster entry is no address; a repeat is one person.
-            p.email!.contains('@') &&
-            seen.add(p.email!.trim().toLowerCase()))
-          // Lowercased, as the de-duplication above reads it: the search,
-          // the invite's attendees and the pills all key on the address.
-          (name: p.name ?? '', address: p.email!.trim().toLowerCase()),
-    ];
+    final people = _otherPeople(thread);
     final target = (source: thread.source, conversationKey: thread.id);
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -5872,6 +5908,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           durationMinutes: durationMinutes,
           window: window,
           zone: zone,
+          surface: 'pane',
         ),
         onPutInReply: (text) => _putInReply(target, text),
         writer: ref.read(calendarWritesProvider),
@@ -5892,13 +5929,228 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
+  /// [thread]'s other people with an address: the owner left out, a Teams
+  /// roster entry (no `@`) left out, each address once and lowercased. The
+  /// pane and the asks column both search on it, so the two cannot drift.
+  List<FindTimePerson> _otherPeople(Conversation thread) {
+    final owner = _ownerRecord.address?.trim().toLowerCase();
+    final seen = <String>{};
+    return <FindTimePerson>[
+      for (final p in thread.participants)
+        if ((p.email ?? '').trim().isNotEmpty &&
+            p.email!.trim().toLowerCase() != owner &&
+            // A Teams roster entry is no address; a repeat is one person.
+            p.email!.contains('@') &&
+            seen.add(p.email!.trim().toLowerCase()))
+          // Lowercased, as the de-duplication above reads it: the search,
+          // the invite's attendees and the pills all key on the address.
+          (name: p.name ?? '', address: p.email!.trim().toLowerCase()),
+    ];
+  }
+
+  List<String> _otherAddresses(Conversation thread) =>
+      [for (final p in _otherPeople(thread)) p.address];
+
+  /// The loaded thread by its source and key, read rather than watched: the
+  /// asks column's callbacks run outside build.
+  Conversation? _loadedConversation(String source, String key) {
+    final state = ref.read(conversationsProvider);
+    if (state is! ConversationsLoaded) return null;
+    for (final c in state.conversations) {
+      if (c.id == key && c.source == source) return c;
+    }
+    return null;
+  }
+
+  /// Who asked: the newest inbound sender's name from the thread's
+  /// participants, else their address.
+  static String _askedBy(Conversation c) {
+    final from = (c.latestInboundFrom ?? '').trim();
+    if (from.isEmpty) return '';
+    for (final p in c.participants) {
+      if ((p.email ?? '').toLowerCase() == from.toLowerCase() &&
+          (p.name ?? '').trim().isNotEmpty) {
+        return p.name!.trim();
+      }
+    }
+    return from;
+  }
+
+  /// The Day column's rows for [asks], each with its search as it stands.
+  List<SchedulingAskRow> _askRows(List<Conversation> asks) =>
+      [for (final c in asks) _askRow(c)];
+
+  SchedulingAskRow _askRow(Conversation c) {
+    final e = _askSearches['${c.source}|${c.id}'] ?? _AskSearch();
+    final subject = (c.subject ?? '').trim();
+    return SchedulingAskRow(
+      source: c.source,
+      key: c.id,
+      subject: subject.isEmpty ? '(no subject)' : subject,
+      askedBy: _askedBy(c),
+      expanded: e.expanded,
+      busy: e.busy,
+      invited: e.invited,
+      minutes: e.minutes,
+      window: e.window,
+      result: e.result,
+    );
+  }
+
+  /// Opens an ask (folding every other: one open at a time) and runs its
+  /// default search at once when it has no answer yet, or folds it, keeping
+  /// the answer for the next open.
+  void _toggleAsk(String source, String key) {
+    final id = '$source|$key';
+    final entry = _askSearches.putIfAbsent(id, _AskSearch.new);
+    if (entry.expanded) {
+      setState(() => entry.expanded = false);
+      return;
+    }
+    // Nothing to search with, so nothing to open: pills over a search that
+    // can never run would be a row that lied.
+    if (_loadedConversation(source, key) == null ||
+        ref.read(calendarZoneProvider).valueOrNull == null) {
+      return;
+    }
+    setState(() {
+      for (final e in _askSearches.values) {
+        e.expanded = false;
+      }
+      entry.expanded = true;
+    });
+    if (entry.result == null && !entry.busy) {
+      unawaited(_runAskSearch(source, key));
+    }
+  }
+
+  /// A pill pressed: the new length or week, and the search again.
+  void _changeAsk(
+      String source, String key, void Function(_AskSearch e) change) {
+    final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
+    setState(() => change(entry));
+    unawaited(_runAskSearch(source, key));
+  }
+
+  /// One ask's search. Its serial is bumped first, so an answer a newer pill
+  /// press overtook is dropped rather than drawn — `_pickCommandSlot`'s
+  /// guard, per ask.
+  Future<void> _runAskSearch(String source, String key) async {
+    final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
+    final thread = _loadedConversation(source, key);
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (thread == null || zone == null) return;
+    final serial = ++entry.serial;
+    setState(() => entry.busy = true);
+    FindTimeResult result;
+    try {
+      result = await _findTimeSearch(
+        addresses: _otherAddresses(thread),
+        durationMinutes: entry.minutes,
+        window: entry.window,
+        zone: zone,
+        surface: 'column',
+      );
+    } on Object {
+      result = const FindTimeResult(
+          note: "Couldn't reach the calendar to find a time.");
+    }
+    if (!mounted || serial != entry.serial) return;
+    setState(() {
+      entry.busy = false;
+      entry.result = result;
+    });
+  }
+
+  /// A slot picked in the asks column: the day it falls on, with the invite
+  /// standing on it as the command bar's proposal — the card with who it
+  /// emails and Send, and the grid's Proposed tile. Nothing new confirms:
+  /// the card's flow is the one every write goes through.
+  Future<void> _pickAskSlot(String source, String key, FreeSlot slot) async {
+    final thread = _loadedConversation(source, key);
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (thread == null || zone == null) return;
+    final today = zone.dateOf(DateTime.now().toUtc());
+    _selectDay(zone.dateOf(slot.startUtc));
+    final addresses = _otherAddresses(thread);
+    final write = CreateEvent.propose(
+      subject: findTimeSubject(thread.subject),
+      startUtc: slot.startUtc,
+      endUtc: slot.endUtc,
+      attendees: addresses,
+      isOnlineMeeting: addresses.isNotEmpty,
+    );
+    await _showProposal(write,
+        zone: zone,
+        today: today,
+        ask: (source: source, key: key),
+        invites: addresses.isNotEmpty);
+  }
+
+  /// [write]'s dry run, drawn as the command card's proposal — the path a
+  /// slot pressed on the card itself takes ([_pickCommandSlot]), with no
+  /// typed text behind it, so whatever the bar held goes first.
+  ///
+  /// [ask] is the ask the slot came from, set in the same frame the card
+  /// lands so the card's write marks it ([invites]: whether anybody is on
+  /// it); a newer command drops it with the card.
+  Future<void> _showProposal(
+    CalendarWrite write, {
+    required CalendarZone zone,
+    required CalendarDate today,
+    AskKey? ask,
+    bool invites = false,
+  }) async {
+    setState(() {
+      _forgetCommand();
+      _commandBusy = true;
+    });
+    final serial = _commandSerial;
+    CommandPlan plan;
+    try {
+      plan = await ref
+          .read(commandPlannerProvider)
+          .propose(write, zone: zone, today: today);
+    } on Object catch (e) {
+      debugPrint('find a time: slot proposal failed: ${e.runtimeType}');
+      plan = const CannotDo('Something went wrong reading that.');
+    }
+    if (!mounted || serial != _commandSerial) return;
+    setState(() {
+      _commandBusy = false;
+      _commandOutcome =
+          CommandOutcome(plan: plan, path: CommandPath.lexicon);
+      _proposalAsk = ask;
+      _proposalInvites = ask != null && invites;
+    });
+  }
+
+  /// Put in reply from the asks column: the thread opens, and every slot
+  /// shown goes into its reply box as one line.
+  ///
+  /// The thread's draft is read first: opened from the column, its box has
+  /// not loaded yet, and a line staged over an unread draft would drop the
+  /// owner's words already in it.
+  Future<void> _askPutInReply(String source, String key) async {
+    final slots = _askSearches['$source|$key']?.result?.slots ?? const [];
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (slots.isEmpty || zone == null) return;
+    final target = (source: source, conversationKey: key);
+    _select(key, source: source);
+    await ref.read(draftProvider(target).notifier).load();
+    if (!mounted) return;
+    _putInReply(target, findTimeReplyLine(slots, zone));
+  }
+
   /// One Find a time search, and its activity row: how many slots, whose
-  /// calendars, how many people, which week — counts and enum words only.
+  /// calendars, how many people, which week, and where it was asked from
+  /// (`pane` or `column`) — counts and enum words only.
   Future<FindTimeResult> _findTimeSearch({
     required List<String> addresses,
     required int durationMinutes,
     required FindTimeWindow window,
     required CalendarZone zone,
+    required String surface,
   }) async {
     MailboxSettings? hours;
     try {
@@ -5921,6 +6173,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       'slots': result.slots.length,
       'people': addresses.length,
       'window': window.wire,
+      'surface': surface,
     }));
     return result;
   }
@@ -8972,4 +9225,18 @@ String needsYouPressSaid(NeedsYouPress press, {required bool remove}) {
   final head = remove ? 'Removed from Needs You' : 'Added to Needs You';
   if (press.changed == 0) return '$head.';
   return '$head — and ${press.changed} like it.';
+}
+
+/// One scheduling ask's inline search in the Day column — see
+/// [_InboxScreenState._askSearches].
+class _AskSearch {
+  bool expanded = false;
+  int minutes = 30;
+  FindTimeWindow window = FindTimeWindow.thisWeek;
+  bool busy = false;
+  FindTimeResult? result;
+  bool invited = false;
+
+  /// Bumped per search, so only the newest answer lands.
+  int serial = 0;
 }

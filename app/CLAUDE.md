@@ -1006,6 +1006,13 @@ that bite.
     search for the owner alone uses `freeSlotsInRange`.
   - Windows are built from components (`findTimeWindowUtc`).
   - "Put in reply" writes through `_stage`, the composer's explicit seam.
+  - The asks list is the Day column's `SCHEDULING ASKS · N` section
+    (`SchedulingAskTile`, prop-driven; the inbox owns the searches in
+    `_askSearches`); the agenda carries no asks group. A slot pick is the
+    command proposal path (`_showProposal` → `_commandOutcome`), never a
+    second confirm. `_proposalAsk` is the slot-pick → card hand-off;
+    `_showProposal`, `_forgetCommand` and a typed Enter clear it, and the
+    card's onDone marks the ask before its serial guard.
 - **Inbox widget tests** reach the real `McpCalendarBackend` through
   `calendarSyncProvider`, which fails fast and silently. To observe the sync,
   build a recording `CalendarSync` subclass INSIDE the test body

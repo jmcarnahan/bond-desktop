@@ -213,8 +213,9 @@ alone, and only the setters that move `_section` clear it.
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
-| a row in today's **Scheduling asks · N** | that thread, in main (`_select`) |
-| its **Find a time** button | that thread in main, with `FindTimePane` over it (`_openFindTime`) |
+| a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time); the header and its chevron fold the section and bring it back |
+| a slot in an open ask | the slot's day (`_selectDay`) with the invite standing as the command card's proposal and the grid's `Proposed` tile (`_showProposal`) |
+| an ask's **Put in reply** / **Open thread** | that thread, in main (`_select`), with the slots staged in its reply box / as it is |
 
 **Find a time** (`FindTimePane`, `docs/pipeline/14-calendar.md` "Find a
 time") is an overlay on the MAIN thread, the pick-storyline picker's

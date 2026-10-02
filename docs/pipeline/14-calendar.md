@@ -46,8 +46,10 @@ use. None of them goes to the cloud.
    needle that looks like a calendar request to the bar
    ([Commands](#commands)).
 7. **Find a time.** When the decision model reads a thread as asking for a
-   time, the thread gets a pane of real free slots. They can go into the
-   reply or out as an invite ([Find a time](#find-a-time)).
+   time, the thread is listed in the Day column's Scheduling asks and gets a
+   pane of real free slots. They can go into the reply or out as an invite,
+   and a slot picked in the column is shown on its day before anything is
+   sent ([Find a time](#find-a-time)).
 
 **The models.**
 
@@ -1376,7 +1378,7 @@ later.
 ## Find a time
 
 **What happens.** A thread asking the owner for a time gets a way to answer
-it with real free slots, on the thread and on today's agenda. No chat model
+it with real free slots, on the thread and in the Day column. No chat model
 is involved: the signal is the decision model's, already stored, and the
 slots are the calendar's.
 
@@ -1447,8 +1449,17 @@ never throws):
   two `Z` instants (the server reads offset-bearing bounds as they are; its
   zone is an `options` key for offset-less bounds, not a parameter — the
   handoff's §3.5 signature is wrong there, and the deployed tool refused a
-  top-level `timezone` on the first live press), the length and at most
-  three candidates (source `graph`).
+  top-level `timezone` on the first live press), the length and five
+  candidates, of which the best three are kept (source `graph`). They rank
+  by how many people are free — each attendee whose
+  `attendeeAvailability` word is `free`, plus the owner when
+  `organizerAvailability` is — then Graph's `confidence`, then the sooner
+  start, because Graph's own order put a slot one person could not make
+  above one everyone could. Each kept slot carries that count
+  (`FindTimeResult.availability`, a `SlotAvailability` of `free` out of the
+  people ASKED plus the owner), so an attendee Graph does not answer for
+  counts as not free, and an entry for someone not asked (the owner's own
+  address) counts for nothing; a `local` slot has none.
 - Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
   the mailbox's working hours (source `local`; `find_meeting_times` refuses an
   empty list — gotcha 28).
@@ -1480,15 +1491,55 @@ only its sentence, never a false all-clear.
   and one with nobody on it (**Add to calendar**) goes straight on with its
   Undo (the Writes policy). A sent invite toasts and returns to the thread.
 
-**Today's agenda.** `DayPane` draws **Scheduling asks · N** after today's
-rows (also on an empty day, under "Nothing on your calendar."): each thread's
-subject, who asked (the newest inbound sender's name from the participants,
-else the address), and a **Find a time** button that selects the thread and
-opens the pane over it; the row itself opens the thread. Today only, and
-agenda view only; `buildDayItems` is unchanged — the group is the pane's.
+**The Day column.** The Day stop's list column (`AppRail`, 260 px) draws
+**SCHEDULING ASKS · N** above the Day section (Invites, the day rows), one
+`SchedulingAskTile` per ask (`app/lib/widgets/scheduling_ask_rows.dart`),
+hidden at zero asks and while the calendar is not shown. The agenda carries
+no asks group: the day view is about the day. The section is dismissable and
+comes back: its chevron AND its header label fold the rows to the header,
+which keeps its count (`_asksCollapsed` in the rail's state, session-only),
+and the same press brings them back; neither selects a section. The rows are
+prop-driven — the inbox owns every search in `_askSearches`, by
+`'$source|$key'`, and hands the rail a `SchedulingAskRow` per ask with six
+callbacks.
+
+- **Folded**, a row is two lines: the subject and who asked (the newest
+  inbound sender's name from the participants, else the address).
+- **Tapping it** opens it and folds any other (one open at a time), and runs
+  the default search at once — 30 minutes, this week — when it has no answer
+  yet; tapping again folds it and keeps the answer.
+- **Open**, it adds two pill rows, `min 30 · 45 · 60` and `This week · Next
+  week`; a press searches again, and an answer a newer press overtook is
+  dropped (a serial per ask). "Finding…" while a search runs. Then up to
+  three slots, each a full-width tap target: "Tue Oct 20 · 10:00–10:30 AM",
+  over the owner's own hard overlap in the rail's accent when the mirror has
+  one, else who can make it — `Everyone free` / `1 of 2 free` (graph) or
+  `your free time` (local); a note that comes with slots (the
+  unsupported-account sentence) sits above them. No slots says the note, else "No free time found
+  this week — try next week." Under them **Put in reply** (only with slots)
+  and **Open thread**, then the caption "when everyone is free" / "from your
+  calendar".
+- **A slot picked** shows it in context: `_selectDay` moves the pane to the
+  slot's day (today is the agenda of today), and `_showProposal` dry-runs a
+  `CreateEvent.propose` (subject "Re: <thread subject>", the thread's other
+  addresses as attendees — `_otherPeople`, the same list the pane's With row
+  shows — online when anyone is invited) through
+  `commandPlannerProvider.propose` and stands it as `_commandOutcome`. So the
+  command bar's `CommandPlanCard` draws it at the top of that day — the
+  summary, "This emails: …", **Send** and Cancel — and the grid draws the
+  `Proposed` ghost tile. The press goes through the card's
+  `CalendarWriteFlow`, whose strip names who is emailed; nothing new
+  confirms. Its outcome has no parse (`CommandOutcome.parsed` is null for a
+  proposal that came from no typed text). When the card's write goes
+  through, the ask folds and, when the invite had anyone on it, reads
+  **Invite sent** under its subject for the rest of the session.
+- **Put in reply** opens the thread and stages every slot shown as one line
+  through `_putInReply`, as the pane's button does. **Open thread** opens the
+  thread (`_select`).
 
 **Activity.** Kind `find_time`, labelled **Find a time**: one row per search,
-`detail: {source: graph|local, slots, people, window: this_week|next_week}` —
+`detail: {source: graph|local, slots, people, window: this_week|next_week,
+surface: column|pane}` (where the search was asked from) —
 "Find a time — 3 slots (graph)" — and one per action, `{action: put_in_reply |
 send_invite | add_to_calendar}` — "Find a time — put in reply", "Find a time —
 invite sent", "Find a time — added to calendar" (a slot with nobody on it; the

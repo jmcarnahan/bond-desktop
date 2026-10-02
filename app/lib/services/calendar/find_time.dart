@@ -37,10 +37,36 @@ enum FindTimeWindow {
       };
 }
 
+/// How many of the people on a `graph` slot are free: the attendees Graph
+/// answered for, plus the owner as organiser.
+@immutable
+class SlotAvailability {
+  final int free;
+  final int of;
+
+  const SlotAvailability({required this.free, required this.of});
+
+  bool get everyone => free >= of;
+
+  /// The slot's second line in the asks column.
+  String get caption => everyone ? 'Everyone free' : '$free of $of free';
+
+  @override
+  bool operator ==(Object other) =>
+      other is SlotAvailability && other.free == free && other.of == of;
+
+  @override
+  int get hashCode => Object.hash(free, of);
+
+  @override
+  String toString() => 'SlotAvailability($free of $of)';
+}
+
 /// What one search found.
 @immutable
 class FindTimeResult {
-  /// At most three, soonest first.
+  /// At most three: soonest first from the mirror, and from Graph the ones
+  /// the most people are free for ([searchFindTime] says how they rank).
   final List<FreeSlot> slots;
 
   /// `graph` when everyone's calendars answered, `local` when only the
@@ -57,11 +83,17 @@ class FindTimeResult {
   /// `graph` slot should have none; the mirror can still know better.
   final Map<FreeSlot, Overlaps> overlaps;
 
+  /// Each slot's head count of who is free. Filled for `graph` only: the
+  /// mirror knows the owner's calendar and nobody else's, so a `local` slot
+  /// has no entry.
+  final Map<FreeSlot, SlotAvailability> availability;
+
   const FindTimeResult({
     this.slots = const [],
     this.source = 'local',
     this.note,
     this.overlaps = const {},
+    this.availability = const {},
   });
 }
 
@@ -124,6 +156,12 @@ const int _dayEndHour = 18;
 /// otherwise — and when the account cannot read others' — the owner's own
 /// mirror (`find_meeting_times` refuses an empty list; gotcha 28).
 ///
+/// Graph is asked for five candidates and the best three are kept, ranked by
+/// how many people are free (the attendees answering `free`, plus the owner
+/// when the organiser's word is `free`), then Graph's own confidence, then
+/// the sooner start. Graph's order alone put a slot one person could not make
+/// above one everyone could.
+///
 /// Never throws: a calendar error is an empty result with its sentence.
 Future<FindTimeResult> searchFindTime({
   required CalendarBackend backend,
@@ -151,7 +189,8 @@ Future<FindTimeResult> searchFindTime({
   }
 
   FindTimeResult withOverlaps(List<FreeSlot> slots, String source,
-          {String? note}) =>
+          {String? note,
+          Map<FreeSlot, SlotAvailability> availability = const {}}) =>
       FindTimeResult(
         slots: slots,
         source: source,
@@ -160,6 +199,7 @@ Future<FindTimeResult> searchFindTime({
           for (final s in slots)
             s: findOverlaps(events, s.startUtc, s.endUtc, zone: zone),
         },
+        availability: availability,
       );
 
   FindTimeResult local({String? note}) => withOverlaps(
@@ -187,11 +227,30 @@ Future<FindTimeResult> searchFindTime({
       durationMinutes: durationMinutes,
       windowStartUtc: w.startUtc,
       windowEndUtc: w.endUtc,
-      maxCandidates: 3,
+      maxCandidates: 5,
     );
+    final ranked = [
+      for (final s in found)
+        (suggestion: s, availability: _availabilityOf(s, addresses)),
+    ]..sort((a, b) {
+        final byFree = b.availability.free.compareTo(a.availability.free);
+        if (byFree != 0) return byFree;
+        final byConfidence =
+            b.suggestion.confidence.compareTo(a.suggestion.confidence);
+        if (byConfidence != 0) return byConfidence;
+        return a.suggestion.startUtc.compareTo(b.suggestion.startUtc);
+      });
+    final kept = ranked.take(3).toList();
     return withOverlaps(
-      [for (final s in found.take(3)) FreeSlot(s.startUtc, s.endUtc)],
+      [
+        for (final k in kept)
+          FreeSlot(k.suggestion.startUtc, k.suggestion.endUtc),
+      ],
       'graph',
+      availability: {
+        for (final k in kept)
+          FreeSlot(k.suggestion.startUtc, k.suggestion.endUtc): k.availability,
+      },
     );
   } on CalendarRefused catch (e) {
     if (e.code == 'unsupported_account') return local(note: findTimeLocalNote);
@@ -216,6 +275,24 @@ Future<FindTimeResult> searchFindTime({
       note: "Couldn't reach the calendar to find a time.",
     );
   }
+}
+
+/// Who is free for one suggestion, out of the people ASKED plus the owner:
+/// each address in [asked] whose word is `free`, plus the owner when the
+/// organiser's is. Someone Graph did not answer for counts as not free, and
+/// an attendee entry outside [asked] (the owner's own address, say) counts
+/// for nothing, so nobody is counted twice.
+SlotAvailability _availabilityOf(MeetingTimeSuggestion s, List<String> asked) {
+  final words = {
+    for (final e in s.attendeeAvailability.entries)
+      e.key.trim().toLowerCase(): e.value.toLowerCase(),
+  };
+  final people = {for (final a in asked) a.trim().toLowerCase()};
+  var free = s.organizerAvailability.toLowerCase() == 'free' ? 1 : 0;
+  for (final a in people) {
+    if (words[a] == 'free') free += 1;
+  }
+  return SlotAvailability(free: free, of: people.length + 1);
 }
 
 /// "Tue 14 Oct 10:00–10:30 AM PDT": one slot, absolute, with the zone's

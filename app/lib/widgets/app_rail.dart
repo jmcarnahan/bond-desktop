@@ -20,6 +20,7 @@ import 'find_filter.dart';
 import 'people_rooms.dart';
 import 'possible_storylines_fold.dart';
 import 'processing_hint.dart';
+import 'scheduling_ask_rows.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
@@ -332,6 +333,10 @@ class AppRail extends StatefulWidget {
   /// [onNewStoryline] is given.
   static const Key newStorylineKey = ValueKey('storyline-new');
 
+  /// The Day column's Scheduling asks header label, and its chevron.
+  static const Key asksHeaderKey = ValueKey('rail-asks-header');
+  static const Key asksChevronKey = ValueKey('rail-asks-chevron');
+
   final List<Conversation> conversations;
 
   /// Suggestions and live storylines together, suggestions first. Empty is
@@ -542,6 +547,16 @@ class AppRail extends StatefulWidget {
   /// somewhere on a host that has no side panel to open it in.
   final void Function(String eventId)? onOpenEvent;
 
+  /// The threads asking for a time, drawn as the Day column's **Scheduling
+  /// asks · N** section above the days. Built by the host, which owns each
+  /// row's search; empty, or a calendar not shown, draws no section.
+  final List<SchedulingAskRow> schedulingAsks;
+
+  /// What an ask row's presses do. Null, or a null [calendarZone], draws the
+  /// folded heads only and nothing opens — a convenience for a test about
+  /// the section rather than the rows.
+  final SchedulingAskCallbacks? askCallbacks;
+
   const AppRail({
     super.key,
     required this.conversations,
@@ -594,6 +609,8 @@ class AppRail extends StatefulWidget {
     this.onSelectDay,
     this.onOpenInvites,
     this.onOpenEvent,
+    this.schedulingAsks = const [],
+    this.askCallbacks,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -607,6 +624,11 @@ class _AppRailState extends State<AppRail> {
   /// Everything starts open. A section the user closed stays closed for the
   /// life of the screen.
   final Set<RailSection> _collapsed = {};
+
+  /// The Day column's Scheduling asks, folded to their header. Its own flag
+  /// rather than a member of [_collapsed]: the asks share the Day stop's
+  /// section with the days, and closing one must not close the other.
+  bool _asksCollapsed = false;
 
   static const double _rowHeight = 32;
 
@@ -664,7 +686,7 @@ class _AppRailState extends State<AppRail> {
       case RailSection.needsYou:
         return _needsYouSection(collapsible: false);
       case RailSection.day:
-        return _daySection();
+        return [..._asksSection(), ..._daySection()];
       case RailSection.storylines:
         return _storylinesSection(collapsible: false);
       case RailSection.people:
@@ -911,11 +933,55 @@ class _AppRailState extends State<AppRail> {
                 : null,
       );
 
+  /// The Day column's threads asking for a time, above the days.
+  ///
+  /// The header and its chevron both fold the rows away and bring them back:
+  /// the section is dismissable without being lost, and its count stays in
+  /// view while it is folded. Neither selects anything, since the Day stop is
+  /// already where the reader is. Not narrowed by Find, the day rows' rule.
+  List<Widget> _asksSection() {
+    if (!widget.calendarShown || widget.schedulingAsks.isEmpty) {
+      return const [];
+    }
+    void toggle() => setState(() => _asksCollapsed = !_asksCollapsed);
+    final zone = widget.calendarZone;
+    final callbacks = widget.askCallbacks;
+    return [
+      _header(
+        RailSection.day,
+        label: 'Scheduling asks · ${widget.schedulingAsks.length}',
+        badge: null,
+        collapsed: _asksCollapsed,
+        collapsible: true,
+        onLabelTap: toggle,
+        onChevronTap: toggle,
+        labelKey: AppRail.asksHeaderKey,
+        chevronKey: AppRail.asksChevronKey,
+        highlight: false,
+      ),
+      if (!_asksCollapsed)
+        for (final row in widget.schedulingAsks)
+          if (zone != null && callbacks != null)
+            SchedulingAskTile(
+              key: ValueKey('ask-tile-${row.source}|${row.key}'),
+              row: row,
+              zone: zone,
+              callbacks: callbacks,
+            )
+          else
+            _calendarRow(label: row.subject, selected: false, onTap: null),
+      const SizedBox(height: BondSpacing.s12),
+    ];
+  }
+
   /// The Day stop's column: the invites row, then one row per upcoming day.
   ///
   /// Neither Find nor the unread toggle touches it. A day is not a thread, and
   /// a column of days that thinned out while the reader typed a name would say
   /// their Thursday had emptied.
+  ///
+  /// Not collapsible: the days are what the stop is for, and the asks section
+  /// above it has its own chevron.
   List<Widget> _daySection() {
     final today = widget.today;
     final rows = <Widget>[
@@ -1070,7 +1136,9 @@ class _AppRailState extends State<AppRail> {
   ///
   /// [collapsible] is false when this section is the ONLY thing in the column:
   /// there is nothing for a chevron to reveal underneath it, and one that
-  /// emptied the column would be an affordance that lied.
+  /// emptied the column would be an affordance that lied. The Day stop's days
+  /// keep that rule even under the Scheduling asks section (see
+  /// [_daySection]).
   ///
   /// [action] is a section-wide control, rendered after the badge and before
   /// the chevron — the one place in the row that is neither the label's target
@@ -1079,6 +1147,11 @@ class _AppRailState extends State<AppRail> {
   ///
   /// [label] overrides the section's own name on the header — the Today
   /// section is a slice of the Day stop and says so by name.
+  ///
+  /// [onLabelTap] and [onChevronTap] replace the two targets' usual acts —
+  /// the Scheduling asks header folds itself from both, on a flag of its own
+  /// — and [highlight] false keeps it from lighting up as the selected
+  /// section beside the Day header that really is.
   Widget _header(
     RailSection section, {
     required Widget? badge,
@@ -1086,8 +1159,13 @@ class _AppRailState extends State<AppRail> {
     Widget? action,
     bool collapsible = true,
     String? label,
+    VoidCallback? onLabelTap,
+    VoidCallback? onChevronTap,
+    Key? labelKey,
+    Key? chevronKey,
+    bool highlight = true,
   }) {
-    final selected = widget.selectedSection == section;
+    final selected = highlight && widget.selectedSection == section;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
@@ -1099,7 +1177,8 @@ class _AppRailState extends State<AppRail> {
             children: [
               Expanded(
                 child: InkWell(
-                  onTap: () => widget.onSelectSection(section),
+                  key: labelKey,
+                  onTap: onLabelTap ?? () => widget.onSelectSection(section),
                   borderRadius: BondRadii.smAll,
                   hoverColor: BondColors.onDarkFaint,
                   child: Padding(
@@ -1126,7 +1205,8 @@ class _AppRailState extends State<AppRail> {
               ?action,
               if (collapsible)
                 InkWell(
-                  onTap: () => _toggle(section),
+                  key: chevronKey,
+                  onTap: onChevronTap ?? () => _toggle(section),
                   borderRadius: BondRadii.fullAll,
                   hoverColor: BondColors.onDarkFaint,
                   child: Padding(
