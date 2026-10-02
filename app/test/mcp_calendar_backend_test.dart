@@ -629,7 +629,9 @@ void main() {
         'duration_minutes': 30,
         'window_start': '2026-10-02T15:00:00Z',
         'window_end': '2026-10-03T01:00:00Z',
-        'timezone': 'UTC',
+        // No top-level `timezone`: the deployed tool has none (its zone is
+        // `options.timezone`, for offset-less bounds) and refused one as an
+        // unexpected keyword on the first live press.
         'options': jsonEncode({'max_candidates': 3}),
       });
       expect(slots, hasLength(1));

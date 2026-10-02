@@ -5,6 +5,7 @@ import '../../data/calendar_store.dart';
 import '../../models/calendar_models.dart';
 import '../backend/calendar_backend.dart';
 import '../backend/calendar_errors.dart';
+import '../llm/llm_client.dart' show redactEndpoints;
 import 'calendar_writes.dart' show firstSentence;
 import 'calendar_zone.dart';
 import 'day_items.dart' show formatEventRange;
@@ -205,7 +206,11 @@ Future<FindTimeResult> searchFindTime({
   } on CalendarUnavailable catch (e) {
     return FindTimeResult(source: 'graph', note: e.sentence);
   } on Object catch (e) {
-    debugPrint('find a time: find_meeting_times failed: ${e.runtimeType}');
+    // The type alone said nothing when a live press failed (2026-10-02):
+    // the server's reason, with any endpoint redacted, is what names a bad
+    // window, a zone Graph refused or a tenant that will not answer.
+    debugPrint('find a time: find_meeting_times failed: ${e.runtimeType}: '
+        '${redactEndpoints('$e')}');
     return const FindTimeResult(
       source: 'graph',
       note: "Couldn't reach the calendar to find a time.",

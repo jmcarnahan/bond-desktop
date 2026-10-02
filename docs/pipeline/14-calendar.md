@@ -1443,8 +1443,12 @@ bottom:
 **The search** (`searchFindTime`, `app/lib/services/calendar/find_time.dart`;
 never throws):
 
-- People on it → `find_meeting_times` with those addresses, the window, the
-  length and at most three candidates (source `graph`).
+- People on it → `find_meeting_times` with those addresses, the window as
+  two `Z` instants (the server reads offset-bearing bounds as they are; its
+  zone is an `options` key for offset-less bounds, not a parameter — the
+  handoff's §3.5 signature is wrong there, and the deployed tool refused a
+  top-level `timezone` on the first live press), the length and at most
+  three candidates (source `graph`).
 - Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
   the mailbox's working hours (source `local`; `find_meeting_times` refuses an
   empty list — gotcha 28).

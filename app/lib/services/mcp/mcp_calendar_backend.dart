@@ -264,10 +264,13 @@ class McpCalendarBackend implements CalendarBackend {
     final result = await _call('find_meeting_times', {
       'attendees': invitees.join(','),
       'duration_minutes': durationMinutes,
-      // Both bounds carry an offset (the `Z`), so the zone must be UTC.
+      // Both bounds carry an offset (the `Z`), which is what the server
+      // reads them in; its zone, when one is needed, is `options.timezone`
+      // (default UTC) and NOT a top-level parameter as the handoff's §3.5
+      // signature says — the deployed tool refused a top-level `timezone`
+      // as an unexpected keyword on the first live press (2026-10-02).
       'window_start': utcWire(windowStartUtc),
       'window_end': utcWire(windowEndUtc),
-      'timezone': 'UTC',
       'options': jsonEncode({'max_candidates': maxCandidates}),
     });
     return [
