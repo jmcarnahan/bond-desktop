@@ -21,11 +21,13 @@ import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
-import 'package:bond_inbox/models/calendar_models.dart' show CalendarDate;
+import 'package:bond_inbox/models/calendar_models.dart'
+    show CalendarDate, CalendarEvent;
 import 'package:bond_inbox/services/calendar/day_items.dart'
-    show dayTitle, shortDate;
+    show dayTitle, formatEventRange, shortDate;
 import 'package:bond_inbox/services/calendar/find_time.dart'
-    show findTimeUnreadableNote;
+    show findTimeUnreadableNote, findTimeWindowUtc;
+import 'package:bond_inbox/theme/tokens.dart' show BondColors;
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/command_plan_card.dart'
     show CommandPlanCard;
@@ -172,6 +174,9 @@ class _RecordingWriter implements CalendarWriter {
   final List<CalendarWrite> previewed = [];
   final List<CalendarWrite> committed = [];
 
+  /// When set, a commit waits for it. Made inside the test body.
+  Completer<void>? hold;
+
   @override
   Future<PreviewResult> preview(CalendarWrite write) async {
     previewed.add(write);
@@ -186,6 +191,8 @@ class _RecordingWriter implements CalendarWriter {
     bool isUndo = false,
   }) async {
     committed.add(write);
+    final held = hold;
+    if (held != null) await held.future;
     // A private create offers its Undo, as the real writer's does.
     return write is CreateEvent && write.attendees.isEmpty
         ? const WriteOutcome.ok(undo: DeleteEvent('new-1'))
@@ -560,7 +567,12 @@ void main() {
     await pumps(tester);
     await pumps(tester);
     expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
-    expect(find.text('Proposed'), findsOneWidget);
+    // Thirty minutes is one line: the name and "Proposed" share it.
+    expect(
+        find.descendant(
+            of: find.byKey(DayGrid.proposalKey),
+            matching: find.text('Re: $_subject · Proposed', findRichText: true)),
+        findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -774,6 +786,53 @@ void main() {
       expect(backend.domains.single, 'unrestricted');
     });
 
+    testWidgets('the first open moves the pane to their day, and Next week '
+        'to that weekday next week, where a grid press proposes',
+        (tester) async {
+      await seedAsk(
+          subject: 'dinner on $weekday',
+          body: 'could we grab dinner on $weekday?');
+      await pumpScreen(tester);
+      final today = la.dateOf(DateTime.now().toUtc());
+      await openAsk(tester);
+      expect(find.text(dayTitle(day, today)), findsOneWidget,
+          reason: 'the pane follows the first search to their day');
+
+      final nextWeek = find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c-ask', FindTimeWindow.nextWeek));
+      expect(
+          find.descendant(
+              of: nextWeek,
+              matching: find.text('Next ${shortDate(day).split(' ').first}')),
+          findsOneWidget);
+      await tester.tap(nextWeek);
+      await pumps(tester);
+      await pumps(tester);
+      final then = day.addDays(7);
+      expect(find.text(dayTitle(then, today)), findsOneWidget);
+      expect(backend.windows.last, (
+        DateTime.fromMicrosecondsSinceEpoch(
+            la.localDateTime(then, 17, 30).microsecondsSinceEpoch,
+            isUtc: true),
+        DateTime.fromMicrosecondsSinceEpoch(
+            la.localDateTime(then, 20, 30).microsecondsSinceEpoch,
+            isUtc: true),
+      ));
+
+      // The grid on that day: a press proposes that day.
+      await tester.tap(find.byKey(DayPane.gridKey));
+      await pumps(tester);
+      await pumps(tester);
+      final grid = tester.getRect(find.byType(DayGrid));
+      await tester.tapAt(grid.center + Offset(0, grid.height / 4));
+      await pumps(tester);
+      await pumps(tester);
+      final proposed = writer.previewed.single as CreateEvent;
+      expect(la.dateOf(proposed.startUtc), then);
+      expect(proposed.attendees, [_dana]);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('the pane opens on the same day and length', (tester) async {
       await seedAsk(
           subject: 'dinner on $weekday',
@@ -830,6 +889,65 @@ void main() {
           findsOneWidget);
     });
 
+    testWidgets('following the search never closes the thread being read',
+        (tester) async {
+      await seedAsk();
+      final monday = findTimeWindowUtc(FindTimeWindow.nextWeek,
+              now: DateTime.now(), zone: la, durationMinutes: 30)
+          .firstDay;
+      // A meeting that Monday, so the column lists the day as a row.
+      final nine = la.localDateTime(monday, 9, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'mon-1',
+          subject: 'Northwind standup',
+          startUtc: nine,
+          endUtc: nine.add(const Duration(minutes: 30)),
+          showAs: 'busy',
+        ),
+      ], syncRun: 'run-1');
+      await pumpScreen(tester);
+      await openAsk(tester);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.openKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
+
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c-ask', FindTimeWindow.nextWeek)));
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget,
+          reason: 'the thread stays open');
+      // The day underneath moved: its row in the column is the selected one.
+      final row = find
+          .ancestor(
+              of: find.textContaining(shortDate(monday)),
+              matching: find.byType(Material))
+          .first;
+      expect(tester.widget<Material>(row).color, BondColors.onDarkTint);
+    });
+
+    testWidgets('leaving the Day stop during the first read does not pull '
+        'the owner back', (tester) async {
+      await seedAsk();
+      final holding = _HoldingStore(db)..hold = Completer<void>();
+      await pumpScreen(tester, storeOverride: holding);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.rowKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      await tester.tap(find.text('Needs You').first);
+      await pumps(tester);
+      expect(find.byType(DayPane), findsNothing);
+
+      holding.hold!.complete();
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byType(DayPane), findsNothing);
+    });
+
     testWidgets('a length pressed while the read is out stays', (tester) async {
       await seedAsk(subject: 'dinner friday?', body: 'dinner friday?');
       final holding = _HoldingStore(db)..hold = Completer<void>();
@@ -875,16 +993,49 @@ void main() {
 
   group('a press on empty grid time', () {
     /// Day → Grid → a tap on empty time in the body.
-    Future<void> tapEmptyGrid(WidgetTester tester) async {
+    Future<void> tapEmptyGrid(WidgetTester tester, {double at = 0.25}) async {
       if (find.byKey(DayPane.gridKey).evaluate().isEmpty) {
         await tester.tap(find.text('Day'));
         await pumps(tester);
       }
-      await tester.tap(find.byKey(DayPane.gridKey));
-      await pumps(tester);
-      await pumps(tester);
+      if (find.byType(DayGrid).evaluate().isEmpty) {
+        await tester.tap(find.byKey(DayPane.gridKey));
+        await pumps(tester);
+        await pumps(tester);
+      }
       final grid = tester.getRect(find.byType(DayGrid));
-      await tester.tapAt(grid.center + Offset(0, grid.height / 4));
+      await tester.tapAt(grid.center + Offset(0, grid.height * at));
+      await pumps(tester);
+      await pumps(tester);
+    }
+
+    /// Lets the grid finish paging to the day it was moved to.
+    Future<void> settle(WidgetTester tester) async {
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+    }
+
+    /// A desktop drag of the ghost by [by], no hold.
+    Future<void> dragGhost(WidgetTester tester, Offset by) async {
+      final gesture = await tester
+          .startGesture(tester.getCenter(find.byKey(DayGrid.proposalKey)));
+      await tester.pump(const Duration(milliseconds: 16));
+      await gesture.moveBy(by / 2);
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(by / 2);
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await pumps(tester);
+      await pumps(tester);
+    }
+
+    /// The ask opened and its Next week pressed: the pane on a day that is
+    /// always ahead, so a dragged ghost is never refused as past.
+    Future<void> openAskNextWeek(WidgetTester tester) async {
+      await openAsk(tester);
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c-ask', FindTimeWindow.nextWeek)));
       await pumps(tester);
       await pumps(tester);
     }
@@ -906,6 +1057,12 @@ void main() {
       await tester.enterText(
           find.byKey(CommandPlanCard.subjectKey), 'Dentist');
       await pumps(tester);
+      expect(
+          find.descendant(
+              of: find.byKey(DayGrid.proposalKey),
+              matching: find.text('Dentist · Proposed', findRichText: true)),
+          findsOneWidget,
+          reason: 'the ghost takes the name as it is typed');
       await tester.tap(find.byKey(CommandPlanCard.doKey));
       await pumps(tester);
       final written = writer.committed.single as CreateEvent;
@@ -939,6 +1096,231 @@ void main() {
 
       expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
       expect((writer.previewed.single as CreateEvent).attendees, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the ghost names the ask, the row says it is proposed, a '
+        'drag re-proposes, and a tap flashes the card', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      // Mid-grid: a drag that starts near its bottom edge scrolls it.
+      await tapEmptyGrid(tester, at: 0);
+
+      final ghost = find.byKey(DayGrid.proposalKey);
+      expect(
+          find.descendant(
+              of: ghost,
+              matching:
+                  find.text('Re: $_subject · Proposed', findRichText: true)),
+          findsOneWidget);
+      expect(
+          find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c-ask')),
+          findsOneWidget);
+      final first = writer.previewed.single as CreateEvent;
+      final summaryBefore =
+          tester.widget<Text>(find.byKey(CommandPlanCard.summaryKey)).data;
+
+      // An hour earlier, dragged as this app is used: on the desktop, no
+      // hold. The ghost is the ask's 30 minutes tall, which
+      // gives the grid's scale.
+      // Let the grid finish paging to the slot's day before grabbing.
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+      final hour = tester.getSize(ghost).height * 2;
+      final gesture = await tester.startGesture(tester.getCenter(ghost));
+      await tester.pump(const Duration(milliseconds: 16));
+      await gesture.moveBy(Offset(0, -hour / 2));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(Offset(0, -hour / 2));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await pumps(tester);
+      await pumps(tester);
+      final again = writer.previewed.last as CreateEvent;
+      expect(writer.previewed, hasLength(2));
+      expect(again.startUtc,
+          first.startUtc.subtract(const Duration(hours: 1)));
+      expect(again.endUtc.difference(again.startUtc),
+          const Duration(minutes: 30));
+      expect(again.attendees, [_dana]);
+      expect(tester.widget<Text>(find.byKey(CommandPlanCard.summaryKey)).data,
+          isNot(summaryBefore));
+      expect(find.text('This emails: $_dana'), findsOneWidget);
+
+      await tester.tap(find.byKey(DayGrid.proposalKey));
+      await tester.pump();
+      expect(
+          tester.widget<CommandPlanCard>(find.byType(CommandPlanCard)).flash,
+          1);
+      await tester.pump(const Duration(milliseconds: 700));
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('in the week, a ghost dragged one column right re-proposes '
+        'on the next day', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      // The week face first, then the press, as an owner working the week
+      // would: the ghost is drawn in its day's column.
+      await tester.tap(find.byKey(DayPane.gridKey));
+      await pumps(tester);
+      await tester.tap(find.byKey(DayPane.spanWeekKey));
+      await pumps(tester);
+      await pumps(tester);
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+      await tapEmptyGrid(tester, at: 0);
+      final first = writer.previewed.single as CreateEvent;
+      final ghost = find.byKey(DayGrid.proposalKey);
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+      final width = tester.getSize(ghost).width;
+      // Held a moment before moving sideways: a quick horizontal drag in the
+      // week is the page swipe's (day_grid_test's week drag holds too).
+      final gesture = await tester.startGesture(tester.getCenter(ghost));
+      await tester.pump(const Duration(milliseconds: 600));
+      await gesture.moveBy(Offset((width + 4) / 2, 0));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(Offset((width + 4) / 2, 0));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await pumps(tester);
+      await pumps(tester);
+      final moved = writer.previewed.last as CreateEvent;
+      expect(la.dateOf(moved.startUtc), la.dateOf(first.startUtc).addDays(1));
+      expect(la.toLocal(moved.startUtc).hour, la.toLocal(first.startUtc).hour);
+      expect(moved.attendees, [_dana]);
+      expect(
+          find.text(
+              'Proposed: ${shortDate(la.dateOf(moved.startUtc))} · '
+              '${formatEventRange(la, moved.startUtc, moved.endUtc)}'),
+          findsOneWidget,
+          reason: 'the row says the new day');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('while the card\'s write is out, the ghost holds still and '
+        'the grid proposes nothing new', (tester) async {
+      await seedAsk();
+      writer.hold = Completer<void>();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await pumps(tester);
+      expect(writer.committed, hasLength(1));
+      final before = writer.previewed.length;
+
+      await dragGhost(tester, const Offset(0, -42));
+      await tapEmptyGrid(tester, at: -0.2);
+      expect(writer.previewed, hasLength(before),
+          reason: 'no dry run under the write in the air');
+      expect(find.byType(CommandPlanCard), findsOneWidget);
+
+      writer.hold!.complete();
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byType(CommandPlanCard), findsNothing);
+      expect(find.byKey(AppRail.asksHeaderKey), findsNothing,
+          reason: 'the invite closed the ask');
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a new card never flashes as it appears', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.tap(find.byKey(DayGrid.proposalKey));
+      await tester.pump();
+      expect(
+          tester.widget<CommandPlanCard>(find.byType(CommandPlanCard)).flash,
+          1);
+      await tester.enterText(
+          find.byKey(DayCommandBar.fieldKey), 'add focus time tomorrow 3pm');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(
+          tester.widget<CommandPlanCard>(find.byType(CommandPlanCard)).flash,
+          0);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a ghost dragged into the past is refused, said', (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Previous day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
+      final before = writer.previewed.length;
+
+      await dragGhost(tester, const Offset(0, -42));
+      expect(find.text('That time has passed.'), findsOneWidget);
+      expect(writer.previewed, hasLength(before));
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a blank ghost dragged keeps the name typed', (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.enterText(
+          find.byKey(CommandPlanCard.subjectKey), 'Dentist');
+      await pumps(tester);
+      final first = writer.previewed.last as CreateEvent;
+
+      await dragGhost(tester, const Offset(0, 42));
+      final again = writer.previewed.last as CreateEvent;
+      expect(again.startUtc, isNot(first.startUtc));
+      expect(again.subject, 'Dentist');
+      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget,
+          reason: 'still the blank event\'s card');
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('the Proposed line goes when the card is dismissed, and a '
+        'dismissed ask takes its card and ghost with it', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tapEmptyGrid(tester, at: 0);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c-ask')),
+          findsOneWidget);
+      await tester.tap(find.byKey(CommandPlanCard.cancelKey));
+      await pumps(tester);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c-ask')),
+          findsNothing);
+
+      // Again, then the ask's own ×.
+      await tapEmptyGrid(tester, at: 0);
+      expect(find.byType(CommandPlanCard), findsOneWidget);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byType(CommandPlanCard), findsNothing);
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 

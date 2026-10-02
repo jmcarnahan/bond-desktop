@@ -67,7 +67,14 @@ class FindTimePane extends StatefulWidget {
     this.onFailed,
     this.availability = CalendarAvailability.unknown,
     this.hints,
+    this.windowLabelsFor,
   });
+
+  /// The window pills' words from the host ([findTimeWindowLabels]) at the
+  /// length the pane has selected, so a rolled week pill says its date and
+  /// follows a longer meeting no longer fitting today; null, or a pill
+  /// missing from it, labels by weekday alone.
+  final Map<FindTimeWindow, String> Function(int minutes)? windowLabelsFor;
 
   /// What the ask's own words said ([readAskHints]): the pane opens on its
   /// length and its day (the their-day pill first), as the Day column's row
@@ -282,7 +289,8 @@ class _FindTimePaneState extends State<FindTimePane> {
               for (final w in findTimeWindows(widget.hints))
                 BondFilterPill(
                   key: FindTimePane.windowKeyFor(w),
-                  label: findTimeWindowLabel(w, widget.hints),
+                  label: widget.windowLabelsFor?.call(_minutes)[w] ??
+                      findTimeWindowLabel(w, widget.hints),
                   selected: w == _window,
                   onTap: () {
                     if (w != _window) _changed(() => _window = w);

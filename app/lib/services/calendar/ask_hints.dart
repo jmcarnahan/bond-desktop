@@ -75,7 +75,13 @@ class AskHints {
   /// read.
   final String? said;
 
-  const AskHints({this.day, this.hours, this.minutes, this.said});
+  /// How the hours were asked for, to put after a weekday in a sentence:
+  /// "for dinner", "in the evening", "at 7:00 PM", "for dinner at 7:00 PM";
+  /// null when no hours were read.
+  final String? timeWords;
+
+  const AskHints(
+      {this.day, this.hours, this.minutes, this.said, this.timeWords});
 
   static const AskHints none = AskHints();
 
@@ -177,6 +183,9 @@ const int _rollDays = 7;
 ///   else a part of the day. A meal beats a part: "coffee tuesday morning"
 ///   is coffee's hours. A meal also says which half of the day a bare hour
 ///   is: "dinner at 7" is 19:00 (the resolver alone reads 7:00 AM).
+/// - **Today, too late**: a day that is today whose hours have already
+///   ended rolls a week on ("dinner on Friday" read on Friday at nine is
+///   next Friday); with no hours, today stands.
 /// - **Minutes**: a length the ask named, else a range's own length, else
 ///   the meal's usual length, else none.
 AskHints readAskHints({
@@ -212,6 +221,7 @@ AskHints readAskHints({
 
   AskHours? hours;
   String? what;
+  String? timeWords;
   int? rangeMinutes;
   var t = w.time;
   final part = w.part;
@@ -247,18 +257,34 @@ AskHints readAskHints({
     final clock =
         DateFormat('h:mm a').format(DateTime.utc(2000, 1, 1, t.$1, t.$2));
     what = m == null ? clock : '${m.word} · $clock';
+    timeWords = m == null ? 'at $clock' : 'for ${m.word} at $clock';
   } else if (meal != null) {
     hours = meal.hours;
     what = meal.word;
+    timeWords = 'for ${meal.word}';
   } else if (part != null) {
     hours = AskHours.fromDayPart(part);
     what = _partWord(part);
+    timeWords = part == DayPart.endOfDay ? 'at end of day' : 'in the $what';
   }
 
   final named = w.duration?.inMinutes;
   final minutes = named != null && named > 0
       ? named
       : rangeMinutes ?? meal?.minutes;
+
+  // Today's hours already gone: "dinner on Friday" read on Friday at nine
+  // means next Friday. Gone means no room left for the meeting before they
+  // close — now plus its length past the close — the arithmetic
+  // `findTimeWindowUtc` judges a week by. With no hours, today stands.
+  final h = hours;
+  final length = Duration(
+      minutes: (minutes ?? 1) < 1 ? 1 : (minutes ?? 1));
+  if (day != null && day == w.today && h != null) {
+    final close =
+        zone.localDateTime(day, h.endHour, h.endMinute).toUtc();
+    if (now.toUtc().add(length).isAfter(close)) day = day.addDays(7);
+  }
 
   final bits = [
     if (day != null) shortDate(day),
@@ -269,6 +295,7 @@ AskHints readAskHints({
     hours: hours,
     minutes: minutes,
     said: bits.isEmpty ? null : 'Asked for: ${bits.join(' · ')}',
+    timeWords: timeWords,
   );
 }
 

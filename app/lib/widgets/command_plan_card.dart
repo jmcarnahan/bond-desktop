@@ -47,10 +47,14 @@ class CommandPlanCard extends StatelessWidget {
     this.onFailed,
     this.availability = CalendarAvailability.unknown,
     this.subjectEditable = false,
+    this.onSubjectChanged,
+    this.flash = 0,
+    this.onWritingChanged,
   });
 
   static const Key doKey = ValueKey('command-plan-do');
   static const Key subjectKey = ValueKey('command-plan-subject');
+  static const Key flashKey = ValueKey('command-plan-flash');
   static const Key cancelKey = ValueKey('command-plan-cancel');
   static const Key answerKey = ValueKey('command-plan-answer');
   static const Key reasonKey = ValueKey('command-plan-reason');
@@ -119,6 +123,20 @@ class CommandPlanCard extends StatelessWidget {
   /// id. The dry run stands as it was — a name changes nobody it emails.
   final bool subjectEditable;
 
+  /// The blank event's name as it is typed, so the host can draw the grid's
+  /// ghost under the same name.
+  final ValueChanged<String>? onSubjectChanged;
+
+  /// Bumped by the host to flash the card once (its ghost was tapped): a
+  /// 600 ms fade of a primary border back to the plain one, run once per
+  /// new value and never looping. Zero is no flash.
+  final int flash;
+
+  /// True as a proposal's real write goes out, false once its flow is idle
+  /// again (done, failed or dismissed): the host keeps the grid's ghost
+  /// still meanwhile, so the write in the air is the one the card shows.
+  final ValueChanged<bool>? onWritingChanged;
+
   @override
   Widget build(BuildContext context) {
     final Widget planBody = switch (plan) {
@@ -150,11 +168,25 @@ class CommandPlanCard extends StatelessWidget {
         : planBody;
     return ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: maxHeight),
-      child: Container(
-        decoration: BoxDecoration(
-          color: BondColors.surface,
-          borderRadius: BondRadii.mdAll,
-          border: Border.all(color: BondColors.border),
+      child: TweenAnimationBuilder<double>(
+        // A new value restarts it from full; zero starts at rest.
+        key: ValueKey('command-plan-flash-$flash'),
+        tween: Tween(begin: flash == 0 ? 0 : 1, end: 0),
+        duration: const Duration(milliseconds: 600),
+        builder: (context, t, child) => Container(
+          key: flashKey,
+          decoration: BoxDecoration(
+            color: Color.lerp(BondColors.surface,
+                BondColors.primary.withValues(alpha: 0.08), t),
+            borderRadius: BondRadii.mdAll,
+            // A fixed width: only the colour moves, so nothing inside
+            // shifts by a pixel as it fades.
+            border: Border.all(
+              color: Color.lerp(BondColors.border, BondColors.primary, t)!,
+              width: 2,
+            ),
+          ),
+          child: child,
         ),
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(BondSpacing.s12),
@@ -202,6 +234,10 @@ class CommandPlanCard extends StatelessWidget {
       writer: writer,
       onDone: onDone,
       onFailed: onFailed,
+      onCommitting: onWritingChanged == null
+          ? null
+          : () => onWritingChanged!(true),
+      onIdle: onWritingChanged == null ? null : () => onWritingChanged!(false),
       builder: (context, start, busy) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -412,7 +448,10 @@ class _NamedProposalState extends State<_NamedProposal> {
           hintText: 'Name this event',
           isDense: true,
         ),
-        onChanged: (_) => setState(() {}),
+        onChanged: (text) {
+          setState(() {});
+          card.onSubjectChanged?.call(text);
+        },
       ),
       summary: writeSummary(_write(),
           shown: const CalendarEvent(id: ''),

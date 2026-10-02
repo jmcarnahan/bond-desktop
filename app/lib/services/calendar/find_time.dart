@@ -45,12 +45,62 @@ enum FindTimeWindow {
 }
 
 /// The pill's words for [window]: [FindTimeWindow.theirs] is the day the ask
-/// named ("Fri Oct 9"); the weeks keep their own labels.
-String findTimeWindowLabel(FindTimeWindow window, AskHints? hints) {
+/// named ("Fri Oct 9"); with a weekday read, the weeks search that weekday
+/// and say so ("This Fri", "Next Fri"); without one they keep their labels.
+///
+/// The label has no clock; the HOST hands it [covers], the day the search
+/// would actually cover ([findTimeWindowUtc]'s `firstDay`), and [today]. A
+/// week pill reads "This Fri" / "Next Fri" only while [covers] lies in its
+/// nominal week (this week's Monday–Sunday, or next week's); once the
+/// weekday has rolled past it — this week's Friday gone — it says the DATE
+/// it now means ("Fri Oct 23"), so a pill never names a day that has gone.
+/// Without them it labels by weekday alone.
+String findTimeWindowLabel(
+  FindTimeWindow window,
+  AskHints? hints, {
+  CalendarDate? covers,
+  CalendarDate? today,
+}) {
   final day = hints?.day;
-  if (window == FindTimeWindow.theirs && day != null) return shortDate(day);
-  return window.label;
+  if (day == null) return window.label;
+  if (window == FindTimeWindow.theirs) return shortDate(day);
+  final wd = DateFormat('EEE').format(DateTime(day.year, day.month, day.day));
+  if (covers != null && today != null) {
+    var monday = today.addDays(1 - today.weekday);
+    if (window == FindTimeWindow.nextWeek) monday = monday.addDays(7);
+    final inWeek =
+        !covers.isBefore(monday) && covers.isBefore(monday.addDays(7));
+    if (!inWeek) return shortDate(covers);
+  }
+  return window == FindTimeWindow.thisWeek ? 'This $wd' : 'Next $wd';
 }
+
+/// Every window pill's words for [hints] at [now], each from the day its
+/// search would cover — what a host builds once and hands a row or the pane.
+Map<FindTimeWindow, String> findTimeWindowLabels(
+  AskHints? hints, {
+  required DateTime now,
+  required CalendarZone zone,
+  int durationMinutes = 0,
+}) {
+  final today = zone.dateOf(now.toUtc());
+  return {
+    for (final w in findTimeWindows(hints))
+      w: findTimeWindowLabel(w, hints,
+          covers: findTimeWindowUtc(w,
+                  now: now,
+                  zone: zone,
+                  durationMinutes: durationMinutes,
+                  hints: hints)
+              .firstDay,
+          today: today),
+  };
+}
+
+/// [weekday] (ISO, Monday = 1) of the week starting [monday], from its
+/// components.
+CalendarDate weekdayWithin(CalendarDate monday, int weekday) =>
+    monday.addDays(weekday - 1);
 
 /// The window pills, in order: the ask's own day first when one was read,
 /// then the two weeks.
@@ -128,6 +178,11 @@ class FindTimeResult {
   /// `graph` slot should have none; the mirror can still know better.
   final Map<FreeSlot, Overlaps> overlaps;
 
+  /// The search could not run (a refusal, a missing permission, the
+  /// calendar unreachable): [note] says why, and no slots is not "nothing
+  /// free", so nothing is tried in its place.
+  final bool failed;
+
   /// Each slot's head count of who is free. Filled for `graph` only: the
   /// mirror knows the owner's calendar and nobody else's, so a `local` slot
   /// has no entry.
@@ -139,6 +194,7 @@ class FindTimeResult {
     this.note,
     this.overlaps = const {},
     this.availability = const {},
+    this.failed = false,
   });
 }
 
@@ -196,6 +252,14 @@ const int _dayEndHour = 18;
 ///
 /// With [hints] hours, a week opens on its Monday at their start and closes
 /// on its Friday at their end, so Friday's dinner is inside "this week".
+///
+/// **A week with a weekday read** ([hints] naming a day) means THAT weekday
+/// of the week ([weekdayWithin]) at the hours: "dinner on Friday" with Next
+/// week is next week's Friday evening, not the week's evenings. This week's
+/// instance once gone (past, or today with the hours over) is next week's,
+/// as their day rolls, and next week is the one after it. [wholeWeek] asks
+/// for the whole Monday–Friday of that weekday's week at the hours instead:
+/// the fallback when the weekday offers nothing.
 /// **This week** is now until Friday 18:00 local; on a weekend, or once
 /// less than [durationMinutes] (at least a minute) is left before Friday
 /// 18:00, the week is over and it means the coming Monday 08:00 to Friday
@@ -211,6 +275,7 @@ const int _dayEndHour = 18;
   required CalendarZone zone,
   int durationMinutes = 0,
   AskHints? hints,
+  bool wholeWeek = false,
 }) {
   final nowUtc = now.toUtc();
   final today = zone.dateOf(nowUtc);
@@ -228,12 +293,32 @@ const int _dayEndHour = 18;
       lastDay: theirDay,
     );
   }
-  var monday = today.addDays(1 - today.weekday);
-  final fridayEnd =
-      zone.localDateTime(monday.addDays(4), closeH, closeM).toUtc();
   // An instant plus a length is no wall-clock arithmetic: a DST change
   // cannot move it.
   final needed = Duration(minutes: durationMinutes < 1 ? 1 : durationMinutes);
+  if (theirDay != null) {
+    var day = weekdayWithin(today.addDays(1 - today.weekday), theirDay.weekday);
+    final closingToday = zone.localDateTime(day, closeH, closeM).toUtc();
+    if (day.isBefore(today) ||
+        (day == today && nowUtc.add(needed).isAfter(closingToday))) {
+      day = day.addDays(7);
+    }
+    if (window == FindTimeWindow.nextWeek) day = day.addDays(7);
+    final first = wholeWeek ? day.addDays(1 - day.weekday) : day;
+    final last = wholeWeek ? first.addDays(4) : day;
+    final opening = zone.localDateTime(first, openH, openM).toUtc();
+    final closing = zone.localDateTime(last, closeH, closeM).toUtc();
+    final start = nowUtc.isAfter(opening) ? nowUtc : opening;
+    return (
+      startUtc: start,
+      endUtc: closing,
+      firstDay: wholeWeek ? zone.dateOf(start) : day,
+      lastDay: last,
+    );
+  }
+  var monday = today.addDays(1 - today.weekday);
+  final fridayEnd =
+      zone.localDateTime(monday.addDays(4), closeH, closeM).toUtc();
   final over = today.weekday > DateTime.friday ||
       nowUtc.add(needed).isAfter(fridayEnd);
   if (over) monday = monday.addDays(7);
@@ -266,10 +351,11 @@ const int _dayEndHour = 18;
 ///
 /// [hints] (the ask's own words, [readAskHints]) narrow it: their hours
 /// clamp every day of the owner's own walk and of the window Graph is given,
-/// a day they named is not skipped as a weekend, and Graph is asked with
-/// `activity_domain: personal` when those hours fall outside the mailbox's
-/// working window or the day is not a working day — dinner is not work time
-/// — and `work` otherwise.
+/// a day they named is not skipped as a weekend, and Graph's
+/// `activity_domain` follows the hours ([_activityDomain]). With a weekday
+/// read, a week searches that weekday ([findTimeWindowUtc]); when it offers
+/// nothing, the rest of its week at the same hours is offered under a note
+/// saying so.
 ///
 /// Never throws: a calendar error is an empty result with its sentence.
 Future<FindTimeResult> searchFindTime({
@@ -283,8 +369,63 @@ Future<FindTimeResult> searchFindTime({
   required CalendarZone zone,
   AskHints? hints,
 }) async {
+  Future<FindTimeResult> once({bool wholeWeek = false}) => _searchOnce(
+        backend: backend,
+        calendar: calendar,
+        hours: hours,
+        addresses: addresses,
+        durationMinutes: durationMinutes,
+        window: window,
+        now: now,
+        zone: zone,
+        hints: hints,
+        wholeWeek: wholeWeek,
+      );
+  final day = hints?.day;
+  final first = await once();
+  // A weekend day has no Monday–Friday of its own to fall back on: the
+  // working week around a Sunday would be the days BEFORE it.
+  if (day == null ||
+      window == FindTimeWindow.theirs ||
+      day.weekday > DateTime.friday ||
+      first.slots.isNotEmpty ||
+      first.failed) {
+    return first;
+  }
+  final week = await once(wholeWeek: true);
+  if (week.slots.isEmpty) return first;
+  final weekday =
+      DateFormat('EEEE').format(DateTime(day.year, day.month, day.day));
+  final words = hints?.timeWords;
+  final note = 'Nothing free on $weekday${words == null ? '' : ' $words'} '
+      'that week — the rest of the week:';
+  return FindTimeResult(
+    slots: week.slots,
+    source: week.source,
+    note: week.note == null ? note : '$note ${week.note}',
+    overlaps: week.overlaps,
+    availability: week.availability,
+  );
+}
+
+Future<FindTimeResult> _searchOnce({
+  required CalendarBackend backend,
+  required CalendarStore calendar,
+  required MailboxSettings? hours,
+  required List<String> addresses,
+  required int durationMinutes,
+  required FindTimeWindow window,
+  required DateTime now,
+  required CalendarZone zone,
+  required AskHints? hints,
+  required bool wholeWeek,
+}) async {
   final w = findTimeWindowUtc(window,
-      now: now, zone: zone, durationMinutes: durationMinutes, hints: hints);
+      now: now,
+      zone: zone,
+      durationMinutes: durationMinutes,
+      hints: hints,
+      wholeWeek: wholeWeek);
   List<CalendarEvent> events;
   try {
     events = await calendar.eventsBetween(
@@ -325,10 +466,9 @@ Future<FindTimeResult> searchFindTime({
           windowStartUtc: w.startUtc,
           windowEndUtc: w.endUtc,
           dailyHours: hints?.hours,
-          // Only the ask's own day is walked whatever the week says; a week
-          // searched under hints still skips its weekend.
-          skipNonWorkingDays:
-              !(window == FindTimeWindow.theirs && hints?.day != null),
+          // The ask's own weekday is walked whatever the calendar says; a
+          // whole week searched under hints still skips its weekend.
+          skipNonWorkingDays: hints?.day == null || wholeWeek,
         ),
         'local',
         note: note,
@@ -340,8 +480,10 @@ Future<FindTimeResult> searchFindTime({
   if (h != null && h.endInMinutes <= h.startInMinutes) {
     return const FindTimeResult();
   }
-  if (addresses.isEmpty) return local();
+  // A window that ends where it starts (their hours over today) searches
+  // nothing and asks nobody.
   if (!w.endUtc.isAfter(w.startUtc)) return const FindTimeResult();
+  if (addresses.isEmpty) return local();
   try {
     final answered = await backend.findMeetingTimes(
       attendees: addresses,
@@ -402,14 +544,17 @@ Future<FindTimeResult> searchFindTime({
     if (e.code == 'unsupported_account') return local(note: findTimeLocalNote);
     final sentence = firstSentence(e.reason);
     return FindTimeResult(
-        source: 'graph', note: sentence.isEmpty ? e.message : sentence);
+        source: 'graph',
+        note: sentence.isEmpty ? e.message : sentence,
+        failed: true);
   } on CalendarScopeMissing {
     return const FindTimeResult(
       source: 'graph',
       note: 'Calendar permission missing — reconnect in Settings.',
+      failed: true,
     );
   } on CalendarUnavailable catch (e) {
-    return FindTimeResult(source: 'graph', note: e.sentence);
+    return FindTimeResult(source: 'graph', note: e.sentence, failed: true);
   } on Object catch (e) {
     // The type alone said nothing when a live press failed (2026-10-02):
     // the server's reason, with any endpoint redacted, is what names a bad
@@ -419,6 +564,7 @@ Future<FindTimeResult> searchFindTime({
     return const FindTimeResult(
       source: 'graph',
       note: "Couldn't reach the calendar to find a time.",
+      failed: true,
     );
   }
 }

@@ -2420,6 +2420,50 @@ void main() {
       expect(calls, ['window email|c1 thisWeek']);
     });
 
+    testWidgets('an ask whose proposal stands says so under its head',
+        (tester) async {
+      await pumpRail(tester, [
+        const SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          proposed: 'Proposed: Fri Oct 2 · 7:15–8:45 PM',
+        ),
+        ask('c2'),
+      ]);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c1')),
+          findsOneWidget);
+      expect(find.text('Proposed: Fri Oct 2 · 7:15–8:45 PM'), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c2')),
+          findsNothing);
+    });
+
+    testWidgets('the window labels the row carries are drawn', (tester) async {
+      await pumpRail(tester, [
+        SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          expanded: true,
+          hints: const AskHints(day: CalendarDate(2026, 10, 9)),
+          windowLabels: const {
+            FindTimeWindow.theirs: 'Fri Oct 9',
+            FindTimeWindow.thisWeek: 'Fri Oct 9',
+            FindTimeWindow.nextWeek: 'Fri Oct 16',
+          },
+        ),
+      ]);
+      expect(
+          find.descendant(
+              of: find.byKey(SchedulingAskTile.windowKeyFor(
+                  'email', 'c1', FindTimeWindow.nextWeek)),
+              matching: find.text('Fri Oct 16')),
+          findsOneWidget);
+      expect(find.text('This Fri'), findsNothing);
+    });
+
     testWidgets('the their-day pill calls back with theirs', (tester) async {
       await pumpRail(tester, [
         SchedulingAskRow(

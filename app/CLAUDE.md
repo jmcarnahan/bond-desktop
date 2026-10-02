@@ -966,6 +966,11 @@ that bite.
     `onCreateRequested` hands the span up and the host decides whether it is
     an ask's invite or a blank event. A bare tap comes through
     `onTappedWithDetail`, since neither create gesture is a tap.
+  - The proposal tile is a kalender event of its own kind (named,
+    adjustable, a tap flashes the card); a change on it re-proposes through
+    the host (`onProposalChanged` → `_reproposeFromGrid`, through the drop's
+    refusals), and nothing is stored — and never while the card writes
+    (`onWritingChanged` → `_cardWriting`).
 - **Work rows:**
   - `AiWorker.sources` (`email`, `teams`, `local`, `calendar`) is a CLAIM
     filter. A new kind queued under a new source is silently never claimed,
@@ -1033,6 +1038,14 @@ that bite.
     working window are `unrestricted`, a non-working day inside it is
     `personal`, else `work`. With hours Graph is asked for 20 and the
     suggestions outside them are dropped before the ranking.
+  - With a weekday read, a week pill means THAT weekday of the week
+    (`weekdayWithin`, pills "This Fri" / "Next Fri", or the date they mean
+    once this week's has gone), falling back to the
+    rest of that week at the same hours under a note when the day offers
+    nothing (never after `FindTimeResult.failed`).
+  - The pane follows the search window: `_followAsk` moves the Day pane to
+    the window's `firstDay` before every ask search, so a grid press lands
+    on the day being searched.
   - An empty Graph answer falls back to the owner's free times unless
     `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
     one rule.

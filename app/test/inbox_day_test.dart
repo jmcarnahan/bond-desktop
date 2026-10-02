@@ -1510,6 +1510,70 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    group('a typed move\'s ghost', () {
+      Future<_RecordingWriter> moveOnGrid(WidgetTester tester) async {
+        await seedTomorrow();
+        final writer = _RecordingWriter();
+        await store.setPref(dayViewKey, 'grid');
+        await pumpScreen(tester, overrides: [
+          calendarWritesProvider.overrideWithValue(writer),
+          routerOver(writer),
+        ]);
+        await tester.tap(find.text('Day'));
+        await pumps(tester);
+        await tester.tap(find.byTooltip('Next day'));
+        await pumps(tester);
+        await ask(tester, 'move focus block to tomorrow 3pm');
+        for (var i = 0; i < 5; i++) {
+          await tester.pump(const Duration(milliseconds: 200));
+        }
+        return writer;
+      }
+
+      /// A desktop drag of the ghost by whole hours (its own height is one).
+      Future<void> dragHours(WidgetTester tester, int hours) async {
+        final ghost = find.byKey(DayGrid.proposalKey);
+        final hour = tester.getSize(ghost).height;
+        final gesture = await tester.startGesture(tester.getCenter(ghost));
+        await tester.pump(const Duration(milliseconds: 16));
+        await gesture.moveBy(Offset(0, hour * hours / 2));
+        await tester.pump(const Duration(milliseconds: 100));
+        await gesture.moveBy(Offset(0, hour * hours / 2));
+        await tester.pump(const Duration(milliseconds: 100));
+        await gesture.up();
+        await settleCommand(tester);
+      }
+
+      testWidgets('is named after the meeting, and dragged it re-proposes '
+          'the same meeting under the same change key', (tester) async {
+        final writer = await moveOnGrid(tester);
+        final grid = tester.widget<DayGrid>(find.byType(DayGrid));
+        expect(grid.proposal!.subject, 'Focus block');
+        expect(grid.proposal!.adjustable, isTrue);
+        final first = writer.previewed.last as MoveEvent;
+
+        await dragHours(tester, -1);
+        final again = writer.previewed.last as MoveEvent;
+        expect(writer.previewed.length, greaterThan(1));
+        expect(again.eventId, 'own-1');
+        expect(again.ifMatch, first.ifMatch);
+        expect(la.toLocal(again.startUtc!).hour, 14);
+        expect(tester.widget<Text>(find.byKey(CommandPlanCard.summaryKey)).data,
+            contains('Focus block'));
+        await tester.pumpWidget(const SizedBox());
+      }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+      testWidgets('dragged back where the meeting already is, it is refused '
+          'in the drop\'s words', (tester) async {
+        final writer = await moveOnGrid(tester);
+        final before = writer.previewed.length;
+        await dragHours(tester, -3);
+        expect(find.text("That's when it already is."), findsOneWidget);
+        expect(writer.previewed, hasLength(before));
+        await tester.pumpWidget(const SizedBox());
+      }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+    });
+
     testWidgets('⌘K: a calendar question in Find offers Ask Day, and Enter '
         'lands on the Day stop with the answer', (tester) async {
       // The providers as the app wires them, the writer aside: this is the

@@ -27,21 +27,37 @@ class GridProposal {
     required this.startUtc,
     required this.endUtc,
     required this.label,
+    this.subject = '',
+    this.adjustable = false,
   });
 
   final DateTime startUtc;
   final DateTime endUtc;
+
+  /// What the ghost is ("Proposed", "Moving here…"), drawn as its caption
+  /// under [subject], or as its title when there is no subject.
   final String label;
+
+  /// What is being proposed: the invite's or the blank event's name, or the
+  /// moved meeting's subject. Untrusted text, drawn plain.
+  final String subject;
+
+  /// A drag or resize on it asks [DayGrid.onProposalChanged] — a standing
+  /// proposal the host can re-run; never a drop's pending move.
+  final bool adjustable;
 
   @override
   bool operator ==(Object other) =>
       other is GridProposal &&
       other.startUtc == startUtc &&
       other.endUtc == endUtc &&
-      other.label == label;
+      other.label == label &&
+      other.subject == subject &&
+      other.adjustable == adjustable;
 
   @override
-  int get hashCode => Object.hash(startUtc, endUtc, label);
+  int get hashCode =>
+      Object.hash(startUtc, endUtc, label, subject, adjustable);
 }
 
 /// The Day stop's grid: one day or one week of time columns, drawn by the
@@ -82,6 +98,8 @@ class DayGrid extends StatefulWidget {
     this.onVisibleDayChanged,
     this.onCreateRequested,
     this.defaultCreateMinutes = 30,
+    this.onProposalChanged,
+    this.onProposalTapped,
   });
 
   /// The day shown (day span), or any day of the week shown (week span;
@@ -130,6 +148,15 @@ class DayGrid extends StatefulWidget {
   /// How long a bare tap's span is: the open ask's length, else 30.
   final int defaultCreateMinutes;
 
+  /// A drag or resize on an [GridProposal.adjustable] proposal — to another
+  /// time, or another day's column in the week — with the new span. Like a
+  /// drop, the tile is not moved here: the host re-runs its proposal and the
+  /// ghost is redrawn where that answer puts it.
+  final void Function(DateTime startUtc, DateTime endUtc)? onProposalChanged;
+
+  /// A tap on the proposal tile: the host brings its card into view.
+  final VoidCallback? onProposalTapped;
+
   static Key tileKeyFor(String eventId) => ValueKey('day-grid-tile-$eventId');
   /// A deadline ([kind] `due`) or return (`back`) tile. The source and the
   /// kind are both in it: a Teams chat and a mail thread can share an id,
@@ -164,6 +191,7 @@ class _GridTile extends KalenderEvent {
     this.cancelled = false,
     this.overlap = false,
     this.movable = false,
+    this.caption = '',
   });
 
   final _TileKind kind;
@@ -175,6 +203,9 @@ class _GridTile extends KalenderEvent {
   final bool cancelled;
   final bool overlap;
   final bool movable;
+
+  /// A proposal's second line ("Proposed") under its subject.
+  final String caption;
 
   @override
   _GridTile copyWithData({required DateTime start, required DateTime end}) =>
@@ -190,6 +221,7 @@ class _GridTile extends KalenderEvent {
         cancelled: cancelled,
         overlap: overlap,
         movable: movable,
+        caption: caption,
       );
 
   @override
@@ -205,12 +237,13 @@ class _GridTile extends KalenderEvent {
         other.declined == declined &&
         other.cancelled == cancelled &&
         other.overlap == overlap &&
-        other.movable == movable;
+        other.movable == movable &&
+        other.caption == caption;
   }
 
   @override
   int get hashCode => Object.hash(super.hashCode, kind, title, eventId, item,
-      tentative, declined, cancelled, overlap, movable);
+      tentative, declined, cancelled, overlap, movable, caption);
 }
 
 class _DayGridState extends State<DayGrid> {
@@ -405,13 +438,26 @@ class _DayGridState extends State<DayGrid> {
 
     final p = widget.proposal;
     if (p != null && p.endUtc.isAfter(p.startUtc)) {
+      // A standing proposal moves and resizes like an own event — to
+      // another time, or another column in the week — and asks the host.
+      final adjustable =
+          p.adjustable && !widget.locked && widget.onProposalChanged != null;
+      final named = p.subject.trim().isNotEmpty;
       tiles.add(_GridTile(
         id: 'proposal',
         start: p.startUtc,
         end: p.endUtc,
-        interaction: EventInteraction.allowNone(),
+        interaction: adjustable
+            ? EventInteraction(
+                allowRescheduling: true,
+                allowStartResize: true,
+                allowEndResize: true,
+              )
+            : EventInteraction.allowNone(),
         kind: _TileKind.proposal,
-        title: p.label,
+        title: named ? p.subject.trim() : p.label,
+        caption: named ? p.label : '',
+        movable: adjustable,
       ));
     }
     return tiles;
@@ -446,7 +492,7 @@ class _DayGridState extends State<DayGrid> {
         final item = event.item;
         if (item != null) widget.onOpenItem?.call(item);
       case _TileKind.proposal:
-        break;
+        if (!widget.locked) widget.onProposalTapped?.call();
     }
   }
 
@@ -458,6 +504,15 @@ class _DayGridState extends State<DayGrid> {
   /// calls this, and a wobble must cost nothing — no dry run, no toast.
   void _changed(KalenderEvent original, KalenderEvent updated) {
     if (original is! _GridTile) return;
+    if (original.kind == _TileKind.proposal) {
+      if (!original.movable ||
+          (updated.start.isAtSameMomentAs(original.start) &&
+              updated.end.isAtSameMomentAs(original.end))) {
+        return;
+      }
+      widget.onProposalChanged?.call(_utc(updated.start), _utc(updated.end));
+      return;
+    }
     if (original.kind != _TileKind.event || !original.movable) return;
     if (updated.start.isAtSameMomentAs(original.start) &&
         updated.end.isAtSameMomentAs(original.end)) {
@@ -588,8 +643,39 @@ class _DayGridState extends State<DayGrid> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Flexible(child: title),
-                      if (timed && tall)
+                      // A short proposal has one line: its caption rides
+                      // on it, so "Proposed" is never lost.
+                      if (event.caption.isNotEmpty && !tall)
+                        Flexible(
+                          child: Text.rich(
+                            TextSpan(
+                              text: event.title,
+                              style: title.style,
+                              children: [
+                                TextSpan(
+                                  text: ' · ${event.caption}',
+                                  style: BondType.caption
+                                      .copyWith(color: BondColors.primary),
+                                ),
+                              ],
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        )
+                      else
+                        Flexible(child: title),
+                      if (event.caption.isNotEmpty && tall)
+                        Flexible(
+                          child: Text(
+                            event.caption,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: BondType.caption
+                                .copyWith(color: BondColors.primary),
+                          ),
+                        )
+                      else if (timed && tall)
                         Flexible(
                           child: Text(
                             formatEventRange(zone, event.start, event.end),

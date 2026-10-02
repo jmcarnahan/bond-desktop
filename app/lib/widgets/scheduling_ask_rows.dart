@@ -41,6 +41,15 @@ class SchedulingAskRow {
   /// again shows it at once. Null until the first search lands.
   final FindTimeResult? result;
 
+  /// The window pills' words, built by the host from the day each search
+  /// would cover ([findTimeWindowLabels]), so a rolled week pill says its
+  /// date. A pill missing here labels by weekday alone.
+  final Map<FindTimeWindow, String> windowLabels;
+
+  /// "Proposed: Fri Oct 2 · 7:15–8:45 PM" while this ask's proposal stands
+  /// on the Day pane's card, so the ghost on the grid is plainly this ask's.
+  final String? proposed;
+
   const SchedulingAskRow({
     required this.source,
     required this.key,
@@ -52,6 +61,8 @@ class SchedulingAskRow {
     this.window = FindTimeWindow.thisWeek,
     this.hints,
     this.result,
+    this.proposed,
+    this.windowLabels = const {},
   });
 }
 
@@ -113,6 +124,8 @@ class SchedulingAskTile extends StatelessWidget {
       ValueKey('ask-put-in-reply-$source|$key');
   static Key openKeyFor(String source, String key) =>
       ValueKey('ask-open-$source|$key');
+  static Key proposedKeyFor(String source, String key) =>
+      ValueKey('ask-proposed-$source|$key');
   static Key dismissKeyFor(String source, String key) =>
       ValueKey('ask-dismiss-$source|$key');
 
@@ -187,6 +200,15 @@ class SchedulingAskTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+                  if ((row.proposed ?? '').isNotEmpty)
+                    Text(
+                      row.proposed!,
+                      key: proposedKeyFor(s, k),
+                      style: BondType.caption
+                          .copyWith(color: BondColors.railAccent),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                 ],
               ),
             ),
@@ -250,7 +272,7 @@ class SchedulingAskTile extends StatelessWidget {
             for (final w in findTimeWindows(row.hints))
               _Pill(
                 key: windowKeyFor(s, k, w),
-                label: findTimeWindowLabel(w, row.hints),
+                label: row.windowLabels[w] ?? findTimeWindowLabel(w, row.hints),
                 selected: w == row.window,
                 onTap: () => callbacks.onWindow(s, k, w),
               ),

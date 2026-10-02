@@ -79,6 +79,8 @@ void main() {
     void Function(CalendarDate)? onVisibleDayChanged,
     void Function(DateTime, DateTime)? onCreateRequested,
     int defaultCreateMinutes = 30,
+    void Function(DateTime, DateTime)? onProposalChanged,
+    VoidCallback? onProposalTapped,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -102,6 +104,8 @@ void main() {
             onVisibleDayChanged: onVisibleDayChanged,
             onCreateRequested: onCreateRequested,
             defaultCreateMinutes: defaultCreateMinutes,
+            onProposalChanged: onProposalChanged,
+            onProposalTapped: onProposalTapped,
           ),
         ),
       ),
@@ -313,7 +317,9 @@ void main() {
   testWidgets('the proposal is a ghost: drawn, labelled, never dragged',
       (tester) async {
     final moves = <String>[];
+    final changed = <(DateTime, DateTime)>[];
     await pumpGrid(
+      onProposalChanged: (s, e) => changed.add((s, e)),
       tester,
       proposal: GridProposal(
         startUtc: DateTime.utc(2026, 10, 7, 20),
@@ -327,6 +333,8 @@ void main() {
     expect(find.text('Proposed: Fabrikam sync'), findsOneWidget);
     await drag(tester, find.byKey(DayGrid.proposalKey), const Offset(0, 42));
     expect(moves, isEmpty);
+    // Not adjustable: even with a handler, a drag asks for nothing.
+    expect(changed, isEmpty);
     await unmount(tester);
   }, variant: platforms);
 
@@ -412,6 +420,106 @@ void main() {
     expect(s, DateTime.utc(2026, 3, 8, 18));
     await unmount(tester);
   }, variant: platforms);
+
+  group('a standing proposal', () {
+    // Wed 1:00–2:30 PM PDT.
+    final start = DateTime.utc(2026, 10, 7, 20);
+    final end = DateTime.utc(2026, 10, 7, 21, 30);
+    GridProposal dinner({bool adjustable = true}) => GridProposal(
+          startUtc: start,
+          endUtc: end,
+          label: 'Proposed',
+          subject: 'Re: dinner on friday',
+          adjustable: adjustable,
+        );
+
+    testWidgets('names what it is, with Proposed under it', (tester) async {
+      await pumpGrid(tester, proposal: dinner());
+      expect(
+          find.descendant(
+              of: find.byKey(DayGrid.proposalKey),
+              matching: find.text('Re: dinner on friday')),
+          findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byKey(DayGrid.proposalKey),
+              matching: find.text('Proposed')),
+          findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets('a drag asks for the new span and the tile stays where the '
+        'host says', (tester) async {
+      final changed = <(DateTime, DateTime)>[];
+      await pumpGrid(tester,
+          proposal: dinner(), onProposalChanged: (s, e) => changed.add((s, e)));
+      final before = tester.getTopLeft(find.byKey(DayGrid.proposalKey));
+      await drag(tester, find.byKey(DayGrid.proposalKey), const Offset(0, 42));
+      expect(changed, [
+        (start.add(const Duration(hours: 1)), end.add(const Duration(hours: 1))),
+      ]);
+      expect(changed.single.$1.isUtc, isTrue);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.getTopLeft(find.byKey(DayGrid.proposalKey)), before);
+      await unmount(tester);
+    }, variant: platforms);
+
+    testWidgets('a tap asks for the card', (tester) async {
+      var tapped = 0;
+      await pumpGrid(tester,
+          proposal: dinner(), onProposalTapped: () => tapped++);
+      await tester.tap(find.byKey(DayGrid.proposalKey));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(tapped, 1);
+      await unmount(tester);
+    });
+
+    testWidgets('locked, it neither moves nor answers a tap', (tester) async {
+      final changed = <(DateTime, DateTime)>[];
+      var tapped = 0;
+      await pumpGrid(tester,
+          proposal: dinner(),
+          locked: true,
+          onProposalChanged: (s, e) => changed.add((s, e)),
+          onProposalTapped: () => tapped++);
+      await tester.tap(find.byKey(DayGrid.proposalKey));
+      await tester.pump(const Duration(milliseconds: 300));
+      await drag(tester, find.byKey(DayGrid.proposalKey), const Offset(0, 42));
+      expect(changed, isEmpty);
+      expect(tapped, 0);
+      await unmount(tester);
+    }, variant: platforms);
+
+    testWidgets('in the week it moves to the next day\'s column at the same '
+        'wall time, across spring-forward', (tester) async {
+      const sat = CalendarDate(2026, 3, 7);
+      final s0 = la.localDateTime(sat, 10, 0).toUtc();
+      final changed = <(DateTime, DateTime)>[];
+      await pumpGrid(
+        tester,
+        on: sat,
+        span: GridSpan.week,
+        now: DateTime.utc(2026, 3, 6, 16),
+        proposal: GridProposal(
+          startUtc: s0,
+          endUtc: s0.add(const Duration(hours: 1)),
+          label: 'Proposed',
+          subject: 'Re: brunch',
+          adjustable: true,
+        ),
+        onProposalChanged: (s, e) => changed.add((s, e)),
+      );
+      final tile = find.byKey(DayGrid.proposalKey);
+      final width = tester.getSize(tile).width;
+      await drag(tester, tile, Offset(width + 4, 0));
+      expect(changed, hasLength(1));
+      final (s, e) = changed.single;
+      expect(s, DateTime.utc(2026, 3, 8, 17));
+      expect(la.toLocal(s).hour, 10);
+      expect(e.difference(s), const Duration(hours: 1));
+      await unmount(tester);
+    }, variant: platforms);
+  });
 
   testWidgets('the week before spring-forward: a Saturday event dragged to '
       'Sunday keeps its wall time', (tester) async {
@@ -523,6 +631,41 @@ void main() {
 
     await swipeLeft(tester);
     expect(changed, [mondayOf(day).addDays(7)]);
+    await unmount(tester);
+  });
+
+  testWidgets('a tap on empty time after paging the week forward is in '
+      'the next week', (tester) async {
+    final changed = <CalendarDate>[];
+    final asked = <(DateTime, DateTime)>[];
+    await pumpGrid(tester,
+        span: GridSpan.week,
+        onVisibleDayChanged: changed.add,
+        onCreateRequested: (s, e) => asked.add((s, e)));
+    await swipeLeft(tester);
+    expect(changed, [mondayOf(day).addDays(7)]);
+
+    await tester.tapAt(tester.getCenter(find.byType(DayGrid)));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(asked, hasLength(1));
+    final d = la.dateOf(asked.single.$1);
+    final monday = mondayOf(day).addDays(7);
+    expect(d.isBefore(monday), isFalse, reason: '$d');
+    expect(d.isBefore(monday.addDays(7)), isTrue, reason: '$d');
+    await unmount(tester);
+  });
+
+  testWidgets('a tap after the host moves the day is on the new day',
+      (tester) async {
+    final asked = <(DateTime, DateTime)>[];
+    await pumpGrid(tester, onCreateRequested: (s, e) => asked.add((s, e)));
+    // The host moves the pane nine days on, as a search does.
+    await pumpGrid(tester,
+        on: day.addDays(9), onCreateRequested: (s, e) => asked.add((s, e)));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tapAt(tester.getCenter(find.byType(DayGrid)));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(la.dateOf(asked.single.$1), day.addDays(9));
     await unmount(tester);
   });
 

@@ -175,4 +175,53 @@ void main() {
     final h = read('', '${'a' * 593} at 11pm');
     expect(h.hours, isNull);
   });
+
+  test('today\'s hours already over roll the day a week on', () {
+    // Friday Oct 9 2026 in Los Angeles: 21:00, then 15:00.
+    final late = readAskHints(
+        subject: 'dinner on friday?',
+        body: '',
+        now: DateTime.utc(2026, 10, 10, 4),
+        zone: la);
+    expect(late.day, const CalendarDate(2026, 10, 16));
+    expect(late.said, 'Asked for: Fri Oct 16 · dinner');
+    final early = readAskHints(
+        subject: 'dinner on friday?',
+        body: '',
+        now: DateTime.utc(2026, 10, 9, 22),
+        zone: la);
+    expect(early.day, const CalendarDate(2026, 10, 9));
+    // No hours: today stands, whatever the time.
+    final bare = readAskHints(
+        subject: 'friday?',
+        body: 'can we talk on friday?',
+        now: DateTime.utc(2026, 10, 10, 4),
+        zone: la);
+    expect(bare.day, const CalendarDate(2026, 10, 9));
+  });
+
+  test('too late today is now plus the meeting past the close', () {
+    // Friday Oct 9: at 19:30 a 90-minute dinner no longer fits by 20:30.
+    final late = readAskHints(
+        subject: 'dinner on friday?',
+        body: '',
+        now: DateTime.utc(2026, 10, 10, 2, 30),
+        zone: la);
+    expect(late.day, const CalendarDate(2026, 10, 16));
+    // At 18:30 it still does.
+    final inTime = readAskHints(
+        subject: 'dinner on friday?',
+        body: '',
+        now: DateTime.utc(2026, 10, 10, 1, 30),
+        zone: la);
+    expect(inTime.day, const CalendarDate(2026, 10, 9));
+  });
+
+  test('the time words say how the hours were asked for', () {
+    expect(read('dinner on friday?').timeWords, 'for dinner');
+    expect(read('Thursday afternoon?').timeWords, 'in the afternoon');
+    expect(read('3pm thursday?').timeWords, 'at 3:00 PM');
+    expect(read('dinner at 7 friday?').timeWords, 'for dinner at 7:00 PM');
+    expect(read('friday?').timeWords, isNull);
+  });
 }

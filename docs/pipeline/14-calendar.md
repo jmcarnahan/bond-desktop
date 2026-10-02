@@ -571,6 +571,33 @@ in-memory.
   no dashed style — for a time that is not on the calendar: the pending
   drop's "Moving here…", and a command's standing proposal, "Proposed"
   ([The bar](#the-bar)).
+- **The proposal tile** (a standing proposal's ghost) is a kalender event of
+  its own kind. It is NAMED: the invite's subject ("Re: dinner on friday"),
+  the blank event's name as its card's field reads it (the card's
+  `onSubjectChanged` → `_proposalName`), or the moved meeting's subject,
+  with "Proposed" as its caption (`GridProposal.subject`; on the same line,
+  "Re: dinner on friday · Proposed", when the tile is one line tall). It is ADJUSTABLE
+  (`GridProposal.adjustable`, when the grid is not `locked`): it moves and
+  resizes like an own event, to another time or to another day's column in
+  Week view, and the grid asks `onProposalChanged(startUtc, endUtc)` without
+  moving it. The inbox (`_reproposeFromGrid`) makes the same proposal again
+  on the new span — an ask's slot again (`_pickAskSlot`, the same ask and
+  people), a blank event under its typed name, a typed command's write
+  rebuilt on the span and dry-run against its own meeting
+  (`_reproposeCommand`, keeping the outcome's reading) — and the ghost is
+  redrawn where that answer puts it; nothing is stored, and a proposal that
+  does not change leaves the ghost where it was. A move of a meeting the
+  owner may not move is never adjustable (the drop's `canMove`); a moved
+  ghost goes through the drop's own refusals (`checkDrop`: "That's when it
+  already is.", "That time has passed.") and a create's is never put in the
+  past. While the card's write is out (`CommandPlanCard.onWritingChanged` →
+  `_cardWriting`) the ghost holds still and an empty-time press proposes
+  nothing, so the write in the air is the one the card shows. A new card
+  never flashes as it appears. In Day view
+  a tile cannot leave its one column: to another day, Week view, or the Day
+  bar's "move … to …". A TAP on it flashes its card once
+  (`CommandPlanCard.flash`, a 600 ms fade, never looping); the card sits
+  above the grid and never scrolls out of view, so no scrolling is needed.
 - **A press on empty time is a PROPOSAL too.** The body allows creation
   (`allowEventCreation` while not `locked` and the host passes
   `onCreateRequested`; the all-day header never). kalender 0.32 has two
@@ -1507,7 +1534,9 @@ which every caller awaits) into `AskHints {day, hours, minutes, said}`:
   is not a day. A day at most seven days past (an old message's date) rolls
   to that weekday's next occurrence — today when it is today's weekday —
   because the ask may be days old; an older one is dropped. "yesterday" is
-  no day.
+  no day. A day that is today whose hours have already ended rolls a week on
+  ("dinner on Friday" read on Friday at nine is next Friday); with no hours
+  today stands.
 - **The hours**, most specific first: an explicit clock time (a two-hour
   window from it, cut at 23:59; a range such as "2-3:30pm" ends where it
   says), with a meal word setting a bare hour's half of the day ("dinner at
@@ -1537,6 +1566,45 @@ is the day itself (`findTimeWindowLabel`: "Fri Oct 9") and comes first, and
 the ask's own length joins the 30 · 45 · 60 pills when it is none of them.
 With hours, a week's window opens Monday at their start and closes Friday at
 their end.
+
+**A week with a weekday read means that weekday.** With "dinner on Friday",
+**This week** is this week's Friday evening and **Next week** next week's
+(`weekdayWithin(monday, weekday)`, built from components), from now when it
+is today; this week's once gone (past, or today with no room left — now plus
+the meeting's length past the hours' close) is the
+next one, as their day rolls, and next week the one after. The pills say so:
+"This Fri" and "Next Fri" (the weekday's three letters; plain "This week" /
+"Next week" with no weekday read) — and once this week's Friday has gone,
+each says the DATE it now means ("Fri Oct 9", "Fri Oct 16"), so a pill never
+reads as a day that has passed: the host (the inbox for the column and the
+pane) builds each pill's words from the day its search would cover
+(`findTimeWindowLabels` → `findTimeWindowLabel(covers:, today:)`; a week
+pill keeps "This Fri" / "Next Fri" only while that day is inside its nominal
+week) and hands them to the row (`SchedulingAskRow.windowLabels`) and the
+pane (`FindTimePane.windowLabelsFor`, at the length the pane has
+selected). When that day offers nothing — no slot of
+the owner's own, or nothing from Graph inside the hours — the rest of its
+Monday–Friday at the same hours is searched and offered under "Nothing free
+on Friday for dinner that week — the rest of the week:" (the weekday and the
+ask's `timeWords`; "Nothing free on Friday that week — the rest of the
+week:" with no hours), with any note of the week's own search — Graph's, or
+"Couldn't read their free time…" — following it. A search that could not
+run at all (`FindTimeResult.failed`: a refusal, a missing permission,
+unreachable) is never retried that way, and neither is a weekend day: a
+Sunday has no Monday–Friday of its own after it. A window that ends where it
+starts searches nothing and asks nobody.
+
+**The pane follows the search.** Before each search of an ask — its first
+open (once its words are read, so on their day), a pill pressed, and a
+re-open on its standing answer — the inbox moves the Day pane to the first
+day of the window about to be searched (`_followAsk`: `findTimeWindowUtc`'s
+`firstDay` → `_selectDay`, which keeps the Agenda or Grid face as it is). So
+Next week on "dinner on Friday" shows next Friday (the week grid its week),
+and a press on its empty time proposes that Friday. It never takes the owner
+anywhere: off the Day stop (left during the hint read) it does nothing, and
+with a thread, storyline, room or Later day open on the Day stop that stays
+open and only the day underneath moves, so the pane is on the right day when
+they come back.
 
 **The search** (`searchFindTime`, `app/lib/services/calendar/find_time.dart`;
 never throws):
@@ -1639,8 +1707,10 @@ callbacks.
   been pressed.
 - **Open**, it says what the ask asked for ("Asked for: Fri Oct 9 · dinner",
   when its words named anything), then two pill rows, `min 30 · 45 · 60`
-  (plus the ask's own length) and `<their day> · This week · Next week` (their
-  day only when one was read, and first); a press searches again, and an answer a newer press overtook is
+  (plus the ask's own length) and `<their day> · This Fri · Next Fri` (their
+  day first, and the weeks named by its weekday, when one was read; else
+  `This week · Next week`); a press searches again, and the pane moves to the
+  day it searches, and an answer a newer press overtook is
   dropped (a serial per ask). "Finding…" while a search runs. Then up to
   three slots, each a full-width tap target: "Tue Oct 20 · 10:00–10:30 AM",
   over the owner's own hard overlap in the rail's accent when the mirror has
@@ -1664,6 +1734,10 @@ callbacks.
   proposal that came from no typed text). When the card's write goes
   through with anyone on it, the ask closes (above) and leaves the column.
 - **×** beside the head, folded or open, dismisses the ask (above).
+- While the ask's proposal stands on the card, its head says so in the
+  rail's accent: "Proposed: Fri Oct 2 · 7:15–8:45 PM"
+  (`SchedulingAskTile.proposedKeyFor`), from `_proposalAsk` and the
+  standing proposal's instants; it goes when the card goes.
 - **Put in reply** opens the thread and stages every slot shown as one line
   through `_putInReply`, as the pane's button does. **Open thread** opens the
   thread (`_select`).

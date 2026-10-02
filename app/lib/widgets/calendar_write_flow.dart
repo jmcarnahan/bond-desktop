@@ -41,6 +41,7 @@ class CalendarWriteFlow extends StatefulWidget {
     this.fill = false,
     this.resetOnSuccess = true,
     this.onIdle,
+    this.onCommitting,
     this.onFailed,
   });
 
@@ -86,6 +87,11 @@ class CalendarWriteFlow extends StatefulWidget {
   /// would land — takes it down here. Not called from dispose: a host that
   /// outlives the flow reads `busy` from the next one instead.
   final VoidCallback? onIdle;
+
+  /// Called as the real write goes out (after the dry run, and the confirm
+  /// when there is one): a host that must not change the write's subject
+  /// under it holds still until [onIdle].
+  final VoidCallback? onCommitting;
 
   /// Told a failed commit's sentence when the flow has gone before the
   /// answer came back, so the screen can say it (the host toasts it). While
@@ -197,6 +203,7 @@ class _CalendarWriteFlowState extends State<CalendarWriteFlow> {
     final preview = _preview;
     if (write == null || preview == null) return;
     setState(() => _phase = _Phase.committing);
+    widget.onCommitting?.call();
     final done =
         _doneMessage + emailedSuffix(preview.notifies, mayEmail: _mayEmail);
     final onDone = widget.onDone;

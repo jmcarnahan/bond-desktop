@@ -64,7 +64,12 @@ import '../services/calendar/command/command_types.dart'
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
 import '../services/calendar/find_time.dart'
-    show findTimeReplyLine, findTimeSubject, searchFindTime;
+    show
+        findTimeReplyLine,
+        findTimeSubject,
+        findTimeWindowLabels,
+        findTimeWindowUtc,
+        searchFindTime;
 import '../services/calendar/scheduling_ask.dart' show schedulingAskKey;
 import '../services/calendar/overlaps.dart'
     show FreeSlot, Overlaps, overlapsForEvent;
@@ -73,6 +78,7 @@ import '../services/calendar/write_rules.dart'
     show
         NewTimeProblem,
         NewTimeTimed,
+        canMove,
         checkDrop,
         writeDoneMessage,
         writeSummary;
@@ -532,6 +538,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The standing proposal is a blank event picked on the grid, so its card
   /// draws a name field. Cleared with the command ([_forgetCommand]).
   bool _proposalBlank = false;
+
+  /// The blank event's name as its card's field now reads, so the grid's
+  /// ghost carries it too; null until typed. Cleared with the command.
+  String? _proposalName;
+
+  /// Bumped when the grid's ghost is tapped: the card flashes once. Back to
+  /// zero with every new card, so a card never flashes as it appears.
+  int _cardFlash = 0;
+
+  /// The card's write is going out: the ghost holds still and the grid
+  /// proposes nothing new until it lands or fails.
+  bool _cardWriting = false;
 
   /// Words ⌘K's "Ask Day" row handed over, waiting for the bar to take them.
   /// One-shot: the bar submits them a frame after it sees them, and the
@@ -5253,6 +5271,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             startUtc: plan.startUtc!,
             endUtc: plan.endUtc!,
             label: 'Proposed',
+            subject: _ghostSubject(plan),
+            adjustable: _ghostAdjustable(plan) && !_cardWriting,
           )
         : null;
     return CalendarWriteFlow(
@@ -5287,6 +5307,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // event — both a proposal on the card, never a tile until written.
         onCreateRequested: (startUtc, endUtc) =>
             _createFromGrid(startUtc, endUtc, zone: zone, today: today),
+        // The ghost moved or resized: the standing proposal again on the new
+        // span. A tap on it flashes its card.
+        onProposalChanged: (startUtc, endUtc) =>
+            _reproposeFromGrid(startUtc, endUtc, zone: zone, today: today),
+        onProposalTapped: () => setState(() => _cardFlash += 1),
         defaultCreateMinutes: _openAsk()?.entry.minutes ?? 30,
         onOpenItem: (item) {
           switch (item) {
@@ -5382,6 +5407,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _proposalAsk = null;
     _proposalInvites = false;
     _proposalBlank = false;
+    _proposalName = null;
+    _cardFlash = 0;
+    _cardWriting = false;
   }
 
   void _clearCommand() {
@@ -5429,6 +5457,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (choice == null) {
         _proposalAsk = null;
         _proposalInvites = false;
+        _cardFlash = 0;
       }
     });
     CommandOutcome outcome;
@@ -5590,6 +5619,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onChoose: (option) =>
           _submitCommand(_commandText, zone: zone, choice: option),
       subjectEditable: _proposalBlank,
+      onSubjectChanged: (name) => setState(() => _proposalName = name),
+      flash: _cardFlash,
+      onWritingChanged: (writing) {
+        if (mounted && serial == _commandSerial) {
+          setState(() => _cardWriting = writing);
+        }
+      },
       onOpenEvent: _openEvent,
     );
   }
@@ -5928,6 +5964,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       child: FindTimePane(
         key: ValueKey('find-time-${thread.source}|${thread.id}'),
         hints: hints,
+        windowLabelsFor: (minutes) => _windowLabels(hints, minutes),
         availability: ref.watch(calendarAvailabilityProvider),
         subject: thread.subject,
         participants: people,
@@ -6030,7 +6067,155 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       window: e.window,
       hints: e.hints,
       result: e.result,
+      proposed: _proposedLine(c.source, c.id),
+      windowLabels: _windowLabels(e.hints, e.minutes),
     );
+  }
+
+  /// The window pills' words for [hints] now, each from the day its search
+  /// would cover, so a rolled week pill says its date.
+  Map<FindTimeWindow, String> _windowLabels(AskHints? hints, int minutes) {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (hints?.day == null || zone == null) return const {};
+    return findTimeWindowLabels(hints,
+        now: DateTime.now(), zone: zone, durationMinutes: minutes);
+  }
+
+  /// "Proposed: Fri Oct 2 · 7:15–8:45 PM" for the ask whose proposal stands
+  /// on the card; null for any other row, and once the card goes.
+  String? _proposedLine(String source, String key) {
+    final ask = _proposalAsk;
+    final plan = _commandOutcome?.plan;
+    if (ask == null || ask.source != source || ask.key != key) return null;
+    if (plan is! CalendarProposal) return null;
+    final s = plan.startUtc;
+    final e = plan.endUtc;
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (s == null || e == null || zone == null) return null;
+    return 'Proposed: ${shortDate(zone.dateOf(s))} · '
+        '${formatEventRange(zone, s, e)}';
+  }
+
+  /// What the grid's ghost is named: the invite's or blank event's subject
+  /// (the name as typed, for a blank one), or the moved meeting's.
+  String _ghostSubject(CalendarProposal plan) => switch (plan.write) {
+        final CreateEvent w => _proposalBlank && _proposalName != null
+            ? (_proposalName!.trim().isEmpty ? 'New event' : _proposalName!)
+            : w.subject,
+        MoveEvent() => plan.targetEvent?.subject ?? '',
+        _ => '',
+      };
+
+  /// Whether the ghost may be dragged: a create always; a move only of a
+  /// timed event the owner may move ([canMove], the drop's own rule).
+  bool _ghostAdjustable(CalendarProposal plan) => switch (plan.write) {
+        CreateEvent() => true,
+        final MoveEvent w => !w.isAllDay &&
+            (plan.targetEvent == null ||
+                (canMove(plan.targetEvent!) && plan.targetEvent!.isTimed)),
+        _ => false,
+      };
+
+  /// The ghost moved to [startUtc]–[endUtc] (another time, or another day's
+  /// column in the week): the standing proposal is made again there, never
+  /// stored. An ask's is its slot again ([_pickAskSlot]: the same ask and
+  /// people); a blank event's keeps its name as typed; a typed command's
+  /// write is rebuilt on the new span and dry-run again against its own
+  /// meeting, keeping the outcome's reading.
+  void _reproposeFromGrid(
+    DateTime startUtc,
+    DateTime endUtc, {
+    required CalendarZone zone,
+    required CalendarDate today,
+  }) {
+    final plan = _commandOutcome?.plan;
+    if (plan is! CalendarProposal || _cardWriting) return;
+    final write = plan.write;
+    // The drop's own refusals, in its words: a move checked as a dropped
+    // tile is, a create never into the past.
+    final target = plan.targetEvent;
+    if (write is MoveEvent && target != null) {
+      final checked = checkDrop(
+          shown: target,
+          startUtc: startUtc,
+          endUtc: endUtc,
+          now: DateTime.now());
+      if (checked is NewTimeProblem) {
+        _toast(checked.reason, cleared: 0);
+        return;
+      }
+    } else if (write is CreateEvent &&
+        startUtc.isBefore(DateTime.now().toUtc())) {
+      _toast('That time has passed.', cleared: 0);
+      return;
+    }
+    final ask = _proposalAsk;
+    if (ask != null) {
+      unawaited(_pickAskSlot(ask.source, ask.key, FreeSlot(startUtc, endUtc)));
+      return;
+    }
+    if (_proposalBlank && write is CreateEvent) {
+      final typed = (_proposalName ?? write.subject).trim();
+      _selectDay(zone.dateOf(startUtc));
+      unawaited(_showProposal(
+          CreateEvent.propose(
+              subject: typed.isEmpty ? 'New event' : typed,
+              startUtc: startUtc,
+              endUtc: endUtc),
+          zone: zone,
+          today: today,
+          blank: true));
+      return;
+    }
+    final CalendarWrite? next = switch (write) {
+      final MoveEvent w when !w.isAllDay => MoveEvent.timed(w.eventId,
+          startUtc: startUtc, endUtc: endUtc, ifMatch: w.ifMatch),
+      final CreateEvent w => CreateEvent.propose(
+          subject: w.subject,
+          startUtc: startUtc,
+          endUtc: endUtc,
+          attendees: w.attendees,
+          isOnlineMeeting: w.isOnlineMeeting,
+          body: w.body),
+      _ => null,
+    };
+    if (next == null) return;
+    _selectDay(zone.dateOf(startUtc));
+    unawaited(_reproposeCommand(next, plan.targetEvent, zone: zone, today: today));
+  }
+
+  /// A typed command's proposal made again on another span — the path a
+  /// slot pressed on its card takes ([_pickCommandSlot]), keeping the
+  /// outcome's path and parse.
+  Future<void> _reproposeCommand(
+    CalendarWrite write,
+    CalendarEvent? target, {
+    required CalendarZone zone,
+    required CalendarDate today,
+  }) async {
+    final serial = _commandSerial + 1;
+    final previous = _commandOutcome;
+    setState(() {
+      _commandSerial = serial;
+      _commandBusy = true;
+    });
+    CommandPlan plan;
+    try {
+      plan = await ref
+          .read(commandPlannerProvider)
+          .propose(write, target: target, zone: zone, today: today);
+    } on Object catch (e) {
+      debugPrint('calendar command: grid re-proposal failed: ${e.runtimeType}');
+      plan = const CannotDo('Something went wrong reading that.');
+    }
+    if (!mounted || serial != _commandSerial) return;
+    setState(() {
+      _commandBusy = false;
+      _cardFlash = 0;
+      _commandOutcome = CommandOutcome(
+          plan: plan, path: previous?.path ?? CommandPath.lexicon,
+          parsed: previous?.parsed);
+    });
   }
 
   /// Opens an ask (folding every other: one open at a time) and runs its
@@ -6068,7 +6253,41 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     });
     if (entry.result == null && !entry.busy) {
       unawaited(_runAskSearch(source, key));
+    } else if (entry.hintsRead) {
+      // Opened again on its standing answer: the pane goes back to its day.
+      _followAsk(entry);
     }
+  }
+
+  /// The pane follows the search: the first day of the window [entry] is
+  /// about to search ([findTimeWindowUtc], with its hints and pills), so
+  /// "Next week" on "dinner on Friday" shows next Friday, and a grid press
+  /// there proposes that Friday. [_selectDay] keeps the grid face as it is.
+  ///
+  /// It never takes the owner anywhere: off the Day stop (they left during
+  /// the hint read) it does nothing, and with a thread, storyline, room or
+  /// Later day open it only moves the day underneath, so the pane is on the
+  /// right day when they come back to it.
+  void _followAsk(_AskSearch entry) {
+    if (_section != RailSection.day) return;
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) return;
+    final now = DateTime.now();
+    final w = findTimeWindowUtc(entry.window,
+        now: now,
+        zone: zone,
+        durationMinutes: entry.minutes,
+        hints: entry.hints);
+    final reading = _selectedId != null ||
+        _selectedStorylineId != null ||
+        _selectedRoomKey != null ||
+        _selectedLaterDay != null;
+    if (reading) {
+      final today = zone.dateOf(now.toUtc());
+      setState(() => _selectedDay = w.firstDay == today ? null : w.firstDay);
+      return;
+    }
+    _selectDay(w.firstDay);
   }
 
   /// A pill pressed: the new length or week, and the search again.
@@ -6103,6 +6322,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
     }
     entry.searched = true;
+    _followAsk(entry);
     FindTimeResult result;
     try {
       result = await _findTimeSearch(
@@ -6228,6 +6448,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     required CalendarZone zone,
     required CalendarDate today,
   }) {
+    // The card's write is in the air: nothing new is proposed under it.
+    if (_cardWriting) return;
     unawaited(() async {
       final ask = _openAsk();
       if (ask != null &&
@@ -6328,6 +6550,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (closed == null) {
       _toast("Couldn't dismiss that ask just now.", cleared: 0);
       return;
+    }
+    // The ask's own proposal goes with it: the card and the ghost.
+    final standing = _proposalAsk;
+    if (standing != null &&
+        standing.source == source &&
+        standing.key == key) {
+      _clearCommand();
     }
     _toast(
       'Dismissed — it comes back if they write again.',

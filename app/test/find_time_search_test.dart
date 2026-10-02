@@ -421,8 +421,161 @@ void main() {
     test('the pill says their day', () {
       expect(findTimeWindowLabel(FindTimeWindow.theirs,
           const AskHints(day: fri)), 'Fri Oct 16');
+      // With a weekday read, the weeks say which day of them they search.
       expect(findTimeWindowLabel(FindTimeWindow.thisWeek,
-          const AskHints(day: fri)), 'This week');
+          const AskHints(day: fri)), 'This Fri');
+      expect(findTimeWindowLabel(FindTimeWindow.nextWeek,
+          const AskHints(day: fri)), 'Next Fri');
+      expect(findTimeWindowLabel(FindTimeWindow.thisWeek,
+          const AskHints(hours: dinner)), 'This week');
+    });
+
+    group('a week with a weekday read', () {
+      const nextFri = CalendarDate(2026, 10, 23);
+      const fridayDinner = AskHints(
+          day: fri, hours: dinner, minutes: 90, timeWords: 'for dinner');
+
+      test('Next week is next week\'s Friday evening, and Graph is asked '
+          'about it alone', () async {
+        final r = await hinted(fridayDinner,
+            window: FindTimeWindow.nextWeek, minutes: 90);
+        expect(r.slots, isNotEmpty);
+        expect(r.slots.map((s) => la.dateOf(s.startUtc)).toSet(), {nextFri});
+        expect(r.note, isNull);
+
+        await hinted(fridayDinner,
+            addresses: ['dana@fabrikam.example'],
+            window: FindTimeWindow.nextWeek,
+            minutes: 90);
+        expect(backend.windows.single,
+            (local(nextFri, 17, 30), local(nextFri, 20, 30)));
+      });
+
+      test('This week is this week\'s Friday', () {
+        final w = findTimeWindowUtc(FindTimeWindow.thisWeek,
+            now: now, zone: la, hints: fridayDinner);
+        expect(w.firstDay, fri);
+        expect(w.lastDay, fri);
+        expect(w.startUtc, local(fri, 17, 30));
+      });
+
+      test('a Friday with nothing free offers the rest of that week, said',
+          () async {
+        await calendar.upsertEvents([
+          CalendarEvent(
+            id: 'fri-busy',
+            subject: 'Northwind offsite',
+            startUtc: local(nextFri, 17),
+            endUtc: local(nextFri, 21),
+            showAs: 'busy',
+          ),
+        ], syncRun: 'run-1');
+        final r = await hinted(fridayDinner,
+            window: FindTimeWindow.nextWeek, minutes: 90);
+        expect(r.slots, isNotEmpty);
+        expect(r.note,
+            'Nothing free on Friday for dinner that week — the rest of the '
+            'week:');
+        for (final s in r.slots) {
+          final d = la.dateOf(s.startUtc);
+          expect(d.isBefore(nextFri), isTrue);
+          expect(d.isBefore(const CalendarDate(2026, 10, 19)), isFalse);
+          expect(la.toLocal(s.startUtc).hour, greaterThanOrEqualTo(17));
+        }
+      });
+
+      test('a week pill whose Friday has gone says the date it now means',
+          () {
+        Map<FindTimeWindow, String> labels(DateTime at) =>
+            findTimeWindowLabels(fridayDinner,
+                now: at, zone: la, durationMinutes: 90);
+        // Wednesday: this week's Friday is ahead.
+        expect(labels(now)[FindTimeWindow.thisWeek], 'This Fri');
+        expect(labels(now)[FindTimeWindow.nextWeek], 'Next Fri');
+        expect(labels(now)[FindTimeWindow.theirs], 'Fri Oct 16');
+        // Saturday: the week's Friday has gone.
+        final saturday = DateTime.utc(2026, 10, 17, 17);
+        expect(labels(saturday)[FindTimeWindow.thisWeek], 'Fri Oct 23');
+        expect(labels(saturday)[FindTimeWindow.nextWeek], 'Fri Oct 30');
+        // Friday 9:00 PM, tonight's hours over; 3:00 PM, still tonight.
+        expect(labels(DateTime.utc(2026, 10, 17, 4))[FindTimeWindow.thisWeek],
+            'Fri Oct 23');
+        expect(labels(DateTime.utc(2026, 10, 16, 22))[FindTimeWindow.thisWeek],
+            'This Fri');
+        // The rule alone: covers inside next week's nominal week keeps the
+        // weekday; outside it, the date.
+        expect(
+            findTimeWindowLabel(FindTimeWindow.nextWeek, fridayDinner,
+                covers: const CalendarDate(2026, 10, 23),
+                today: const CalendarDate(2026, 10, 14)),
+            'Next Fri');
+        expect(
+            findTimeWindowLabel(FindTimeWindow.nextWeek, fridayDinner,
+                covers: const CalendarDate(2026, 10, 30),
+                today: const CalendarDate(2026, 10, 14)),
+            'Fri Oct 30');
+      });
+
+      test('a weekend day with nothing free falls back to nothing, and Graph '
+          'is asked once', () async {
+        const sun = CalendarDate(2026, 10, 18);
+        const brunch = AskHours(
+            startHour: 10, startMinute: 0, endHour: 13, endMinute: 0);
+        await calendar.upsertEvents([
+          CalendarEvent(
+            id: 'sun-busy',
+            subject: 'Family day',
+            startUtc: local(sun, 9),
+            endUtc: local(sun, 14),
+            showAs: 'busy',
+          ),
+        ], syncRun: 'run-1');
+        backend.answer = const MeetingTimes(emptyReason: 'unknown');
+        final r = await hinted(
+            const AskHints(day: sun, hours: brunch, timeWords: 'for brunch'),
+            addresses: ['dana@fabrikam.example'],
+            window: FindTimeWindow.thisWeek,
+            minutes: 60);
+        expect(r.slots, isEmpty, reason: 'no Mon–Fri before the Sunday');
+        expect(backend.asked, hasLength(1));
+      });
+
+      test('a search that could not run is not retried as a week', () async {
+        backend.answer = const CalendarScopeMissing();
+        final r = await hinted(fridayDinner,
+            addresses: ['dana@fabrikam.example'],
+            window: FindTimeWindow.nextWeek,
+            minutes: 90);
+        expect(backend.asked, hasLength(1));
+        expect(r.failed, isTrue);
+        expect(r.note, 'Calendar permission missing — reconnect in Settings.');
+      });
+
+      test('their hours already over today search nothing and ask nobody',
+          () async {
+        // Wednesday 1:00 PM; the ask's morning ended at noon.
+        final r = await searchFindTime(
+          backend: backend,
+          calendar: calendar,
+          hours: null,
+          addresses: const ['dana@fabrikam.example'],
+          durationMinutes: 30,
+          window: FindTimeWindow.theirs,
+          now: DateTime.utc(2026, 10, 14, 20),
+          zone: la,
+          hints: const AskHints(
+              day: CalendarDate(2026, 10, 14), hours: morning),
+        );
+        expect(r.slots, isEmpty);
+        expect(backend.asked, isEmpty);
+      });
+
+      test('a week without a weekday read is still the week', () {
+        final w = findTimeWindowUtc(FindTimeWindow.nextWeek,
+            now: now, zone: la, hints: const AskHints(hours: dinner));
+        expect(w.firstDay, const CalendarDate(2026, 10, 19));
+        expect(w.lastDay, nextFri);
+      });
     });
   });
 }

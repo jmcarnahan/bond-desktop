@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/calendar/day_items.dart'
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:bond_inbox/services/calendar/write_rules.dart'
     show writeSummary;
+import 'package:bond_inbox/theme/tokens.dart' show BondColors;
 import 'package:bond_inbox/widgets/command_plan_card.dart';
 import 'package:bond_inbox/widgets/write_confirm_strip.dart';
 import 'package:flutter/material.dart';
@@ -80,6 +81,9 @@ void main() {
   Future<void> pumpCard(WidgetTester tester, CommandPlan plan,
       {CalendarWriter? writer,
       bool subjectEditable = false,
+      ValueChanged<String>? onSubjectChanged,
+      int flash = 0,
+      ValueChanged<bool>? onWritingChanged,
       CalendarAvailability availability =
           CalendarAvailability.available}) async {
     await tester.pumpWidget(MaterialApp(
@@ -99,6 +103,9 @@ void main() {
             onOpenEvent: opened.add,
             availability: availability,
             subjectEditable: subjectEditable,
+            onSubjectChanged: onSubjectChanged,
+            flash: flash,
+            onWritingChanged: onWritingChanged,
           ),
         ),
       ),
@@ -182,6 +189,15 @@ void main() {
       expect(done.single.message, contains('Dentist'));
     });
 
+    testWidgets('the name is reported as it is typed', (tester) async {
+      final names = <String>[];
+      await pumpCard(tester, blank(),
+          subjectEditable: true, onSubjectChanged: names.add);
+      await tester.enterText(find.byKey(CommandPlanCard.subjectKey), 'Dentist');
+      await tester.pump();
+      expect(names, ['Dentist']);
+    });
+
     testWidgets('an emptied name writes the default', (tester) async {
       final writer = _FakeWriter();
       await pumpCard(tester, blank(), writer: writer, subjectEditable: true);
@@ -192,6 +208,36 @@ void main() {
       await tester.pump();
       expect((writer.committed.single as CreateEvent).subject, 'New event');
     });
+  });
+
+  testWidgets('the host is told while the real write goes out', (tester) async {
+    final writing = <bool>[];
+    final writer = _FakeWriter(notifies: const ['dana@contoso.com']);
+    await pumpCard(tester, move(notifies: const ['dana@contoso.com']),
+        writer: writer, onWritingChanged: writing.add);
+    await tester.tap(find.byKey(CommandPlanCard.doKey));
+    await tester.pump();
+    expect(writing, isEmpty, reason: 'the dry run and the strip are not it');
+    await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+    await tester.pump();
+    await tester.pump();
+    expect(writing, [true, false]);
+  });
+
+  testWidgets('a flash runs once and comes to rest', (tester) async {
+    Color border() => ((tester
+                .widget<Container>(find.byKey(CommandPlanCard.flashKey))
+                .decoration! as BoxDecoration)
+            .border! as Border)
+        .top
+        .color;
+    await pumpCard(tester, move());
+    expect(border(), BondColors.border);
+    await pumpCard(tester, move(), flash: 1);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(border(), isNot(BondColors.border));
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(border(), BondColors.border);
   });
 
   testWidgets('a proposal that emails says who, and waits on the strip',
