@@ -185,7 +185,7 @@ RESET  := \033[0m
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
         golden-pairs golden-gate golden-decision decision-agreement _decide-health \
-        calendar-heads calendar-heads-adopt \
+        calendar-heads calendar-heads-adopt foreground background \
         golden-judge-pack golden-judge-tally \
         dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
         dist dist-notarize dist-appcast dist-sparkle-tools _dist-preflight
@@ -214,6 +214,8 @@ help:
 	@printf "  make clean-model  → delete the cached weights for a re-download\n"
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
+	@printf "  make foreground W=<worktree>   → check a round's branch out HERE for the manual pass (the worktree detaches)\n"
+	@printf "  make background W=<worktree>   → the reverse: this checkout back on main, the worktree back on its branch\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
 	@printf "  make app-gen      → regenerate Drift code + migration snapshots\n"
 	@printf "  make app-migrations → record a Drift schema bump (run before app-gen)\n"
@@ -1188,6 +1190,45 @@ app-install:
 
 app-run:
 	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+
+# A round is built in a worktree under .claude/worktrees/<name> and tested by
+# hand from THIS checkout: a worktree build cannot read the keychain (the
+# signing config is git-ignored and lives here), so sign-in dies on every
+# restart there, and `make app-run` here is the owner's everyday path. Git
+# lets a branch be checked out in one place only, so the move is: detach the
+# worktree (its files, plan and PR body stay on disk), then switch here.
+# Run from this checkout — a Claude session launched inside a worktree is
+# walled off from the main checkout by Claude Code itself and cannot run it.
+# The sandbox line in local.mk (BOND_SAMPLE_DIR) must be overridden for a
+# round that needs the real account; the printed line does that.
+foreground:
+	@test -n "$(W)" || { printf "usage: make foreground W=<worktree name under .claude/worktrees>\n"; exit 2; }
+	@wt=".claude/worktrees/$(W)"; \
+	 test -d "$$wt" || { printf "no worktree at %s\n" "$$wt"; exit 2; }; \
+	 test -z "$$(git status --short)" || { printf "this checkout has uncommitted changes; commit or set them aside first:\n"; git status --short; exit 1; }; \
+	 branch=$$(git -C "$$wt" branch --show-current); \
+	 if [ -z "$$branch" ]; then \
+	   branch=$$(git for-each-ref refs/heads --format='%(refname:short)' --points-at "$$(git -C "$$wt" rev-parse HEAD)" | grep -v '^main$$' | head -1); \
+	   test -n "$$branch" || { printf "the worktree is detached and no branch points at its HEAD; name it: git switch <branch>\n"; exit 1; }; \
+	 else \
+	   test -z "$$(git -C "$$wt" status --short)" || { printf "the worktree has uncommitted changes; commit them there first:\n"; git -C "$$wt" status --short; exit 1; }; \
+	   git -C "$$wt" switch --detach --quiet; \
+	 fi; \
+	 git switch "$$branch"; \
+	 printf "\n  %s is in the foreground. Run the app with:\n\n    make app-run BOND_SAMPLE_DIR=\n\n  (BOND_SAMPLE_DIR= overrides the sandbox line in local.mk for this run; drop it for a sandbox pass.)\n" "$$branch"
+
+# The way back once the pass is done: this checkout returns to main and the
+# worktree re-attaches to the branch, so a worktree session can commit again.
+background:
+	@test -n "$(W)" || { printf "usage: make background W=<worktree name under .claude/worktrees>\n"; exit 2; }
+	@wt=".claude/worktrees/$(W)"; \
+	 test -d "$$wt" || { printf "no worktree at %s\n" "$$wt"; exit 2; }; \
+	 branch=$$(git branch --show-current); \
+	 test "$$branch" != main || { printf "this checkout is already on main\n"; exit 1; }; \
+	 test -z "$$(git status --short)" || { printf "this checkout has uncommitted changes; commit them first:\n"; git status --short; exit 1; }; \
+	 git switch main; \
+	 git -C "$$wt" switch "$$branch"; \
+	 printf "\n  main is back here; %s is on the worktree at %s.\n" "$$branch" "$$wt"
 
 app-test:
 	@cd $(APP_DIR) && $(FLUTTER) test

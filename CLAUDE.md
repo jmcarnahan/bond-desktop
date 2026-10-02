@@ -44,3 +44,16 @@ benching anything. The short version:
 Why-comments sit ABOVE assignments; recipes split server-launch lines from
 `$(MAKE)` wait lines so `make -n` stays a dry run; `?=` vars that users
 override live AFTER the `-include local.mk` line.
+
+## Worktrees: built in the background, tested in the foreground
+
+A round is built in a worktree under `.claude/worktrees/<name>` and tested by
+hand from the MAIN checkout — never by running the app from the worktree (a
+worktree build cannot read the keychain, so sign-in dies on every restart). The
+move is one command, run from the main checkout: `make foreground W=<name>`
+(detaches the worktree, keeps its files and git-ignored plan, switches the
+branch in here, prints the `make app-run BOND_SAMPLE_DIR=` line); `make
+background W=<name>` is the way back. A Claude session launched inside a
+worktree is walled off from the main checkout by Claude Code itself (no
+setting lifts it), so that session commits and detaches, and the owner runs
+`make foreground` — or `/cd`s the session to the main checkout first.
