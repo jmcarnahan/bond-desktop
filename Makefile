@@ -1192,13 +1192,13 @@ app-run:
 	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 
 # A round is built in a worktree under .claude/worktrees/<name> and tested by
-# hand from THIS checkout: a worktree build cannot read the keychain (the
-# signing config is git-ignored and lives here), so sign-in dies on every
-# restart there, and `make app-run` here is the owner's everyday path. Git
-# lets a branch be checked out in one place only, so the move is: detach the
+# hand from THIS checkout, where local.mk, .env, the signing config and the
+# owner's everyday `make app-run` live. Git lets a branch be checked out in
+# one place only, so the move is: detach the
 # worktree (its files, plan and PR body stay on disk), then switch here.
-# Run from this checkout — a Claude session launched inside a worktree is
-# walled off from the main checkout by Claude Code itself and cannot run it.
+# Run from this checkout: a Claude session still inside the worktree cannot
+# run git against the main checkout (Claude Code's isolation), so it calls
+# ExitWorktree(keep) first and runs this from here — never the owner by hand.
 # The sandbox line in local.mk (BOND_SAMPLE_DIR) must be overridden for a
 # round that needs the real account; the printed line does that.
 foreground:
