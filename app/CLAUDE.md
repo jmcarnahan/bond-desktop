@@ -966,6 +966,13 @@ that bite.
     `onCreateRequested` hands the span up and the host decides whether it is
     an ask's invite or a blank event. A bare tap comes through
     `onTappedWithDetail`, since neither create gesture is a tap.
+  - kalender draws NO drag feedback unless `feedbackTileBuilder` /
+    `dropTargetTile` are given; the resize detectors are bands at the
+    tile's ends whose length is `ResizeHandleStyle.length` (shown only to a
+    hovering mouse or a selected tile, so a resize test hovers first); a
+    resize follows the pointer's column, so the grid refuses one that
+    leaves the day (`DayGrid.staysOnOneDay`, `onRefused`). The landing day
+    is read from the feedback's left edge.
   - The proposal tile is a kalender event of its own kind (named,
     adjustable, a tap flashes the card); a change on it re-proposes through
     the host (`onProposalChanged` → `_reproposeFromGrid`, through the drop's

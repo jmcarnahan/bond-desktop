@@ -5312,6 +5312,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onProposalChanged: (startUtc, endUtc) =>
             _reproposeFromGrid(startUtc, endUtc, zone: zone, today: today),
         onProposalTapped: () => setState(() => _cardFlash += 1),
+        onRefused: (sentence) => _toast(sentence, cleared: 0),
         defaultCreateMinutes: _openAsk()?.entry.minutes ?? 30,
         onOpenItem: (item) {
           switch (item) {
@@ -6130,6 +6131,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }) {
     final plan = _commandOutcome?.plan;
     if (plan is! CalendarProposal || _cardWriting) return;
+    // A belt for any span handed in: the grid refuses a resize that leaves
+    // its day, and a move across midnight, or a span over a day, is refused
+    // here in the same words.
+    if (!DayGrid.staysOnOneDay(zone, startUtc, endUtc)) {
+      _toast(DayGrid.resizeLeavesDay, cleared: 0);
+      return;
+    }
     final write = plan.write;
     // The drop's own refusals, in its words: a move checked as a dropped
     // tile is, a create never into the past.

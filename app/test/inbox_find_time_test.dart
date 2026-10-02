@@ -41,6 +41,7 @@ import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:bond_inbox/widgets/write_confirm_strip.dart'
     show WriteConfirmStrip;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1181,12 +1182,15 @@ void main() {
       }
       final width = tester.getSize(ghost).width;
       // Held a moment before moving sideways: a quick horizontal drag in the
-      // week is the page swipe's (day_grid_test's week drag holds too).
+      // week is the page swipe's (day_grid_test's week drag holds too). A
+      // little past one column: the landing column is read from the
+      // feedback's LEFT edge, and exactly one column's width can land a
+      // fraction of a pixel short of the next.
       final gesture = await tester.startGesture(tester.getCenter(ghost));
       await tester.pump(const Duration(milliseconds: 600));
-      await gesture.moveBy(Offset((width + 4) / 2, 0));
+      await gesture.moveBy(Offset((width + 8) / 2, 0));
       await tester.pump(const Duration(milliseconds: 100));
-      await gesture.moveBy(Offset((width + 4) / 2, 0));
+      await gesture.moveBy(Offset((width + 8) / 2, 0));
       await tester.pump(const Duration(milliseconds: 100));
       await gesture.up();
       await pumps(tester);
@@ -1231,6 +1235,44 @@ void main() {
       expect(find.byType(CommandPlanCard), findsNothing);
       expect(find.byKey(AppRail.asksHeaderKey), findsNothing,
           reason: 'the invite closed the ask');
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a ghost resized into the next day is refused, said',
+        (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tester.tap(find.byKey(DayPane.gridKey));
+      await pumps(tester);
+      await tester.tap(find.byKey(DayPane.spanWeekKey));
+      await pumps(tester);
+      await settle(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      final before = writer.previewed.length;
+
+      // A hovering mouse shows the end band; pressed 4 px above the bottom
+      // and dragged into the next column.
+      final r = tester.getRect(find.byKey(DayGrid.proposalKey));
+      final from = Offset(r.center.dx, r.bottom - 4);
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: from - const Offset(0, 1));
+      await gesture.moveTo(from);
+      await tester.pump();
+      await tester.pump();
+      await gesture.down(from);
+      await tester.pump(const Duration(milliseconds: 16));
+      await gesture.moveBy(Offset((r.width + 4) / 2, 10));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(Offset((r.width + 4) / 2, 10));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await gesture.removePointer();
+      await pumps(tester);
+
+      expect(find.text(DayGrid.resizeLeavesDay), findsOneWidget);
+      expect(writer.previewed, hasLength(before));
       await tester.pumpWidget(const SizedBox());
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 

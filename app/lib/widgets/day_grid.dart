@@ -100,6 +100,7 @@ class DayGrid extends StatefulWidget {
     this.defaultCreateMinutes = 30,
     this.onProposalChanged,
     this.onProposalTapped,
+    this.onRefused,
   });
 
   /// The day shown (day span), or any day of the week shown (week span;
@@ -157,6 +158,26 @@ class DayGrid extends StatefulWidget {
   /// A tap on the proposal tile: the host brings its card into view.
   final VoidCallback? onProposalTapped;
 
+  /// A drag the grid will not pass on, with its sentence for the host to
+  /// say: a resize that would leave its day ([resizeLeavesDay]).
+  final void Function(String sentence)? onRefused;
+
+  /// What [onRefused] says for a resize dragged into another day's column.
+  static const String resizeLeavesDay =
+      'A meeting stays on one day — move it instead.';
+
+  /// Whether [startUtc]–[endUtc] is one local day's span in [zone]: no
+  /// longer than a day, and its last minute on its first day. The grid's
+  /// resize rule, and the host's belt for any span it is handed.
+  static bool staysOnOneDay(
+      CalendarZone zone, DateTime startUtc, DateTime endUtc) {
+    if (endUtc.difference(startUtc) > const Duration(hours: 24)) return false;
+    final last = endUtc.isAfter(startUtc)
+        ? endUtc.subtract(const Duration(minutes: 1))
+        : endUtc;
+    return zone.dateOf(last.toUtc()) == zone.dateOf(startUtc.toUtc());
+  }
+
   static Key tileKeyFor(String eventId) => ValueKey('day-grid-tile-$eventId');
   /// A deadline ([kind] `due`) or return (`back`) tile. The source and the
   /// kind are both in it: a Teams chat and a mail thread can share an id,
@@ -165,6 +186,12 @@ class DayGrid extends StatefulWidget {
           {required String kind}) =>
       ValueKey('day-grid-marker-$kind-$source-$conversationKey');
   static const Key proposalKey = ValueKey('day-grid-proposal');
+
+  /// While a tile is dragged: the copy under the pointer, the original left
+  /// behind, and the outline where it would land.
+  static const Key feedbackKey = ValueKey('day-grid-feedback');
+  static const Key draggedKey = ValueKey('day-grid-dragged');
+  static const Key dropTargetKey = ValueKey('day-grid-drop-target');
 
   @override
   State<DayGrid> createState() => _DayGridState();
@@ -504,6 +531,13 @@ class _DayGridState extends State<DayGrid> {
   /// calls this, and a wobble must cost nothing — no dry run, no toast.
   void _changed(KalenderEvent original, KalenderEvent updated) {
     if (original is! _GridTile) return;
+    // kalender reads a resize's end from the pointer's COLUMN as well as its
+    // height, so an end handle drifting into Thursday makes a two-day span.
+    // A resize keeps its day; only a move (the same length) changes columns.
+    if (_resizeLeavesDay(original, updated)) {
+      widget.onRefused?.call(DayGrid.resizeLeavesDay);
+      return;
+    }
     if (original.kind == _TileKind.proposal) {
       if (!original.movable ||
           (updated.start.isAtSameMomentAs(original.start) &&
@@ -553,6 +587,16 @@ class _DayGridState extends State<DayGrid> {
         start, start.add(Duration(minutes: widget.defaultCreateMinutes)));
   }
 
+  bool _resizeLeavesDay(KalenderEvent original, KalenderEvent updated) {
+    final was = original.end.difference(original.start);
+    final now = updated.end.difference(updated.start);
+    if (was == now) return false;
+    final zone = widget.zone;
+    final start = _utc(updated.start);
+    return !DayGrid.staysOnOneDay(zone, start, _utc(updated.end)) ||
+        zone.dateOf(start) != zone.dateOf(_utc(original.start));
+  }
+
   /// A plain UTC [DateTime] at [t]'s instant. The package hands back
   /// `TZDateTime`s, whose `==` also compares the location, so one never
   /// equals the plain UTC stamp the store holds for the same instant.
@@ -569,7 +613,48 @@ class _DayGridState extends State<DayGrid> {
 
   // ── the look ─────────────────────────────────────────────────────────
 
-  Widget _tile(BuildContext context, KalenderEvent event, KalenderDateTimeRange range) {
+  Widget _tile(BuildContext context, KalenderEvent event, KalenderDateTimeRange range) =>
+      _tileBody(event);
+
+  /// What follows the pointer during a drag: the same tile at the landing
+  /// size, a little see-through, outlined in the primary colour. Material
+  /// for its text, since it is drawn in the overlay, outside the grid.
+  Widget _feedbackTile(BuildContext context, KalenderEvent event, Size size) =>
+      Material(
+        key: DayGrid.feedbackKey,
+        type: MaterialType.transparency,
+        child: SizedBox(
+          width: size.width,
+          height: size.height,
+          child: Opacity(
+            opacity: 0.85,
+            child: _tileBody(event,
+                keyed: false,
+                outline: Border.all(color: BondColors.primary, width: 1.5)),
+          ),
+        ),
+      );
+
+  /// The tile left behind while it is dragged: faded, so the eye follows
+  /// the feedback rather than it.
+  Widget _tileWhileDragging(BuildContext context, KalenderEvent event) =>
+      Opacity(key: DayGrid.draggedKey, opacity: 0.35, child: _tileBody(event));
+
+  /// Where the drop would land, drawn as the pointer moves: the ghost's own
+  /// look, a primary outline on an 8 % fill.
+  Widget _dropTarget(BuildContext context, KalenderEvent event) => Container(
+        key: DayGrid.dropTargetKey,
+        decoration: BoxDecoration(
+          color: BondColors.primary.withValues(alpha: 0.08),
+          borderRadius: BondRadii.smAll,
+          border: Border.all(color: BondColors.primary, width: 1.5),
+        ),
+      );
+
+  /// One tile's drawing, shared by the tile, its drag feedback and the tile
+  /// left behind. [keyed] false leaves its key off (the feedback is a copy,
+  /// and a test finds the tile by its key); [outline] replaces its border.
+  Widget _tileBody(KalenderEvent event, {bool keyed = true, Border? outline}) {
     if (event is! _GridTile) return const SizedBox.shrink();
     final zone = widget.zone;
     final Key key = switch (event.kind) {
@@ -623,12 +708,12 @@ class _DayGridState extends State<DayGrid> {
       builder: (context, constraints) {
         final tall = constraints.maxHeight > 30;
         return Container(
-          key: key,
+          key: keyed ? key : null,
           clipBehavior: Clip.hardEdge,
           decoration: BoxDecoration(
             color: fill,
             borderRadius: BondRadii.smAll,
-            border: border,
+            border: outline ?? border,
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -710,8 +795,28 @@ class _DayGridState extends State<DayGrid> {
 
   @override
   Widget build(BuildContext context) {
-    final tiles = TileComponents(tileBuilder: _tile);
-    return KalenderView(
+    // Every builder a tear-off: kalender compares components with `==`.
+    // Without the three drag builders kalender draws NOTHING while a tile
+    // is dragged — no feedback, no faded original, no landing outline — and
+    // the tile only jumps when the drop lands. The feedback keeps the grab
+    // point under the pointer (`childDragAnchorStrategy`, kalender's own
+    // default, written out so it is a choice).
+    final tiles = TileComponents(
+      tileBuilder: _tile,
+      feedbackTileBuilder: _feedbackTile,
+      tileWhenDraggingBuilder: _tileWhileDragging,
+      dropTargetTile: _dropTarget,
+      dragAnchorStrategy: childDragAnchorStrategy,
+      verticalResizeHandle: const _ResizePill(),
+    );
+    // A 10-px resize band at a tile's end, not kalender's 16: the middle of
+    // a 30-minute tile (21 px) drags, and only its last 10 px resize. The
+    // start band hides where kalender hides it (twice its length over half
+    // the tile).
+    return KalenderTheme(
+      data: const KalenderThemeData(
+          resizeHandleStyle: ResizeHandleStyle(length: 10)),
+      child: KalenderView(
       eventsController: _events,
       kalenderController: _controller,
       location: widget.zone.location,
@@ -775,6 +880,7 @@ class _DayGridState extends State<DayGrid> {
         multiDayBodyConfiguration:
             const MultiDayBodyConfiguration(minimumTileHeight: 20),
       ),
+    ),
     );
   }
 
@@ -807,4 +913,22 @@ class _HourTimeLine extends TimeLine {
     double itemHeight,
   ) =>
       60;
+}
+
+/// The mark on a tile's resize band: a small pill at its end, so the band
+/// LOOKS like the place that resizes.
+class _ResizePill extends StatelessWidget {
+  const _ResizePill();
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Container(
+          width: 24,
+          height: 3,
+          decoration: BoxDecoration(
+            color: BondColors.primary.withValues(alpha: 0.5),
+            borderRadius: BondRadii.fullAll,
+          ),
+        ),
+      );
 }

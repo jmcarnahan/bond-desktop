@@ -81,6 +81,7 @@ void main() {
     int defaultCreateMinutes = 30,
     void Function(DateTime, DateTime)? onProposalChanged,
     VoidCallback? onProposalTapped,
+    void Function(String)? onRefused,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -106,6 +107,7 @@ void main() {
             defaultCreateMinutes: defaultCreateMinutes,
             onProposalChanged: onProposalChanged,
             onProposalTapped: onProposalTapped,
+            onRefused: onRefused,
           ),
         ),
       ),
@@ -517,6 +519,157 @@ void main() {
       expect(s, DateTime.utc(2026, 3, 8, 17));
       expect(la.toLocal(s).hour, 10);
       expect(e.difference(s), const Duration(hours: 1));
+      await unmount(tester);
+    }, variant: platforms);
+  });
+
+  group('what a drag shows, and where it resizes', () {
+    // Wednesday 10:00–11:30 AM PDT: 63 px at 0.7 px a minute.
+    final ten = DateTime.utc(2026, 10, 7, 17);
+    final halfPast = DateTime.utc(2026, 10, 7, 18, 30);
+    final tile = find.byKey(DayGrid.tileKeyFor('m1'));
+
+    testWidgets('mid-drag: the copy under the pointer, the faded original '
+        'and the landing outline; after the drop, none of them',
+        (tester) async {
+      await pumpGrid(tester,
+          events: [own('m1', 'Contoso planning', ten,
+              length: const Duration(minutes: 90))],
+          onMoveRequested: (_, _, _) {});
+      final gesture = await tester.startGesture(tester.getCenter(tile));
+      await tester.pump(const Duration(milliseconds: 16));
+      await gesture.moveBy(const Offset(0, 20));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(const Offset(0, 22));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(DayGrid.feedbackKey), findsOneWidget);
+      expect(find.byKey(DayGrid.dropTargetKey), findsOneWidget);
+      expect(find.byKey(DayGrid.draggedKey), findsOneWidget);
+      expect(
+          tester.widget<Opacity>(find.byKey(DayGrid.draggedKey)).opacity, 0.35);
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(DayGrid.feedbackKey), findsNothing);
+      expect(find.byKey(DayGrid.dropTargetKey), findsNothing);
+      expect(find.byKey(DayGrid.draggedKey), findsNothing);
+      await unmount(tester);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    /// A mouse drag as the desktop makes one: the pointer hovers first —
+    /// kalender shows a tile's resize bands only to a hovering mouse (or a
+    /// selected tile) — then presses at [from] and moves by [by].
+    Future<void> plainDrag(WidgetTester tester, Offset from, Offset by) async {
+      final gesture =
+          await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: from - const Offset(0, 1));
+      await gesture.moveTo(from);
+      await tester.pump();
+      await tester.pump();
+      await gesture.down(from);
+      await tester.pump(const Duration(milliseconds: 16));
+      await gesture.moveBy(by / 2);
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(by / 2);
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await gesture.removePointer();
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    testWidgets('4 px above the bottom edge resizes; the middle moves',
+        (tester) async {
+      final moves = <(DateTime, DateTime)>[];
+      await pumpGrid(tester,
+          events: [own('m1', 'Contoso planning', ten,
+              length: const Duration(minutes: 90))],
+          onMoveRequested: (_, s, e) => moves.add((s, e)));
+      final r = tester.getRect(tile);
+      await plainDrag(
+          tester, Offset(r.center.dx, r.bottom - 4), const Offset(0, 42));
+      expect(moves.single, (ten, halfPast.add(const Duration(hours: 1))),
+          reason: 'the end moved, the start stayed');
+
+      moves.clear();
+      await plainDrag(tester, tester.getCenter(tile), const Offset(0, 42));
+      expect(moves.single, (
+        ten.add(const Duration(hours: 1)),
+        halfPast.add(const Duration(hours: 1)),
+      ));
+      await unmount(tester);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a resize dragged into the next day\'s column is refused, '
+        'said; the proposal\'s too', (tester) async {
+      const sat = CalendarDate(2026, 3, 7);
+      final s0 = la.localDateTime(sat, 10, 0).toUtc();
+      final moves = <String>[];
+      final changed = <(DateTime, DateTime)>[];
+      final refused = <String>[];
+      await pumpGrid(
+        tester,
+        on: sat,
+        span: GridSpan.week,
+        now: DateTime.utc(2026, 3, 6, 16),
+        events: [own('w1', 'Contoso review', s0,
+            length: const Duration(minutes: 90))],
+        proposal: GridProposal(
+          startUtc: s0.subtract(const Duration(hours: 3)),
+          endUtc: s0.subtract(const Duration(hours: 1, minutes: 30)),
+          label: 'Proposed',
+          subject: 'Re: brunch',
+          adjustable: true,
+        ),
+        onMoveRequested: (id, _, _) => moves.add(id),
+        onProposalChanged: (s, e) => changed.add((s, e)),
+        onRefused: refused.add,
+      );
+      for (final f in [
+        find.byKey(DayGrid.tileKeyFor('w1')),
+        find.byKey(DayGrid.proposalKey),
+      ]) {
+        final r = tester.getRect(f);
+        await plainDrag(tester, Offset(r.center.dx, r.bottom - 4),
+            Offset(r.width + 4, 20));
+      }
+      expect(moves, isEmpty);
+      expect(changed, isEmpty);
+      expect(refused, [DayGrid.resizeLeavesDay, DayGrid.resizeLeavesDay]);
+      await unmount(tester);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    test('one day\'s span: no longer than a day, ending on its first day',
+        () {
+      final eleven = la.localDateTime(day, 23, 0).toUtc();
+      expect(DayGrid.staysOnOneDay(la, eleven,
+          eleven.add(const Duration(hours: 1))), isTrue, reason: 'to midnight');
+      expect(DayGrid.staysOnOneDay(la, eleven,
+          eleven.add(const Duration(minutes: 90))), isFalse);
+      final nine = la.localDateTime(day, 9, 0).toUtc();
+      expect(DayGrid.staysOnOneDay(la, nine,
+          nine.add(const Duration(hours: 25))), isFalse);
+    });
+
+    testWidgets('a proposal on Monday moves to Tuesday\'s column',
+        (tester) async {
+      const mon = CalendarDate(2026, 10, 5);
+      final s0 = la.localDateTime(mon, 12, 0).toUtc();
+      final changed = <(DateTime, DateTime)>[];
+      await pumpGrid(tester,
+          on: mon,
+          span: GridSpan.week,
+          now: DateTime.utc(2026, 10, 2, 16),
+          proposal: GridProposal(
+              startUtc: s0,
+              endUtc: s0.add(const Duration(minutes: 30)),
+              label: 'Proposed',
+              subject: 'Re: dinner',
+              adjustable: true),
+          onProposalChanged: (s, e) => changed.add((s, e)));
+      final ghost = find.byKey(DayGrid.proposalKey);
+      final width = tester.getSize(ghost).width;
+      await drag(tester, ghost, Offset(width + 4, 0));
+      expect(changed.single.$1.isAtSameMomentAs(s0.add(const Duration(days: 1))),
+          isTrue, reason: '${changed.single.$1}');
       await unmount(tester);
     }, variant: platforms);
   });

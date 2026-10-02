@@ -566,6 +566,30 @@ in-memory.
   never moves the tile itself: it renders from the store, so a refused,
   failed or dismissed move leaves the tile where it was, and a move that went
   through moves it when the mirror does.
+- **What a drag shows.** kalender draws NOTHING while a tile moves unless it
+  is given the drag builders, so the grid gives all three: the tile itself
+  follows the pointer at the landing size, 85 % opaque with a primary
+  outline (`feedbackTileBuilder`, `DayGrid.feedbackKey`); the tile left
+  behind fades to 35 % (`tileWhenDraggingBuilder`, `DayGrid.draggedKey`);
+  and the landing span is outlined as the pointer moves, the ghost's own
+  look (`dropTargetTile`, `DayGrid.dropTargetKey`). The anchor is
+  `childDragAnchorStrategy`: the copy stays under the grab point, and its
+  top and LEFT edges are what kalender reads for the landing time and day
+  (so a sideways drag of exactly one column can land a fraction short;
+  the outline shows where it will land).
+- **Resize zones.** A tile's resize bands are 10 px at its ends
+  (`KalenderTheme` → `ResizeHandleStyle(length: 10)`, kalender's default
+  is 16), shown to a hovering mouse or a selected tile, each marked by a
+  small primary pill (`TileComponents.verticalResizeHandle`): the middle of
+  a 30-minute tile drags and only its last 10 px resize; the start band
+  hides where kalender hides it (on a short tile). kalender reads a
+  resize's end from the pointer's COLUMN as well as its height, so an end
+  handle drifting into the next day would make a two-day span: the grid
+  refuses a resize that leaves its day (`DayGrid.staysOnOneDay`), the tile
+  snaps back and the host toasts "A meeting stays on one day — move it
+  instead." (`onRefused`); a move, the same length, still crosses columns.
+  The host refuses any proposal span longer than a day or crossing one in
+  the same words, whatever handed it in.
 - **The ghost tile.** `DayGrid.proposal` draws an undraggable tile — a solid
   1.5 px primary outline on an 8 % fill; solid because Flutter's `Border` has
   no dashed style — for a time that is not on the calendar: the pending
