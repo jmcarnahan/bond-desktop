@@ -190,21 +190,25 @@ Future<List<CalendarEvent>> _between(
       toDateExclusive: toExclusive,
     );
 
-/// The `'$source|$id'` keys of the threads asking for a time
-/// ([schedulingAskKeys]): the thread header's Find a time and the Day stop's
-/// "Scheduling asks" group read the same set.
+/// The threads asking for a time: the thread header's Find a time and the
+/// Day column's Scheduling asks read the same map.
 ///
 /// Re-read whenever the list reloads — which is what follows a triage pass
 /// writing new decisions, a reply going out, or a thread changing state. A
 /// calendar revision changes none of that, so it is not watched. One query
 /// ([MessageStore.schedulingAskConversations]). No clock: the rule is about
 /// the thread's state and its newest message, not the time.
+///
+/// Keyed by the ask, valued by its newest inbound message's id
+/// ([schedulingAskMessageIds]): the keys are what the thread bar and the
+/// column test, and the id is what the inbox labels when the owner closes an
+/// ask. Invalidated by the inbox after such a label, so the row goes at once.
 final schedulingAsksProvider =
-    FutureProvider.autoDispose<Set<String>>((ref) async {
+    FutureProvider.autoDispose<Map<String, String>>((ref) async {
   final state = ref.watch(conversationsProvider);
   if (state is! ConversationsLoaded) return const {};
   try {
-    return await schedulingAskKeys(ref.watch(messageStoreProvider));
+    return await schedulingAskMessageIds(ref.watch(messageStoreProvider));
   } on Object catch (err) {
     debugPrint('scheduling asks could not be read: ${err.runtimeType}');
     return const {};

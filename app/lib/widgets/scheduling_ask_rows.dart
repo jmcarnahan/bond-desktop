@@ -29,8 +29,6 @@ class SchedulingAskRow {
   /// A search is out.
   final bool busy;
 
-  /// An invite for this ask went out this session.
-  final bool invited;
   final int minutes;
   final FindTimeWindow window;
 
@@ -45,7 +43,6 @@ class SchedulingAskRow {
     required this.askedBy,
     this.expanded = false,
     this.busy = false,
-    this.invited = false,
     this.minutes = 30,
     this.window = FindTimeWindow.thisWeek,
     this.result,
@@ -62,6 +59,9 @@ class SchedulingAskCallbacks {
   final void Function(String source, String key) onPutInReply;
   final void Function(String source, String key) onOpen;
 
+  /// The ×: the owner says this thread no longer asks them for a time.
+  final void Function(String source, String key) onDismiss;
+
   const SchedulingAskCallbacks({
     required this.onToggle,
     required this.onMinutes,
@@ -69,6 +69,7 @@ class SchedulingAskCallbacks {
     required this.onPickSlot,
     required this.onPutInReply,
     required this.onOpen,
+    required this.onDismiss,
   });
 }
 
@@ -106,8 +107,8 @@ class SchedulingAskTile extends StatelessWidget {
       ValueKey('ask-put-in-reply-$source|$key');
   static Key openKeyFor(String source, String key) =>
       ValueKey('ask-open-$source|$key');
-  static Key invitedKeyFor(String source, String key) =>
-      ValueKey('ask-invited-$source|$key');
+  static Key dismissKeyFor(String source, String key) =>
+      ValueKey('ask-dismiss-$source|$key');
 
   /// The lengths offered, in minutes — the pane's three.
   static const List<int> durations = [30, 45, 60];
@@ -143,49 +144,65 @@ class SchedulingAskTile extends StatelessWidget {
     );
   }
 
+  /// The subject over who asked, the tap target that opens and folds the
+  /// row, with the × beside it — its own target, so a dismiss is never an
+  /// open.
   Widget _head(String s, String k) {
-    return InkWell(
-      key: rowKeyFor(s, k),
-      onTap: () => callbacks.onToggle(s, k),
-      borderRadius: BondRadii.smAll,
-      hoverColor: BondColors.onDarkFaint,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: BondSpacing.s8,
-          vertical: BondSpacing.s4,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              row.subject,
-              style: BondType.small.copyWith(
-                color: row.expanded
-                    ? BondColors.onDarkPrimary
-                    : BondColors.onDarkSecondary,
-                fontWeight: FontWeight.w600,
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: InkWell(
+            key: rowKeyFor(s, k),
+            onTap: () => callbacks.onToggle(s, k),
+            borderRadius: BondRadii.smAll,
+            hoverColor: BondColors.onDarkFaint,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: BondSpacing.s8,
+                vertical: BondSpacing.s4,
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    row.subject,
+                    style: BondType.small.copyWith(
+                      color: row.expanded
+                          ? BondColors.onDarkPrimary
+                          : BondColors.onDarkSecondary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (row.askedBy.isNotEmpty)
+                    Text(
+                      row.askedBy,
+                      style: _caption,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
             ),
-            if (row.invited)
-              Text(
-                'Invite sent',
-                key: invitedKeyFor(s, k),
-                style: BondType.caption.copyWith(color: BondColors.railAccent),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            if (row.askedBy.isNotEmpty)
-              Text(
-                row.askedBy,
-                style: _caption,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-          ],
+          ),
         ),
-      ),
+        Tooltip(
+          message: 'Dismiss',
+          child: InkWell(
+            key: dismissKeyFor(s, k),
+            onTap: () => callbacks.onDismiss(s, k),
+            borderRadius: BondRadii.fullAll,
+            hoverColor: BondColors.onDarkFaint,
+            child: const SizedBox(
+              width: 32,
+              height: 32,
+              child: Icon(Icons.close, size: 16, color: BondColors.onDarkMuted),
+            ),
+          ),
+        ),
+      ],
     );
   }
 

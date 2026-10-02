@@ -214,6 +214,7 @@ alone, and only the setters that move `_section` clear it.
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
 | a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time); the header and its chevron fold the section and bring it back |
+| an ask's **×** | the ask leaves the column (a `scheduling_ask` label), with Undo on the toast and `z`; a newer message from them brings it back |
 | a slot in an open ask | the slot's day (`_selectDay`) with the invite standing as the command card's proposal and the grid's `Proposed` tile (`_showProposal`) |
 | an ask's **Put in reply** / **Open thread** | that thread, in main (`_select`), with the slots staged in its reply box / as it is |
 

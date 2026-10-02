@@ -173,4 +173,93 @@ void main() {
     expect(await keys(limit: 1), {'email|c-new'});
     expect(await keys(), {'email|c-old', 'email|c-new'});
   });
+
+  group('the owner closing an ask', () {
+    /// A second inbound message on [key], [age] ago, read as [intent].
+    Future<void> laterMessage(String key, String id,
+        {String intent = 'scheduling', Duration age = const Duration(hours: 1)}) async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Thread $key',
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at': ago(age),
+        'body_text': 'That time does not work for me — another?',
+        'triage_status': 'done',
+      });
+      await store.writeDecision(
+        'email',
+        id,
+        fakeDecision(fakeAnswers(intent: intent, choiceP: 0.9)),
+        qhash: DecisionHeads.expectedQhash,
+        ownerKnown: true,
+      );
+    }
+
+    Future<int> label(String key, String messageId,
+            {String origin = 'dismiss', String? createdAt}) =>
+        store.writeSchedulingAskLabel(
+          source: 'email',
+          conversationKey: key,
+          sourceMessageId: messageId,
+          origin: origin,
+          createdAt: createdAt,
+        );
+
+    test('the rows carry the newest inbound message id', () async {
+      await thread('c-1');
+      expect(await schedulingAskMessageIds(store), {'email|c-1': 'in-c-1'});
+    });
+
+    test('a label on the newest inbound message closes the ask', () async {
+      await thread('c-1');
+      await thread('c-2');
+      await label('c-1', 'in-c-1', origin: 'invite');
+      expect(await keys(), {'email|c-2'});
+    });
+
+    test('a label on an older message does not', () async {
+      await thread('c-1', age: const Duration(hours: 3));
+      await label('c-1', 'in-c-1');
+      await laterMessage('c-1', 'in-c-1-later');
+      expect(await schedulingAskMessageIds(store),
+          {'email|c-1': 'in-c-1-later'});
+    });
+
+    test('a newer inbound message after a label opens the ask again',
+        () async {
+      await thread('c-1', age: const Duration(hours: 3));
+      await label('c-1', 'in-c-1');
+      expect(await keys(), isEmpty);
+      await laterMessage('c-1', 'in-c-1-later');
+      expect(await keys(), {'email|c-1'});
+    });
+
+    test('the label is deleted by id AND stamp, and the ask is back',
+        () async {
+      await thread('c-1');
+      const stamp = '2026-10-02T12:00:00.000000Z';
+      final id = await label('c-1', 'in-c-1', createdAt: stamp);
+      expect(await keys(), isEmpty);
+      expect(await store.deleteSchedulingAskLabel(id, createdAt: 'other'),
+          isFalse);
+      expect(await keys(), isEmpty);
+      expect(await store.deleteSchedulingAskLabel(id, createdAt: stamp),
+          isTrue);
+      expect(await keys(), {'email|c-1'});
+    });
+
+    test('the Needs You readers never see a scheduling_ask row', () async {
+      await thread('c-1');
+      await label('c-1', 'in-c-1');
+      expect(await store.needsYouLabels(), isEmpty);
+      expect(await store.needsYouLabelSignature(), (count: 0, maxId: 0));
+      expect(await store.needsYouPressCounts(), (removed: 0, added: 0));
+      expect(await store.deleteAllNeedsYouLabels(), 0);
+      expect(await store.decisionLabels(), hasLength(1));
+    });
+  });
 }

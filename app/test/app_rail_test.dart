@@ -2260,7 +2260,6 @@ void main() {
       String askedBy = 'Dana Ortiz',
       bool expanded = false,
       bool busy = false,
-      bool invited = false,
       FindTimeResult? result,
     }) =>
         SchedulingAskRow(
@@ -2270,7 +2269,6 @@ void main() {
           askedBy: askedBy,
           expanded: expanded,
           busy: busy,
-          invited: invited,
           result: result,
         );
 
@@ -2285,6 +2283,7 @@ void main() {
               calls.add('pick $s|$k ${slots.indexOf(slot)}'),
           onPutInReply: (s, k) => calls.add('reply $s|$k'),
           onOpen: (s, k) => calls.add('open $s|$k'),
+          onDismiss: (s, k) => calls.add('dismiss $s|$k'),
         );
 
     setUp(() {
@@ -2394,11 +2393,15 @@ void main() {
           findsOneWidget);
     });
 
-    testWidgets('an ask whose invite went out says so', (tester) async {
-      await pumpRail(tester, [ask('c1', invited: true)]);
-      expect(find.byKey(SchedulingAskTile.invitedKeyFor('email', 'c1')),
-          findsOneWidget);
-      expect(find.text('Invite sent'), findsOneWidget);
+    testWidgets('the × dismisses, folded or open, and is not an open',
+        (tester) async {
+      await pumpRail(tester, [ask('c1'), ask('c2', expanded: true)]);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c1')));
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c2')));
+      expect(calls, ['dismiss email|c1', 'dismiss email|c2']);
+      expect(find.text('Invite sent'), findsNothing);
     });
 
     testWidgets('the chevron folds the rows and brings them back, selecting '

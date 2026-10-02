@@ -4309,6 +4309,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onPutInReply: (source, key) =>
             unawaited(_askPutInReply(source, key)),
         onOpen: (source, key) => _select(key, source: source),
+        onDismiss: (source, key) => unawaited(_dismissAsk(source, key)),
       ),
     );
   }
@@ -5559,17 +5560,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       writer: ref.read(calendarWritesProvider),
       onDone: (message, undo) {
         _calendarWriteDone(message, undo);
-        // A slot picked in the asks column: that ask folds, and says its
-        // invite went out when one did — even when a newer card stands now,
-        // because the write this card started did go through.
-        final entry = ask == null
-            ? null
-            : _askSearches['${ask.source}|${ask.key}'];
-        if (entry != null && mounted) {
-          setState(() {
-            entry.expanded = false;
-            if (invites) entry.invited = true;
-          });
+        // A slot picked in the asks column: an invite answers the ask, so it
+        // closes and leaves the column — even when a newer card stands now,
+        // because the write this card started did go through. A slot that
+        // only went on the owner's calendar answers nobody, and the ask
+        // stays owed.
+        if (ask != null && invites) {
+          unawaited(_closeAsk(ask.source, ask.key, origin: 'invite'));
         }
         // Only the card this write came from: a new Enter while it was in
         // flight put up another card, and that one stands.
@@ -5850,11 +5847,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The threads among [conversations] that [schedulingAsksProvider] says are
   /// asking for a time, in the list's order.
   List<Conversation> _schedulingAsksIn(List<Conversation> conversations) {
-    final keys = ref.watch(schedulingAsksProvider).valueOrNull;
-    if (keys == null || keys.isEmpty) return const [];
+    final asks = ref.watch(schedulingAsksProvider).valueOrNull;
+    if (asks == null || asks.isEmpty) return const [];
     return [
       for (final c in conversations)
-        if (keys.contains(schedulingAskKey(c.source, c.id))) c,
+        if (asks.containsKey(schedulingAskKey(c.source, c.id))) c,
     ];
   }
 
@@ -5990,7 +5987,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       askedBy: _askedBy(c),
       expanded: e.expanded,
       busy: e.busy,
-      invited: e.invited,
       minutes: e.minutes,
       window: e.window,
       result: e.result,
@@ -6123,6 +6119,76 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _proposalAsk = ask;
       _proposalInvites = ask != null && invites;
     });
+  }
+
+  /// Writes the owner's word that the ask [source]/[key] is answered — a
+  /// `scheduling_ask` label on its NEWEST inbound message ([origin]
+  /// `invite` or `dismiss`) — and re-reads the asks so its row goes at
+  /// once. Returns the label's id and stamp for an undo, or null when the
+  /// ask is not listed any more (nothing to close) or the write failed.
+  Future<({int id, String createdAt})?> _closeAsk(
+    String source,
+    String key, {
+    required String origin,
+  }) async {
+    final messageId = ref
+        .read(schedulingAsksProvider)
+        .valueOrNull?[schedulingAskKey(source, key)];
+    if (messageId == null) return null;
+    final createdAt = DateTime.now().toUtc().toIso8601String();
+    final int id;
+    try {
+      id = await ref.read(messageStoreProvider).writeSchedulingAskLabel(
+            source: source,
+            conversationKey: key,
+            sourceMessageId: messageId,
+            origin: origin,
+            createdAt: createdAt,
+          );
+    } on Object catch (e) {
+      debugPrint('scheduling ask: the label write failed: ${e.runtimeType}');
+      return null;
+    }
+    _askSearches.remove('$source|$key');
+    unawaited(ref
+        .read(activityLogProvider)
+        .record('scheduling_ask', detail: {'origin': origin}));
+    if (mounted) ref.invalidate(schedulingAsksProvider);
+    return (id: id, createdAt: createdAt);
+  }
+
+  /// The ×: the ask leaves the column until the other person writes again
+  /// (a newer inbound message is a new ask), and Undo — the one toast slot,
+  /// so `z` works — puts it back. No model is asked, so it needs no
+  /// processing switch.
+  Future<void> _dismissAsk(String source, String key) async {
+    final closed = await _closeAsk(source, key, origin: 'dismiss');
+    if (!mounted) return;
+    if (closed == null) {
+      _toast("Couldn't dismiss that ask just now.", cleared: 0);
+      return;
+    }
+    _toast(
+      'Dismissed — it comes back if they write again.',
+      cleared: 0,
+      onUndo: () => unawaited(_undoDismissAsk(closed)),
+    );
+  }
+
+  Future<void> _undoDismissAsk(({int id, String createdAt}) closed) async {
+    try {
+      await ref
+          .read(messageStoreProvider)
+          .deleteSchedulingAskLabel(closed.id, createdAt: closed.createdAt);
+    } on Object catch (e) {
+      debugPrint('scheduling ask: the undo failed: ${e.runtimeType}');
+      if (mounted) _toast("Couldn't undo that just now.", cleared: 0);
+      return;
+    }
+    unawaited(ref
+        .read(activityLogProvider)
+        .record('scheduling_ask', detail: const {'origin': 'undo'}));
+    if (mounted) ref.invalidate(schedulingAsksProvider);
   }
 
   /// Put in reply from the asks column: the thread opens, and every slot
@@ -6975,7 +7041,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // column and opens the pane there ([_openFindTime]), as Find a time
       // always takes the main pane.
       onFindTime: (ref.watch(schedulingAsksProvider).valueOrNull ?? const {})
-              .contains(schedulingAskKey(selected.source, selected.id))
+              .containsKey(schedulingAskKey(selected.source, selected.id))
           ? () => _openFindTime(selected.source, selected.id)
           : null,
       // Opening a file always lands on the split, never on the full pane the
@@ -9235,7 +9301,6 @@ class _AskSearch {
   FindTimeWindow window = FindTimeWindow.thisWeek;
   bool busy = false;
   FindTimeResult? result;
-  bool invited = false;
 
   /// Bumped per search, so only the newest answer lands.
   int serial = 0;

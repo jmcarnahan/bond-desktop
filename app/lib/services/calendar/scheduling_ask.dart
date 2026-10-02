@@ -30,5 +30,23 @@ Future<Set<String>> schedulingAskKeys(
   };
 }
 
+/// Every scheduling ask by its `'$source|$id'` key, with the id of the
+/// thread's NEWEST inbound message — the one the rule read, and the one an
+/// invite or a dismiss labels (`MessageStore.writeSchedulingAskLabel`).
+/// What `schedulingAsksProvider` holds.
+Future<Map<String, String>> schedulingAskMessageIds(
+  MessageStore store, {
+  int limit = 200,
+}) async {
+  final asks = await store.schedulingAskConversations(
+    limit: limit,
+    threshold: DecisionPolicy.booleanYes,
+  );
+  return {
+    for (final a in asks)
+      schedulingAskKey(a.source, a.conversationKey): a.sourceMessageId,
+  };
+}
+
 /// The key [schedulingAskKeys] answers with.
 String schedulingAskKey(String source, String id) => '$source|$id';

@@ -1383,7 +1383,7 @@ is involved: the signal is the decision model's, already stored, and the
 slots are the calendar's.
 
 **The signal** (`app/lib/services/calendar/scheduling_ask.dart`). A thread is
-a *scheduling ask* when all three hold:
+a *scheduling ask* when all four hold:
 
 - its state is `needs_reply`;
 - the owner has not written since its NEWEST inbound message
@@ -1391,7 +1391,30 @@ a *scheduling ask* when all three hold:
   the thread's `last_outbound_at` is absent or not after that message;
 - that message's stored decision (`message_decisions.answers_json`) has
   `intent` = `scheduling` with the scheduling option's own probability (else
-  the choice's confidence) ≥ `DecisionPolicy.booleanYes` (0.50).
+  the choice's confidence) ≥ `DecisionPolicy.booleanYes` (0.50);
+- the owner has not closed it: no `scheduling_ask` label in
+  `decision_labels` on that same newest inbound message.
+
+**Closing and reopening.** An invite is not a message in the thread, so
+after the owner sent one from an ask the first three clauses still held and
+the ask stayed listed (found live, 2026-10-02). The owner's word about an
+ask is therefore a KEPT `decision_labels` row: `question =
+'scheduling_ask'`, `answer = 'no'` (to "does this thread still ask me for a
+time?"), `source_message_id` = the newest inbound message the rule read,
+`origin` = `invite` | `dismiss` (`MessageStore.writeSchedulingAskLabel`).
+Two things write one: a slot's invite going through from the Day column
+WITH people on it (a slot only added to the owner's calendar answers
+nobody, and the ask stays owed), and the row's **×**. The × toasts
+"Dismissed — it comes back if they write again." with Undo (the one toast
+slot, so `z` works), which deletes the row by id AND stamp
+(`deleteSchedulingAskLabel`, the needs-you labels' reason: ids are reused
+after a delete). Either way the inbox invalidates `schedulingAsksProvider`
+and the row leaves at once; the write's own toast already said the invite
+went. Because the label is pinned to a message id, a LATER inbound message
+— the other person saying the time does not work — is a new newest message
+and the ask comes back by itself; a label on an older message does
+nothing. Activity: kind `scheduling_ask`, `detail: {origin: invite |
+dismiss | undo}`.
 
 A message the decision model never read (triaged before it, or gated first),
 or whose stored answers are unreadable, is not an ask. The rule has ONE
@@ -1401,7 +1424,9 @@ threads joined to their newest inbound message joined to its decision, read
 with `json_extract` under `json_valid` inside a CASE so a bad row is no ask
 rather than a failed read, newest first, capped at 200. `schedulingAskKeys`
 turns it into the `'$source|$id'` keys, the one path the app and the tests
-share, and `schedulingAsksProvider` (`day_providers.dart`) holds that set,
+share; `schedulingAskMessageIds` keys the same rows to their newest inbound
+message id, and `schedulingAsksProvider` (`day_providers.dart`) holds that
+map (the keys for the thread bar and the column, the id for a label),
 re-read when the conversation list reloads (which is what follows a triage
 pass writing new decisions, a reply going out, or a state change). No clock.
 
@@ -1544,8 +1569,8 @@ callbacks.
   `CalendarWriteFlow`, whose strip names who is emailed; nothing new
   confirms. Its outcome has no parse (`CommandOutcome.parsed` is null for a
   proposal that came from no typed text). When the card's write goes
-  through, the ask folds and, when the invite had anyone on it, reads
-  **Invite sent** under its subject for the rest of the session.
+  through with anyone on it, the ask closes (above) and leaves the column.
+- **×** beside the head, folded or open, dismisses the ask (above).
 - **Put in reply** opens the thread and stages every slot shown as one line
   through `_putInReply`, as the pane's button does. **Open thread** opens the
   thread (`_select`).

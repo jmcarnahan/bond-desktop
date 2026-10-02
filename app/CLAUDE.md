@@ -705,7 +705,10 @@ enforce the ones that are commands.
   press, never by an automatic pass: storyline rows by `StorylineEdits` (Keep
   and Dismiss of a suggestion or possible row, add, remove, a charter written
   — Allow again writes none, lifting a veto is not a yes) through
-  `writeDecisionLabels`, and `question = 'needs_you'` rows by `NeedsYouEdits`
+  `writeDecisionLabels`, `question = 'scheduling_ask'` rows (answer `no`,
+  origin `invite`/`dismiss`) by the inbox through `writeSchedulingAskLabel`
+  (undo: `deleteSchedulingAskLabel` by id and stamp), and
+  `question = 'needs_you'` rows by `NeedsYouEdits`
   ("Remove from Needs You" / "Add to Needs You") through `writeNeedsYouLabel`,
   read back by `needsYouLabels()` as `NeedsYouLabel`. The one UPDATE the log
   takes is `updateNeedsYouLabelVector`, the vector refresh `applyDecision`
@@ -1013,6 +1016,10 @@ that bite.
     second confirm. `_proposalAsk` is the slot-pick → card hand-off;
     `_showProposal`, `_forgetCommand` and a typed Enter clear it, and the
     card's onDone marks the ask before its serial guard.
+  - The `scheduling_ask` label is the owner's word on an ask (an invite
+    sent from it, or the ×), pinned to the newest inbound message id, so a
+    later inbound message reopens it. `schedulingAskConversations` is
+    still the one rule; it reads the label.
   - An empty Graph answer falls back to the owner's free times unless
     `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
     one rule.

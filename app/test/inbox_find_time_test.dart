@@ -6,6 +6,8 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
     show MeetingTimeSuggestion, MeetingTimes, WritePreview;
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/conversations_provider.dart'
+    show conversationsProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
@@ -33,6 +35,7 @@ import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:bond_inbox/widgets/write_confirm_strip.dart'
     show WriteConfirmStrip;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -212,10 +215,12 @@ void main() {
     String key = 'c-ask',
     String messageId = 'ask-m1',
     String subject = _subject,
+    String participantsJson = '[{"name":"Dana Ortiz","email":"$_dana"}]',
+    int minutesAgo = 60,
   }) async {
     final received = DateTime.now()
         .toUtc()
-        .subtract(const Duration(hours: 1))
+        .subtract(Duration(minutes: minutesAgo))
         .toIso8601String();
     await store.upsertMessage({
       'source': 'email',
@@ -237,7 +242,7 @@ void main() {
       'source': 'email',
       'conversation_key': key,
       'subject': subject,
-      'participants_json': '[{"name":"Dana Ortiz","email":"$_dana"}]',
+      'participants_json': participantsJson,
       'state': 'needs_reply',
       'cta_text': 'Reply to Dana',
       'cta_urgency': 'normal',
@@ -412,12 +417,12 @@ void main() {
     await pumps(tester);
     expect(find.byType(WriteConfirmStrip), findsNothing);
     expect(writer.committed, isEmpty);
-    expect(find.byKey(SchedulingAskTile.invitedKeyFor('email', 'c-ask')),
-        findsNothing);
+    expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget,
+        reason: 'nothing was sent, so the ask is still owed');
   });
 
-  testWidgets('a confirmed invite goes to Dana, and the ask folds and says '
-      'Invite sent', (tester) async {
+  testWidgets('a confirmed invite goes to Dana, and the ask closes: it '
+      'leaves the column and the thread bar', (tester) async {
     await seedAsk();
     await pumpScreen(tester);
     await pickFirstSlot(tester);
@@ -430,11 +435,84 @@ void main() {
     expect(write.attendees, [_dana]);
     expect(write.subject, 'Re: $_subject');
     expect(find.byType(CommandPlanCard), findsNothing);
-    expect(find.byKey(SchedulingAskTile.invitedKeyFor('email', 'c-ask')),
+    await pumps(tester);
+    expect(find.byKey(AppRail.asksHeaderKey), findsNothing,
+        reason: 'the only ask closed');
+    final labels = await store.decisionLabels();
+    expect(labels.single['question'], 'scheduling_ask');
+    expect(labels.single['origin'], 'invite');
+    expect(labels.single['source_message_id'], 'ask-m1');
+
+    // The thread no longer offers Find a time.
+    await tester.tap(find.text('Needs You').first);
+    await pumps(tester);
+    await tester.tap(find.text(_subject).first);
+    await pumps(tester);
+    expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+  });
+
+  testWidgets('a slot added to your own calendar with nobody on it leaves '
+      'the ask owed', (tester) async {
+    await seedAsk(participantsJson: '[]');
+    writer = _RecordingWriter();
+    await pumpScreen(tester);
+    await pickFirstSlot(tester);
+
+    await tester.tap(find.byKey(CommandPlanCard.doKey));
+    await pumps(tester);
+    // Nobody on it and nobody emailed: it goes straight on, with its Undo.
+    expect(find.byType(WriteConfirmStrip), findsNothing);
+    final write = writer.committed.single as CreateEvent;
+    expect(write.attendees, isEmpty);
+    await pumps(tester);
+    expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+    expect(await store.decisionLabels(), isEmpty);
+  });
+
+  testWidgets('× dismisses the ask with a toast, and z brings it back',
+      (tester) async {
+    await seedAsk();
+    await pumpScreen(tester);
+    await tester.tap(find.text('Day'));
+    await pumps(tester);
+
+    await tester
+        .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c-ask')));
+    await pumps(tester);
+    await pumps(tester);
+    expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+    expect(find.text('Dismissed — it comes back if they write again.'),
         findsOneWidget);
-    expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
-        findsNothing,
-        reason: 'the ask folded');
+    expect((await store.decisionLabels()).single['origin'], 'dismiss');
+    expect(backend.asked, isEmpty, reason: 'a dismiss searches nothing');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await pumps(tester);
+    await pumps(tester);
+    expect(await store.decisionLabels(), isEmpty);
+    expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+  });
+
+  testWidgets('after a dismiss, a newer inbound scheduling message makes it '
+      'an ask again', (tester) async {
+    await seedAsk();
+    await pumpScreen(tester);
+    await tester.tap(find.text('Day'));
+    await pumps(tester);
+    await tester
+        .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c-ask')));
+    await pumps(tester);
+    await pumps(tester);
+    expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+
+    // Dana writes again: that time does not work, could we try another.
+    await seedAsk(messageId: 'ask-m2', minutesAgo: 10);
+    final container =
+        ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+    await container.read(conversationsProvider.notifier).load();
+    await pumps(tester);
+    await pumps(tester);
+    expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
   });
 
   testWidgets('the grid draws the picked slot as the Proposed tile',
@@ -506,8 +584,8 @@ void main() {
     final write = writer.committed.single as CreateEvent;
     expect(write.subject, isNot('Re: $_subject'),
         reason: 'the typed command was sent, not the ask');
-    expect(find.byKey(SchedulingAskTile.invitedKeyFor('email', 'c-ask')),
-        findsNothing);
+    expect(await store.decisionLabels(), isEmpty,
+        reason: 'the typed command closed no ask');
     expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
         findsOneWidget,
         reason: 'the ask did not fold on the typed command\'s account');

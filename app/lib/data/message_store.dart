@@ -2808,19 +2808,34 @@ WHERE COALESCE(cta_text, '') <> ''
   /// `scheduling` with that option's probability — else the choice's own
   /// confidence, for a row without per-option probabilities — at least
   /// [threshold], and the owner has not written since that message
-  /// (`last_outbound_at` absent or not after it). This is the rule's one
-  /// spelling; the caller supplies only the policy's number.
+  /// (`last_outbound_at` absent or not after it), and the owner has not
+  /// closed it: no `scheduling_ask` label ([writeSchedulingAskLabel]) on
+  /// that same newest inbound message. An invite sent from the ask, or a
+  /// dismiss, writes one. Pinned to the message by id, so a later inbound
+  /// message (the other person saying the time does not work) is a new
+  /// newest message, and the ask comes back by itself. This is the rule's
+  /// one spelling; the caller supplies only the policy's number.
+  ///
+  /// Each row carries that newest inbound message's id, which is what a
+  /// label is written against.
   ///
   /// `answers_json` is read under `json_valid` inside a CASE, which SQLite
   /// evaluates lazily, so an unreadable row is simply not an ask rather than
   /// a malformed-JSON error failing the whole read.
-  Future<List<({String source, String conversationKey})>>
+  Future<
+          List<
+              ({
+                String source,
+                String conversationKey,
+                String sourceMessageId,
+              })>>
       schedulingAskConversations({
     int limit = 200,
     required double threshold,
   }) async {
     final rows = await db.customSelect(
-      'SELECT c.source AS source, c.conversation_key AS conversation_key '
+      'SELECT c.source AS source, c.conversation_key AS conversation_key, '
+      '  n.source_message_id AS source_message_id '
       'FROM conversations c '
       'JOIN ('
       '  SELECT m.source AS source, m.conversation_key AS conversation_key, '
@@ -2839,6 +2854,10 @@ WHERE COALESCE(cta_text, '') <> ''
       "WHERE c.state = 'needs_reply' "
       "  AND (c.last_outbound_at IS NULL OR c.last_outbound_at <= "
       "       COALESCE(n.received_at, '')) "
+      '  AND NOT EXISTS (SELECT 1 FROM decision_labels l '
+      "    WHERE l.question = 'scheduling_ask' AND l.source = n.source "
+      '    AND l.conversation_key = n.conversation_key '
+      '    AND l.source_message_id = n.source_message_id) '
       '  AND CASE WHEN json_valid(d.answers_json) THEN '
       "    json_extract(d.answers_json, '\$.intent.choice') = 'scheduling' "
       '    AND COALESCE('
@@ -2855,6 +2874,7 @@ WHERE COALESCE(cta_text, '') <> ''
         (
           source: row.data['source'] as String? ?? '',
           conversationKey: row.data['conversation_key'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
         ),
     ];
   }
@@ -5550,6 +5570,54 @@ SELECT conversation_key FROM (
       "WHERE id = ? AND question = 'needs_you'",
       variables: _args([encodeEmbedding(vector), vectorModel, id]),
     );
+  }
+
+  /// Appends the owner's word that a thread no longer asks them for a time
+  /// and returns its row id: `question = 'scheduling_ask'`, `answer = 'no'`,
+  /// about [sourceMessageId], the ask's NEWEST inbound message — the one
+  /// [schedulingAskConversations] read. [origin] is `invite` (an invite
+  /// went out from the ask) or `dismiss` (the owner's ×). Append-only like
+  /// [writeNeedsYouLabel]; the undo of a dismiss deletes the row
+  /// ([deleteSchedulingAskLabel]). Kept by Clear AI results, like every
+  /// row of the log.
+  Future<int> writeSchedulingAskLabel({
+    required String source,
+    required String conversationKey,
+    required String sourceMessageId,
+    required String origin,
+    String? createdAt,
+  }) async {
+    final rows = await db.customWriteReturning(
+      'INSERT INTO decision_labels '
+      '(question, answer, source, conversation_key, origin, created_at, '
+      'source_message_id) '
+      "VALUES ('scheduling_ask', 'no', ?, ?, ?, ?, ?) RETURNING id",
+      variables: _args([
+        source,
+        conversationKey,
+        origin,
+        createdAt ?? _nowIso(),
+        sourceMessageId,
+      ]),
+    );
+    return rows.first.data['id'] as int;
+  }
+
+  /// Deletes the `scheduling_ask` label [id] stamped [createdAt] — the undo
+  /// of a dismiss — and says whether it went. By id AND stamp, for
+  /// [deleteNeedsYouLabels]' reason: a deleted highest id is handed out
+  /// again, and the stamp is what tells the two rows apart.
+  Future<bool> deleteSchedulingAskLabel(
+    int id, {
+    required String createdAt,
+  }) async {
+    final rows = await db.customWriteReturning(
+      'DELETE FROM decision_labels '
+      "WHERE question = 'scheduling_ask' AND id = ? AND created_at = ? "
+      'RETURNING id',
+      variables: _args([id, createdAt]),
+    );
+    return rows.isNotEmpty;
   }
 
   /// Every row of `decision_labels`, oldest first — for the reporting counts
