@@ -4,7 +4,7 @@ import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
-    show MeetingTimeSuggestion, WritePreview;
+    show MeetingTimeSuggestion, MeetingTimes, WritePreview;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
@@ -18,6 +18,8 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart' show dayTitle;
+import 'package:bond_inbox/services/calendar/find_time.dart'
+    show findTimeUnreadableNote;
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/command_plan_card.dart'
     show CommandPlanCard;
@@ -103,13 +105,16 @@ class _Backend extends Fake implements CalendarBackend {
   final List<List<String>> asked = [];
   final List<int> minutes = [];
 
+  /// Graph's reason on an empty answer; set with [slots] empty.
+  String emptyReason = '';
+
   /// When true each call waits on its own Completer in [held], in call
   /// order, so a test can answer them out of order.
   bool hold = false;
   final List<Completer<List<MeetingTimeSuggestion>>> held = [];
 
   @override
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,
@@ -121,9 +126,9 @@ class _Backend extends Fake implements CalendarBackend {
     if (hold) {
       final c = Completer<List<MeetingTimeSuggestion>>();
       held.add(c);
-      return c.future;
+      return MeetingTimes(suggestions: await c.future);
     }
-    return slots;
+    return MeetingTimes(suggestions: slots, emptyReason: emptyReason);
   }
 }
 
@@ -588,6 +593,30 @@ void main() {
     expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 1)),
         findsNothing,
         reason: 'the stale answer was not drawn');
+  });
+
+  testWidgets('an attendee Graph cannot read falls back to your own free '
+      'times, said, and a slot still stands the proposal', (tester) async {
+    await seedAsk();
+    // Live 2026-10-02: an attendee in another tenant, zero suggestions.
+    backend = _Backend(const [])
+      ..emptyReason = 'attendeesunavailableorunknown';
+    await pumpScreen(tester);
+    await openAsk(tester);
+
+    expect(find.text(findTimeUnreadableNote), findsOneWidget);
+    expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+        findsOneWidget);
+    expect(find.text('your free time'), findsWidgets);
+    expect(find.text(CommandPlanCard.localCaption), findsOneWidget);
+    expect(find.textContaining('Nobody is free'), findsNothing);
+
+    await tester
+        .tap(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)));
+    await pumps(tester);
+    await pumps(tester);
+    expect(find.byKey(CommandPlanCard.summaryKey), findsOneWidget);
+    expect((writer.previewed.single as CreateEvent).attendees, [_dana]);
   });
 
   testWidgets('Open thread opens the thread, wearing the chip', (tester) async {

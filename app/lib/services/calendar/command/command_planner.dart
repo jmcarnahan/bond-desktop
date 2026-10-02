@@ -8,6 +8,7 @@ import '../calendar_writes.dart';
 import '../calendar_zone.dart';
 import '../day_items.dart' show formatEventRange, formatEventTime, shortDate;
 import '../event_view.dart' show isSeriesEvent, lastMetLabel, nextMeetingLabel;
+import '../find_time.dart' show FindTimeEmpty, findTimeEmptyFallback;
 import '../overlaps.dart';
 import '../when_resolver.dart';
 import '../write_rules.dart';
@@ -192,6 +193,11 @@ String unknownPersonSentence(String name) =>
 
 const String noCommonTimeSentence =
     'No time when everyone is free in that window.';
+
+/// Said after a slot choice's title when Graph could not read someone's free
+/// time and the owner's own openings stand in (`findTimeEmptyFallback`).
+const String unreadableSuffix =
+    " (couldn't read their free time — your calendar only)";
 
 /// Appended to the confirm line of a write on one meeting of a series: the
 /// bar acts on the occurrence it matched, never on the series.
@@ -903,10 +909,19 @@ class CommandPlanner {
         windowEndUtc: end,
         maxCandidates: 3,
       );
-      if (found.isEmpty) return const CannotDo(noCommonTimeSentence);
+      if (found.suggestions.isEmpty) {
+        // Find a time's rule: only Graph's "everyone was read and nobody is
+        // free" is a no; anything else is a calendar it could not read, and
+        // the owner's own openings stand in, saying so in the title.
+        return switch (findTimeEmptyFallback(found.emptyReason)) {
+          FindTimeEmpty.nobodyFree => const CannotDo(noCommonTimeSentence),
+          FindTimeEmpty.unreadable => await local(unreadableSuffix),
+        };
+      }
       return SlotChoice(
         slots: [
-          for (final s in found.take(3)) FreeSlot(s.startUtc, s.endUtc),
+          for (final s in found.suggestions.take(3))
+            FreeSlot(s.startUtc, s.endUtc),
         ],
         buildWrite: build,
         title: title,

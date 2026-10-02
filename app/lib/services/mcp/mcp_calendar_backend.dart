@@ -247,7 +247,7 @@ class McpCalendarBackend implements CalendarBackend {
   }
 
   @override
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,
@@ -273,10 +273,16 @@ class McpCalendarBackend implements CalendarBackend {
       'window_end': utcWire(windowEndUtc),
       'options': jsonEncode({'max_candidates': maxCandidates}),
     });
-    return [
-      for (final raw in _list(result['suggestions']))
-        if (raw is Map) ?_suggestion(Map<String, dynamic>.from(raw)),
-    ];
+    final reason = result['empty_reason'];
+    return MeetingTimes(
+      suggestions: [
+        for (final raw in _list(result['suggestions']))
+          if (raw is Map) ?_suggestion(Map<String, dynamic>.from(raw)),
+      ],
+      // Lowercased: Graph spells it `AttendeesUnavailable`, and the rule
+      // that reads it should not care.
+      emptyReason: reason is String ? reason.trim().toLowerCase() : '',
+    );
   }
 
   // ── wire formats ───────────────────────────────────────────────────────

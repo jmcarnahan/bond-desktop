@@ -85,7 +85,7 @@ class UnavailableCalendarBackend implements CalendarBackend {
       throw _why;
 
   @override
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,

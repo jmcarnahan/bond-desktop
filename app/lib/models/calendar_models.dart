@@ -608,6 +608,21 @@ class CalendarSyncPage {
   }) : explicitlyComplete = explicitlyComplete ?? complete;
 }
 
+/// What `find_meeting_times` answered: the suggestions, and Graph's
+/// `emptySuggestionsReason` when there are none.
+@immutable
+class MeetingTimes {
+  final List<MeetingTimeSuggestion> suggestions;
+
+  /// Graph's reason word, lowercased (`attendeesunavailable`,
+  /// `attendeesunavailableorunknown`, `organizerunavailable`,
+  /// `locationsunavailable`, `unknown`); empty when there are suggestions or
+  /// the server said nothing. `findTimeEmptyFallback` reads it.
+  final String emptyReason;
+
+  const MeetingTimes({this.suggestions = const [], this.emptyReason = ''});
+}
+
 /// One `find_meeting_times` suggestion.
 @immutable
 class MeetingTimeSuggestion {

@@ -615,7 +615,7 @@ void main() {
           },
         ],
       });
-      final slots = await McpCalendarBackend(mcp).findMeetingTimes(
+      final found = await McpCalendarBackend(mcp).findMeetingTimes(
         attendees: ['dana@contoso.com', 'Sam@Fabrikam.com'],
         durationMinutes: 30,
         windowStartUtc: DateTime.utc(2026, 10, 2, 15),
@@ -634,6 +634,8 @@ void main() {
         // unexpected keyword on the first live press.
         'options': jsonEncode({'max_candidates': 3}),
       });
+      final slots = found.suggestions;
+      expect(found.emptyReason, '');
       expect(slots, hasLength(1));
       expect(slots.single.startUtc, DateTime.utc(2026, 10, 2, 17));
       expect(slots.single.endUtc, DateTime.utc(2026, 10, 2, 17, 30));
@@ -641,6 +643,26 @@ void main() {
       expect(slots.single.organizerAvailability, 'free');
       expect(slots.single.attendeeAvailability, {'dana@contoso.com': 'free'});
       expect(slots.single.reason, startsWith('Suggested'));
+    });
+
+    test('empty_reason is read, lowercased, and empty when absent', () async {
+      Future<MeetingTimes> answer(Map<String, Object?> body) =>
+          McpCalendarBackend(_FakeMcp({
+            'find_meeting_times': [body],
+          })).findMeetingTimes(
+            attendees: ['dana@contoso.com'],
+            durationMinutes: 30,
+            windowStartUtc: DateTime.utc(2026, 10, 2, 15),
+            windowEndUtc: DateTime.utc(2026, 10, 3, 1),
+          );
+      final unknown = await answer({
+        'suggestions': <Object>[],
+        'empty_reason': 'AttendeesUnavailableOrUnknown',
+      });
+      expect(unknown.suggestions, isEmpty);
+      expect(unknown.emptyReason, 'attendeesunavailableorunknown');
+      final absent = await answer({'suggestions': <Object>[]});
+      expect(absent.emptyReason, '');
     });
 
     test('no attendees is refused locally: a self-only search is not a call',
@@ -672,7 +694,7 @@ void main() {
         windowStartUtc: start,
         windowEndUtc: end,
       );
-      expect(slots, isEmpty);
+      expect(slots.suggestions, isEmpty);
       expect(mcp.optionsFor('find_meeting_times'), {'max_candidates': 5});
 
       await expectLater(

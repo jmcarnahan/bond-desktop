@@ -122,14 +122,15 @@ abstract class CalendarBackend {
 
   /// Up to [maxCandidates] slots of [durationMinutes] in
   /// [windowStartUtc]..[windowEndUtc] when [attendees] and you are free,
-  /// within working hours. An empty list is an answer, not a failure. A
-  /// personal account is `unsupported_account` ([CalendarRefused]).
+  /// within working hours. No suggestions is an answer, not a failure, and
+  /// carries Graph's reason ([MeetingTimes.emptyReason]). A personal account
+  /// is `unsupported_account` ([CalendarRefused]).
   ///
   /// [attendees] (bare addresses) must be NON-EMPTY — an empty list is an
   /// [ArgumentError], because the server refuses it. A search of only your
   /// own calendar is local, over the mirror: `freeSlotsOnDay` or
   /// `freeSlotsInRange` in `services/calendar/overlaps.dart`.
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,

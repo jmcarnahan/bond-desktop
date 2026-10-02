@@ -1460,6 +1460,19 @@ never throws):
   people ASKED plus the owner), so an attendee Graph does not answer for
   counts as not free, and an entry for someone not asked (the owner's own
   address) counts for nothing; a `local` slot has none.
+- **An empty answer** carries Graph's `emptySuggestionsReason` as
+  `empty_reason` (`MeetingTimes.emptyReason`, lowercased), and ONE rule reads
+  it (`findTimeEmptyFallback`, shared with the command planner). Only
+  `attendeesunavailable` (everyone was read and nobody is free) is a no:
+  "Nobody is free this week — try next week." with no slots (the planner's
+  `noCommonTimeSentence`). Every other word —
+  `attendeesunavailableorunknown`, `organizerunavailable`,
+  `locationsunavailable`, `unknown` — and none at all mean somebody's free
+  time could not be read (an attendee in another tenant answers nothing;
+  measured live 2026-10-02), so the owner's own openings stand in: source
+  `local`, captioned "your free time", under the note "Couldn't read their
+  free time — showing your own free times." (`findTimeUnreadableNote`; the
+  planner's slot choice adds `unreadableSuffix` to its title).
 - Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
   the mailbox's working hours (source `local`; `find_meeting_times` refuses an
   empty list — gotcha 28).

@@ -1013,6 +1013,9 @@ that bite.
     second confirm. `_proposalAsk` is the slot-pick → card hand-off;
     `_showProposal`, `_forgetCommand` and a typed Enter clear it, and the
     card's onDone marks the ask before its serial guard.
+  - An empty Graph answer falls back to the owner's free times unless
+    `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
+    one rule.
 - **Inbox widget tests** reach the real `McpCalendarBackend` through
   `calendarSyncProvider`, which fails fast and silently. To observe the sync,
   build a recording `CalendarSync` subclass INSIDE the test body

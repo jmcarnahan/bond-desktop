@@ -17,7 +17,7 @@ class _Backend extends Fake implements CalendarBackend {
   Object answer = const <MeetingTimeSuggestion>[];
 
   @override
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,
@@ -27,7 +27,9 @@ class _Backend extends Fake implements CalendarBackend {
     asked.add(attendees);
     candidates.add(maxCandidates);
     final a = answer;
-    if (a is List<MeetingTimeSuggestion>) return a;
+    if (a is List<MeetingTimeSuggestion>) return MeetingTimes(suggestions: a);
+    // An empty answer with Graph's reason.
+    if (a is MeetingTimes) return a;
     throw a;
   }
 }
@@ -208,6 +210,55 @@ void main() {
       expect(r.source, 'local');
       expect(r.slots, isNotEmpty);
       expect(r.availability, isEmpty);
+    });
+  });
+
+  group('an empty answer', () {
+    test('an unreadable attendee falls back to the owner\'s free times with '
+        'the note', () async {
+      for (final reason in const [
+        'attendeesunavailableorunknown',
+        'organizerunavailable',
+        'locationsunavailable',
+        'unknown',
+        '',
+      ]) {
+        backend.answer = MeetingTimes(emptyReason: reason);
+        final r = await search(['dana@fabrikam.example']);
+        expect(r.source, 'local', reason: reason);
+        expect(r.note, findTimeUnreadableNote, reason: reason);
+        expect(r.slots, hasLength(3), reason: 'the mirror\'s openings');
+        expect(r.availability, isEmpty);
+      }
+    });
+
+    test('attendees all busy says nobody is free and shows no slots',
+        () async {
+      backend.answer = const MeetingTimes(emptyReason: 'attendeesunavailable');
+      final r = await search(['dana@fabrikam.example']);
+      expect(r.source, 'graph');
+      expect(r.slots, isEmpty);
+      expect(r.note, 'Nobody is free this week — try next week.');
+
+      final next = await searchFindTime(
+        backend: backend,
+        calendar: calendar,
+        hours: null,
+        addresses: const ['dana@fabrikam.example'],
+        durationMinutes: 30,
+        window: FindTimeWindow.nextWeek,
+        now: now,
+        zone: la,
+      );
+      expect(next.note, 'Nobody is free next week — try this week.');
+    });
+
+    test('the rule: only attendeesunavailable is a no', () {
+      expect(findTimeEmptyFallback('AttendeesUnavailable'),
+          FindTimeEmpty.nobodyFree);
+      expect(findTimeEmptyFallback('attendeesunavailableorunknown'),
+          FindTimeEmpty.unreadable);
+      expect(findTimeEmptyFallback(''), FindTimeEmpty.unreadable);
     });
   });
 }

@@ -102,6 +102,34 @@ const String findTimeLocalNote =
     "Showing your own free times — your account can't look up others' "
     'calendars.';
 
+/// The note when Graph answered nothing it could stand behind — see
+/// [findTimeEmptyFallback].
+const String findTimeUnreadableNote =
+    "Couldn't read their free time — showing your own free times.";
+
+/// What an EMPTY `find_meeting_times` answer means, by Graph's
+/// `emptySuggestionsReason` ([MeetingTimes.emptyReason], lowercased).
+enum FindTimeEmpty {
+  /// `attendeesunavailable`: Graph read everyone's calendar and nobody is
+  /// free. A true "no time".
+  nobodyFree,
+
+  /// Every other word — `attendeesunavailableorunknown`,
+  /// `organizerunavailable`, `locationsunavailable`, `unknown` — and none at
+  /// all: Graph could not read somebody's free time (an attendee in another
+  /// tenant answers nothing), so "nobody is free" would be false. The owner's
+  /// own openings stand in, said as such.
+  unreadable,
+}
+
+/// The ONE rule for an empty answer, which Find a time and the command
+/// planner both read. Measured live on 2026-10-02: an attendee outside the
+/// owner's tenant made Graph answer zero suggestions for both weeks.
+FindTimeEmpty findTimeEmptyFallback(String emptyReason) =>
+    emptyReason.trim().toLowerCase() == 'attendeesunavailable'
+        ? FindTimeEmpty.nobodyFree
+        : FindTimeEmpty.unreadable;
+
 /// The working week's bounds the windows are cut from. Hours are fixed
 /// (08:00 to 18:00 local) rather than read from the mailbox: the search
 /// itself keeps to working hours, and the window only says which days.
@@ -229,8 +257,23 @@ Future<FindTimeResult> searchFindTime({
       windowEndUtc: w.endUtc,
       maxCandidates: 5,
     );
+    if (found.suggestions.isEmpty) {
+      switch (findTimeEmptyFallback(found.emptyReason)) {
+        case FindTimeEmpty.nobodyFree:
+          final other = window == FindTimeWindow.thisWeek
+              ? FindTimeWindow.nextWeek
+              : FindTimeWindow.thisWeek;
+          return FindTimeResult(
+            source: 'graph',
+            note: 'Nobody is free ${window.label.toLowerCase()} — try '
+                '${other.label.toLowerCase()}.',
+          );
+        case FindTimeEmpty.unreadable:
+          return local(note: findTimeUnreadableNote);
+      }
+    }
     final ranked = [
-      for (final s in found)
+      for (final s in found.suggestions)
         (suggestion: s, availability: _availabilityOf(s, addresses)),
     ]..sort((a, b) {
         final byFree = b.availability.free.compareTo(a.availability.free);

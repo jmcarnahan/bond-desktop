@@ -25,20 +25,20 @@ import 'fixtures/test_db.dart';
 /// is asked about; the planner's own tests cover the rest.
 class _Backend extends Fake implements CalendarBackend {
   @override
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,
     required DateTime windowEndUtc,
     int maxCandidates = 5,
   }) async =>
-      [
+      MeetingTimes(suggestions: [
         MeetingTimeSuggestion(
           startUtc: windowStartUtc,
           endUtc: windowStartUtc.add(Duration(minutes: durationMinutes)),
           confidence: 100,
         ),
-      ];
+      ]);
 }
 
 class _Writer implements CalendarWriter {

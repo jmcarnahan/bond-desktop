@@ -21,7 +21,7 @@ class _Backend extends Fake implements CalendarBackend {
   Object answer = const <MeetingTimeSuggestion>[];
 
   @override
-  Future<List<MeetingTimeSuggestion>> findMeetingTimes({
+  Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,
@@ -36,7 +36,9 @@ class _Backend extends Fake implements CalendarBackend {
       'max': maxCandidates,
     });
     final a = answer;
-    if (a is List<MeetingTimeSuggestion>) return a;
+    if (a is List<MeetingTimeSuggestion>) return MeetingTimes(suggestions: a);
+    // An empty answer with Graph's reason.
+    if (a is MeetingTimes) return a;
     throw a;
   }
 }
@@ -351,8 +353,23 @@ void main() {
     });
 
     test('nobody free: a sentence', () async {
+      // Graph read everyone and nobody is free: a true no.
+      backend.answer = const MeetingTimes(emptyReason: 'attendeesunavailable');
       final r = await plan('book planning with Dana Friday');
       expect((r as CannotDo).reason, noCommonTimeSentence);
+    });
+
+    test('an unreadable attendee: the owner\'s own openings, and it says so',
+        () async {
+      // Empty with any other reason (or none) is a calendar Graph could not
+      // read, so "nobody is free" would be false.
+      for (final reason in const ['attendeesunavailableorunknown', '']) {
+        backend.answer = MeetingTimes(emptyReason: reason);
+        final r = await plan('book planning with Dana Friday') as SlotChoice;
+        expect(r.source, 'local', reason: reason);
+        expect(r.title, endsWith(unreadableSuffix), reason: reason);
+        expect(r.slots, isNotEmpty, reason: reason);
+      }
     });
 
     test('a personal account: the owner\'s own openings, and it says so',
