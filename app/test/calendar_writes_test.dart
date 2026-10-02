@@ -169,6 +169,7 @@ class _FakeCalendarBackend implements CalendarBackend {
     required DateTime windowStartUtc,
     required DateTime windowEndUtc,
     int maxCandidates = 5,
+    String activityDomain = 'work',
   }) =>
       throw UnimplementedError();
 }
@@ -288,6 +289,26 @@ void main() {
   const privately = WritePreview(method: 'PATCH', path: '/me/events/e1');
   const toDana =
       WritePreview(method: 'PATCH', path: '/me/events/e1', notifies: [dana]);
+
+  test('withSubject renames a create and keeps everything else, the '
+      'transaction id included', () {
+    final original = CreateEvent.propose(
+      subject: 'New event',
+      startUtc: DateTime.utc(2026, 10, 9, 0, 30),
+      endUtc: DateTime.utc(2026, 10, 9, 2),
+      attendees: const ['dana@fabrikam.example'],
+      isOnlineMeeting: true,
+      body: 'Agenda to follow.',
+    );
+    final named = original.withSubject('Dinner at Northwind');
+    expect(named.subject, 'Dinner at Northwind');
+    expect(named.transactionId, original.transactionId);
+    expect(named.startUtc, original.startUtc);
+    expect(named.endUtc, original.endUtc);
+    expect(named.attendees, original.attendees);
+    expect(named.isOnlineMeeting, isTrue);
+    expect(named.body, 'Agenda to follow.');
+  });
 
   group('the confirm policy', () {
     test('anyone emailed, a delete and a cancel confirm; a private move does '

@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/calendar/ask_hints.dart' show AskHours;
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -532,6 +533,68 @@ void main() {
   });
 
   group('freeSlotsInRange', () {
+    const dinner =
+        AskHours(startHour: 17, startMinute: 30, endHour: 20, endMinute: 30);
+
+    test('daily hours replace the working window, evenings included', () {
+      final slots = freeSlotsInRange(
+          events: [timed('x', at(wed, 17, 30), at(wed, 18, 30))],
+          firstDay: wed,
+          lastDay: wed,
+          durationMinutes: 90,
+          zone: la,
+          dailyHours: dinner);
+      // 18:30 is the first opening after the busy hour; 20:00 does not fit.
+      expect(starts(slots), [(18, 30)]);
+      expect(slots.single.endUtc, at(wed, 20));
+    });
+
+    test('daily hours on a weekend day the ask named are walked', () {
+      const sat = CalendarDate(2026, 10, 17);
+      final slots = freeSlotsInRange(
+          events: const [],
+          firstDay: sat,
+          lastDay: sat,
+          durationMinutes: 90,
+          zone: la,
+          dailyHours: dinner,
+          skipNonWorkingDays: false);
+      expect(slots.map((s) => la.dateOf(s.startUtc)).toSet(), {sat});
+      expect(starts(slots).first, (17, 30));
+    });
+
+    test('daily hours are still clamped by the window bounds', () {
+      final slots = freeSlotsInRange(
+          events: const [],
+          firstDay: wed,
+          lastDay: wed,
+          durationMinutes: 60,
+          zone: la,
+          dailyHours: dinner,
+          windowEndUtc: at(wed, 19));
+      expect(starts(slots), [(17, 30)]);
+    });
+
+    test('daily hours that end where they start offer nothing', () {
+      expect(
+          freeSlotsInRange(
+              events: const [],
+              firstDay: wed,
+              lastDay: wed,
+              durationMinutes: 30,
+              zone: la,
+              dailyHours: const AskHours(
+                  startHour: 23, startMinute: 59, endHour: 23, endMinute: 59)),
+          isEmpty);
+    });
+
+    test('the mailbox window as AskHours, and its working days', () {
+      expect(workingWindowOf(null),
+          const AskHours(startHour: 8, startMinute: 0, endHour: 18, endMinute: 0));
+      expect(isWorkingDay(null, wed), isTrue);
+      expect(isWorkingDay(null, const CalendarDate(2026, 10, 17)), isFalse);
+    });
+
     test('across three days, one opening each', () {
       final events = <CalendarEvent>[];
       for (var i = 0; i < 3; i++) {

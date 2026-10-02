@@ -961,6 +961,11 @@ that bite.
     controllers.
   - Drag tests run under `TargetPlatformVariant` for both platforms:
     `flutter_test` is Android (a long-press drag), macOS a plain drag.
+  - A create is a PROPOSAL too: kalender never adds a created event (that is
+    the host's `onEventCreated` job, and this host never does), so
+    `onCreateRequested` hands the span up and the host decides whether it is
+    an ask's invite or a blank event. A bare tap comes through
+    `onTappedWithDetail`, since neither create gesture is a tap.
 - **Work rows:**
   - `AiWorker.sources` (`email`, `teams`, `local`, `calendar`) is a CLAIM
     filter. A new kind queued under a new source is silently never claimed,
@@ -1020,6 +1025,14 @@ that bite.
     sent from it, or the ×), pinned to the newest inbound message id, so a
     later inbound message reopens it. `schedulingAskConversations` is
     still the one rule; it reads the label.
+  - Hints (`readAskHints`) are read from the ask's NEWEST inbound message,
+    once per newest message (`_readAskHints`, one read in flight that every
+    caller awaits; never started in a build); `theirs` is a window (the
+    named day alone). `activity_domain` follows the hinted hours: Graph's
+    `personal` is working hours plus the weekend, so hours outside the
+    working window are `unrestricted`, a non-working day inside it is
+    `personal`, else `work`. With hours Graph is asked for 20 and the
+    suggestions outside them are dropped before the ranking.
   - An empty Graph answer falls back to the owner's free times unless
     `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
     one rule.

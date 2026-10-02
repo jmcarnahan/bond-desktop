@@ -1,4 +1,5 @@
-import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, listEquals;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:kalender/kalender.dart';
@@ -58,6 +59,11 @@ class GridProposal {
 /// attendee's copy would be moving someone else's meeting, and an all-day
 /// drag is out of this round.
 ///
+/// A press on EMPTY time is a proposal too: the grid asks
+/// [onCreateRequested] with the span and draws nothing for it — the host
+/// decides whether it is an ask's invite or a blank event, and only the
+/// store's answer, once that write goes through, puts a tile there.
+///
 /// Subjects are the ORGANISER's text: plain [Text], never markup.
 class DayGrid extends StatefulWidget {
   const DayGrid({
@@ -74,6 +80,8 @@ class DayGrid extends StatefulWidget {
     this.onOpenItem,
     this.onMoveRequested,
     this.onVisibleDayChanged,
+    this.onCreateRequested,
+    this.defaultCreateMinutes = 30,
   });
 
   /// The day shown (day span), or any day of the week shown (week span;
@@ -113,6 +121,14 @@ class DayGrid extends StatefulWidget {
 
   /// The person paged the grid: the first day now showing.
   final void Function(CalendarDate firstVisibleDay)? onVisibleDayChanged;
+
+  /// A drag over empty time in the body (the span it covered), or a bare
+  /// tap there ([defaultCreateMinutes] from the quarter hour tapped). The
+  /// grid adds no tile. Null — or [locked] — leaves empty time inert.
+  final void Function(DateTime startUtc, DateTime endUtc)? onCreateRequested;
+
+  /// How long a bare tap's span is: the open ask's length, else 30.
+  final int defaultCreateMinutes;
 
   static Key tileKeyFor(String eventId) => ValueKey('day-grid-tile-$eventId');
   /// A deadline ([kind] `due`) or return (`back`) tile. The source and the
@@ -451,6 +467,37 @@ class _DayGridState extends State<DayGrid> {
         ?.call(original.eventId, _utc(updated.start), _utc(updated.end));
   }
 
+  bool get _creates => !widget.locked && widget.onCreateRequested != null;
+
+  /// A drag over empty time ended: the span it covered, as the package
+  /// sized it while the pointer moved. A drag that barely moved — the
+  /// package seeds exactly one snap, a quarter hour, and never less — is a
+  /// tap that wobbled and takes the default length.
+  ///
+  /// The package never adds a created event itself — that is the host's
+  /// job in its `onEventCreated` — so nothing is added here, and the grid
+  /// stays a mirror of the store, as it does for a drop.
+  void _created(KalenderEvent event) {
+    if (!_creates) return;
+    final start = _utc(event.start);
+    var end = _utc(event.end);
+    if (end.difference(start) <= const Duration(minutes: 15)) {
+      end = start.add(Duration(minutes: widget.defaultCreateMinutes));
+    }
+    widget.onCreateRequested?.call(start, end);
+  }
+
+  /// A bare tap on empty time in the body: [DayGrid.defaultCreateMinutes]
+  /// from the quarter hour tapped (the package snaps the date it reports).
+  /// A tap in the all-day header reports a [MultiDayDetail] and does
+  /// nothing: creation there stays off.
+  void _emptyTapped(TapDetail detail) {
+    if (!_creates || detail is! DayDetail) return;
+    final start = _utc(detail.date);
+    widget.onCreateRequested?.call(
+        start, start.add(Duration(minutes: widget.defaultCreateMinutes)));
+  }
+
   /// A plain UTC [DateTime] at [t]'s instant. The package hands back
   /// `TZDateTime`s, whose `==` also compares the location, so one never
   /// equals the plain UTC stamp the store holds for the same instant.
@@ -587,6 +634,8 @@ class _DayGridState extends State<DayGrid> {
         onEventTapped: _tapped,
         onEventChanged: _changed,
         onPageChanged: _pageChanged,
+        onEventCreated: _creates ? _created : null,
+        onTappedWithDetail: _creates ? _emptyTapped : null,
       ),
       components: KalenderComponents(
         multiDayComponents: MultiDayComponents(
@@ -615,7 +664,21 @@ class _DayGridState extends State<DayGrid> {
         multiDayTileComponents: tiles,
       ),
       body: KalenderBody(
-        interaction: KalenderInteraction(allowEventCreation: false),
+        // Creating on empty time: kalender 0.32 offers `tap` (a plain
+        // Draggable, which starts on the first movement — the desktop's
+        // press-and-drag sizes the span as the pointer moves) and
+        // `longPress` (a LongPressDraggable, held first — what a phone
+        // needs, where a plain drag is the scroll). Neither makes an event
+        // from a bare tap: that is `onTappedWithDetail` ([_emptyTapped]).
+        interaction: KalenderInteraction(
+          allowEventCreation: _creates,
+          createEventGesture: switch (defaultTargetPlatform) {
+            TargetPlatform.android ||
+            TargetPlatform.iOS =>
+              EventInteractionGesture.longPress,
+            _ => EventInteractionGesture.tap,
+          },
+        ),
         // Quarter hours, and never the Now line: a meeting dragged near now
         // would otherwise land on 4:07.
         snapping: const KalenderSnapping(

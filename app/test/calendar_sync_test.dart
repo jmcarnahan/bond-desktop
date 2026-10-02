@@ -116,6 +116,7 @@ class _FakeCalendarBackend implements CalendarBackend {
     required DateTime windowStartUtc,
     required DateTime windowEndUtc,
     int maxCandidates = 5,
+    String activityDomain = 'work',
   }) =>
       throw UnimplementedError();
 }

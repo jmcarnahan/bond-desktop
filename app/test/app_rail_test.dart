@@ -3,6 +3,7 @@ import 'package:bond_inbox/models/files_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/needs_you_sort.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/calendar/ask_hints.dart' show AskHints;
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/calendar/find_time.dart';
@@ -2379,6 +2380,68 @@ void main() {
         'reply email|c1',
         'open email|c1',
       ]);
+    });
+
+    testWidgets('an ask with hints says what it asked for, and its day is '
+        'the first pill', (tester) async {
+      await pumpRail(tester, [
+        SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          expanded: true,
+          minutes: 90,
+          window: FindTimeWindow.theirs,
+          hints: const AskHints(
+            day: CalendarDate(2026, 10, 9),
+            minutes: 90,
+            said: 'Asked for: Fri Oct 9 · dinner',
+          ),
+        ),
+      ]);
+      expect(find.text('Asked for: Fri Oct 9 · dinner'), findsOneWidget);
+      // The ask's own length joins the three.
+      expect(find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c1', 90)),
+          findsOneWidget);
+      final theirs = find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.theirs));
+      expect(
+          find.descendant(of: theirs, matching: find.text('Fri Oct 9')),
+          findsOneWidget);
+      // First in reading order (the pills wrap at this width).
+      final a = tester.getTopLeft(theirs);
+      final b = tester.getTopLeft(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.thisWeek)));
+      expect(a.dy < b.dy || (a.dy == b.dy && a.dx < b.dx), isTrue);
+      // Selected, so it takes no tap; this week does.
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.thisWeek)));
+      expect(calls, ['window email|c1 thisWeek']);
+    });
+
+    testWidgets('the their-day pill calls back with theirs', (tester) async {
+      await pumpRail(tester, [
+        SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          expanded: true,
+          hints: const AskHints(day: CalendarDate(2026, 10, 9)),
+        ),
+      ]);
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.theirs)));
+      expect(calls, ['window email|c1 theirs']);
+    });
+
+    testWidgets('no hints, no their-day pill', (tester) async {
+      await pumpRail(tester, [ask('c1', expanded: true)]);
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c1', FindTimeWindow.theirs)),
+          findsNothing);
     });
 
     testWidgets('no slots says the note, or which week to try', (tester) async {

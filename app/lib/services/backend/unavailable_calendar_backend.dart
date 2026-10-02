@@ -91,6 +91,7 @@ class UnavailableCalendarBackend implements CalendarBackend {
     required DateTime windowStartUtc,
     required DateTime windowEndUtc,
     int maxCandidates = 5,
+    String activityDomain = 'work',
   }) async =>
       throw _why;
 }

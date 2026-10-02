@@ -8,6 +8,8 @@ import 'package:bond_inbox/services/calendar/command/command_types.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart'
     show offlineCaption;
 import 'package:bond_inbox/services/calendar/overlaps.dart';
+import 'package:bond_inbox/services/calendar/write_rules.dart'
+    show writeSummary;
 import 'package:bond_inbox/widgets/command_plan_card.dart';
 import 'package:bond_inbox/widgets/write_confirm_strip.dart';
 import 'package:flutter/material.dart';
@@ -77,6 +79,7 @@ void main() {
 
   Future<void> pumpCard(WidgetTester tester, CommandPlan plan,
       {CalendarWriter? writer,
+      bool subjectEditable = false,
       CalendarAvailability availability =
           CalendarAvailability.available}) async {
     await tester.pumpWidget(MaterialApp(
@@ -95,6 +98,7 @@ void main() {
             onChoose: (option) async => chosen.add(option),
             onOpenEvent: opened.add,
             availability: availability,
+            subjectEditable: subjectEditable,
           ),
         ),
       ),
@@ -119,6 +123,76 @@ void main() {
       notifies: notifies,
     );
   }
+
+  group('a blank event', () {
+    CalendarProposal blank() {
+      final write = CreateEvent.propose(
+          subject: 'New event', startUtc: start, endUtc: end);
+      return CalendarProposal(
+        write: write,
+        preview: const WritePreview(method: 'POST', path: '/x'),
+        summary: writeSummary(write,
+            shown: const CalendarEvent(id: ''),
+            series: false,
+            zone: la,
+            today: today),
+        doneMessage: 'Added.',
+        needsConfirm: false,
+        startUtc: start,
+        endUtc: end,
+      );
+    }
+
+    testWidgets('the name field is drawn only when the host asks',
+        (tester) async {
+      await pumpCard(tester, blank());
+      expect(find.byKey(CommandPlanCard.subjectKey), findsNothing);
+      await pumpCard(tester, blank(), subjectEditable: true);
+      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
+      // Never on a move, whatever the host says.
+      await pumpCard(tester, move(), subjectEditable: true);
+      expect(find.byKey(CommandPlanCard.subjectKey), findsNothing);
+    });
+
+    testWidgets('typing re-words the summary, and the press writes the name '
+        'under the proposal\'s own transaction id', (tester) async {
+      final writer = _FakeWriter();
+      final p = blank();
+      await pumpCard(tester, p, writer: writer, subjectEditable: true);
+      expect(
+          tester.widget<Text>(find.byKey(CommandPlanCard.summaryKey)).data,
+          contains('New event'));
+
+      await tester.enterText(find.byKey(CommandPlanCard.subjectKey), 'Dentist');
+      await tester.pump();
+      final summary =
+          tester.widget<Text>(find.byKey(CommandPlanCard.summaryKey)).data!;
+      expect(summary, contains('Dentist'));
+      expect(summary, isNot(contains('New event')));
+
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await tester.pump();
+      await tester.pump();
+      final written = writer.committed.single as CreateEvent;
+      expect(written.subject, 'Dentist');
+      expect(written.transactionId, (p.write as CreateEvent).transactionId);
+      expect(written.attendees, isEmpty);
+      expect(written.startUtc, start);
+      // The toast says the typed name, not the proposal's.
+      expect(done.single.message, contains('Dentist'));
+    });
+
+    testWidgets('an emptied name writes the default', (tester) async {
+      final writer = _FakeWriter();
+      await pumpCard(tester, blank(), writer: writer, subjectEditable: true);
+      await tester.enterText(find.byKey(CommandPlanCard.subjectKey), '  ');
+      await tester.pump();
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await tester.pump();
+      await tester.pump();
+      expect((writer.committed.single as CreateEvent).subject, 'New event');
+    });
+  });
 
   testWidgets('a proposal that emails says who, and waits on the strip',
       (tester) async {

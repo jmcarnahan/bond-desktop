@@ -4,6 +4,8 @@ import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/widgets/day_grid.dart';
 import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kalender/kalender.dart' show KalenderView;
@@ -75,6 +77,8 @@ void main() {
     void Function(DayItem)? onOpenItem,
     void Function(String, DateTime, DateTime)? onMoveRequested,
     void Function(CalendarDate)? onVisibleDayChanged,
+    void Function(DateTime, DateTime)? onCreateRequested,
+    int defaultCreateMinutes = 30,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -96,6 +100,8 @@ void main() {
             onOpenItem: onOpenItem,
             onMoveRequested: onMoveRequested,
             onVisibleDayChanged: onVisibleDayChanged,
+            onCreateRequested: onCreateRequested,
+            defaultCreateMinutes: defaultCreateMinutes,
           ),
         ),
       ),
@@ -121,6 +127,128 @@ void main() {
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 300));
   }
+
+  group('a press on empty time', () {
+    // A 10:00 tile is the ruler: 42 px an hour below its top is 1:00 PM.
+    final ten = DateTime.utc(2026, 10, 7, 17);
+    final one = DateTime.utc(2026, 10, 7, 20); // 1:00 PM PDT
+    Offset oneOClock(WidgetTester tester) =>
+        tester.getTopLeft(find.byKey(DayGrid.tileKeyFor('ruler'))) +
+        const Offset(4, 3 * 42 + 2);
+
+    testWidgets('a drag sizes the span, and the grid draws nothing for it',
+        (tester) async {
+      final asked = <(DateTime, DateTime)>[];
+      await pumpGrid(
+        tester,
+        events: [own('ruler', 'Ruler', ten, length: const Duration(minutes: 30))],
+        onCreateRequested: (s, e) => asked.add((s, e)),
+      );
+      // A phone holds, then drags; a desktop drags with a mouse, whose
+      // slop is a pixel or two, so the span starts where the press did.
+      final hold = defaultTargetPlatform == TargetPlatform.android;
+      final gesture = await tester.startGesture(oneOClock(tester),
+          kind: hold ? PointerDeviceKind.touch : PointerDeviceKind.mouse);
+      await tester.pump(Duration(milliseconds: hold ? 600 : 16));
+      await gesture.moveBy(const Offset(0, 3));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.moveBy(const Offset(0, 39));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(asked, hasLength(1));
+      expect(asked.single.$1, one);
+      expect(asked.single.$1.isUtc, isTrue);
+      expect(asked.single.$2.difference(asked.single.$1),
+          greaterThanOrEqualTo(const Duration(minutes: 45)));
+      // The grid is a mirror: only the ruler is a tile.
+      expect(find.byWidgetPredicate((w) =>
+          w.key is ValueKey<String> &&
+          (w.key! as ValueKey<String>).value.startsWith('day-grid-tile-')),
+          findsOneWidget);
+      await unmount(tester);
+    }, variant: platforms);
+
+    testWidgets('a drag that barely moved is the default length too',
+        (tester) async {
+      final asked = <(DateTime, DateTime)>[];
+      await pumpGrid(
+        tester,
+        events: [own('ruler', 'Ruler', ten, length: const Duration(minutes: 30))],
+        onCreateRequested: (s, e) => asked.add((s, e)),
+      );
+      final gesture = await tester.startGesture(oneOClock(tester),
+          kind: PointerDeviceKind.mouse);
+      await tester.pump(const Duration(milliseconds: 16));
+      await gesture.moveBy(const Offset(0, 3));
+      await tester.pump(const Duration(milliseconds: 100));
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(asked, [(one, one.add(const Duration(minutes: 30)))]);
+      await unmount(tester);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a bare tap is the default length from the quarter hour',
+        (tester) async {
+      final asked = <(DateTime, DateTime)>[];
+      await pumpGrid(
+        tester,
+        events: [own('ruler', 'Ruler', ten, length: const Duration(minutes: 30))],
+        onCreateRequested: (s, e) => asked.add((s, e)),
+      );
+      await tester.tapAt(oneOClock(tester));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(asked, [(one, one.add(const Duration(minutes: 30)))]);
+      await unmount(tester);
+    }, variant: platforms);
+
+    testWidgets('the default length is the host\'s', (tester) async {
+      final asked = <(DateTime, DateTime)>[];
+      await pumpGrid(
+        tester,
+        events: [own('ruler', 'Ruler', ten, length: const Duration(minutes: 30))],
+        onCreateRequested: (s, e) => asked.add((s, e)),
+        defaultCreateMinutes: 90,
+      );
+      await tester.tapAt(oneOClock(tester));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(asked, [(one, one.add(const Duration(minutes: 90)))]);
+      await unmount(tester);
+    });
+
+    testWidgets('a locked grid creates nothing', (tester) async {
+      final asked = <(DateTime, DateTime)>[];
+      await pumpGrid(
+        tester,
+        locked: true,
+        events: [own('ruler', 'Ruler', ten, length: const Duration(minutes: 30))],
+        onCreateRequested: (s, e) => asked.add((s, e)),
+      );
+      await tester.tapAt(oneOClock(tester));
+      await tester.pump(const Duration(milliseconds: 300));
+      await drag(tester, find.byKey(DayGrid.tileKeyFor('ruler')),
+          const Offset(0, 126));
+      expect(asked, isEmpty);
+      await unmount(tester);
+    });
+
+    testWidgets('a tap on a tile opens it, never a create', (tester) async {
+      final asked = <(DateTime, DateTime)>[];
+      final opened = <String>[];
+      await pumpGrid(
+        tester,
+        events: [own('ruler', 'Ruler', ten)],
+        onOpenEvent: opened.add,
+        onCreateRequested: (s, e) => asked.add((s, e)),
+      );
+      await tester.tap(find.byKey(DayGrid.tileKeyFor('ruler')));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(opened, ['ruler']);
+      expect(asked, isEmpty);
+      await unmount(tester);
+    });
+  });
 
   testWidgets('the axis labels hours only, however tall the grid',
       (tester) async {

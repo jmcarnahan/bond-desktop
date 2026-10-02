@@ -645,6 +645,39 @@ void main() {
       expect(slots.single.reason, startsWith('Suggested'));
     });
 
+    test('activity_domain goes out only when it is not work', () async {
+      Future<Map<String, Object?>?> optionsWith(String? domain) async {
+        final mcp = _FakeMcp({
+          'find_meeting_times': [
+            {'suggestions': <Object>[], 'empty_reason': ''},
+          ],
+        });
+        final backend = McpCalendarBackend(mcp);
+        if (domain == null) {
+          await backend.findMeetingTimes(
+            attendees: ['dana@contoso.com'],
+            durationMinutes: 90,
+            windowStartUtc: DateTime.utc(2026, 10, 9, 0, 30),
+            windowEndUtc: DateTime.utc(2026, 10, 9, 3, 30),
+          );
+        } else {
+          await backend.findMeetingTimes(
+            attendees: ['dana@contoso.com'],
+            durationMinutes: 90,
+            windowStartUtc: DateTime.utc(2026, 10, 9, 0, 30),
+            windowEndUtc: DateTime.utc(2026, 10, 9, 3, 30),
+            activityDomain: domain,
+          );
+        }
+        return mcp.optionsFor('find_meeting_times');
+      }
+
+      expect(await optionsWith(null), {'max_candidates': 5});
+      expect(await optionsWith('work'), {'max_candidates': 5});
+      expect(await optionsWith('personal'),
+          {'max_candidates': 5, 'activity_domain': 'personal'});
+    });
+
     test('empty_reason is read, lowercased, and empty when absent', () async {
       Future<MeetingTimes> answer(Map<String, Object?> body) =>
           McpCalendarBackend(_FakeMcp({

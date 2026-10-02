@@ -6,9 +6,10 @@ import '../../models/calendar_models.dart';
 import '../backend/calendar_backend.dart';
 import '../backend/calendar_errors.dart';
 import '../llm/llm_client.dart' show redactEndpoints;
+import 'ask_hints.dart';
 import 'calendar_writes.dart' show firstSentence;
 import 'calendar_zone.dart';
-import 'day_items.dart' show formatEventRange;
+import 'day_items.dart' show formatEventRange, shortDate;
 import 'overlaps.dart';
 
 /// Find a time on a scheduling thread (docs/pipeline/14-calendar.md "Find a
@@ -19,23 +20,67 @@ import 'overlaps.dart';
 /// calendars) or the mirror (the owner's own), and never the clock: the host
 /// hands it `now`.
 
-/// Which week the pane looks in.
+/// Where the search looks: the day the ask named, this week, or next.
 enum FindTimeWindow {
+  /// The day the ask's own words named ([AskHints.day]) and nothing else.
+  /// Offered only when one was read; without one it behaves as [thisWeek].
+  theirs,
   thisWeek,
   nextWeek;
 
   /// The activity row's enum word.
   String get wire => switch (this) {
+        FindTimeWindow.theirs => 'theirs',
         FindTimeWindow.thisWeek => 'this_week',
         FindTimeWindow.nextWeek => 'next_week',
       };
 
-  /// The pill's words, and the empty sentence's.
+  /// The pill's words, and the empty sentence's. [theirs]'s pill says the
+  /// day instead — see [findTimeWindowLabel].
   String get label => switch (this) {
+        FindTimeWindow.theirs => 'Their day',
         FindTimeWindow.thisWeek => 'This week',
         FindTimeWindow.nextWeek => 'Next week',
       };
 }
+
+/// The pill's words for [window]: [FindTimeWindow.theirs] is the day the ask
+/// named ("Fri Oct 9"); the weeks keep their own labels.
+String findTimeWindowLabel(FindTimeWindow window, AskHints? hints) {
+  final day = hints?.day;
+  if (window == FindTimeWindow.theirs && day != null) return shortDate(day);
+  return window.label;
+}
+
+/// The window pills, in order: the ask's own day first when one was read,
+/// then the two weeks.
+List<FindTimeWindow> findTimeWindows(AskHints? hints) => [
+      if (hints?.day != null) FindTimeWindow.theirs,
+      FindTimeWindow.thisWeek,
+      FindTimeWindow.nextWeek,
+    ];
+
+/// The length pills: 30, 45 and 60, plus the ask's own length (dinner's 90)
+/// in its place when it is none of them.
+List<int> findTimeDurations(AskHints? hints) {
+  final m = hints?.minutes;
+  final out = [30, 45, 60];
+  if (m != null && m > 0 && !out.contains(m)) out.add(m);
+  return out..sort();
+}
+
+/// The window an empty answer suggests trying instead of [window].
+FindTimeWindow findTimeOtherWindow(FindTimeWindow window) =>
+    window == FindTimeWindow.nextWeek
+        ? FindTimeWindow.thisWeek
+        : window == FindTimeWindow.thisWeek
+            ? FindTimeWindow.nextWeek
+            : FindTimeWindow.thisWeek;
+
+/// "this week", "next week", or "then" for the ask's own day — how an empty
+/// sentence names where it looked.
+String findTimeWindowWords(FindTimeWindow window) =>
+    window == FindTimeWindow.theirs ? 'then' : window.label.toLowerCase();
 
 /// How many of the people on a `graph` slot are free: the attendees Graph
 /// answered for, plus the owner as organiser.
@@ -107,6 +152,13 @@ const String findTimeLocalNote =
 const String findTimeUnreadableNote =
     "Couldn't read their free time — showing your own free times.";
 
+/// The note when Graph answered, but with nothing inside the ask's own hours
+/// (dinner asked, only daytime came back): the owner's own openings in
+/// those hours stand in, the unreadable path's shape with its own reason.
+const String findTimeOutsideHoursNote =
+    'No time inside those hours from their calendar — showing your own '
+    'free times.';
+
 /// What an EMPTY `find_meeting_times` answer means, by Graph's
 /// `emptySuggestionsReason` ([MeetingTimes.emptyReason], lowercased).
 enum FindTimeEmpty {
@@ -138,6 +190,12 @@ const int _dayEndHour = 18;
 
 /// [window] as UTC instants, with the local days it spans.
 ///
+/// **Their day** ([hints] naming a day) is that day alone, from the ask's
+/// hours' start (else 08:00) to their end (else 18:00), and from now when it
+/// is today. With no day read it is this week.
+///
+/// With [hints] hours, a week opens on its Monday at their start and closes
+/// on its Friday at their end, so Friday's dinner is inside "this week".
 /// **This week** is now until Friday 18:00 local; on a weekend, or once
 /// less than [durationMinutes] (at least a minute) is left before Friday
 /// 18:00, the week is over and it means the coming Monday 08:00 to Friday
@@ -152,12 +210,27 @@ const int _dayEndHour = 18;
   required DateTime now,
   required CalendarZone zone,
   int durationMinutes = 0,
+  AskHints? hints,
 }) {
   final nowUtc = now.toUtc();
   final today = zone.dateOf(nowUtc);
+  final h = hints?.hours;
+  final (openH, openM) = h == null ? (_dayStartHour, 0) : (h.startHour, h.startMinute);
+  final (closeH, closeM) = h == null ? (_dayEndHour, 0) : (h.endHour, h.endMinute);
+  final theirDay = hints?.day;
+  if (window == FindTimeWindow.theirs && theirDay != null) {
+    final opening = zone.localDateTime(theirDay, openH, openM).toUtc();
+    final closing = zone.localDateTime(theirDay, closeH, closeM).toUtc();
+    return (
+      startUtc: nowUtc.isAfter(opening) ? nowUtc : opening,
+      endUtc: closing,
+      firstDay: theirDay,
+      lastDay: theirDay,
+    );
+  }
   var monday = today.addDays(1 - today.weekday);
   final fridayEnd =
-      zone.localDateTime(monday.addDays(4), _dayEndHour, 0).toUtc();
+      zone.localDateTime(monday.addDays(4), closeH, closeM).toUtc();
   // An instant plus a length is no wall-clock arithmetic: a DST change
   // cannot move it.
   final needed = Duration(minutes: durationMinutes < 1 ? 1 : durationMinutes);
@@ -166,10 +239,11 @@ const int _dayEndHour = 18;
   if (over) monday = monday.addDays(7);
   if (window == FindTimeWindow.nextWeek) monday = monday.addDays(7);
   final friday = monday.addDays(4);
-  final end = zone.localDateTime(friday, _dayEndHour, 0).toUtc();
-  final opening = zone.localDateTime(monday, _dayStartHour, 0).toUtc();
+  final end = zone.localDateTime(friday, closeH, closeM).toUtc();
+  final opening = zone.localDateTime(monday, openH, openM).toUtc();
   // This week, while it lasts, starts now; any other starts on its Monday.
-  final start = window == FindTimeWindow.thisWeek && !over
+  // ([theirs] with no day read is this week.)
+  final start = window != FindTimeWindow.nextWeek && !over
       ? (nowUtc.isAfter(opening) ? nowUtc : opening)
       : opening;
   return (
@@ -190,6 +264,13 @@ const int _dayEndHour = 18;
 /// the sooner start. Graph's order alone put a slot one person could not make
 /// above one everyone could.
 ///
+/// [hints] (the ask's own words, [readAskHints]) narrow it: their hours
+/// clamp every day of the owner's own walk and of the window Graph is given,
+/// a day they named is not skipped as a weekend, and Graph is asked with
+/// `activity_domain: personal` when those hours fall outside the mailbox's
+/// working window or the day is not a working day — dinner is not work time
+/// — and `work` otherwise.
+///
 /// Never throws: a calendar error is an empty result with its sentence.
 Future<FindTimeResult> searchFindTime({
   required CalendarBackend backend,
@@ -200,9 +281,10 @@ Future<FindTimeResult> searchFindTime({
   required FindTimeWindow window,
   required DateTime now,
   required CalendarZone zone,
+  AskHints? hints,
 }) async {
   final w = findTimeWindowUtc(window,
-      now: now, zone: zone, durationMinutes: durationMinutes);
+      now: now, zone: zone, durationMinutes: durationMinutes, hints: hints);
   List<CalendarEvent> events;
   try {
     events = await calendar.eventsBetween(
@@ -242,31 +324,52 @@ Future<FindTimeResult> searchFindTime({
           nowUtc: now.toUtc(),
           windowStartUtc: w.startUtc,
           windowEndUtc: w.endUtc,
+          dailyHours: hints?.hours,
+          // Only the ask's own day is walked whatever the week says; a week
+          // searched under hints still skips its weekend.
+          skipNonWorkingDays:
+              !(window == FindTimeWindow.theirs && hints?.day != null),
         ),
         'local',
         note: note,
       );
 
+  // Hours that end where they start (a 23:59 clock time) hold no meeting:
+  // nothing is offered, and nobody is asked, rather than the working day.
+  final h = hints?.hours;
+  if (h != null && h.endInMinutes <= h.startInMinutes) {
+    return const FindTimeResult();
+  }
   if (addresses.isEmpty) return local();
   if (!w.endUtc.isAfter(w.startUtc)) return const FindTimeResult();
   try {
-    final found = await backend.findMeetingTimes(
+    final answered = await backend.findMeetingTimes(
       attendees: addresses,
       durationMinutes: durationMinutes,
       windowStartUtc: w.startUtc,
       windowEndUtc: w.endUtc,
-      maxCandidates: 5,
+      // With the ask's hours Graph still answers across the whole window, so
+      // it is asked for more and those outside the hours are dropped below.
+      maxCandidates: h == null ? 5 : 20,
+      activityDomain: _activityDomain(hints, hours, window),
     );
+    var found = answered;
+    if (h != null && answered.suggestions.isNotEmpty) {
+      found = MeetingTimes(suggestions: [
+        for (final s in answered.suggestions)
+          if (_insideHours(s, h, zone)) s,
+      ]);
+      if (found.suggestions.isEmpty) {
+        return local(note: findTimeOutsideHoursNote);
+      }
+    }
     if (found.suggestions.isEmpty) {
       switch (findTimeEmptyFallback(found.emptyReason)) {
         case FindTimeEmpty.nobodyFree:
-          final other = window == FindTimeWindow.thisWeek
-              ? FindTimeWindow.nextWeek
-              : FindTimeWindow.thisWeek;
           return FindTimeResult(
             source: 'graph',
-            note: 'Nobody is free ${window.label.toLowerCase()} — try '
-                '${other.label.toLowerCase()}.',
+            note: 'Nobody is free ${findTimeWindowWords(window)} — try '
+                '${findTimeOtherWindow(window).label.toLowerCase()}.',
           );
         case FindTimeEmpty.unreadable:
           return local(note: findTimeUnreadableNote);
@@ -336,6 +439,45 @@ SlotAvailability _availabilityOf(MeetingTimeSuggestion s, List<String> asked) {
     if (words[a] == 'free') free += 1;
   }
   return SlotAvailability(free: free, of: people.length + 1);
+}
+
+/// Graph's `activity_domain` for a search with [hints]. Graph's `personal`
+/// is the working hours PLUS the weekend, and only `unrestricted` opens
+/// every hour of every day, so: `unrestricted` when the ask's hours leave
+/// the mailbox's working window (dinner); `personal` when its own day is not
+/// a working day and its hours sit inside the window (Saturday morning);
+/// `work` (the server's default) otherwise.
+String _activityDomain(
+    AskHints? hints, MailboxSettings? hours, FindTimeWindow window) {
+  final h = hints?.hours;
+  if (h != null) {
+    final work = workingWindowOf(hours);
+    if (h.startInMinutes < work.startInMinutes ||
+        h.endInMinutes > work.endInMinutes) {
+      return 'unrestricted';
+    }
+  }
+  final day = hints?.day;
+  if (window == FindTimeWindow.theirs &&
+      day != null &&
+      !isWorkingDay(hours, day)) {
+    return 'personal';
+  }
+  return 'work';
+}
+
+/// Whether [s] starts and ends inside [hours] on its own local day.
+bool _insideHours(MeetingTimeSuggestion s, AskHours hours, CalendarZone zone) {
+  final start = zone.toLocal(s.startUtc.toUtc());
+  final end = zone.toLocal(s.endUtc.toUtc());
+  final sameDay = start.year == end.year &&
+      start.month == end.month &&
+      start.day == end.day;
+  final from = start.hour * 60 + start.minute;
+  final to = end.hour * 60 + end.minute;
+  return sameDay &&
+      from >= hours.startInMinutes &&
+      to <= hours.endInMinutes;
 }
 
 /// "Tue 14 Oct 10:00–10:30 AM PDT": one slot, absolute, with the zone's

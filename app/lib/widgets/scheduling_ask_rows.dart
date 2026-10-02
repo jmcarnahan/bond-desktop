@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../services/calendar/ask_hints.dart' show AskHints;
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart'
     show formatEventRange, overlapLine, shortDate;
@@ -32,6 +33,10 @@ class SchedulingAskRow {
   final int minutes;
   final FindTimeWindow window;
 
+  /// What the ask's own words said about the time ([readAskHints]): the
+  /// "Asked for" line, the their-day pill and its length. Null until read.
+  final AskHints? hints;
+
   /// The last search's answer, kept while the row is folded so opening it
   /// again shows it at once. Null until the first search lands.
   final FindTimeResult? result;
@@ -45,6 +50,7 @@ class SchedulingAskRow {
     this.busy = false,
     this.minutes = 30,
     this.window = FindTimeWindow.thisWeek,
+    this.hints,
     this.result,
   });
 }
@@ -110,8 +116,6 @@ class SchedulingAskTile extends StatelessWidget {
   static Key dismissKeyFor(String source, String key) =>
       ValueKey('ask-dismiss-$source|$key');
 
-  /// The lengths offered, in minutes — the pane's three.
-  static const List<int> durations = [30, 45, 60];
 
   static final TextStyle _caption =
       BondType.caption.copyWith(color: BondColors.onDarkMuted);
@@ -211,6 +215,16 @@ class SchedulingAskTile extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        // What the ask itself said, so the pills below read as following it.
+        if ((row.hints?.said ?? '').isNotEmpty) ...[
+          Text(
+            row.hints!.said!,
+            style: _caption,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: BondSpacing.s4),
+        ],
         // Bare numbers: three "30 min" pills do not fit the column, and the
         // leading word says what they count.
         Wrap(
@@ -219,7 +233,7 @@ class SchedulingAskTile extends StatelessWidget {
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             Text('min', style: _caption),
-            for (final m in durations)
+            for (final m in findTimeDurations(row.hints))
               _Pill(
                 key: minutesKeyFor(s, k, m),
                 label: '$m',
@@ -233,10 +247,10 @@ class SchedulingAskTile extends StatelessWidget {
           spacing: BondSpacing.s4,
           runSpacing: BondSpacing.s4,
           children: [
-            for (final w in FindTimeWindow.values)
+            for (final w in findTimeWindows(row.hints))
               _Pill(
                 key: windowKeyFor(s, k, w),
-                label: w.label,
+                label: findTimeWindowLabel(w, row.hints),
                 selected: w == row.window,
                 onTap: () => callbacks.onWindow(s, k, w),
               ),
@@ -253,13 +267,11 @@ class SchedulingAskTile extends StatelessWidget {
     if (row.busy) return [Text('Finding…', style: _caption)];
     if (result == null) return const [];
     if (result.slots.isEmpty) {
-      final other = row.window == FindTimeWindow.thisWeek
-          ? FindTimeWindow.nextWeek
-          : FindTimeWindow.thisWeek;
+      final other = findTimeOtherWindow(row.window);
       return [
         Text(
           result.note ??
-              'No free time found ${row.window.label.toLowerCase()} — '
+              'No free time found ${findTimeWindowWords(row.window)} — '
                   'try ${other.label.toLowerCase()}.',
           style: _caption,
           maxLines: 3,

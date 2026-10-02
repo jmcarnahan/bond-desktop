@@ -253,6 +253,7 @@ class McpCalendarBackend implements CalendarBackend {
     required DateTime windowStartUtc,
     required DateTime windowEndUtc,
     int maxCandidates = 5,
+    String activityDomain = 'work',
   }) async {
     // The server refuses an empty CSV as `invalid_arguments`; a self-only
     // search is local, over the mirror (`freeSlotsOnDay`/`freeSlotsInRange`).
@@ -271,7 +272,11 @@ class McpCalendarBackend implements CalendarBackend {
       // as an unexpected keyword on the first live press (2026-10-02).
       'window_start': utcWire(windowStartUtc),
       'window_end': utcWire(windowEndUtc),
-      'options': jsonEncode({'max_candidates': maxCandidates}),
+      // `work` is the server's default, so it is said only when it is not.
+      'options': jsonEncode({
+        'max_candidates': maxCandidates,
+        if (activityDomain != 'work') 'activity_domain': activityDomain,
+      }),
     });
     final reason = result['empty_reason'];
     return MeetingTimes(

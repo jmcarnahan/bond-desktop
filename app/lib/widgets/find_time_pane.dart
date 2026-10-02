@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/calendar_models.dart' show CalendarDate, CalendarEvent;
+import '../services/calendar/ask_hints.dart' show AskHints;
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
@@ -65,7 +66,13 @@ class FindTimePane extends StatefulWidget {
     required this.onHome,
     this.onFailed,
     this.availability = CalendarAvailability.unknown,
+    this.hints,
   });
+
+  /// What the ask's own words said ([readAskHints]): the pane opens on its
+  /// length and its day (the their-day pill first), as the Day column's row
+  /// does. The host's [search] applies the hours; null is no hint.
+  final AskHints? hints;
 
   /// The thread's subject; the invite is "Re: " it.
   final String? subject;
@@ -105,7 +112,7 @@ class FindTimePane extends StatefulWidget {
   static const Key waitingKey = ValueKey('find-time-waiting');
   static const Key offlineKey = ValueKey('find-time-offline');
 
-  /// The durations offered, in minutes.
+  /// The durations offered, in minutes, before an ask adds its own.
   static const List<int> durations = [30, 45, 60];
 
   static Key durationKeyFor(int minutes) =>
@@ -151,8 +158,10 @@ class FindTimePane extends StatefulWidget {
 
 class _FindTimePaneState extends State<FindTimePane> {
   late List<FindTimePerson> _people = [...widget.participants];
-  int _minutes = FindTimePane.durations.first;
-  FindTimeWindow _window = FindTimeWindow.thisWeek;
+  late int _minutes = widget.hints?.minutes ?? FindTimePane.durations.first;
+  late FindTimeWindow _window = widget.hints?.day != null
+      ? FindTimeWindow.theirs
+      : FindTimeWindow.thisWeek;
 
   FindTimeResult? _result;
   bool _searching = true;
@@ -253,7 +262,7 @@ class _FindTimePaneState extends State<FindTimePane> {
             spacing: BondSpacing.s8,
             runSpacing: BondSpacing.s8,
             children: [
-              for (final m in FindTimePane.durations)
+              for (final m in findTimeDurations(widget.hints))
                 BondFilterPill(
                   key: FindTimePane.durationKeyFor(m),
                   label: '$m min',
@@ -270,10 +279,10 @@ class _FindTimePaneState extends State<FindTimePane> {
             spacing: BondSpacing.s8,
             runSpacing: BondSpacing.s8,
             children: [
-              for (final w in FindTimeWindow.values)
+              for (final w in findTimeWindows(widget.hints))
                 BondFilterPill(
                   key: FindTimePane.windowKeyFor(w),
-                  label: w.label,
+                  label: findTimeWindowLabel(w, widget.hints),
                   selected: w == _window,
                   onTap: () {
                     if (w != _window) _changed(() => _window = w);
@@ -360,9 +369,7 @@ class _FindTimePaneState extends State<FindTimePane> {
     final note = result.note;
     final slots = result.slots.take(3).toList();
     final everyone = _people.isNotEmpty && result.source == 'graph';
-    final other = _window == FindTimeWindow.thisWeek
-        ? FindTimeWindow.nextWeek
-        : FindTimeWindow.thisWeek;
+    final other = findTimeOtherWindow(_window);
     return [
       if (note != null) ...[
         Text(
@@ -377,7 +384,7 @@ class _FindTimePaneState extends State<FindTimePane> {
       if (slots.isEmpty && (note == null || note == findTimeLocalNote))
         Text(
           '${everyone ? 'No time when everyone is free' : 'No free time'} '
-          '${_window.label.toLowerCase()}. '
+          '${findTimeWindowWords(_window)}. '
           'Try ${other.label.toLowerCase()}.',
           key: FindTimePane.emptyKey,
           style: BondType.small.copyWith(color: BondColors.inkSecondary),

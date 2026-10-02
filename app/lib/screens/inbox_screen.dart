@@ -47,6 +47,7 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
+import '../services/calendar/ask_hints.dart' show AskHints, readAskHints;
 import '../services/calendar/brief_gatherer.dart' show briefQuickCheck;
 import '../services/calendar/meeting_brief_handler.dart' show BriefRequest;
 import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
@@ -527,6 +528,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// anybody (an ask with nobody else on it adds to the owner's calendar).
   AskKey? _proposalAsk;
   bool _proposalInvites = false;
+
+  /// The standing proposal is a blank event picked on the grid, so its card
+  /// draws a name field. Cleared with the command ([_forgetCommand]).
+  bool _proposalBlank = false;
 
   /// Words ⌘K's "Ask Day" row handed over, waiting for the bar to take them.
   /// One-shot: the bar submits them a frame after it sees them, and the
@@ -5278,6 +5283,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         zone: zone,
         clock: DateTime.now,
         onOpenEvent: _openEvent,
+        // Empty time pressed: the open ask's invite there, else a blank
+        // event — both a proposal on the card, never a tile until written.
+        onCreateRequested: (startUtc, endUtc) =>
+            _createFromGrid(startUtc, endUtc, zone: zone, today: today),
+        defaultCreateMinutes: _openAsk()?.entry.minutes ?? 30,
         onOpenItem: (item) {
           switch (item) {
             case DeadlineItem(:final conversation):
@@ -5371,6 +5381,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _pendingCommandText = null;
     _proposalAsk = null;
     _proposalInvites = false;
+    _proposalBlank = false;
   }
 
   void _clearCommand() {
@@ -5578,6 +5589,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           _pickCommandSlot(choice, slot, zone: zone, today: today),
       onChoose: (option) =>
           _submitCommand(_commandText, zone: zone, choice: option),
+      subjectEditable: _proposalBlank,
       onOpenEvent: _openEvent,
     );
   }
@@ -5864,6 +5876,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _select(key, source: source);
     }
     setState(() => _findTimeFor = (source: source, key: key));
+    // The pane opens on the ask's own words; it waits on this read (one row,
+    // once per newest message), started here so its build only reads.
+    if ((ref.read(schedulingAsksProvider).valueOrNull ?? const {})
+        .containsKey(schedulingAskKey(source, key))) {
+      unawaited(_readAskHints(source, key)
+          .then((_) => mounted ? setState(() {}) : null));
+    }
   }
 
   /// Find a time for [thread]: its other people, the search, and the two
@@ -5884,12 +5903,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ),
       );
     }
+    // An ask's own words seed the pane's length and day, so they are read
+    // before it opens (one row read, once per ask); a thread that is not an
+    // ask has none to read.
+    final entry = _askSearches['${thread.source}|${thread.id}'];
+    final isAsk = (ref.watch(schedulingAsksProvider).valueOrNull ?? const {})
+        .containsKey(schedulingAskKey(thread.source, thread.id));
+    // Waits only while the read [_openFindTime] started is out; build never
+    // starts one.
+    if (isAsk && entry?.hintsReading != null) {
+      return Padding(
+        padding: const EdgeInsets.all(BondSpacing.s24),
+        child: FindTimePane.waiting(
+          onBack: back,
+          onHome: () => _selectSection(RailSection.home),
+        ),
+      );
+    }
+    final hints = isAsk ? entry?.hints : null;
     final people = _otherPeople(thread);
     final target = (source: thread.source, conversationKey: thread.id);
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: FindTimePane(
         key: ValueKey('find-time-${thread.source}|${thread.id}'),
+        hints: hints,
         availability: ref.watch(calendarAvailabilityProvider),
         subject: thread.subject,
         participants: people,
@@ -5906,6 +5944,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           window: window,
           zone: zone,
           surface: 'pane',
+          hints: hints,
         ),
         onPutInReply: (text) => _putInReply(target, text),
         writer: ref.read(calendarWritesProvider),
@@ -5989,6 +6028,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       busy: e.busy,
       minutes: e.minutes,
       window: e.window,
+      hints: e.hints,
       result: e.result,
     );
   }
@@ -6009,6 +6049,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ref.read(calendarZoneProvider).valueOrNull == null) {
       return;
     }
+    // A newer inbound message is a new ask in the same row: its words are
+    // read again and its first search starts from them.
+    final newest = ref
+        .read(schedulingAsksProvider)
+        .valueOrNull?[schedulingAskKey(source, key)];
+    if (entry.hintsRead && newest != null && entry.hintsMessageId != newest) {
+      entry
+        ..hintsRead = false
+        ..searched = false
+        ..result = null;
+    }
     setState(() {
       for (final e in _askSearches.values) {
         e.expanded = false;
@@ -6024,7 +6075,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _changeAsk(
       String source, String key, void Function(_AskSearch e) change) {
     final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
-    setState(() => change(entry));
+    // The owner's own choice: a hint read still out must not overwrite it.
+    setState(() {
+      change(entry);
+      entry.searched = true;
+    });
     unawaited(_runAskSearch(source, key));
   }
 
@@ -6038,6 +6093,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (thread == null || zone == null) return;
     final serial = ++entry.serial;
     setState(() => entry.busy = true);
+    // The ask's own words, read once; the first search starts from them.
+    if (!entry.hintsRead) {
+      await _readAskHints(source, key);
+      if (!mounted || serial != entry.serial) return;
+      if (!entry.searched) {
+        entry.minutes = entry.hints?.minutes ?? entry.minutes;
+        if (entry.hints?.day != null) entry.window = FindTimeWindow.theirs;
+      }
+    }
+    entry.searched = true;
     FindTimeResult result;
     try {
       result = await _findTimeSearch(
@@ -6046,6 +6111,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         window: entry.window,
         zone: zone,
         surface: 'column',
+        hints: entry.hints,
       );
     } on Object {
       result = const FindTimeResult(
@@ -6058,14 +6124,65 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     });
   }
 
+  /// Reads what the ask [source]/[key] says about the time — its NEWEST
+  /// inbound message (the one the rule read), subject and body, else the
+  /// preview — into its search entry, once. A row that cannot be read leaves
+  /// no hints, and the search runs as it always did.
+  ///
+  /// One read at a time per ask: a second caller (the pane, a pill pressed
+  /// during the first search) awaits the one already out.
+  Future<void> _readAskHints(String source, String key) {
+    final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
+    if (entry.hintsRead) return Future.value();
+    return entry.hintsReading ??= _readAskHintsNow(source, key, entry)
+        .whenComplete(() => entry.hintsReading = null);
+  }
+
+  Future<void> _readAskHintsNow(
+      String source, String key, _AskSearch entry) async {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    final messageId = ref
+        .read(schedulingAsksProvider)
+        .valueOrNull?[schedulingAskKey(source, key)];
+    AskHints? hints;
+    if (zone != null && messageId != null) {
+      try {
+        final row = await ref
+            .read(messageStoreProvider)
+            .getMessageRow(source, messageId);
+        if (row != null) {
+          final body = (row['body_text'] as String?)?.trim();
+          hints = readAskHints(
+            subject: row['subject'] as String? ?? '',
+            body: body == null || body.isEmpty
+                ? row['body_preview'] as String? ?? ''
+                : body,
+            now: DateTime.now(),
+            zone: zone,
+          );
+        }
+      } on Object catch (e) {
+        debugPrint('scheduling ask: the message could not be read: '
+            '${e.runtimeType}');
+      }
+    }
+    entry
+      ..hints = hints
+      ..hintsMessageId = messageId
+      ..hintsRead = true;
+  }
+
   /// A slot picked in the asks column: the day it falls on, with the invite
   /// standing on it as the command bar's proposal — the card with who it
   /// emails and Send, and the grid's Proposed tile. Nothing new confirms:
   /// the card's flow is the one every write goes through.
-  Future<void> _pickAskSlot(String source, String key, FreeSlot slot) async {
+  ///
+  /// False when it cannot run (the thread or the zone is gone), so a grid
+  /// press can fall back to a blank event.
+  Future<bool> _pickAskSlot(String source, String key, FreeSlot slot) async {
     final thread = _loadedConversation(source, key);
     final zone = ref.read(calendarZoneProvider).valueOrNull;
-    if (thread == null || zone == null) return;
+    if (thread == null || zone == null) return false;
     final today = zone.dateOf(DateTime.now().toUtc());
     _selectDay(zone.dateOf(slot.startUtc));
     final addresses = _otherAddresses(thread);
@@ -6081,6 +6198,47 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         today: today,
         ask: (source: source, key: key),
         invites: addresses.isNotEmpty);
+    return true;
+  }
+
+  /// The ask open in the Day column, if one is — and still an ask: a row
+  /// that closed or left the list while open counts for nothing.
+  ({String source, String key, _AskSearch entry})? _openAsk() {
+    final asks = ref.read(schedulingAsksProvider).valueOrNull ?? const {};
+    for (final MapEntry(:key, :value) in _askSearches.entries) {
+      if (!value.expanded || !asks.containsKey(key)) continue;
+      final bar = key.indexOf('|');
+      if (bar < 0) continue;
+      return (
+        source: key.substring(0, bar),
+        key: key.substring(bar + 1),
+        entry: value,
+      );
+    }
+    return null;
+  }
+
+  /// A press on empty grid time: with an ask open, that ask's invite on the
+  /// span (its day, the card, the ghost — a slot picked in the column);
+  /// with none, a blank event the card asks a name for. Either way a
+  /// proposal through the card's write flow, never a tile of its own.
+  void _createFromGrid(
+    DateTime startUtc,
+    DateTime endUtc, {
+    required CalendarZone zone,
+    required CalendarDate today,
+  }) {
+    unawaited(() async {
+      final ask = _openAsk();
+      if (ask != null &&
+          await _pickAskSlot(ask.source, ask.key, FreeSlot(startUtc, endUtc))) {
+        return;
+      }
+      if (!mounted) return;
+      final write = CreateEvent.propose(
+          subject: 'New event', startUtc: startUtc, endUtc: endUtc);
+      await _showProposal(write, zone: zone, today: today, blank: true);
+    }());
   }
 
   /// [write]'s dry run, drawn as the command card's proposal — the path a
@@ -6089,13 +6247,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// [ask] is the ask the slot came from, set in the same frame the card
   /// lands so the card's write marks it ([invites]: whether anybody is on
-  /// it); a newer command drops it with the card.
+  /// it); a newer command drops it with the card. [blank] is a blank event
+  /// picked on the grid, whose card asks for its name.
   Future<void> _showProposal(
     CalendarWrite write, {
     required CalendarZone zone,
     required CalendarDate today,
     AskKey? ask,
     bool invites = false,
+    bool blank = false,
   }) async {
     setState(() {
       _forgetCommand();
@@ -6118,6 +6278,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           CommandOutcome(plan: plan, path: CommandPath.lexicon);
       _proposalAsk = ask;
       _proposalInvites = ask != null && invites;
+      _proposalBlank = blank;
     });
   }
 
@@ -6217,6 +6378,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     required FindTimeWindow window,
     required CalendarZone zone,
     required String surface,
+    AskHints? hints,
   }) async {
     MailboxSettings? hours;
     try {
@@ -6233,6 +6395,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       window: window,
       now: DateTime.now(),
       zone: zone,
+      hints: hints,
     );
     unawaited(ref.read(activityLogProvider).record('find_time', detail: {
       'source': result.source,
@@ -9301,6 +9464,24 @@ class _AskSearch {
   FindTimeWindow window = FindTimeWindow.thisWeek;
   bool busy = false;
   FindTimeResult? result;
+
+  /// What the ask's own words said ([readAskHints]); [hintsRead] once the
+  /// newest message ([hintsMessageId]) was read, whatever it said, so it is
+  /// read once per newest message.
+  AskHints? hints;
+  bool hintsRead = false;
+
+  /// The newest inbound message [hints] were read from: when the asks name a
+  /// newer one, the row's words are read again.
+  String? hintsMessageId;
+
+  /// The read in flight, which every caller awaits rather than starting
+  /// another.
+  Future<void>? hintsReading;
+
+  /// The first search has run: it is the one seeded from [hints], and a pill
+  /// pressed later is the owner's own choice.
+  bool searched = false;
 
   /// Bumped per search, so only the newest answer lands.
   int serial = 0;

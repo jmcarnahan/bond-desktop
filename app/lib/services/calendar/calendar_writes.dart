@@ -184,6 +184,19 @@ final class CreateEvent extends CalendarWrite {
   final String? body;
   final String transactionId;
 
+  /// The same proposal under another name. Every other field stays,
+  /// [transactionId] included: a blank event named on its card is still the
+  /// one create, and a retry of it must not put a second one down.
+  CreateEvent withSubject(String subject) => CreateEvent(
+        subject: subject,
+        startUtc: startUtc,
+        endUtc: endUtc,
+        attendees: attendees,
+        isOnlineMeeting: isOnlineMeeting,
+        body: body,
+        transactionId: transactionId,
+      );
+
   @override
   String get eventId => '';
 

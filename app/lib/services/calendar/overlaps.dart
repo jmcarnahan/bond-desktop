@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../../models/calendar_models.dart';
+import 'ask_hints.dart' show AskHours;
 import 'calendar_zone.dart';
 
 /// Does this slot clash, and when is the person actually free?
@@ -317,6 +318,11 @@ List<FreeSlot> freeSlotsOnDay({
 /// that has already gone is not offered. [windowStartUtc]/[windowEndUtc] clamp
 /// every day's window, so a range clamp from Wednesday 15:00 to Thursday 12:00
 /// offers Wednesday's late afternoon and Thursday's morning only.
+///
+/// [dailyHours] replaces the working window on EVERY day — an ask for dinner
+/// looks at 17:30–20:30, not at the mailbox's 9–5 — and is clamped by the
+/// window bounds like the working window is. Pair it with
+/// [skipNonWorkingDays] false when the ask named the day.
 List<FreeSlot> freeSlotsInRange({
   required Iterable<CalendarEvent> events,
   required CalendarDate firstDay,
@@ -331,10 +337,23 @@ List<FreeSlot> freeSlotsInRange({
   DateTime? windowEndUtc,
   bool skipNonWorkingDays = true,
   bool tentativeBlocks = true,
+  AskHours? dailyHours,
 }) {
   if (durationMinutes <= 0 || limit <= 0) return const [];
   if (lastDay.isBefore(firstDay)) return const [];
+  // Hours that end where they start hold no slot, and say so by offering
+  // none — never the working day in their place.
+  if (dailyHours != null &&
+      dailyHours.endInMinutes <= dailyHours.startInMinutes) {
+    return const [];
+  }
   final workingDays = _workingWeekdays(hours);
+  final window = dailyHours == null
+      ? _WorkingWindow.of(hours)
+      : _WorkingWindow(
+          (dailyHours.startHour, dailyHours.startMinute),
+          (dailyHours.endHour, dailyHours.endMinute),
+        );
   return _offer(
     busy: _busySpans(events, tentativeBlocks),
     days: [
@@ -343,7 +362,7 @@ List<FreeSlot> freeSlotsInRange({
     ],
     duration: Duration(minutes: durationMinutes),
     zone: zone,
-    window: _WorkingWindow.of(hours),
+    window: window,
     limit: limit,
     notBeforeUtc: notBeforeUtc,
     nowUtc: nowUtc,
@@ -351,6 +370,24 @@ List<FreeSlot> freeSlotsInRange({
     windowEndUtc: windowEndUtc,
   );
 }
+
+/// The mailbox's working window as [AskHours] — what Find a time compares an
+/// ask's hours against to decide whether Graph may look outside work time.
+/// 08:00–18:00 when the hours do not parse, the walk's own fallback.
+AskHours workingWindowOf(MailboxSettings? hours) {
+  final w = _WorkingWindow.of(hours);
+  return AskHours(
+    startHour: w.start.$1,
+    startMinute: w.start.$2,
+    endHour: w.end.$1,
+    endMinute: w.end.$2,
+  );
+}
+
+/// Whether the mailbox works on [day]: [MailboxSettings.workingDays] when it
+/// names any, else Monday–Friday — the rule [freeSlotsInRange] skips by.
+bool isWorkingDay(MailboxSettings? hours, CalendarDate day) =>
+    _workingWeekdays(hours).contains(day.weekday);
 
 /// The walk behind both public calls, over [days] in order.
 ///

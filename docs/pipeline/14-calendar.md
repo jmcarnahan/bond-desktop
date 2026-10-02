@@ -571,6 +571,30 @@ in-memory.
   no dashed style — for a time that is not on the calendar: the pending
   drop's "Moving here…", and a command's standing proposal, "Proposed"
   ([The bar](#the-bar)).
+- **A press on empty time is a PROPOSAL too.** The body allows creation
+  (`allowEventCreation` while not `locked` and the host passes
+  `onCreateRequested`; the all-day header never). kalender 0.32 has two
+  create gestures, both Draggables: `tap` (a plain Draggable that starts on
+  the first movement — a desktop press-and-drag sizes the span as the
+  pointer moves) and `longPress` (held first, what a phone needs). The grid
+  picks `tap` on the desktop and `longPress` on Android and iOS. Neither makes
+  an event from a bare tap, so a bare tap on empty time comes through
+  `onTappedWithDetail` (a `DayDetail`; the header's `MultiDayDetail` is
+  ignored) and takes `defaultCreateMinutes` from the quarter hour tapped; a
+  drag shorter than a quarter hour does too. The span reaches the host
+  through `onEventCreated` → `onCreateRequested(startUtc, endUtc)`, and the
+  grid adds NOTHING — kalender leaves adding a created event to the host,
+  and this host never does, so the grid stays a mirror of the store, as for
+  a drop. The inbox (`_createFromGrid`): with an ask open in the Day column,
+  the span is that ask's slot (`_pickAskSlot`: its day, the card, the
+  `Proposed` ghost, Send) and `defaultCreateMinutes` is the ask's length;
+  with none, it is a **blank event**: `CreateEvent.propose(subject: 'New
+  event', …)` through `_showProposal`, whose card (`subjectEditable`) draws
+  a name field (`CommandPlanCard.subjectKey`, "Name this event", focused)
+  above the summary, re-words the summary with `writeSummary` as the name
+  changes, and at the press writes `CreateEvent.withSubject(name)` (empty →
+  "New event") under the proposal's own `transactionId`. With nobody on it
+  the write goes straight on with its Undo, the Writes policy as it stands.
 
 ## Events, invite cards and people
 
@@ -1467,6 +1491,53 @@ bottom:
   saying whose calendars answered ("when everyone is free" / "from your
   calendar").
 
+**The ask's own words** (`readAskHints`,
+`app/lib/services/calendar/ask_hints.dart`, pure). For "could we grab
+dinner on Friday?" the search used to offer Friday at noon — the owner's
+working hours. The ask's NEWEST inbound message (subject, then `body_text`
+else `body_preview` cut at its first quoted-reply header — "On … wrote:",
+"-----Original Message-----", a "From:" line — so the history's dates never
+win; the first 600 characters, cut back to a word boundary) is read ONCE
+per newest message by the inbox (`_readAskHints`: on the ask's first search,
+or from `_openFindTime` for the pane, which waits on that one read; a newer
+inbound message is read again on the row's next open; one read in flight,
+which every caller awaits) into `AskHints {day, hours, minutes, said}`:
+
+- **The day** is `resolveWhen(…, mode: question)`'s; a week ("next week")
+  is not a day. A day at most seven days past (an old message's date) rolls
+  to that weekday's next occurrence — today when it is today's weekday —
+  because the ask may be days old; an older one is dropped. "yesterday" is
+  no day.
+- **The hours**, most specific first: an explicit clock time (a two-hour
+  window from it, cut at 23:59; a range such as "2-3:30pm" ends where it
+  says), with a meal word setting a bare hour's half of the day ("dinner at
+  7" is 19:00, breakfast keeps its morning); else a meal or social word, the
+  earliest in the text —
+  breakfast 07:30–09:30, coffee 09:00–16:00, lunch 11:30–13:30 (wider than
+  the command bar's `DayPart.lunch`, whose bounds are not touched), dinner
+  17:30–20:30, a drink, drinks or happy hour 17:00–19:30 ("lunchtime" is
+  lunch; "coffeehouse" is not coffee); else a part of the day at
+  its `DayPart` bounds. A meal beats a part: "coffee tuesday morning" is
+  coffee's hours.
+- **The length**: a length the ask named, else a range's own, else the
+  meal's — breakfast 45, coffee 30, lunch 60, dinner 90, drinks 60 — else
+  none.
+- **`said`**: "Asked for: Fri Oct 9 · dinner" (the day, then the meal, part
+  or clock time that set the hours; "Fri Oct 9 · dinner · 7:00 PM" when a
+  meal and a time were both named).
+
+Hours that end where they start (a clock time at 23:59) hold no meeting:
+nothing is offered and Graph is not asked.
+
+The first search of an ask starts from them: `minutes = hints.minutes ??
+30`, the window **Their day** when a day was read. `FindTimeWindow.theirs`
+is that day alone, from the hours' start (else 08:00) to their end (else
+18:00), and from now when it is today; with no day it is this week. Its pill
+is the day itself (`findTimeWindowLabel`: "Fri Oct 9") and comes first, and
+the ask's own length joins the 30 · 45 · 60 pills when it is none of them.
+With hours, a week's window opens Monday at their start and closes Friday at
+their end.
+
 **The search** (`searchFindTime`, `app/lib/services/calendar/find_time.dart`;
 never throws):
 
@@ -1498,6 +1569,23 @@ never throws):
   `local`, captioned "your free time", under the note "Couldn't read their
   free time — showing your own free times." (`findTimeUnreadableNote`; the
   planner's slot choice adds `unreadableSuffix` to its title).
+- **With hints**: the owner's own walk takes `dailyHours` (the hours replace
+  the working window on EVERY day, still clamped by the window bounds) and
+  skips no weekend only when the window is the ask's own day (a week
+  searched under hints still skips its weekend). Graph is asked over the
+  same window with `options.activity_domain`: Graph's `personal` is the
+  working hours PLUS the weekend, and only `unrestricted` opens every hour,
+  so `unrestricted` when the hours leave the mailbox's working window
+  (`workingWindowOf`: dinner), `personal` when the named day is not a
+  working day (`isWorkingDay`) and the hours sit inside the window
+  (Saturday morning), and `work` (the server's default, so not sent)
+  otherwise. `findMeetingTimes(activityDomain:)` puts the key in `options`
+  only when it is not `work`. Graph still answers across the whole window,
+  so with hours it is asked for twenty candidates and every suggestion whose
+  local start or end leaves those hours on its own day is DROPPED before the
+  ranking keeps three; none left falls back to the owner's own openings in
+  those hours under "No time inside those hours from their calendar —
+  showing your own free times." (`findTimeOutsideHoursNote`).
 - Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
   the mailbox's working hours (source `local`; `find_meeting_times` refuses an
   empty list — gotcha 28).
@@ -1544,10 +1632,15 @@ callbacks.
 - **Folded**, a row is two lines: the subject and who asked (the newest
   inbound sender's name from the participants, else the address).
 - **Tapping it** opens it and folds any other (one open at a time), and runs
-  the default search at once — 30 minutes, this week — when it has no answer
-  yet; tapping again folds it and keeps the answer.
-- **Open**, it adds two pill rows, `min 30 · 45 · 60` and `This week · Next
-  week`; a press searches again, and an answer a newer press overtook is
+  the first search at once when it has no answer yet — the ask's own length
+  and its day when one was read, else 30 minutes this week; tapping again
+  folds it and keeps the answer. A pill pressed while the ask's words are
+  still being read stays: the first search is seeded only if no pill has
+  been pressed.
+- **Open**, it says what the ask asked for ("Asked for: Fri Oct 9 · dinner",
+  when its words named anything), then two pill rows, `min 30 · 45 · 60`
+  (plus the ask's own length) and `<their day> · This week · Next week` (their
+  day only when one was read, and first); a press searches again, and an answer a newer press overtook is
   dropped (a serial per ask). "Finding…" while a search runs. Then up to
   three slots, each a full-width tap target: "Tue Oct 20 · 10:00–10:30 AM",
   over the owner's own hard overlap in the rail's accent when the mirror has

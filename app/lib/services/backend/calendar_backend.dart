@@ -130,11 +130,17 @@ abstract class CalendarBackend {
   /// [ArgumentError], because the server refuses it. A search of only your
   /// own calendar is local, over the mirror: `freeSlotsOnDay` or
   /// `freeSlotsInRange` in `services/calendar/overlaps.dart`.
+  ///
+  /// [activityDomain] is the server's `activity_domain`: `work` keeps to
+  /// working hours (its default), `personal` is those hours plus the weekend
+  /// (a Saturday morning), and `unrestricted` is every hour of every day (an
+  /// ask for dinner).
   Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
     required int durationMinutes,
     required DateTime windowStartUtc,
     required DateTime windowEndUtc,
     int maxCandidates = 5,
+    String activityDomain = 'work',
   });
 }

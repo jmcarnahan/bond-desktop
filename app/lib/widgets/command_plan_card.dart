@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../models/calendar_models.dart' show CalendarDate;
+import '../models/calendar_models.dart' show CalendarDate, CalendarEvent;
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/command/command_planner.dart';
@@ -8,7 +8,8 @@ import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
 import '../services/calendar/day_items.dart'
     show formatEventRange, offlineCaption, overlapLine, shortDate;
 import '../services/calendar/overlaps.dart' show FreeSlot;
-import '../services/calendar/write_rules.dart' show emailedLine, mayEmailFor;
+import '../services/calendar/write_rules.dart'
+    show emailedLine, mayEmailFor, writeDoneMessage, writeSummary;
 import '../theme/tokens.dart';
 import 'calendar_write_flow.dart';
 
@@ -45,9 +46,11 @@ class CommandPlanCard extends StatelessWidget {
     this.onOpenEvent,
     this.onFailed,
     this.availability = CalendarAvailability.unknown,
+    this.subjectEditable = false,
   });
 
   static const Key doKey = ValueKey('command-plan-do');
+  static const Key subjectKey = ValueKey('command-plan-subject');
   static const Key cancelKey = ValueKey('command-plan-cancel');
   static const Key answerKey = ValueKey('command-plan-answer');
   static const Key reasonKey = ValueKey('command-plan-reason');
@@ -110,9 +113,18 @@ class CommandPlanCard extends StatelessWidget {
   /// as plain words.
   final void Function(String eventId)? onOpenEvent;
 
+  /// A blank event picked on the grid: a create proposal's face gains a
+  /// name field above the summary, and the press writes the create under
+  /// the typed name (`New event` when left empty) and its own transaction
+  /// id. The dry run stands as it was — a name changes nobody it emails.
+  final bool subjectEditable;
+
   @override
   Widget build(BuildContext context) {
     final Widget planBody = switch (plan) {
+      final CalendarProposal p
+          when subjectEditable && p.write is CreateEvent =>
+        _NamedProposal(card: this, proposal: p),
       final CalendarProposal p => _proposal(p),
       final SlotChoice c => _slots(c),
       final Answer a => _answer(a),
@@ -170,7 +182,17 @@ class CommandPlanCard extends StatelessWidget {
   /// The dry-run write, its overlap and who it emails, and Do it. The flow
   /// runs the dry run again on the press — the calendar may have moved
   /// since Enter — and shows its own strip when that says confirm.
-  Widget _proposal(CalendarProposal p) {
+  ///
+  /// [nameField], [summary] and [write] are the blank event's: the field
+  /// above the summary, the summary as the name now reads, and the write
+  /// under that name at the press.
+  Widget _proposal(
+    CalendarProposal p, {
+    Widget? nameField,
+    String? summary,
+    CalendarWrite Function()? write,
+  }) {
+    final named = write;
     final overlaps = p.overlaps;
     final overlap = overlaps == null ? null : overlapLine(overlaps);
     final mayEmail = mayEmailFor(p.write, event: p.targetEvent);
@@ -184,7 +206,11 @@ class CommandPlanCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(p.summary, key: summaryKey, style: BondType.small),
+          if (nameField != null) ...[
+            nameField,
+            const SizedBox(height: BondSpacing.s8),
+          ],
+          Text(summary ?? p.summary, key: summaryKey, style: BondType.small),
           if (overlap != null) ...[
             const SizedBox(height: BondSpacing.s4),
             Text(
@@ -213,9 +239,13 @@ class CommandPlanCard extends StatelessWidget {
                 key: doKey,
                 onPressed: busy
                     ? null
-                    : () => start(p.write,
-                        summary: p.summary,
-                        doneMessage: p.doneMessage,
+                    : () => start(named?.call() ?? p.write,
+                        summary: summary ?? p.summary,
+                        // A named blank event's toast says the typed name.
+                        doneMessage: named == null
+                            ? p.doneMessage
+                            : writeDoneMessage(named(),
+                                shown: null, series: false, zone: zone),
                         mayEmail: mayEmail),
                 child: Text(p.notifies.isEmpty ? 'Do it' : 'Send'),
               ),
@@ -336,4 +366,60 @@ class CommandPlanCard extends StatelessWidget {
           _close(),
         ],
       );
+}
+
+/// A create proposal with a name to give it: the blank event picked on the
+/// grid. Owns the field's controller; the face is the card's own.
+class _NamedProposal extends StatefulWidget {
+  const _NamedProposal({required this.card, required this.proposal});
+
+  final CommandPlanCard card;
+  final CalendarProposal proposal;
+
+  @override
+  State<_NamedProposal> createState() => _NamedProposalState();
+}
+
+class _NamedProposalState extends State<_NamedProposal> {
+  late final TextEditingController _name = TextEditingController(
+      text: (widget.proposal.write as CreateEvent).subject);
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  /// The write under the name as it now reads; empty keeps the default.
+  CreateEvent _write() {
+    final create = widget.proposal.write as CreateEvent;
+    final name = _name.text.trim();
+    return create.withSubject(name.isEmpty ? 'New event' : name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final card = widget.card;
+    return card._proposal(
+      widget.proposal,
+      nameField: TextField(
+        key: CommandPlanCard.subjectKey,
+        controller: _name,
+        autofocus: true,
+        maxLines: 1,
+        style: BondType.small,
+        decoration: const InputDecoration(
+          hintText: 'Name this event',
+          isDense: true,
+        ),
+        onChanged: (_) => setState(() {}),
+      ),
+      summary: writeSummary(_write(),
+          shown: const CalendarEvent(id: ''),
+          series: false,
+          zone: card.zone,
+          today: card.today),
+      write: _write,
+    );
+  }
 }
