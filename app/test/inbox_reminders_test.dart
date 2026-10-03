@@ -145,7 +145,10 @@ void main() {
     la = CalendarZone.tryNamed('America/Los_Angeles')!;
   });
 
-  tearDown(() => db.close());
+  tearDown(() async {
+    InboxScreen.followUpWaitOverride = null;
+    await db.close();
+  });
 
   String ago(int hours) =>
       DateTime.now().toUtc().subtract(Duration(hours: hours)).toIso8601String();
@@ -468,6 +471,81 @@ void main() {
     expect(await store.activeReminders(), hasLength(1));
   });
 
+  /// Picks 2 days in the invoice's composer and sends a reply.
+  Future<void> sendWithFollowUp(WidgetTester tester) async {
+    await tester.tap(
+        find.byKey(Composer.followUpChoiceKeyFor(FollowUpChoice.twoDays)));
+    await tester.pump();
+    await tester.enterText(
+      find.descendant(
+          of: find.byType(Composer), matching: find.byType(TextField)),
+      'Signed and sent back.',
+    );
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byType(Composer),
+      matching: find.text('Send'),
+    ));
+    await pumps(tester);
+    await pumps(tester);
+  }
+
+  testWidgets('a slow To Do does not hold the send', (tester) async {
+    InboxScreen.followUpWaitOverride = const Duration(milliseconds: 200);
+    await seedInvoice();
+    final tasks = _RecordingTasks()..holdCreate = Completer<void>();
+    final mail = _SendingMail();
+    await pumpScreen(tester, tasks: tasks, mail: mail);
+    await openInvoice(tester);
+
+    await sendWithFollowUp(tester);
+    await tester.pump(const Duration(milliseconds: 300));
+    await pumps(tester);
+
+    // The reply went and says so, with no follow-up line, while To Do is
+    // still answering.
+    expect(mail.bodies, ['Signed and sent back.']);
+    expect(find.text('Reply sent.'), findsOneWidget);
+    expect(find.textContaining('Following up'), findsNothing);
+    expect(tasks.created, isEmpty);
+
+    tasks.holdCreate!.complete();
+    await pumps(tester);
+    await pumps(tester);
+
+    // The late answer lands by itself, and says nothing more.
+    expect(tasks.created, hasLength(1));
+    final rows = await store.activeReminders();
+    expect(rows.single.kind, ReminderKind.followUp);
+    expect(find.text('Reply sent.'), findsOneWidget);
+    expect(find.textContaining('No follow-up set'), findsNothing);
+  });
+
+  testWidgets('a late To Do failure toasts without Undo', (tester) async {
+    InboxScreen.followUpWaitOverride = const Duration(milliseconds: 200);
+    await seedInvoice();
+    final tasks = _RecordingTasks()..holdCreate = Completer<void>();
+    await pumpScreen(tester, tasks: tasks, mail: _SendingMail());
+    await openInvoice(tester);
+
+    await sendWithFollowUp(tester);
+    await tester.pump(const Duration(milliseconds: 300));
+    await pumps(tester);
+    expect(find.text('Reply sent.'), findsOneWidget);
+
+    tasks.holdCreate!.completeError(const TasksTransient('Graph 503'));
+    await pumps(tester);
+    await pumps(tester);
+
+    expect(
+      find.text("No follow-up set — Couldn't reach To Do. Nothing was set."),
+      findsOneWidget,
+    );
+    expect(find.text('Undo'), findsNothing);
+    expect(tasks.created, isEmpty);
+    expect(await store.activeReminders(), isEmpty);
+  });
+
   testWidgets('unavailable: the strip says the permission sentence, and the '
       'composer has no follow-up', (tester) async {
     await seedInvoice();
@@ -545,7 +623,6 @@ void main() {
       reminderServiceProvider.overrideWith((ref) => service = _RecordingService(
             store: ref.watch(messageStoreProvider),
             backend: ref.watch(tasksBackendProvider),
-            mailbox: () async => null,
             zone: CalendarZone.utc,
             log: ref.watch(activityLogProvider),
             availability: () async => TasksAvailability.available,
@@ -625,6 +702,10 @@ class _RecordingTasks implements TasksBackend {
   /// Thrown by the next `deleteTask`, once.
   Object? throwOnDelete;
 
+  /// When set, every `createTask` waits on it (and throws what it is
+  /// completed with as an error): a slow To Do.
+  Completer<void>? holdCreate;
+
   @override
   Future<TodoList> ensureList({String name = 'Bond follow-ups'}) async =>
       const TodoList(id: 'list-1', name: 'Bond follow-ups', created: true);
@@ -641,6 +722,7 @@ class _RecordingTasks implements TasksBackend {
     String importance = 'normal',
     TodoLink? link,
   }) async {
+    await holdCreate?.future;
     final id = 'task-${++_next}';
     created.add((
       id: id,
@@ -709,7 +791,6 @@ class _RecordingService extends ReminderService {
   _RecordingService({
     required super.store,
     required super.backend,
-    required super.mailbox,
     required super.zone,
     required super.log,
     required super.availability,

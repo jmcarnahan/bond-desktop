@@ -866,9 +866,10 @@ CREATE TABLE decision_labels (
 -- A reminder the app placed in Microsoft To Do (the calendar-automation round's
 -- Phase 5): why, for which thread, when it fires, and the task that carries it.
 -- KEPT, not derived: the row points at a task in the owner's To Do, and Clear
--- AI results must not orphan one. `id` is also the task's linked-resource
--- external_id. `AS ReminderRow` keeps drift's generated class off the model
--- class `Reminder`; the store is raw SQL.
+-- AI results must not orphan one. `id` is also the task's external_id when the
+-- task carries a link (external_id rides inside linked_resource). `AS
+-- ReminderRow` keeps drift's generated class off the model class `Reminder`;
+-- the store is raw SQL.
 CREATE TABLE reminders (
   id TEXT NOT NULL PRIMARY KEY,
   kind TEXT NOT NULL,                      -- reply_by | follow_up | deadline | custom

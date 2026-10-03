@@ -407,6 +407,23 @@ void main() {
       await tester.pumpAndSettle();
       expect(written, [false]);
     });
+
+    testWidgets('names the Bond server connection in SDK mode', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onRemindDeadlinesChanged: (_) {},
+        tasksAvailability: TasksAvailability.sdkMode,
+      );
+      await expand(tester, 'Needs You');
+
+      expect(find.text('$caption · Needs the Bond server connection'),
+          findsOneWidget);
+      expect(find.textContaining('Needs the To Do permission'), findsNothing);
+      final row = find.byKey(SettingsScreen.remindDeadlinesKey);
+      expect(tester.widget<SwitchListTile>(row).onChanged, isNotNull);
+    });
   });
 
   testWidgets('the Needs You section has no text to edit', (tester) async {

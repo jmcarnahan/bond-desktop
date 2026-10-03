@@ -149,6 +149,9 @@ class DraftHandler extends WorkHandler {
   /// this existed drafts exactly as it did. See [_slotsFor].
   final DraftCalendar? _calendar;
 
+  /// Services never read the clock directly.
+  final DateTime Function() _clock;
+
   DraftHandler(
     this._store,
     this._client, {
@@ -167,6 +170,7 @@ class DraftHandler extends WorkHandler {
     this._streams,
     this._stream = const DraftStreamBus.disabled(),
     this._calendar,
+    this._clock = DateTime.now,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         // ignore: prefer_initializing_formals
         _improveClient = improveClient,
@@ -407,7 +411,7 @@ class DraftHandler extends WorkHandler {
       // `validate` before this, so the line is never cut. The clock is read
       // here, not before a slow streamed draft, so no slot that began during
       // the call is offered.
-      final slots = await _slotsFor(source, id, row, key, DateTime.now());
+      final slots = await _slotsFor(source, id, row, key, _clock());
       final provenance =
           _provenanceFor(excerpts, pack).copyWith(calendar: slots?.record);
       // The distinct paths the caption's directory files came from, for the
@@ -864,7 +868,7 @@ class DraftHandler extends WorkHandler {
     try {
       final zone = await wired.zone();
       final kept = await liveSlots(wired.store, slots,
-          now: DateTime.now(), zone: zone);
+          now: _clock(), zone: zone);
       if (kept.isEmpty) return null;
       return (
         line: findTimeReplyLine(kept, zone),
@@ -990,7 +994,7 @@ class DraftHandler extends WorkHandler {
         aboutMe: g.aboutMe,
         attachmentExcerpts: g.excerpts,
         directories: g.pack,
-        now: DateTime.now(),
+        now: _clock(),
       );
 
   /// What this reply was written from, distinct and in ranked order. Three

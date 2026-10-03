@@ -1234,6 +1234,7 @@ final askReaderProvider = Provider<AskReader>((ref) => AskReader(
       log: ref.watch(activityLogProvider),
       zone: () =>
           ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc(),
+      enabled: askReadOn,
     ));
 
 /// One chat client per pipeline stage. Constructing one opens nothing — the
@@ -2212,14 +2213,13 @@ final draftSlotRefresherProvider =
         ));
 
 /// The reminders carried by Microsoft To Do (D7/D8). Every input is read at
-/// call time — the mailbox zone, the display zone, the grant — so a sync or
-/// a reconnect rebuilds nothing; only a backend switch (a new
-/// [tasksBackendProvider]) builds a new service.
+/// call time — the display zone, the grant — so a sync or a reconnect
+/// rebuilds nothing; only a backend switch (a new [tasksBackendProvider])
+/// builds a new service.
 final reminderServiceProvider = Provider<ReminderService>((ref) =>
     ReminderService(
       store: ref.watch(messageStoreProvider),
       backend: ref.watch(tasksBackendProvider),
-      mailbox: () => ref.read(mailboxSettingsProvider.future),
       zone: () =>
           ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc(),
       log: ref.watch(activityLogProvider),
@@ -2230,8 +2230,7 @@ final reminderServiceProvider = Provider<ReminderService>((ref) =>
 /// that changed rows), so [remindersProvider] reads the table again.
 final reminderRevisionProvider = StateProvider<int>((ref) => 0);
 
-/// The active reminders, soonest first — what the Day timeline and the
-/// thread bar draw.
+/// The active reminders, soonest first — what the Day timeline draws.
 final remindersProvider =
     FutureProvider.autoDispose<List<Reminder>>((ref) {
   ref.watch(reminderRevisionProvider);

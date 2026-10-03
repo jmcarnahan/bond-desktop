@@ -1,4 +1,5 @@
 import '../../data/message_store.dart';
+import '../backend/tasks_errors.dart' show TasksRefused;
 import '../../models/message_models.dart' show Conversation, Message;
 import '../../models/reminder_models.dart';
 import '../calendar/ask_words.dart' show askOwnWords;
@@ -16,6 +17,11 @@ import 'tasks_availability.dart';
 /// (`remind_deadlines`) is off or To Do is unavailable, never a second
 /// reminder for a thread that has an active one of any kind, never a 09:00
 /// that has already passed, and at most [perPass] a pass.
+///
+/// A thread whose task To Do refuses ([TasksRefused]) is skipped and
+/// remembered for the life of the planner, so one bad thread neither wedges
+/// the pass nor is offered to To Do again every poll; any other failure ends
+/// the pass.
 class ReminderPlanner {
   final MessageStore _store;
   final ReminderService _service;
@@ -31,6 +37,10 @@ class ReminderPlanner {
     this._clock = DateTime.now,
   });
 
+  /// `'<source>|<conversation key>'` of the threads To Do refused, kept in
+  /// memory only: an app restart offers them once more.
+  final Set<String> _refused = {};
+
   /// The most reminders one pass creates; the rest wait a poll.
   static const int perPass = 5;
 
@@ -39,7 +49,9 @@ class ReminderPlanner {
 
   /// Plans the deadline reminders owed over [conversations]; returns how
   /// many were created. A create that throws ends the pass and propagates,
-  /// so a missing permission or a lost connection is not met five times.
+  /// so a missing permission or a lost connection is not met five times —
+  /// except [TasksRefused], which is about that one thread: it is skipped,
+  /// remembered, and the pass goes on.
   Future<int> plan({
     required CalendarZone zone,
     required double needsYouThreshold,
@@ -53,6 +65,8 @@ class ReminderPlanner {
     for (final c in conversations) {
       if (created >= perPass) break;
       if (!isNeedsYou(c, threshold: needsYouThreshold)) continue;
+      final key = '${c.source}|${c.id}';
+      if (_refused.contains(key)) continue;
       final day = remindDeadlineDay(c, now);
       if (day == null || day.isBefore(today)) continue;
       final remindAt = zone.localDateTime(day, remindHour, 0).toUtc();
@@ -60,18 +74,23 @@ class ReminderPlanner {
       if (await _store.hasActiveReminder(c.source, c.id)) continue;
       final newest = await _newestInbound(c);
       final subject = c.subject?.trim() ?? '';
-      await _service.create(ReminderRequest(
-        kind: ReminderKind.deadline,
-        source: c.source,
-        conversationKey: c.id,
-        anchorMessageId: newest?.id ?? '',
-        title: 'Reply to ${replyToName(c, newest)}: '
-            '${subject.isEmpty ? '(no subject)' : subject}',
-        remindAtUtc: remindAt,
-        createdFrom: ReminderOrigin.auto,
-        bodyText: _bodyOf(newest),
-        anchorWebLink: newest?.webLink,
-      ));
+      try {
+        await _service.create(ReminderRequest(
+          kind: ReminderKind.deadline,
+          source: c.source,
+          conversationKey: c.id,
+          anchorMessageId: newest?.id ?? '',
+          title: 'Reply to ${replyToName(c, newest)}: '
+              '${subject.isEmpty ? '(no subject)' : subject}',
+          remindAtUtc: remindAt,
+          createdFrom: ReminderOrigin.auto,
+          bodyText: _bodyOf(newest),
+          anchorWebLink: newest?.webLink,
+        ));
+      } on TasksRefused {
+        _refused.add(key);
+        continue;
+      }
       created++;
     }
     return created;

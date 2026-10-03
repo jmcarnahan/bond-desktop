@@ -26,6 +26,11 @@ class _FakeTasks implements TasksBackend {
   /// Thrown by the next `createTask` calls, one each, before any succeed.
   final List<Object> createThrows = [];
 
+  /// Run inside `completeTask` / `deleteTask` before they answer: the seam
+  /// a test races the row through.
+  Future<void> Function()? duringComplete;
+  Future<void> Function()? duringDelete;
+
   /// Thrown by every `completeTask` / `deleteTask` / `flagMessages`.
   Object? completeThrows;
   Object? deleteThrows;
@@ -87,6 +92,7 @@ class _FakeTasks implements TasksBackend {
     required String taskId,
   }) async {
     calls.add((call: 'completeTask', args: {'listId': listId, 'taskId': taskId}));
+    await duringComplete?.call();
     if (completeThrows case final e?) throw e;
     return TodoTask(id: taskId, listId: listId, title: '', status: 'completed');
   }
@@ -97,6 +103,7 @@ class _FakeTasks implements TasksBackend {
     required String taskId,
   }) async {
     calls.add((call: 'deleteTask', args: {'listId': listId, 'taskId': taskId}));
+    await duringDelete?.call();
     if (deleteThrows case final e?) throw e;
   }
 
@@ -121,6 +128,15 @@ class _FakeTasks implements TasksBackend {
     if (flagThrows case final e?) throw e;
     return FlagOutcome(updated: messageIds.length);
   }
+}
+
+/// A store whose reminder insert always fails, as a full disk would.
+class _FailingInsertStore extends MessageStore {
+  _FailingInsertStore(super.db);
+
+  @override
+  Future<void> insertReminder(Reminder reminder) async =>
+      throw StateError('disk full');
 }
 
 void main() {
@@ -152,12 +168,15 @@ void main() {
 
   tearDown(() => db.close());
 
-  ReminderService service({DateTime Function()? clock}) => ReminderService(
-        store: store,
+  ReminderService service({
+    DateTime Function()? clock,
+    MessageStore? on,
+    CalendarZone? zone,
+  }) =>
+      ReminderService(
+        store: on ?? store,
         backend: tasks,
-        mailbox: () async =>
-            const MailboxSettings(timeZone: 'Pacific Standard Time'),
-        zone: () => la,
+        zone: () => zone ?? la,
         log: ActivityLog(store),
         availability: () async => availability,
         clock: clock ?? () => now,
@@ -176,13 +195,14 @@ void main() {
     String? body,
     DateTime? remindAt,
     ReminderOrigin from = ReminderOrigin.bar,
+    String title = 'Reply to Dana: Q3 numbers',
   }) =>
       ReminderRequest(
         kind: kind,
         source: 'email',
         conversationKey: key,
         anchorMessageId: anchor,
-        title: 'Reply to Dana: Q3 numbers',
+        title: title,
         remindAtUtc: remindAt ?? now.add(const Duration(days: 1)),
         createdFrom: from,
         bodyText: body,
@@ -247,7 +267,7 @@ void main() {
       expect(sent['listId'], 'list-1');
       expect(sent['title'], 'Reply to Dana: Q3 numbers');
       expect(sent['dueDate'], const CalendarDate(2026, 10, 9));
-      expect(sent['dueTimeZone'], 'Pacific Standard Time');
+      expect(sent['dueTimeZone'], 'America/Los_Angeles');
       expect(sent['reminderAtUtc'], remindAt);
       expect(sent['status'], 'notStarted');
       final link = sent['link']! as TodoLink;
@@ -387,6 +407,70 @@ void main() {
       expect(body.endsWith('numbers'), isTrue);
     });
 
+    test('a long title is cut at a word to 200 characters', () async {
+      final long = 'Reply to Dana: ${List.filled(60, 'numbers').join(' ')}';
+
+      final r = await service().create(request(title: long));
+
+      final sent = tasks.argsOf('createTask').single['title']! as String;
+      expect(sent.length, lessThanOrEqualTo(ReminderService.titleCap));
+      expect(long.startsWith(sent), isTrue);
+      expect(sent.endsWith('numbers'), isTrue);
+      expect(r.title, sent);
+      expect((tasks.argsOf('createTask').single['link']! as TodoLink)
+          .displayName, sent);
+    });
+
+    test('the due date and its zone come from the same zone', () async {
+      // 20:00 on the 9th in Los Angeles, 03:00 on the 10th in UTC.
+      final remindAt = DateTime.utc(2026, 10, 10, 3);
+
+      await service().create(request(remindAt: remindAt));
+      await service(zone: CalendarZone.utc())
+          .create(request(key: 'c2', remindAt: remindAt));
+
+      final sent = tasks.argsOf('createTask');
+      expect(sent[0]['dueDate'], const CalendarDate(2026, 10, 9));
+      expect(sent[0]['dueTimeZone'], 'America/Los_Angeles');
+      expect(sent[1]['dueDate'], const CalendarDate(2026, 10, 10));
+      expect(sent[1]['dueTimeZone'], CalendarZone.utc().iana);
+    });
+
+    test('a row that cannot be written takes its task back out of To Do',
+        () async {
+      final failing = _FailingInsertStore(db);
+
+      await expectLater(
+          service(on: failing).create(request()), throwsA(isA<StateError>()));
+
+      expect(tasks.argsOf('createTask'), hasLength(1));
+      expect(tasks.argsOf('deleteTask').single,
+          {'listId': 'list-1', 'taskId': 'task-1'});
+      expect(await store.activeReminders(), isEmpty);
+    });
+
+    test('a failed take-back still fails as the write failed', () async {
+      tasks.deleteThrows = const TasksTransient('Graph 503');
+
+      await expectLater(service(on: _FailingInsertStore(db)).create(request()),
+          throwsA(isA<StateError>()));
+
+      expect(tasks.argsOf('deleteTask'), hasLength(1));
+    });
+
+    test('two creates with no stored list make one ensure_list call',
+        () async {
+      final s = service();
+
+      final both = await Future.wait(
+          [s.create(request()), s.create(request(key: 'c2'))]);
+
+      expect(tasks.argsOf('ensureList'), hasLength(1));
+      expect(both[0].todoListId, 'list-1');
+      expect(both[1].todoListId, 'list-1');
+      expect(await store.getPref(todoListIdKey), 'list-1');
+    });
+
     test('a missing permission throws before any call or row', () async {
       availability = TasksAvailability.scopeMissing;
       await expectLater(
@@ -480,6 +564,33 @@ void main() {
       // Cancelling twice is a no-op, not a second delete.
       await s.cancel(r.id);
       expect(tasks.argsOf('deleteTask'), hasLength(1));
+    });
+
+    test('completing a cancelled reminder records nothing', () async {
+      final s = service();
+      final r = await s.create(request());
+      // The Undo lands while the task is being completed in To Do.
+      tasks.duringComplete = () => s.cancel(r.id);
+
+      await s.complete(r.id, reason: 'done');
+
+      expect((await store.reminderById(r.id))!.status,
+          ReminderStatus.cancelled);
+      expect([for (final row in await reminderRows()) row['action']],
+          ['cancel', 'create']);
+    });
+
+    test('cancelling a completed reminder records nothing', () async {
+      final s = service();
+      final r = await s.create(request());
+      // The reconcile's complete lands while the task is being deleted.
+      tasks.duringDelete = () => s.complete(r.id, reason: 'done');
+
+      await s.cancel(r.id);
+
+      expect((await store.reminderById(r.id))!.status, ReminderStatus.done);
+      expect([for (final row in await reminderRows()) row['action']],
+          ['complete', 'create']);
     });
 
     test('the store moves only an active row to done or cancelled', () async {
@@ -615,6 +726,40 @@ void main() {
 
       // Once moved, it stays put.
       expect(await s.reconcile(), 0);
+    });
+
+    test('a reminder 31 days past is marked done as expired with no To Do '
+        'call', () async {
+      await conversation();
+      final r = await service().create(request(
+          kind: ReminderKind.followUp, anchor: 'sent-1', graphId: 'sent-1'));
+      final flags = tasks.argsOf('flagMessages').length;
+      final later = r.remindAtUtc.add(const Duration(days: 31));
+
+      expect(await service(clock: () => later).reconcile(), 1);
+
+      final row = (await store.reminderById(r.id))!;
+      expect(row.status, ReminderStatus.done);
+      expect(row.doneAt, MessageStore.isoStamp(later));
+      expect(tasks.argsOf('completeTask'), isEmpty);
+      expect(tasks.argsOf('flagMessages'), hasLength(flags));
+      expect((await reminderRows()).first,
+          {'status': 'ok', 'action': 'complete', 'kind': 'follow_up',
+              'reason': 'expired'});
+    });
+
+    test('a reminder 29 days past is still reconciled', () async {
+      await conversation();
+      final r = await service().create(request());
+      final later = r.remindAtUtc.add(const Duration(days: 29));
+
+      expect(await service(clock: () => later).reconcile(), 0);
+      expect((await store.reminderById(r.id))!.status, ReminderStatus.active);
+
+      await conversation(state: 'done');
+      expect(await service(clock: () => later).reconcile(), 1);
+      expect(tasks.argsOf('completeTask'), hasLength(1));
+      expect((await reminderRows()).first['reason'], 'done');
     });
 
     test('does nothing while To Do is unavailable', () async {

@@ -27,8 +27,9 @@ abstract class TasksBackend {
   Future<TodoList> ensureList({String name = 'Bond follow-ups'});
 
   /// A new task on [listId]. [reminderAtUtc] turns its reminder on;
-  /// [dueDate] is read in [dueTimeZone] (the mailbox's Windows name — the
-  /// default UTC can show the date a day early in a western To Do app).
+  /// [dueDate] is read in [dueTimeZone] (the IANA name of the zone the date
+  /// was worked out in — the default UTC can show the date a day early in a
+  /// western To Do app).
   /// [link] ties the task back to the mail and to the app's own row (its
   /// `externalId`).
   Future<TodoTask> createTask({

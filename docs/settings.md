@@ -156,8 +156,9 @@ as `remind_deadlines` (`AppPrefs.remindDeadlines`). It is **on by default**:
 the reminder lands in the owner's own Microsoft To Do and emails nobody. While
 To Do cannot carry a reminder (`tasksAvailability` is not `available`, which
 is every install until the consent round) the caption gains ` · Needs the To
-Do permission` and the switch stays live, because the pref is the owner's
-wish and holds until the permission arrives. What it turns on is the deadline
+Do permission` — or, on the SDK backend, where To Do is never reachable,
+` · Needs the Bond server connection` — and the switch stays live, because
+the pref is the owner's wish and holds until the permission arrives. What it turns on is the deadline
 planner ([pipeline/15-reminders.md](pipeline/15-reminders.md#the-deadline-planner)).
 
 The section's last control is a switch, **Sending a reply marks it done** — *A

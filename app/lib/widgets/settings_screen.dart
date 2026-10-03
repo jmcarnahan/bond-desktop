@@ -2442,14 +2442,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  /// The To Do switch's caption, with the missing permission named when To
-  /// Do cannot carry a reminder yet.
+  /// The To Do switch's caption, with what is missing named when To Do
+  /// cannot carry a reminder yet: the permission, or (in SDK mode) the Bond
+  /// server connection — the two causes `tasksUnavailableSentence` names.
+  /// While the grant is still being read the host passes `available`.
   String _remindDeadlinesCaption() {
     const caption =
         'A Needs You thread with a deadline gets a To Do reminder that morning';
-    return widget.tasksAvailability == TasksAvailability.available
-        ? caption
-        : '$caption · Needs the To Do permission';
+    return switch (widget.tasksAvailability) {
+      TasksAvailability.available => caption,
+      TasksAvailability.scopeMissing =>
+        '$caption · Needs the To Do permission',
+      TasksAvailability.sdkMode => '$caption · Needs the Bond server connection',
+    };
   }
 
   // ── Notifications ─────────────────────────────────────────────────────────

@@ -3,7 +3,6 @@ import 'dart:math';
 import 'package:flutter/foundation.dart' show debugPrint, immutable;
 
 import '../../data/message_store.dart';
-import '../../models/calendar_models.dart' show MailboxSettings;
 import '../../models/message_models.dart'
     show ConversationState, Message, localEchoPrefix;
 import '../../models/reminder_models.dart';
@@ -17,7 +16,8 @@ import 'tasks_availability.dart';
 
 /// A new reminder id: 32 hex characters from [Random.secure], the shape
 /// `calendar_writes.dart` mints transaction ids in (no uuid dependency). It
-/// is the row's key and the To Do task's linked-resource `external_id`.
+/// is the row's key, and the To Do task's `external_id` when the task carries
+/// a link (`external_id` rides inside `linked_resource`).
 String defaultReminderId() => [
       for (var i = 0; i < 16; i++)
         _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
@@ -94,7 +94,6 @@ class ReminderRequest {
 class ReminderService {
   final MessageStore _store;
   final TasksBackend _backend;
-  final Future<MailboxSettings?> Function() _mailbox;
   final CalendarZone Function() _zone;
   final ActivityLog _log;
   final Future<TasksAvailability> Function() _availability;
@@ -104,7 +103,6 @@ class ReminderService {
   ReminderService({
     required this._store,
     required this._backend,
-    required this._mailbox,
     required this._zone,
     required this._log,
     required this._availability,
@@ -115,12 +113,23 @@ class ReminderService {
   /// The task body's cap, on a word.
   static const int bodyCap = 300;
 
+  /// The task title's cap, on a word.
+  static const int titleCap = 200;
+
   /// The most rows one [reconcile] pass changes; the rest wait a poll.
   static const int reconcileCap = 20;
 
   /// How far from a follow-up's creation the Sent Items copy of its sent
   /// reply may be stamped and still be taken for it (see [_reanchor]).
   static const Duration echoMatchWindow = Duration(minutes: 15);
+
+  /// How long past its [Reminder.remindAt] [reconcile] keeps watching a
+  /// reminder; an older one is let go as `expired` (see [reconcile]).
+  static const Duration reconcileHorizon = Duration(days: 30);
+
+  /// The [_ensureList] in flight, so two creates with no stored list id make
+  /// one `ensure_list` call (the tool is find-then-create, not atomic).
+  Future<String>? _ensuring;
 
   /// Places [r] in To Do and stores it `active`.
   ///
@@ -129,8 +138,14 @@ class ReminderService {
   /// or row) when [ReminderRequest.remindAtUtc] is not after the clock, and
   /// whatever the create throws (no row is
   /// written then either). A list that is gone (deleted in To Do) is found
-  /// or made again ONCE and the create retried once. The follow-up's flag is
-  /// best effort: a failure is logged and never fails the reminder.
+  /// or made again ONCE and the create retried once. A row that cannot be
+  /// written takes its task back out of To Do (best effort) and rethrows.
+  /// The follow-up's flag is best effort: a failure is logged and never
+  /// fails the reminder.
+  ///
+  /// The title is capped at [titleCap] on a word, here, so every caller is.
+  /// The due date is the reminder's day in the display zone, and the task's
+  /// `due_timezone` is that zone's IANA name, so the two always agree.
   Future<Reminder> create(ReminderRequest r) async {
     switch (await _availability()) {
       case TasksAvailability.available:
@@ -144,22 +159,23 @@ class ReminderService {
     final remindAt = r.remindAtUtc.toUtc();
     if (!remindAt.isAfter(_clock())) throw const ReminderPast();
     final id = _newId();
-    final dueDate = _zone().dateOf(remindAt);
-    final timeZone = await _mailboxZone();
+    final title = capAtWord(r.title, titleCap);
+    final zone = _zone();
+    final dueDate = zone.dateOf(remindAt);
     final webLink = r.anchorWebLink?.trim();
     final link = webLink != null && _isWebUrl(webLink)
-        ? TodoLink(webUrl: webLink, displayName: r.title, externalId: id)
+        ? TodoLink(webUrl: webLink, displayName: title, externalId: id)
         : null;
     final body = r.bodyText?.trim();
 
     Future<TodoTask> createOn(String listId) => _backend.createTask(
           listId: listId,
-          title: r.title,
+          title: title,
           bodyText: body == null || body.isEmpty
               ? null
               : capAtWord(body, bodyCap),
           dueDate: dueDate,
-          dueTimeZone: timeZone,
+          dueTimeZone: zone.iana,
           reminderAtUtc: remindAt,
           status: r.kind == ReminderKind.followUp
               ? 'waitingOnOthers'
@@ -185,7 +201,7 @@ class ReminderService {
       source: r.source,
       conversationKey: r.conversationKey,
       anchorMessageId: r.anchorMessageId,
-      title: r.title,
+      title: title,
       remindAt: MessageStore.isoStamp(remindAt),
       dueDate: dueDate.toIso(),
       status: ReminderStatus.active,
@@ -197,7 +213,18 @@ class ReminderService {
     );
     // The row first, then the flag: a task that exists must have its row
     // even when the flag call never returns.
-    await _store.insertReminder(reminder);
+    try {
+      await _store.insertReminder(reminder);
+    } catch (_) {
+      // No row means nothing would ever complete or cancel the task: take
+      // it back out of To Do, best effort, and fail as the write failed.
+      try {
+        await _backend.deleteTask(listId: listId, taskId: task.id);
+      } catch (e) {
+        debugPrint('reminder orphan delete: ${e.runtimeType}');
+      }
+      rethrow;
+    }
 
     var flagged = false;
     final graphId = r.anchorGraphId;
@@ -229,7 +256,10 @@ class ReminderService {
   /// Completes reminder [id]: the task is marked completed (a task already
   /// deleted in To Do is fine), the flag on its mail completed best effort,
   /// and the row `done`. [reason] is `reply`, `done` or `owner`, for the
-  /// activity row. A reminder that is not active is left alone.
+  /// activity row (the fourth word, `expired`, is [reconcile]'s own and
+  /// makes no To Do call). A reminder that is not active is left alone, and one that
+  /// ended while the task was being completed (a cancel won) records
+  /// nothing.
   Future<void> complete(String id, {required String reason}) async {
     final r = await _store.reminderById(id);
     if (r == null || !r.isActive) return;
@@ -244,12 +274,13 @@ class ReminderService {
       await _setFlag(r, r.flagMessageId, 'complete');
     }
     final now = MessageStore.isoStamp(_clock());
-    await _store.updateReminder(
+    final moved = await _store.updateReminder(
       id,
       status: ReminderStatus.done,
       doneAt: now,
       updatedAt: now,
     );
+    if (moved != 1) return;
     await _log.record(
       'reminder',
       source: r.source,
@@ -259,7 +290,8 @@ class ReminderService {
   }
 
   /// Cancels reminder [id] (the Undo): the task is deleted (already gone is
-  /// fine), the flag cleared best effort, and the row `cancelled`.
+  /// fine), the flag cleared best effort, and the row `cancelled`. A row that
+  /// ended meanwhile (a complete won) records nothing.
   Future<void> cancel(String id) async {
     final r = await _store.reminderById(id);
     if (r == null || !r.isActive) return;
@@ -273,11 +305,12 @@ class ReminderService {
     if (r.flagMessageId.isNotEmpty) {
       await _setFlag(r, r.flagMessageId, 'notflagged');
     }
-    await _store.updateReminder(
+    final moved = await _store.updateReminder(
       id,
       status: ReminderStatus.cancelled,
       updatedAt: MessageStore.isoStamp(_clock()),
     );
+    if (moved != 1) return;
     await _log.record(
       'reminder',
       source: r.source,
@@ -298,15 +331,25 @@ class ReminderService {
   ///   `done`; the owner wrote on it after the reminder was made → complete
   ///   `reply`.
   ///
+  /// Before any of that, a reminder whose `remind_at` is more than
+  /// [reconcileHorizon] behind the clock is moved to `done` as `expired` with
+  /// NO To Do call: the app stops watching it, and the task stays whatever
+  /// it is in To Do. It counts as a changed row.
+  ///
   /// Never throws but [ReconsentRequired]: each reminder is tried on its own,
   /// and a failure is printed by type and retried on the next poll. Does
   /// nothing while To Do is unavailable.
   Future<int> reconcile() async {
     if (await _availability() != TasksAvailability.available) return 0;
     var changed = 0;
+    final horizon = _clock().toUtc().subtract(reconcileHorizon);
     for (final r in await _store.activeReminders()) {
       if (changed >= reconcileCap) break;
       try {
+        if (r.remindAtUtc.isBefore(horizon)) {
+          if (await _expire(r)) changed++;
+          continue;
+        }
         if (await _reconcileOne(r)) changed++;
       } on ReconsentRequired {
         rethrow;
@@ -315,6 +358,26 @@ class ReminderService {
       }
     }
     return changed;
+  }
+
+  /// Lets [r] go as `expired`: the row `done`, no To Do or flag call. True
+  /// when the row moved.
+  Future<bool> _expire(Reminder r) async {
+    final now = MessageStore.isoStamp(_clock());
+    final moved = await _store.updateReminder(
+      r.id,
+      status: ReminderStatus.done,
+      doneAt: now,
+      updatedAt: now,
+    );
+    if (moved != 1) return false;
+    await _log.record(
+      'reminder',
+      source: r.source,
+      entityId: r.conversationKey,
+      detail: {'action': 'complete', 'kind': r.kind.wire, 'reason': 'expired'},
+    );
+    return true;
   }
 
   Future<bool> _reconcileOne(Reminder r) async {
@@ -458,21 +521,15 @@ class ReminderService {
     return _ensureList();
   }
 
-  Future<String> _ensureList() async {
+  /// Finds or makes the list and persists its id; concurrent callers share
+  /// the one call in flight ([_ensuring]).
+  Future<String> _ensureList() =>
+      _ensuring ??= _findOrMakeList().whenComplete(() => _ensuring = null);
+
+  Future<String> _findOrMakeList() async {
     final list = await _backend.ensureList();
     await _store.setPref(todoListIdKey, list.id);
     return list.id;
-  }
-
-  /// The mailbox's Windows zone name for the task's due date, or null (the
-  /// server's UTC default) when the settings are unknown or unreadable.
-  Future<String?> _mailboxZone() async {
-    try {
-      final zone = (await _mailbox())?.timeZone;
-      return zone == null || zone.isEmpty ? null : zone;
-    } catch (_) {
-      return null;
-    }
   }
 
   static bool _isWebUrl(String s) {

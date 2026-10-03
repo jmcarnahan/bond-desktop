@@ -4298,9 +4298,9 @@ FROM messages
         await db.customUpdate('DELETE FROM $table');
       }
       final keys = <String>[
-        // The three that describe one PERSON — the identity claim on these
-        // rows, and the two texts they wrote about themselves and their
-        // inbox. Kept only when the person is staying.
+        // The four that describe one PERSON — the identity claim on these
+        // rows, the two texts they wrote about themselves and their inbox,
+        // and their To Do list. Kept only when the person is staying.
         if (!keepIdentity) ...[
           dbOwnerKey,
           aboutMeKey,
@@ -5754,7 +5754,8 @@ SELECT conversation_key FROM (
   ///
   /// A move to `done` or `cancelled` lands only on a row still `active`, so
   /// a complete racing a cancel cannot flip a cancelled row to done or back.
-  Future<void> updateReminder(
+  /// Returns the rows written: 0 when [id] is gone or that move lost.
+  Future<int> updateReminder(
     String id, {
     ReminderStatus? status,
     String? todoListId,
@@ -5775,7 +5776,7 @@ SELECT conversation_key FROM (
     };
     final ends = status == ReminderStatus.done ||
         status == ReminderStatus.cancelled;
-    await db.customUpdate(
+    return db.customUpdate(
       'UPDATE reminders SET ${sets.keys.map((k) => '$k = ?').join(', ')} '
       "WHERE id = ?${ends ? " AND status = 'active'" : ''}",
       variables: _args([...sets.values, id]),

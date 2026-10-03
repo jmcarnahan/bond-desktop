@@ -911,6 +911,8 @@ void main() {
           'The model read the ask the way the rules did');
       expect(row({'applied': true, 'agree': false, 'cached': false}),
           "The model's reading replaced the rules'");
+      expect(row({'applied': false, 'agree': false, 'cached': false}),
+          "The rules' reading stood");
       // An error takes the general sentence, with its type only.
       expect(row({'error': 'LlmFormatException'}, status: 'error'),
           'Ask reading failed — LlmFormatException');
@@ -940,6 +942,9 @@ void main() {
           'Reminder done — thread done');
       expect(row({'action': 'complete', 'kind': 'custom', 'reason': 'owner'}),
           'Reminder done — by you');
+      expect(
+          row({'action': 'complete', 'kind': 'follow_up', 'reason': 'expired'}),
+          'Reminder — no longer tracked (30 days past)');
       expect(row({'action': 'cancel', 'kind': 'reply_by'}),
           'Reminder cancelled');
       // The follow-up's flag never fails the reminder, so its one error row

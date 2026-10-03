@@ -2272,6 +2272,105 @@ void main() {
           reason: 'the draft lane pre-warms the reading the Day column reads');
     });
 
+    test("a model reading that kept nothing falls back to the rules' day",
+        () async {
+      // "Thurs" is the ask's word; the model's "Thursday" is not in the text,
+      // so the literal guard drops it and the reading keeps nothing.
+      await seedAsk(subject: 'Call', body: 'Free for a call Thurs?');
+      final reading = ScriptedLlm(answers: {
+        'ask_read': {
+          'evidence': 'Dana asks for a call on Thursday.',
+          'asks_for_time': true,
+          'when': ['Thursday'],
+          'time': '',
+          'duration': '',
+          'meal': 'none',
+        },
+      });
+      final draft = await runAsk(
+        draftClient(draft: answer()),
+        calendar: calendarFor(
+          reader: AskReader(
+            store: store,
+            client: () => reading,
+            log: log,
+            zone: () => la,
+          ),
+        ),
+      );
+
+      expect(reading.schemaNames, ['ask_read']);
+      expect(la.toLocal(backend.windows.first.$1).weekday, DateTime.thursday,
+          reason: "the rules' Thursday, not this week");
+      final calendar = calendarOf(draft)!;
+      expect(calendar['read'], 'rules');
+      expect(calendar['window'], 'theirs');
+    });
+
+    test('a multi-day model reading offers one slot on each day', () async {
+      await seedAsk(
+          subject: 'Catch up',
+          body: 'Could we meet Tuesday or Thursday afternoon?');
+      final reading = ScriptedLlm(answers: {
+        'ask_read': {
+          'evidence': 'Dana offers two afternoons.',
+          'asks_for_time': true,
+          'when': ['Tuesday', 'Thursday'],
+          'time': 'afternoon',
+          'duration': '',
+          'meal': 'none',
+        },
+      });
+      // Each day's call answered with an opening just inside it, so the
+      // day being today never makes its slot one that has begun.
+      backend.answerFor = (start, end) {
+        final at = start.add(const Duration(minutes: 5));
+        return [
+          MeetingTimeSuggestion(
+              startUtc: at, endUtc: at.add(const Duration(minutes: 30))),
+        ];
+      };
+      final draft = await runAsk(
+        draftClient(draft: answer()),
+        calendar: calendarFor(
+          reader: AskReader(
+            store: store,
+            client: () => reading,
+            log: log,
+            zone: () => la,
+          ),
+        ),
+      );
+
+      final calendar = calendarOf(draft)!;
+      expect(calendar['read'], 'model');
+      final slots = draftSlotsOf(calendar);
+      expect({for (final s in slots) la.toLocal(s.startUtc).weekday},
+          {DateTime.tuesday, DateTime.thursday});
+      final body = draft['body'] as String;
+      expect(body, endsWith('\n\n${findTimeReplyLine(slots, la)}'));
+      for (final s in slots) {
+        expect(body, contains(findTimeSlotLine(s, la)));
+      }
+    });
+
+    test("the handler's own clock decides which slots have begun", () async {
+      await seedAsk();
+      // A clock a minute into the first offered slot: that slot has begun
+      // by it, though not by the wall clock.
+      final fixed = offered[0].startUtc.add(const Duration(minutes: 1));
+      await runOne(
+        DraftHandler(store, draftClient(draft: withOptions()),
+            activityLog: log, calendar: calendarFor(), clock: () => fixed),
+        id: 'm-ask',
+      );
+
+      final draft = (await store.getDraftForMessage('email', 'm-ask'))!;
+      expect(draft['body'],
+          endsWith('\n\n${findTimeReplyLine([offered[1]], la)}'));
+      expect(calendarOf(draft)!['slots'], hasLength(1));
+    });
+
     test('not a scheduling ask: no calendar call', () async {
       await seedAsk(intent: 'question');
       final draft = await runAsk(draftClient(draft: withOptions()));

@@ -4,6 +4,7 @@ import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/reminder_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/tasks_backend.dart';
+import 'package:bond_inbox/services/backend/tasks_errors.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/reminders/reminder_planner.dart';
 import 'package:bond_inbox/services/reminders/reminder_service.dart';
@@ -25,6 +26,12 @@ import 'fixtures/triage_seed.dart';
 class _FakeTasks implements TasksBackend {
   final List<({DateTime? reminderAtUtc, String title})> created = [];
 
+  /// Every title `createTask` was called with, thrown on or not.
+  final List<String> attempted = [];
+
+  /// What `createTask` throws for a title, when it throws.
+  Object? Function(String title)? throwFor;
+
   @override
   Future<TodoList> ensureList({String name = 'Bond follow-ups'}) async =>
       TodoList(id: 'list-1', name: name);
@@ -41,6 +48,8 @@ class _FakeTasks implements TasksBackend {
     String importance = 'normal',
     TodoLink? link,
   }) async {
+    attempted.add(title);
+    if (throwFor?.call(title) case final e?) throw e;
     created.add((reminderAtUtc: reminderAtUtc, title: title));
     return TodoTask(
       id: 'task-${created.length}',
@@ -111,7 +120,6 @@ void main() {
     final service = ReminderService(
       store: store,
       backend: tasks,
-      mailbox: () async => null,
       zone: () => la,
       log: ActivityLog(store),
       availability: () async => availability,
@@ -135,6 +143,7 @@ void main() {
     double p = 0.9,
     String state = 'needs_reply',
     String receivedAt = '2026-10-07T20:00:00Z',
+    String subject = 'Q3 numbers',
   }) async {
     final id = '$key-m1';
     await store.upsertMessage({
@@ -142,7 +151,7 @@ void main() {
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
-      'subject': 'Q3 numbers',
+      'subject': subject,
       'from_name': 'Dana Reyes',
       'from_address': 'dana@contoso.com',
       'received_at': receivedAt,
@@ -156,7 +165,7 @@ void main() {
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
-      'subject': 'Q3 numbers',
+      'subject': subject,
       'participants_json': '[{"name":"Dana Reyes","email":"dana@contoso.com"}]',
       'state': state,
       'last_message_at': receivedAt,
@@ -267,5 +276,55 @@ void main() {
     await seed('plan', deadline: 'Day 1');
 
     expect(await plan(), 0);
+  });
+
+  group('a failing create', () {
+    const bad = 'Reply to Dana Reyes: Refused';
+
+    test('a thread To Do refuses is skipped and the next one is planned',
+        () async {
+      await seed('bad', subject: 'Refused');
+      await seed('good', subject: 'Accepted');
+      tasks.throwFor = (title) => title == bad
+          ? const TasksRefused('invalid_options', 'x')
+          : null;
+
+      expect(await plan(), 1);
+
+      expect(tasks.attempted, contains(bad));
+      final row = (await store.activeReminders()).single;
+      expect(row.conversationKey, 'good');
+      expect(await store.hasActiveReminder('email', 'bad'), isFalse);
+    });
+
+    test('a refused thread is not retried on the next pass', () async {
+      await seed('bad', subject: 'Refused');
+      tasks.throwFor = (title) => title == bad
+          ? const TasksRefused('invalid_options', 'x')
+          : null;
+      final p = planner();
+      Future<int> again() async => p.plan(
+            zone: la,
+            needsYouThreshold: 0.35,
+            conversations: await store.loadConversations(),
+          );
+
+      expect(await again(), 0);
+      expect(tasks.attempted, [bad]);
+
+      expect(await again(), 0);
+      expect(tasks.attempted, [bad]);
+    });
+
+    test('a transient failure still ends the pass and propagates', () async {
+      await seed('c1');
+      await seed('c2');
+      tasks.throwFor = (_) => const TasksTransient('Graph 503');
+
+      await expectLater(plan(), throwsA(isA<TasksTransient>()));
+
+      expect(tasks.attempted, hasLength(1));
+      expect(await store.activeReminders(), isEmpty);
+    });
   });
 }

@@ -208,6 +208,12 @@ void main() {
     expect(await store.askReading('email', 'm1'), isNull);
   });
 
+  test('the shipped switch is on', () {
+    // D10: the provider passes it; flipping it is the one edit to turn the
+    // model reading off.
+    expect(askReadOn, isTrue);
+  });
+
   test('a message that is gone: null, and no call', () async {
     final llm = ScriptedLlm.never();
     expect(await reader(llm).readFor('email', 'nope'), isNull);

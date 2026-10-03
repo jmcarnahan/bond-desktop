@@ -77,9 +77,10 @@ more, overwrites the stored id and retries the create once.
   `Waiting on <names>: <subject>` for a follow-up.
 - **body** — the ask's own words (above any quoted reply), capped at 300
   characters on a word (`ReminderService.bodyCap`).
-- **due date** — the reminder's day on the owner's wall (`zone.dateOf`), with
-  `due_timezone` = the mailbox's Windows zone name, because To Do's default
-  UTC shows the date a day early west of Greenwich.
+- **due date** — the reminder's day on the owner's wall (`zone.dateOf`, the
+  display zone), with `due_timezone` = that same zone's IANA name, so the day
+  and its zone always agree; To Do's default UTC shows the date a day early
+  west of Greenwich.
 - **reminder** — `reminder_at`, the instant To Do rings.
 - **status** — `waitingOnOthers` for a follow-up, `notStarted` for the rest.
 - **link** — a `linked_resource` back to the mail: the anchor message's
@@ -131,8 +132,17 @@ The owner's consent checklist (bond-mcps handoff §6), in this order:
 - `create(ReminderRequest)` — the availability check, the list, the task,
   then the row (`active`, with the list and task ids), then the follow-up's
   flag. The row is written before the flag so a task that exists always has
-  its row. Ids are 32 hex characters from `Random.secure`
-  (`defaultReminderId`).
+  its row — with one honest gap: a create whose ANSWER is lost (the tool
+  threw after Graph took the POST, a `TasksTransient`) leaves a task in To
+  Do and no row here, and the deadline planner then makes a second task on
+  the next poll. The handoff's §5.6 list-by-`external_id` adoption is not
+  built (the id rides only inside a link, so an unlinked task cannot be
+  found); the owner deletes the extra task in To Do. The reverse gap is
+  closed: a row that cannot be written takes its task back out of To Do
+  (`deleteTask`, best effort) and the create fails. Two creates with no
+  stored list id share ONE `ensure_list` call. The title is capped at 200
+  characters on a word (`titleCap`). Ids are 32 hex characters from
+  `Random.secure` (`defaultReminderId`).
 - `complete(id, reason:)` — `completeTask` (a task already deleted in To Do
   is fine), the flag completed, the row `done` with `done_at`. `reason` is
   `reply` or `done`; `owner` is reserved (nothing completes a reminder by
@@ -141,7 +151,8 @@ The owner's consent checklist (bond-mcps handoff §6), in this order:
   cleared, the row `cancelled`. The store moves a row to `done` or
   `cancelled` only while it is still `active` (`updateReminder`'s
   `AND status = 'active'`), so a complete racing a cancel cannot flip one
-  into the other.
+  into the other; the loser sees 0 rows written and records no activity
+  row.
 - `reconcile()` — below.
 
 ## Reconcile: completion is local
@@ -168,6 +179,12 @@ changes at most 20 rows a pass (`reconcileCap`):
   as instants, never as strings (`received_at` has whole seconds, the
   reminder's stamps six digits).
 
+**Expiry**: before any of that, a reminder whose `remind_at` is more than 30
+days behind the clock (`reconcileHorizon`) is moved to `done` with `reason:
+expired` and NO To Do call — the app stops watching it, and the task stays
+whatever it is in To Do. It counts toward the pass's 20, so a thread that
+never answers does not keep its reminder in every poll forever.
+
 Each reminder is tried on its own: a failure is printed by type and the row
 stays active for the next poll. `ReconsentRequired` propagates.
 
@@ -188,14 +205,17 @@ conversations the inbox already holds:
 - reminded at **09:00** on that day on the owner's wall; a 09:00 already
   past is skipped, not moved;
 - at most **5** a pass (`perPass`), the rest on the next poll. A create that
-  throws ends the pass.
+  throws ends the pass, except a `TasksRefused` (one thread's task To Do
+  will not take): that thread is skipped and remembered in memory, so it is
+  not offered again until the app restarts, and the pass goes on.
 
 ## The three doors (the UI, Phase 5 part 2)
 
 The Remind me icon is drawn on every thread that is not done; its strip
-offers the pills only while To Do can carry a reminder
-(`tasksAvailabilityProvider` is `available`), and otherwise holds the
-sentence saying why, with nothing to pick. The composer's follow-up choices
+offers the pills unless `tasksAvailabilityProvider` has answered something
+other than `available` — then it holds the sentence saying why, with nothing
+to pick. While the provider is still loading the pills draw, and a pick meets
+`ReminderService.create`'s own precheck. The composer's follow-up choices
 are drawn only while available, and a choice made before To Do stopped being
 available is dropped at the send, never set. The two sentences are
 `tasksUnavailableSentence`'s:
@@ -276,8 +296,10 @@ The toast:
   *Reply sent · Marked done · Following up Thu 9:00 AM*. Its one Undo stays
   the done's; the reminder gets no Undo of its own there (it is cancelled in
   To Do, or completes itself when they answer).
-- a follow-up that was not set — *Reply sent. Couldn't reach To Do. Nothing
-  was set.* (or the carrier's sentence), no Undo.
+- a follow-up that was not set — with reply-marks-done off, *Reply sent.
+  Couldn't reach To Do. Nothing was set.* (or the carrier's sentence), no
+  Undo; with it on, the same sentence is a line on the done's toast, whose
+  Undo stays the done's.
 - the display zone not yet resolved — *No follow-up set — the time zone is
   not known yet.* Nothing is created: the 09:00 is a wall time, and a UTC
   stand-in would ring at the wrong hour.
@@ -330,6 +352,7 @@ enum words and booleans only — never a title, a subject, a person or a link:
 |---|---|---|
 | `create` | `kind`, `created_from`, `flagged`, `linked` | Reminder set in To Do (reply by \| follow up \| deadline \| reminder) |
 | `complete` | `kind`, `reason` | Reminder done — answered \| thread done \| by you (`owner`, reserved: nothing produces it yet) |
+| `complete`, `reason: expired` | `kind` | Reminder — no longer tracked (30 days past): let go with no To Do call, so it is not "done" |
 | `cancel` | `kind` | Reminder cancelled |
 | `flag` (status `error`) | `kind` | Could not flag the mail |
 
@@ -343,7 +366,8 @@ re-synced and its conversation keys are Graph ids, so each row still names
 its thread — deleting them would orphan the tasks, strand the follow-ups and
 let the planner make duplicate deadline tasks. Only the full wipe (sign-out,
 and `IdentityGuard` on a different account) deletes it, with
-`todo_list_id`. Columns: `id` (also the task's `external_id`), `kind`, `source`,
+`todo_list_id`. Columns: `id` (also the task's `external_id`, when the task
+carries a link — `external_id` rides inside `linked_resource`), `kind`, `source`,
 `conversation_key`, `anchor_message_id`, `title`, `remind_at` (isoStamp UTC),
 `due_date` (`yyyy-mm-dd`, the owner's zone), `status`, `created_from`,
 `todo_list_id`, `todo_task_id`, `flag_message_id`, `created_at`,

@@ -17,11 +17,11 @@ import 'fixtures/bench_target.dart';
 /// rules ([readAskHints]) against the fixture's expectation.
 ///
 /// It PRINTS the line the ledger records — `model: m/40 · rules: k/40 ·
-/// both: b/40 · disagree: d` — and every row where the model missed or the
-/// two readers parted, with the phrases the model copied. It asserts shape
-/// only: every row was asked and accounted for, an answer or a counted
-/// `failed`. A score threshold would fail a
-/// model swap for no defect (the repo's live-bench rule).
+/// both: b/40 · disagree: d · failed: f` — and every row where the model
+/// missed or the two readers parted, with the phrases the model copied. It
+/// asserts shape only: every row came back as a reading (`failed` is 0). A
+/// score threshold would fail a model swap for no defect (the repo's
+/// live-bench rule).
 void main() {
   setUpAll(initCalendarZones);
 
@@ -31,7 +31,6 @@ void main() {
       final client = BenchTarget.prose.client();
       final cases = loadAskCases();
       var model = 0, rules = 0, both = 0, disagree = 0, failed = 0;
-      var answered = 0;
       final lines = <String>[];
       for (final (i, c) in cases.indexed) {
         // ignore: avoid_print
@@ -58,7 +57,6 @@ void main() {
           lines.add('${c.id}: FAILED ${e.runtimeType}');
           continue;
         }
-        answered += 1;
         final byModel = askOutcome(readAskHintsFromRead(
           read: read,
           subject: c.subject,
@@ -92,9 +90,11 @@ void main() {
             'disagree: $disagree · failed: $failed',
         ...lines,
       ].join('\n'));
-      // Shape only: every row was asked and accounted for. A failed row is
-      // printed above; a score is never asserted.
-      expect(answered + failed, n);
+      // Shape only: every row came back as a reading. A score is never
+      // asserted.
+      expect(failed, 0,
+          reason: 'every row must come back as a reading; failures are '
+              'printed above');
       expect(n, 40);
     },
     timeout: const Timeout(Duration(minutes: 15)),

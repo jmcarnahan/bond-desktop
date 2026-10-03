@@ -566,4 +566,33 @@ void main() {
       expect(h.said, 'Asked for: Thu Oct 8');
     });
   });
+
+  group('choosing between the readers', () {
+    const rulesDay = AskHints(day: friday, days: [friday]);
+    const tuesday = CalendarDate(2026, 10, 13);
+    const modelDay = AskHints(day: tuesday, days: [tuesday]);
+
+    test('a model reading that read something stands', () {
+      final c = chooseAskHints(rules: rulesDay, model: modelDay);
+      expect(c.hints, same(modelDay));
+      expect(c.byModel, isTrue);
+    });
+
+    test('a model reading with nothing in it never erases the rules\' day',
+        () {
+      final c = chooseAskHints(rules: rulesDay, model: AskHints.none);
+      expect(c.hints, same(rulesDay));
+      expect(c.byModel, isFalse);
+      // When neither read anything, the model's none is the answer.
+      final both = chooseAskHints(rules: AskHints.none, model: AskHints.none);
+      expect(both.hints.any, isFalse);
+      expect(both.byModel, isTrue);
+    });
+
+    test('no model reading is the rules\'', () {
+      final c = chooseAskHints(rules: rulesDay, model: null);
+      expect(c.hints, same(rulesDay));
+      expect(c.byModel, isFalse);
+    });
+  });
 }

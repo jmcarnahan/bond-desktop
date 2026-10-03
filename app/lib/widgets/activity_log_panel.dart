@@ -265,6 +265,10 @@ class ActivityLogPanel extends StatefulWidget {
         case 'create':
           final kind = _reminderKinds[detail['kind']] ?? 'reminder';
           return 'Reminder set in To Do ($kind)';
+        // Aged out by the reconcile, with no To Do call: the task may still
+        // be open there, so it is not "done".
+        case 'complete' when detail['reason'] == 'expired':
+          return 'Reminder — no longer tracked (30 days past)';
         case 'complete':
           final why = _reminderReasons[detail['reason']];
           return why == null ? 'Reminder done' : 'Reminder done — $why';
@@ -595,13 +599,17 @@ class ActivityLogPanel extends StatefulWidget {
       // The model's reading of a scheduling ask (`ask_read`): how many days
       // it copied, or that nobody asked for a time — a count and an enum
       // word, never a phrase. The Day column's verdict on a reading is
-      // booleans: whether it agreed with the rules' or replaced them.
+      // booleans: whether it agreed with the rules', replaced them, or left
+      // them standing.
       case 'ask_read':
         if (detail['agree'] == true) {
           return 'The model read the ask the way the rules did';
         }
         if (detail['applied'] == true) {
           return "The model's reading replaced the rules'";
+        }
+        if (detail['applied'] == false && detail['agree'] == false) {
+          return "The rules' reading stood";
         }
         if (detail['status'] == 'none') return 'Read an ask · no time asked';
         final when = detail['when'];

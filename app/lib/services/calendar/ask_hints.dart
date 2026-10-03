@@ -288,6 +288,24 @@ AskHints readAskHintsFromRead({
   );
 }
 
+/// Which reading of an ask stands: the [model]'s when it read something,
+/// or when the [rules] read nothing either; else the [rules]'.
+///
+/// ONE rule for the Day column and the draft: a model reading with nothing
+/// in it never erases a day the rules found. The decision model already
+/// called this an ask, so the model reading nobody asking — or the literal
+/// guard dropping every phrase it copied — is the riskiest answer to act
+/// on. A null [model] (no reading) is the rules'. [byModel] says which won.
+({AskHints hints, bool byModel}) chooseAskHints({
+  required AskHints rules,
+  required AskHints? model,
+}) {
+  if (model != null && (model.any || !rules.any)) {
+    return (hints: model, byModel: true);
+  }
+  return (hints: rules, byModel: false);
+}
+
 /// The rules both readers share: the days out of [dayReads] (each may carry
 /// one), the hours out of [timeRead] next to [meal], the length out of
 /// [duration], judged at [now] in [zone]. [readAskHints] documents every

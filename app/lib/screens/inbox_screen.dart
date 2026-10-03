@@ -412,6 +412,16 @@ class InboxScreen extends ConsumerStatefulWidget {
   @visibleForTesting
   static Duration? askReadWaitOverride;
 
+  /// How long a send waits for the follow-up it asked for before the toast
+  /// goes up without it. A slower To Do still lands the reminder on its own
+  /// (its revision bump puts it on the Day); a slower failure says so then.
+  static const Duration followUpWait = Duration(seconds: 5);
+
+  /// A test's shorter [followUpWait]; null in the app. Set it in the test
+  /// body and clear it in a tear-down.
+  @visibleForTesting
+  static Duration? followUpWaitOverride;
+
   /// A test's shorter [askResultLifetime], so a reopen takes the staleness
   /// path without a clock; null in the app. Cleared in a tear-down.
   @visibleForTesting
@@ -6362,7 +6372,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the copy lands; never flagged here, since an echo id is no Graph id.
   /// Answers the toast's line ("Following up Thu 9:00 AM") and the reminder,
   /// or the sentence saying why none was set. Nothing is set before the
-  /// zone has resolved: "three business days at 09:00" is a wall time, and
+  /// zone has resolved: "two business days at 09:00" is a wall time, and
   /// a UTC stand-in would ring at the wrong hour.
   Future<({Reminder? reminder, String line})> _setFollowUp(
     DraftTarget target,
@@ -9790,7 +9800,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// reminder is set at once ([_setFollowUp]) and the toast says when it
   /// fires, with an Undo that cancels the reminder only. With
   /// `replySendMarksDone` on, the toast's Undo stays the done's, and the
-  /// follow-up is a line on it with no Undo of its own.
+  /// follow-up is a line on it with no Undo of its own. A To Do slower than
+  /// [InboxScreen.followUpWait] does not hold the send: the toast goes up
+  /// without the line, and only a late failure says anything more.
   Future<void> _send(
     DraftTarget target,
     String body, {
@@ -9816,16 +9828,36 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         : FollowUpChoice.none;
     final revision = ref.read(reminderRevisionProvider.notifier);
     final outcome = await drafts.send(body, replyTo: replyToId);
-    // Right after the send, before anything else awaits: the reminder's
-    // re-anchor matches the Sent Items copy by time.
+    // Started right after the send, so the row's `created_at` is well
+    // inside the re-anchor's 15-minute match window (`echoMatchWindow`) of
+    // the Sent Items copy. Waited on only for [InboxScreen.followUpWait]: a
+    // To Do that answers later lands by itself (the revision bump inside
+    // [_setFollowUp]), and one that fails later toasts on its own.
     ({Reminder? reminder, String line})? followUp;
     if (outcome == SendOutcome.sent && choice != FollowUpChoice.none) {
-      followUp = await _setFollowUp(
+      final pending = _setFollowUp(
         target,
         choice,
         echoId: drafts.lastEchoId,
         revision: revision,
       );
+      followUp = await pending
+          .then<({Reminder? reminder, String line})?>((f) => f)
+          .timeout(
+            InboxScreen.followUpWaitOverride ?? InboxScreen.followUpWait,
+            onTimeout: () => null,
+          );
+      if (followUp == null) {
+        unawaited(pending.then((late) {
+          if (late.reminder != null || !mounted) return;
+          _toast(
+            late.line.startsWith('No follow-up set')
+                ? late.line
+                : 'No follow-up set — ${late.line}',
+            cleared: 0,
+          );
+        }));
+      }
     }
     if (outcome == SendOutcome.sent) _followUps.remove(_stageKey(target));
     if (!mounted) return;

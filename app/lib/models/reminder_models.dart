@@ -73,7 +73,8 @@ enum ReminderOrigin {
 /// the store's `isoStamp` width, so SQL string order is chronological.
 @immutable
 class Reminder {
-  /// 32 hex characters; also the task's linked-resource `external_id`.
+  /// 32 hex characters; also the task's `external_id` when the task carries
+  /// a link (`external_id` rides inside `linked_resource`).
   final String id;
   final ReminderKind kind;
   final String source;

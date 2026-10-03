@@ -858,8 +858,7 @@ WHERE needs_you_p IS NULL''');
               // the phrases the model copied out of an ask, never a date.
               //
               // Nothing to backfill: a reading is made on demand, when an ask
-              // opens in the Day column (the draft lane pre-warms it from
-              // Phase 3).
+              // opens in the Day column (the draft lane pre-warms it).
               from25To26: (m, schema) async {
                 if (!await _tableExists('ask_readings')) {
                   await m.createTable(schema.askReadings);
@@ -868,7 +867,8 @@ WHERE needs_you_p IS NULL''');
               // v27 — reminders carried by Microsoft To Do (the
               // calendar-automation round's Phase 5). One KEPT table,
               // `reminders`: each row points at a task in the owner's To Do,
-              // so Clear AI results keeps it and only `wipeAll` deletes it.
+              // so Clear AI results keeps it and only the full wipe
+              // (`wipeAll(keepIdentity: false)`) deletes it.
               //
               // Nothing to backfill: a reminder exists only once the owner
               // (or the deadline planner) sets one. Indexes as IF NOT EXISTS

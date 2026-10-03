@@ -92,7 +92,8 @@ class DraftSlots {
 /// message — keyed by source and thread, so an older message of an ask
 /// thread offers nothing; an asked-for draft included); the ask's hints —
 /// the model's reading when it has one (`readAskHintsFromRead`, no timeout:
-/// this runs on a lane), else the rules' ([readAskHints]); the window the
+/// this runs on a lane) and the rules' ([readAskHints]), one chosen by
+/// [chooseAskHints], the Day column's rule; the window the
 /// Day column seeds on a first read ([askWindowFor]: their day when one was
 /// read, else this week) and the hinted length, else 30 minutes; the
 /// thread's other people ([otherAddresses]); then [searchFindTime], the Day
@@ -125,8 +126,9 @@ Future<DraftSlots?> draftSlotsFor({
     if (asks[schedulingAskKey(source, thread.id)] != messageId) return null;
     final reading = await calendar.reader.readFor(source, messageId);
     final zone = await calendar.zone();
-    final byModel = reading != null && reading.status == 'ready';
-    final hints = byModel
+    final rules = readAskHints(
+        subject: subject, body: body, now: now, zone: zone, sentAt: sentAt);
+    final model = reading != null && reading.status == 'ready'
         ? readAskHintsFromRead(
             read: reading.read,
             subject: subject,
@@ -134,12 +136,10 @@ Future<DraftSlots?> draftSlotsFor({
             now: now,
             zone: zone,
             sentAt: sentAt)
-        : readAskHints(
-            subject: subject,
-            body: body,
-            now: now,
-            zone: zone,
-            sentAt: sentAt);
+        : null;
+    // The Day column's own rule: a reading that kept nothing never erases
+    // the rules' day.
+    final (:hints, :byModel) = chooseAskHints(rules: rules, model: model);
     final readVia = byModel ? 'model' : 'rules';
     final window = askWindowFor(
         hints.day != null ? FindTimeWindow.theirs : FindTimeWindow.thisWeek,

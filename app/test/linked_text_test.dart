@@ -1,5 +1,6 @@
 import 'package:bond_inbox/services/mail_body.dart'
     show canonicalLinkRun, mailTextFromHtml;
+import 'package:bond_inbox/services/teams_sync.dart' show stripChatHtml;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/linked_text.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
@@ -444,6 +445,25 @@ void main() {
 
       expect(opened.map((u) => u.toString()).toList(),
           ['https://metrics.example.com/rooms/01f0b5d9']);
+    });
+
+    testWidgets('a Teams meeting link as the chat sync stores it is one link',
+        (tester) async {
+      // The exact run `stripChatHtml` writes for a titled chat link.
+      final body = stripChatHtml('<a href="https://teams.example.com/l/'
+          'meetup-join/fictional">Join the meeting</a>');
+      final opened = <Uri>[];
+      await tester.pumpWidget(_host(LinkedText(body, onOpenLink: opened.add)));
+
+      expect(_runs(body), [
+        'link:Join the meeting → '
+            'https://teams.example.com/l/meetup-join/fictional',
+      ]);
+      await tester.tapOnText(find.textRange.ofSubstring('Join the meeting'));
+      await tester.pump();
+
+      expect(opened.map((u) => u.toString()).toList(),
+          ['https://teams.example.com/l/meetup-join/fictional']);
     });
 
     testWidgets('a tap on the words around a link opens nothing',

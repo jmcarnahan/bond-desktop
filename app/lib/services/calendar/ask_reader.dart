@@ -7,6 +7,10 @@ import '../llm/json_task.dart';
 import '../llm/llm_client.dart';
 import 'calendar_zone.dart';
 
+/// D10: the model reading ships on; flip to false and the rules read every
+/// ask alone — measured by `make ask-read-eval`.
+const bool askReadOn = true;
+
 /// One ask's reading by the model, as [AskReader.readFor] hands it back.
 @immutable
 class AskReading {
