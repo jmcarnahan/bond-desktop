@@ -89,7 +89,10 @@ void main() {
     GridSpan gridSpan = GridSpan.day,
     void Function(GridSpan)? onGridSpanChanged,
     Widget? grid,
-    Map<String, String> briefHeadlines = const {},
+    Map<String, MeetingBrief> briefs = const {},
+    Set<String> expandedBriefs = const {},
+    void Function(String)? onToggleBrief,
+    Widget Function(String)? briefBody,
     Widget? commandBar,
     Widget? planCard,
   }) async {
@@ -119,7 +122,10 @@ void main() {
           gridSpan: gridSpan,
           onGridSpanChanged: onGridSpanChanged ?? (_) {},
           grid: grid,
-          briefHeadlines: briefHeadlines,
+          briefs: briefs,
+          expandedBriefs: expandedBriefs,
+          onToggleBrief: onToggleBrief,
+          briefBody: briefBody,
           commandBar: commandBar,
           planCard: planCard,
         ),
@@ -129,8 +135,8 @@ void main() {
   }
 
   group('agenda', () {
-    testWidgets('a written brief is a one-line teaser under its meeting, '
-        'and a cancelled or declined meeting shows none', (tester) async {
+    testWidgets('a written brief is a glance under its meeting, and a '
+        'cancelled or declined meeting shows none', (tester) async {
       await pumpPane(
         tester,
         events: [
@@ -141,21 +147,128 @@ void main() {
           timed('no', 'Northwind review', DateTime.utc(2026, 9, 29, 23),
               responseStatus: 'declined'),
         ],
-        briefHeadlines: const {
-          'briefed': 'Dana is waiting on the quote.',
-          'off': 'Should not show.',
-          'no': 'Should not show either.',
+        briefs: const {
+          'briefed': MeetingBrief(headline: 'Dana is waiting on the quote.'),
+          'off': MeetingBrief(headline: 'Should not show.'),
+          'no': MeetingBrief(headline: 'Should not show either.'),
         },
+        onToggleBrief: (_) {},
       );
 
       final teaser = find.byKey(DayPane.briefTeaserKeyFor('briefed'));
       expect(teaser, findsOneWidget);
       expect(tester.widget<Text>(teaser).data, 'Dana is waiting on the quote.');
-      expect(tester.widget<Text>(teaser).maxLines, 1);
+      expect(tester.widget<Text>(teaser).maxLines, 2);
       expect(find.byKey(DayPane.briefTeaserKeyFor('plain')), findsNothing);
-      expect(find.byKey(DayPane.briefTeaserKeyFor('off')), findsNothing);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('off')), findsNothing,
+          reason: 'a cancelled meeting shows no glance');
+      expect(find.byKey(DayPane.briefToggleKeyFor('off')), findsNothing);
       expect(find.byKey(DayPane.briefTeaserKeyFor('no')), findsNothing,
           reason: 'a declined meeting offers no brief either');
+      expect(find.byKey(DayPane.briefToggleKeyFor('no')), findsNothing);
+    });
+
+    testWidgets('the glance shows up to two lines and a toggle; toggling '
+        'asks the host', (tester) async {
+      final toggled = <String>[];
+      final opened = <String>[];
+      await pumpPane(
+        tester,
+        events: [
+          timed('briefed', 'Fabrikam sync', DateTime.utc(2026, 9, 29, 20)),
+        ],
+        briefs: const {
+          'briefed': MeetingBrief(
+            headline: 'Dana is waiting on the quote; the Q3 deck arrived '
+                'Monday and nobody has answered its pricing question.',
+          ),
+        },
+        onToggleBrief: toggled.add,
+        onOpenEvent: opened.add,
+      );
+
+      final glance = tester.widget<Text>(
+          find.byKey(DayPane.briefTeaserKeyFor('briefed')));
+      expect(glance.maxLines, 2);
+      expect(glance.overflow, TextOverflow.ellipsis);
+      final toggle = find.byKey(DayPane.briefToggleKeyFor('briefed'));
+      expect(toggle, findsOneWidget);
+      expect(tester.widget<IconButton>(toggle).tooltip, 'Show the brief');
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+      // The chevron is the one focus stop and spoken toggle; the glance is a
+      // pointer shortcut.
+      final glanceInk = tester.widget<InkWell>(find
+          .ancestor(
+            of: find.byKey(DayPane.briefTeaserKeyFor('briefed')),
+            matching: find.byType(InkWell),
+          )
+          .first);
+      expect(glanceInk.canRequestFocus, isFalse);
+      expect(glanceInk.excludeFromSemantics, isTrue);
+
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(toggled, ['briefed']);
+      expect(opened, isEmpty, reason: 'the chevron is not the row');
+
+      await tester.tap(find.byKey(DayPane.briefTeaserKeyFor('briefed')));
+      await tester.pump();
+      expect(toggled, ['briefed', 'briefed']);
+      expect(opened, isEmpty, reason: 'the glance is not the row either');
+
+      await tester.tap(find.text('Fabrikam sync'));
+      await tester.pump();
+      expect(opened, ['briefed'], reason: 'the row still opens the event');
+      expect(toggled, hasLength(2));
+    });
+
+    testWidgets('expanded draws the brief body under the row', (tester) async {
+      final asked = <String>[];
+      await pumpPane(
+        tester,
+        events: [
+          timed('briefed', 'Fabrikam sync', DateTime.utc(2026, 9, 29, 20)),
+          timed('other', 'Contoso standup', DateTime.utc(2026, 9, 29, 21)),
+        ],
+        briefs: const {
+          'briefed': MeetingBrief(headline: 'Dana is waiting on the quote.'),
+          'other': MeetingBrief(headline: 'Nothing open.'),
+        },
+        expandedBriefs: const {'briefed'},
+        onToggleBrief: (_) {},
+        briefBody: (id) {
+          asked.add(id);
+          return Text('body of $id', key: ValueKey('body-$id'));
+        },
+      );
+
+      expect(find.byKey(const ValueKey('body-briefed')), findsOneWidget);
+      expect(find.byKey(const ValueKey('body-other')), findsNothing);
+      expect(asked.toSet(), {'briefed'});
+      final toggle = find.byKey(DayPane.briefToggleKeyFor('briefed'));
+      expect(tester.widget<IconButton>(toggle).tooltip, 'Hide the brief');
+      // Under the row, from the subject column.
+      final body = tester.getTopLeft(find.byKey(const ValueKey('body-briefed')));
+      final glance =
+          tester.getBottomLeft(find.byKey(DayPane.briefTeaserKeyFor('briefed')));
+      expect(body.dy, greaterThan(glance.dy));
+      expect(body.dx,
+          tester.getTopLeft(find.text('Fabrikam sync')).dx);
+    });
+
+    testWidgets('no brief, no glance, no toggle', (tester) async {
+      await pumpPane(
+        tester,
+        events: [
+          timed('plain', 'Contoso standup', DateTime.utc(2026, 9, 29, 21)),
+        ],
+        onToggleBrief: (_) {},
+        expandedBriefs: const {'plain'},
+        briefBody: (id) => Text('body of $id'),
+      );
+      expect(find.byKey(DayPane.briefTeaserKeyFor('plain')), findsNothing);
+      expect(find.byKey(DayPane.briefToggleKeyFor('plain')), findsNothing);
+      expect(find.text('body of plain'), findsNothing);
     });
 
     testWidgets('meetings by subject, with their time, place and marks',

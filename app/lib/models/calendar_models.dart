@@ -758,8 +758,61 @@ class BriefAskOut {
       };
 }
 
+/// One line of a brief about a file the attendees sent. [file] is a 0-based
+/// index into [MeetingBrief.materialRefs]; the task drops an entry whose
+/// number is outside the list it showed, so there is no -1 here.
+@immutable
+class BriefMaterialOut {
+  final int file;
+  final String takeaway;
+
+  const BriefMaterialOut({required this.file, required this.takeaway});
+
+  Map<String, Object?> toJson() => {'file': file, 'takeaway': takeaway};
+}
+
+/// One file a brief can point at, stored INSIDE the brief (like
+/// [BriefThreadRef]) so the agenda can open it without gathering again.
+///
+/// [name] is the sender's text and is shown as plain text only.
+@immutable
+class BriefMaterialRef {
+  final String source;
+  final String messageId;
+  final String attachmentId;
+  final String name;
+
+  const BriefMaterialRef({
+    required this.source,
+    required this.messageId,
+    required this.attachmentId,
+    required this.name,
+  });
+
+  Map<String, Object?> toJson() => {
+        'source': source,
+        'message_id': messageId,
+        'attachment_id': attachmentId,
+        'name': name,
+      };
+
+  static BriefMaterialRef? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final messageId = raw['message_id'];
+    final attachmentId = raw['attachment_id'];
+    if (messageId is! String || messageId.isEmpty) return null;
+    if (attachmentId is! String || attachmentId.isEmpty) return null;
+    return BriefMaterialRef(
+      source: _str(raw['source'], fallback: 'email'),
+      messageId: messageId,
+      attachmentId: attachmentId,
+      name: _str(raw['name']),
+    );
+  }
+}
+
 /// A written pre-meeting brief: what the generative model said, validated,
-/// plus the thread list its indices point into.
+/// plus the thread and material lists its indices point into.
 ///
 /// Lives with the calendar models rather than beside its task because the
 /// stored row decodes into it ([EventBrief.brief]) and models may not import
@@ -767,9 +820,21 @@ class BriefAskOut {
 /// reads it from here.
 @immutable
 class MeetingBrief {
+  /// The one sentence the model wrote first — what the meeting is for and
+  /// where things stand — so everything after it follows from something.
+  /// Stored, not drawn; '' on a row written before it existed.
+  final String evidence;
+
+  /// The glance: one or two dense sentences the agenda shows.
   final String headline;
   final List<BriefPoint> points;
   final List<BriefAskOut> openAsks;
+
+  /// What the files they sent say, each pointing into [materialRefs].
+  final List<BriefMaterialOut> materials;
+
+  /// Questions worth asking in the meeting, at most three.
+  final List<String> questions;
   final List<String> prep;
 
   /// The numbered threads the model was shown, in the order it was shown
@@ -777,33 +842,67 @@ class MeetingBrief {
   /// before storing, because only it holds the gathered input.
   final List<BriefThreadRef> threads;
 
+  /// The numbered materials the model was shown, attached by the handler the
+  /// same way as [threads].
+  final List<BriefMaterialRef> materialRefs;
+
   const MeetingBrief({
+    this.evidence = '',
     required this.headline,
     this.points = const [],
     this.openAsks = const [],
+    this.materials = const [],
+    this.questions = const [],
     this.prep = const [],
     this.threads = const [],
+    this.materialRefs = const [],
   });
 
-  MeetingBrief withThreads(List<BriefThreadRef> threads) => MeetingBrief(
+  MeetingBrief _copy({
+    List<BriefThreadRef>? threads,
+    List<BriefMaterialRef>? materialRefs,
+  }) =>
+      MeetingBrief(
+        evidence: evidence,
         headline: headline,
         points: points,
         openAsks: openAsks,
+        materials: materials,
+        questions: questions,
         prep: prep,
-        threads: threads,
+        threads: threads ?? this.threads,
+        materialRefs: materialRefs ?? this.materialRefs,
       );
+
+  MeetingBrief withThreads(List<BriefThreadRef> threads) =>
+      _copy(threads: threads);
+
+  MeetingBrief withMaterials(List<BriefMaterialRef> materialRefs) =>
+      _copy(materialRefs: materialRefs);
 
   /// The thread [index] names, or null for -1 or an index the stored list
   /// does not hold (a row written by an older build).
   BriefThreadRef? threadAt(int index) =>
       index >= 0 && index < threads.length ? threads[index] : null;
 
+  /// The file [index] names, or null for an index the stored list does not
+  /// hold or a placeholder left by a malformed stored entry.
+  BriefMaterialRef? materialAt(int index) {
+    if (index < 0 || index >= materialRefs.length) return null;
+    final ref = materialRefs[index];
+    return ref.attachmentId.isEmpty ? null : ref;
+  }
+
   Map<String, Object?> toJson() => {
+        'evidence': evidence,
         'headline': headline,
         'points': [for (final p in points) p.toJson()],
         'open_asks': [for (final a in openAsks) a.toJson()],
+        'materials': [for (final m in materials) m.toJson()],
+        'questions': questions,
         'prep': prep,
         'threads': [for (final t in threads) t.toJson()],
+        'material_refs': [for (final r in materialRefs) r.toJson()],
       };
 
   /// Tolerant: a stored blob is this app's own writing, but a row from an
@@ -812,6 +911,7 @@ class MeetingBrief {
   factory MeetingBrief.fromJson(Map<String, dynamic> json) {
     int index(Object? raw) => raw is int ? raw : (raw is num ? raw.toInt() : -1);
     return MeetingBrief(
+      evidence: _str(json['evidence']),
       headline: _str(json['headline']),
       points: [
         for (final p in json['points'] is List ? json['points'] as List : const [])
@@ -828,11 +928,36 @@ class MeetingBrief {
               thread: index(a['thread']),
             ),
       ],
+      materials: [
+        for (final m
+            in json['materials'] is List ? json['materials'] as List : const [])
+          if (m is Map && index(m['file']) >= 0 && _str(m['takeaway']).isNotEmpty)
+            BriefMaterialOut(
+              file: index(m['file']),
+              takeaway: _str(m['takeaway']),
+            ),
+      ],
+      questions: _strings(json['questions']),
       prep: _strings(json['prep']),
       threads: [
         for (final t
             in json['threads'] is List ? json['threads'] as List : const [])
           ?BriefThreadRef.fromJson(t),
+      ],
+      // A malformed entry keeps its PLACE as an empty ref: the material
+      // lines point by index, and dropping it would shift every later one
+      // onto the wrong file.
+      materialRefs: [
+        for (final r in json['material_refs'] is List
+            ? json['material_refs'] as List
+            : const [])
+          BriefMaterialRef.fromJson(r) ??
+              const BriefMaterialRef(
+                source: '',
+                messageId: '',
+                attachmentId: '',
+                name: '',
+              ),
       ],
     );
   }

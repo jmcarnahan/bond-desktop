@@ -63,14 +63,26 @@ class DayPane extends StatelessWidget {
     this.grid,
     this.onOpenEvent,
     this.inviteActions,
-    this.briefHeadlines = const {},
+    this.briefs = const {},
+    this.expandedBriefs = const {},
+    this.onToggleBrief,
+    this.briefBody,
     this.commandBar,
     this.planCard,
   });
 
-  /// The key of a meeting row's brief teaser.
+  /// The key of a meeting row's brief glance.
   static Key briefTeaserKeyFor(String eventId) =>
       ValueKey('day-brief-teaser-$eventId');
+
+  /// The key of the button beside a glance that opens and closes the brief.
+  static Key briefToggleKeyFor(String eventId) =>
+      ValueKey('day-brief-toggle-$eventId');
+
+  /// Where a row's subject column starts: the time column and its gap. An
+  /// opened brief is drawn from here, under the subject it belongs to.
+  static const double subjectIndent = _whenWidth + BondSpacing.s12;
+  static const double _whenWidth = 160;
 
   /// How far back and forward the arrows go: the mirror's window. A day
   /// outside it would read as empty when it is merely not synced.
@@ -136,10 +148,21 @@ class DayPane extends StatelessWidget {
   /// on a button inside the row is the button's, never the row's open.
   final Widget Function(InviteEntry entry)? inviteActions;
 
-  /// Written brief headlines by event id, drawn as a muted one-line teaser
-  /// under a meeting's subject. Model output over other people's mail, so
-  /// plain text; the full brief is one tap away in the event panel.
-  final Map<String, String> briefHeadlines;
+  /// Written briefs by event id. Each one's glance (its headline, up to two
+  /// lines) is drawn muted under the meeting's subject, so the day reads at a
+  /// look; model output over other people's mail, so plain text.
+  final Map<String, MeetingBrief> briefs;
+
+  /// The meetings whose brief is open under their row. The host holds it.
+  final Set<String> expandedBriefs;
+
+  /// Opens or closes one meeting's brief: the glance and the chevron beside
+  /// it both ask. Null draws the glance with no toggle.
+  final void Function(String eventId)? onToggleBrief;
+
+  /// The host-built brief, drawn under an open row. The host builds it
+  /// because it reads the store and opens threads and files.
+  final Widget Function(String eventId)? briefBody;
 
   /// The host-built command bar (`DayCommandBar`), drawn under the title row
   /// in both the agenda and the grid, so a command typed over one face is
@@ -381,7 +404,7 @@ class DayPane extends StatelessWidget {
 
   /// The fixed-width time column every row lines up on.
   Widget _when(String text) => SizedBox(
-        width: 160,
+        width: _whenWidth,
         child: Text(
           text,
           style: BondType.small.copyWith(color: BondColors.inkSecondary),
@@ -417,6 +440,12 @@ class DayPane extends StatelessWidget {
     final range = (e.startUtc != null && e.endUtc != null)
         ? formatEventRange(zone, e.startUtc!, e.endUtc!)
         : '';
+    // A meeting the owner is not going to offers no brief.
+    final brief = cancelled || declined ? null : briefs[e.id];
+    final expanded = brief != null && expandedBriefs.contains(e.id);
+    final glance = brief == null || brief.headline.isEmpty
+        ? null
+        : _glance(e.id, brief.headline, expanded);
 
     final body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -447,17 +476,7 @@ class DayPane extends StatelessWidget {
             ],
           ],
         ),
-        // A meeting the owner is not going to offers no brief.
-        if (!cancelled &&
-            !declined &&
-            (briefHeadlines[e.id] ?? '').isNotEmpty)
-          Text(
-            briefHeadlines[e.id]!,
-            key: briefTeaserKeyFor(e.id),
-            style: _muted,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+        ?glance,
         if (e.location.trim().isNotEmpty)
           Text(e.location.trim(), style: _muted, maxLines: 1,
               overflow: TextOverflow.ellipsis),
@@ -499,7 +518,64 @@ class DayPane extends StatelessWidget {
         ],
       ),
     );
-    return declined ? Opacity(opacity: 0.5, child: row) : row;
+    if (declined) return Opacity(opacity: 0.5, child: row);
+    final open = briefBody;
+    if (glance == null || !expanded || open == null) return row;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        row,
+        Padding(
+          padding: const EdgeInsets.only(
+            left: subjectIndent,
+            bottom: BondSpacing.s8,
+          ),
+          child: open(e.id),
+        ),
+      ],
+    );
+  }
+
+  /// A brief's glance under a meeting's subject, with the chevron that opens
+  /// the rest. Both are their own tap targets inside the row, so a tap on
+  /// either toggles the brief and a tap anywhere else on the row still opens
+  /// the event.
+  Widget _glance(String id, String headline, bool expanded) {
+    final toggle = onToggleBrief;
+    final text = Text(
+      headline,
+      key: briefTeaserKeyFor(id),
+      style: _muted,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+    if (toggle == null) return text;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Flexible(
+          // A pointer shortcut only: the chevron is the one focus stop and
+          // the one spoken toggle, so a keyboard walk meets it once.
+          child: InkWell(
+            canRequestFocus: false,
+            excludeFromSemantics: true,
+            onTap: () => toggle(id),
+            borderRadius: BondRadii.smAll,
+            child: text,
+          ),
+        ),
+        IconButton(
+          key: briefToggleKeyFor(id),
+          tooltip: expanded ? 'Hide the brief' : 'Show the brief',
+          icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+          iconSize: 18,
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+          onPressed: () => toggle(id),
+        ),
+      ],
+    );
   }
 
   Widget _allDayRow(CalendarEvent e) {

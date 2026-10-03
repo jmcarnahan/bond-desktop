@@ -1,15 +1,21 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
+import 'package:bond_inbox/services/llm/prompt_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_decision_client.dart';
+import 'fixtures/fake_embed_server.dart';
 import 'fixtures/test_db.dart';
 
 /// The brief's inputs, gathered over a real in-memory store: who counts as
@@ -60,6 +66,7 @@ void main() {
     String organizerAddress = '',
     String bodyPreview = '',
     String changeKey = 'ck-1',
+    String seriesMasterId = '',
   }) {
     final start = now.add(startsIn);
     return CalendarEvent(
@@ -73,6 +80,7 @@ void main() {
       organizerAddress: organizerAddress,
       bodyPreview: bodyPreview,
       changeKey: changeKey,
+      seriesMasterId: seriesMasterId,
       attendees: attendees ??
           const [
             Attendee(name: 'Me', address: owner),
@@ -110,6 +118,7 @@ void main() {
     String fromName = 'Dana',
     String body = 'Hello there.',
     Duration ago = const Duration(hours: 2),
+    String? eventId,
   }) =>
       store.upsertMessage({
         'source': 'email',
@@ -122,6 +131,9 @@ void main() {
         'received_at': stampAgo(ago),
         'body_text': body,
         'triage_status': 'done',
+        if (eventId != null)
+          'source_meta_json':
+              jsonEncode({'meeting': 'meetingRequest', 'event_id': eventId}),
       });
 
   Future<void> decide(
@@ -410,7 +422,7 @@ void main() {
   });
 
   group('caps', () {
-    test('seven threads → six; five asks → four; ten files → eight', () async {
+    test('seven threads → six; five asks → four; ten materials → six', () async {
       for (var i = 0; i < 7; i++) {
         await thread('c-$i', state: 'needs_reply', ago: Duration(hours: i + 1));
         await decide('m-c-$i', needsYou: 0.9, intent: 'request');
@@ -440,8 +452,9 @@ void main() {
       final input = await eligible(meeting());
       expect(input.threads, hasLength(BriefGatherer.maxThreads));
       expect(input.openAsks, hasLength(BriefGatherer.maxAsks));
-      expect(input.files, hasLength(BriefGatherer.maxFiles));
-      expect(input.files, isNot(contains('logo.png')));
+      expect(input.materials, hasLength(BriefGatherer.maxMaterials));
+      expect([for (final m in input.materials) m.name],
+          isNot(contains('logo.png')));
     });
 
     test('three storylines → two, the summary fenced', () async {
@@ -461,6 +474,361 @@ void main() {
       expect(input.storylines.first.summary,
           startsWith('<untrusted_data source="storyline">'));
       expect(input.storylines.first.summary, contains('Where 0 stands.'));
+    });
+  });
+
+  group("the meeting's own mail", () {
+    const assistant = 'assistant@fabrikam.com';
+
+    test("the invite's own mail is a thread, first, even without an address "
+        'match', () async {
+      // Sent by an assistant who is not in the meeting: no attendee's
+      // address matches it, and Sam has no other mail.
+      await conversation('c-invite', people: const [assistant],
+          ago: const Duration(days: 3));
+      await message('m-invite', 'c-invite',
+          from: assistant,
+          fromName: 'Assistant',
+          ago: const Duration(days: 3),
+          eventId: 'evt-1');
+      final withSam = meeting(attendees: const [
+        Attendee(name: 'Sam Ortiz', address: sam),
+      ]);
+      final alone = await eligible(withSam);
+      expect([for (final t in alone.threads) t.conversationKey], ['c-invite'],
+          reason: 'an invite thread alone makes the meeting eligible');
+
+      // A newer, urgent thread with Sam still comes after the invite.
+      await conversation('c-sam', people: const [sam], ago: const Duration(hours: 1));
+      await message('m-sam', 'c-sam', from: sam, ago: const Duration(hours: 1));
+      await decide('m-sam', urgency: 'high');
+      final both = await eligible(withSam);
+      expect([for (final t in both.threads) t.conversationKey],
+          ['c-invite', 'c-sam']);
+    });
+
+    test("an occurrence reads its series' invite too, after its own, and a "
+        'thread found both ways is listed once', () async {
+      await conversation('c-own', people: const [assistant]);
+      await message('m-own', 'c-own', from: assistant, eventId: 'evt-1');
+      await conversation('c-series', people: const [assistant],
+          ago: const Duration(days: 20));
+      await message('m-series', 'c-series',
+          from: assistant, ago: const Duration(days: 20), eventId: 'master-1');
+      // Dana's thread carries the invite too: found by address AND by event.
+      await thread('c-dana', ago: const Duration(minutes: 30));
+      await message('m-dana-invite', 'c-dana',
+          ago: const Duration(hours: 4), eventId: 'evt-1');
+
+      final input = await eligible(meeting(seriesMasterId: 'master-1'));
+      final keys = [for (final t in input.threads) t.conversationKey];
+      // The occurrence's own invites newest first, then the series'; Dana's
+      // thread is an invite thread now, and not listed again by address.
+      expect(keys, ['c-own', 'c-dana', 'c-series']);
+    });
+
+    test('invite threads take at most three of the six, so a long series '
+        'leaves room for the mail with the people', () async {
+      for (var i = 0; i < 5; i++) {
+        await conversation('c-inv-$i', people: const [assistant],
+            ago: Duration(days: i + 1));
+        await message('m-inv-$i', 'c-inv-$i',
+            from: assistant, ago: Duration(days: i + 1), eventId: 'evt-1');
+      }
+      await thread('c-dana', ago: const Duration(days: 9));
+
+      final input = await eligible(meeting());
+      expect([for (final t in input.threads) t.conversationKey],
+          ['c-inv-0', 'c-inv-1', 'c-inv-2', 'c-dana']);
+      expect(BriefGatherer.maxInviteThreads, 3);
+    });
+
+    test('no invite thread and no address match is still no mail', () async {
+      expect(
+        await ineligible(meeting(attendees: const [
+          Attendee(name: 'Sam', address: sam),
+        ])),
+        BriefIneligibility.noMail,
+      );
+    });
+  });
+
+  group('materials', () {
+    Future<void> attach(
+      String messageId,
+      String attachmentId, {
+      String name = 'deck.pptx',
+      String kind = 'file',
+      String? contentType =
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      bool inline = false,
+      int ordinal = 0,
+    }) =>
+        store.upsertAttachments('email', messageId, [
+          {
+            'attachment_id': attachmentId,
+            'ordinal': ordinal,
+            'kind': kind,
+            'name': name,
+            'content_type': contentType,
+            'is_inline': inline ? 1 : 0,
+          },
+        ]);
+
+    Future<void> read(String messageId, String attachmentId) =>
+        store.setAttachmentText('email', messageId, attachmentId,
+            status: 'done', text: 'The words of the deck.');
+
+    Future<void> digest(String messageId, String attachmentId, String summary) =>
+        store.setAttachmentDigest('email', messageId, attachmentId,
+            status: 'done',
+            digestJson: jsonEncode(AttachmentDigest(
+              kind: 'slides',
+              summary: summary,
+              facts: const ['Two tiers.'],
+            ).toJson()));
+
+    String dayOf(Duration ago) => la.dateOf(now.subtract(ago)).toIso();
+
+    test('materials carry the ref, the sender, the day, the digest and the '
+        'read state, newest first', () async {
+      await conversation('c-1', count: 3, ago: const Duration(hours: 1));
+      await message('m-old', 'c-1', ago: const Duration(hours: 30));
+      await message('m-mine', 'c-1', outbound: true, ago: const Duration(hours: 5));
+      await message('m-new', 'c-1', ago: const Duration(hours: 1));
+      await attach('m-old', 'a-old', name: 'terms.pdf',
+          contentType: 'application/pdf');
+      await attach('m-mine', 'a-mine', name: 'my reply.pdf');
+      await attach('m-new', 'a-deck', name: 'Q3 plan.pptx');
+      await read('m-new', 'a-deck');
+      await digest('m-new', 'a-deck', 'The Q3 plan proposes two tiers.');
+
+      final input = await eligible(meeting());
+      expect([for (final m in input.materials) m.name],
+          ['Q3 plan.pptx', 'terms.pdf'],
+          reason: "newest mail first, and never the owner's own file");
+      final deck = input.materials.first;
+      expect((deck.source, deck.messageId, deck.attachmentId),
+          ('email', 'm-new', 'a-deck'));
+      expect(deck.sender, 'Dana Lee', reason: "the invite's name for her");
+      expect(deck.date, dayOf(const Duration(hours: 1)));
+      expect(deck.contentType, contains('presentation'));
+      expect(deck.textStatus, 'done');
+      expect(deck.digest?.summary, 'The Q3 plan proposes two tiers.');
+      expect(deck.passages, isEmpty, reason: 'no embeddings client, no passages');
+      final terms = input.materials.last;
+      expect(terms.date, dayOf(const Duration(hours: 30)));
+      expect(terms.textStatus, 'pending');
+      expect(terms.digest, isNull);
+    });
+
+    test('an unread deck is listed as arrived, with no digest', () async {
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck', name: 'Board deck.pptx');
+
+      final input = await eligible(meeting());
+      final deck = input.materials.single;
+      expect(deck.name, 'Board deck.pptx');
+      expect(deck.textStatus, 'pending');
+      expect(deck.digest, isNull);
+      expect(deck.passages, isEmpty);
+      expect(
+          const MeetingBriefTask().buildUserMessage(input),
+          contains('[1] (unread) ${wrapUntrusted('material', 'Board deck.pptx · '
+              'Dana Lee · ${dayOf(const Duration(hours: 2))}')}'));
+    });
+
+    test('images and inline files are not materials', () async {
+      await thread('c-1');
+      await attach('m-c-1', 'a-inline', name: 'inline.pdf', inline: true,
+          ordinal: 0);
+      await attach('m-c-1', 'a-photo', name: 'photo.jpg',
+          contentType: 'image/jpeg', ordinal: 1);
+      await attach('m-c-1', 'a-image', name: 'pasted.png', kind: 'image',
+          contentType: null, ordinal: 2);
+      await attach('m-c-1', 'a-card', name: 'card', kind: 'card', ordinal: 3);
+      await attach('m-c-1', 'a-quote', name: 'quoted',
+          kind: 'message_reference', ordinal: 4);
+      await attach('m-c-1', 'a-noname', name: '  ', ordinal: 5);
+      await attach('m-c-1', 'a-link', name: 'Shared plan', kind: 'reference',
+          contentType: null, ordinal: 6);
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx', ordinal: 7);
+
+      final input = await eligible(meeting());
+      expect({for (final m in input.materials) m.attachmentId},
+          {'a-link', 'a-deck'});
+    });
+
+    test('the same deck re-attached on every reply is one material, the '
+        'newest copy', () async {
+      await conversation('c-1', count: 3, ago: const Duration(hours: 1));
+      await message('m-1', 'c-1', ago: const Duration(hours: 9));
+      await message('m-2', 'c-1', ago: const Duration(hours: 5));
+      await message('m-3', 'c-1', ago: const Duration(hours: 1));
+      await attach('m-1', 'a-1', name: 'Q3 Plan.pptx');
+      await attach('m-2', 'a-2', name: 'q3 plan.pptx');
+      await attach('m-3', 'a-3', name: 'Q3 plan.pptx');
+      await attach('m-2', 'a-other', name: 'terms.pdf', ordinal: 1);
+
+      final input = await eligible(meeting());
+      expect([for (final m in input.materials) (m.messageId, m.name)],
+          [('m-3', 'Q3 plan.pptx'), ('m-2', 'terms.pdf')]);
+    });
+
+    test('a digest landing moves the hash; a renamed file does not', () async {
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx');
+      final first = (await eligible(meeting())).inputsHash;
+
+      await attach('m-c-1', 'a-deck', name: 'deck (final).pptx');
+      final renamed = await eligible(meeting());
+      expect(renamed.materials.single.name, 'deck (final).pptx');
+      expect(renamed.inputsHash, first);
+
+      await read('m-c-1', 'a-deck');
+      final textLanded = (await eligible(meeting())).inputsHash;
+      expect(textLanded, isNot(first));
+
+      await digest('m-c-1', 'a-deck', 'What the deck says.');
+      final digested = (await eligible(meeting())).inputsHash;
+      expect(digested, isNot(textLanded));
+    });
+
+    BriefGatherer withChunks(_ChunkStore chunks, FakeEmbedServer server) =>
+        BriefGatherer(
+          chunks,
+          calendar,
+          ownerAddress: () async => owner,
+          zone: () => la,
+          embeddings: server.client,
+        );
+
+    AttachmentChunkHit hit(String messageId, String attachmentId, int seq,
+            String locator, String text) =>
+        AttachmentChunkHit(
+          ref: AttachmentRef(
+              source: 'email', messageId: messageId, attachmentId: attachmentId),
+          chunkId: seq,
+          seq: seq,
+          locator: locator,
+          text: text,
+          outbound: false,
+        );
+
+    test('passages come from the chunks nearest the meeting, two per file at '
+        'most', () async {
+      final chunks = _ChunkStore(db);
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx', ordinal: 0);
+      await attach('m-c-1', 'a-sheet', name: 'numbers.xlsx',
+          contentType: 'application/vnd.ms-excel', ordinal: 1);
+      chunks.hits = [
+        hit('m-c-1', 'a-deck', 0, 'digest', 'A model summary.'),
+        hit('m-c-1', 'a-deck', 3, 'slide 3', 'Pricing: two tiers.'),
+        hit('other-message', 'a-deck', 9, 'slide 1', 'Same id, other mail.'),
+        hit('m-c-1', 'a-sheet', 1, 'Sheet Q3 rows 1-40', 'x' * 600),
+        hit('m-c-1', 'a-deck', 5, 'slide 5', 'Timeline: November.'),
+        hit('m-c-1', 'a-deck', 7, 'slide 7', 'A third deck passage.'),
+      ];
+      final server = FakeEmbedServer();
+
+      final input = await withChunks(chunks, server)
+          .gather(meeting(bodyPreview: 'Agenda: pricing.'), now: now);
+      final materials = (input as BriefEligible).input.materials;
+      final deck = materials.firstWhere((m) => m.attachmentId == 'a-deck');
+      final sheet = materials.firstWhere((m) => m.attachmentId == 'a-sheet');
+      expect(deck.passages, [
+        wrapUntrusted('passage', '[slide 3] Pricing: two tiers.'),
+        wrapUntrusted('passage', '[slide 5] Timeline: November.'),
+      ], reason: 'the digest chunk out, another mail out, two at most');
+      expect(sheet.passages.single,
+          startsWith('<untrusted_data source="passage">'));
+      expect(sheet.passages.single, contains('[Sheet Q3 rows 1-40] x'));
+      expect(sheet.passages.single, contains('x' * (BriefGatherer.passageCap - 30)));
+      expect(sheet.passages.single, isNot(contains('x' * BriefGatherer.passageCap)));
+
+      expect(server.inputs, ['Fabrikam sync\nAgenda: pricing.'],
+          reason: 'the meeting, embedded once, under the document prefix');
+      // One scoped search per file, never one shared shortlist.
+      expect([for (final c in chunks.knnCalls) c.attachmentIds],
+          unorderedEquals([
+            ['a-deck'],
+            ['a-sheet'],
+          ]));
+      for (final c in chunks.knnCalls) {
+        expect(c.messageIds, isEmpty);
+        expect(c.embedModel, EmbeddingsClient.documentModelTag);
+        expect(c.limit, BriefGatherer.passageLimit);
+      }
+
+      // Passages are not hashed: the same materials without them hash alike,
+      // and a gather asked for no passages makes no embedding call.
+      final quiet = await withChunks(chunks, server).gather(
+          meeting(bodyPreview: 'Agenda: pricing.'),
+          now: now,
+          passages: false);
+      expect((quiet as BriefEligible).input.inputsHash, input.input.inputsHash);
+      expect(quiet.input.materials.every((m) => m.passages.isEmpty), isTrue);
+      expect(server.calls, 1, reason: 'still only the first gather embedded');
+    });
+
+    test('a long deck cannot starve the other files of passages', () async {
+      final chunks = _ChunkStore(db);
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx', ordinal: 0);
+      await attach('m-c-1', 'a-memo', name: 'memo.docx', ordinal: 1);
+      chunks.hits = [
+        // Forty slides nearer the meeting than anything in the memo.
+        for (var i = 0; i < 40; i++)
+          hit('m-c-1', 'a-deck', i, 'slide $i', 'Slide $i.'),
+        hit('m-c-1', 'a-memo', 100, 'part 1', 'The memo.'),
+      ];
+      final server = FakeEmbedServer();
+      final input =
+          await withChunks(chunks, server).gather(meeting(), now: now);
+      final materials = (input as BriefEligible).input.materials;
+      expect(
+          materials.firstWhere((m) => m.attachmentId == 'a-memo').passages,
+          [wrapUntrusted('passage', '[part 1] The memo.')]);
+      expect(
+          materials.firstWhere((m) => m.attachmentId == 'a-deck').passages,
+          hasLength(BriefGatherer.passagesPerMaterial));
+      expect(server.calls, 1, reason: 'the meeting is still embedded once');
+    });
+
+    test('no chunks, no embedding call', () async {
+      final chunks = _ChunkStore(db)..hasChunks = false;
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck');
+      final server = FakeEmbedServer();
+      final input = await withChunks(chunks, server).gather(meeting(), now: now);
+      expect((input as BriefEligible).input.materials.single.passages, isEmpty);
+      expect(server.calls, 0);
+      expect(chunks.knnCalls, isEmpty);
+    });
+
+    test('a passage failure costs no brief', () async {
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck');
+
+      final throwing = _ChunkStore(db)..throwOnKnn = true;
+      final thrown =
+          await withChunks(throwing, FakeEmbedServer()).gather(meeting(), now: now);
+      expect((thrown as BriefEligible).input.materials.single.passages, isEmpty);
+
+      final down = _ChunkStore(db)
+        ..hits = [hit('m-c-1', 'a-deck', 1, 'slide 1', 'Words.')];
+      final offline = await withChunks(down, FakeEmbedServer(status: null))
+          .gather(meeting(), now: now);
+      expect((offline as BriefEligible).input.materials.single.passages,
+          isEmpty);
+      expect(down.knnCalls, isEmpty, reason: 'no vector, no search');
+
+      final noIndex = _ChunkStore(db)..indexMissing = true;
+      final missing = await withChunks(noIndex, FakeEmbedServer())
+          .gather(meeting(), now: now);
+      expect((missing as BriefEligible).input.materials.single.passages,
+          isEmpty);
     });
   });
 
@@ -584,4 +952,56 @@ void main() {
     final input = await eligible(meeting());
     expect(input.lastMet, startsWith('Last met'));
   });
+}
+
+/// A store whose chunk reads are scripted, so the passage step is tested
+/// without seeding the vec0 index: [hits] is what the scoped KNN answers,
+/// and every call is recorded. `brief_planner_test.dart` has a smaller one.
+class _ChunkStore extends MessageStore {
+  _ChunkStore(super.db);
+
+  bool hasChunks = true;
+  bool throwOnKnn = false;
+  bool indexMissing = false;
+  List<AttachmentChunkHit> hits = const [];
+  final List<
+      ({
+        String embedModel,
+        List<String> messageIds,
+        List<String> attachmentIds,
+        int limit
+      })> knnCalls = [];
+
+  @override
+  Future<bool> hasAttachmentChunks(
+    String source, {
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+  }) async =>
+      hasChunks;
+
+  @override
+  Future<List<AttachmentChunkHit>?> chunkKnn(
+    Uint8List query, {
+    required String embedModel,
+    required String source,
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+    int limit = 6,
+  }) async {
+    knnCalls.add((
+      embedModel: embedModel,
+      messageIds: messageIds,
+      attachmentIds: attachmentIds,
+      limit: limit,
+    ));
+    if (throwOnKnn) throw StateError('the index broke');
+    if (indexMissing) return null;
+    // Scoped and limited the way the real read is: the nearest [limit]
+    // within these attachment ids, in [hits] order.
+    return [
+      for (final h in hits)
+        if (attachmentIds.contains(h.ref.attachmentId)) h,
+    ].take(limit).toList();
+  }
 }

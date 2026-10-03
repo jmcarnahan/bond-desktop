@@ -43,13 +43,15 @@ final dayEventsProvider = FutureProvider.autoDispose
   return _between(store, zone, day, day.addDays(1));
 });
 
-/// The day's written brief headlines, by event id — the one-line teaser the
-/// agenda draws under a meeting. Ready briefs only: a skipped or failed row
-/// has nothing to tease, and the panel is where those say why.
-final briefHeadlinesProvider = FutureProvider.autoDispose
-    .family<Map<String, String>, CalendarDate>((ref, day) async {
+/// The day's written briefs, by event id — the agenda draws each one's glance
+/// under its meeting and opens the rest inline, and the Today section draws
+/// the glances. Ready briefs only, and only those with a glance: a skipped or
+/// failed row has nothing to show, and the panel is where those say why.
+final dayBriefsProvider = FutureProvider.autoDispose
+    .family<Map<String, MeetingBrief>, CalendarDate>((ref, day) async {
+  // Not the work tick: the agenda draws no "Writing…" state, and a stored
+  // brief bumps briefRevisionProvider (the handler's onStored).
   ref.watch(briefRevisionProvider);
-  ref.watch(briefWorkTickProvider);
   final events = await ref.watch(dayEventsProvider(day).future);
   if (events.isEmpty) return const {};
   final briefs = await ref
@@ -57,7 +59,8 @@ final briefHeadlinesProvider = FutureProvider.autoDispose
       .briefsFor([for (final e in events) e.id]);
   return {
     for (final MapEntry(:key, :value) in briefs.entries)
-      if ((value.brief?.headline ?? '').isNotEmpty) key: value.brief!.headline,
+      if (value.brief case final brief? when brief.headline.isNotEmpty)
+        key: brief,
   };
 });
 

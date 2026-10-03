@@ -119,6 +119,48 @@ void main() {
     });
   });
 
+  group('dayBriefsProvider', () {
+    const day = CalendarDate(2026, 10, 15);
+
+    Future<void> brief(String eventId, String status, String headline) =>
+        calendar.putBrief(
+          eventId: eventId,
+          inputsHash: 'h-$eventId',
+          status: status,
+          briefJson: jsonEncode(MeetingBrief(
+            headline: headline,
+            questions: const ['What is still open?'],
+          ).toJson()),
+          generatedAt: '2026-10-15T08:00:00.000000Z',
+        );
+
+    test('answers the ready briefs by event id and drops an empty glance',
+        () async {
+      await calendar.upsertEvents([
+        timed('briefed', la.localDateTime(day, 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('blank', la.localDateTime(day, 10, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('failed', la.localDateTime(day, 11, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('tomorrow', la.localDateTime(day.addDays(1), 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+      ], syncRun: 'run-1');
+      await brief('briefed', EventBrief.ready, 'The Q3 numbers are due.');
+      await brief('blank', EventBrief.ready, '');
+      await brief('failed', EventBrief.failed, 'Not drawn.');
+      await brief('tomorrow', EventBrief.ready, 'Another day.');
+
+      final briefs = await readFuture(
+        containerFor(CalendarAvailability.available),
+        dayBriefsProvider(day).future,
+      );
+      expect(briefs.keys, ['briefed']);
+      expect(briefs['briefed']!.headline, 'The Q3 numbers are due.');
+      expect(briefs['briefed']!.questions, ['What is still open?']);
+    });
+  });
+
   group('weekEventsProvider', () {
     // Monday Oct 12 2026; the week runs to Sunday Oct 18 inclusive.
     const monday = CalendarDate(2026, 10, 12);

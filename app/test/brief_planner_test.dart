@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
@@ -10,6 +12,7 @@ import 'package:bond_inbox/services/calendar/brief_planner.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_embed_server.dart';
 import 'fixtures/test_db.dart';
 
 /// The planner over a real mirror: which meetings it queues after a sync,
@@ -132,16 +135,154 @@ void main() {
     expect(await status('master'), isNull);
   });
 
-  test('a fresh brief is left alone, whatever changed', () async {
+  test('a fresh brief is left alone unless its inputs moved', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    final young = calendarStamp(now.subtract(const Duration(minutes: 30)));
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: await currentHash('evt-1'),
+      status: EventBrief.ready,
+      generatedAt: young,
+    );
+    expect(await plan(), 0, reason: 'fresh and unchanged');
+    expect(await status('evt-1'), isNull);
+
+    // A deck (or its digest) landed: the same young brief, inputs moved.
     await calendar.putBrief(
       eventId: 'evt-1',
       inputsHash: 'something else',
       status: EventBrief.ready,
+      generatedAt: young,
+    );
+    expect(await plan(after: const Duration(minutes: 16)), 1,
+        reason: 're-briefed within one recheck, not after two hours');
+    expect(await status('evt-1'), 'pending');
+  });
+
+  test('a fresh brief whose rewrite failed is not retried on the same '
+      'inputs until it ages, and is when they move again', () async {
+    await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: 'stale',
+      status: EventBrief.ready,
       generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
     );
-    expect(await plan(), 0);
-    expect(await status('evt-1'), isNull);
+    expect(await plan(), 1);
+
+    // The rewrite failed: the worker finished the row, and the handler kept
+    // the old brief, moving only its stamp (`touchBrief`).
+    await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+        status: 'done');
+    await calendar.touchBrief('evt-1',
+        generatedAt: calendarStamp(now.add(const Duration(minutes: 1))));
+    expect(await plan(after: const Duration(minutes: 20)), 0,
+        reason: 'these inputs were already tried while the brief is fresh');
+
+    // New mail moves the inputs again.
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'c-1',
+      'subject': 'Fabrikam renewal',
+      'participants_json': jsonEncode([
+        {'name': 'Dana', 'email': dana},
+      ]),
+      'state': 'waiting',
+      'message_count': 2,
+      'last_message_at':
+          MessageStore.isoStamp(now.add(const Duration(minutes: 30))),
+    });
+    expect(await plan(after: const Duration(minutes: 40)), 1);
+
+    // A failed row on unchanged inputs waits out the two hours.
+    await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+        status: 'done');
+    final fresh = BriefPlanner(store, calendar, gatherer);
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: await currentHash('evt-1'),
+      status: EventBrief.failed,
+      generatedAt: calendarStamp(now.add(const Duration(minutes: 40))),
+    );
+    expect(await fresh.plan(now: now.add(const Duration(minutes: 41)), zone: la),
+        0);
+    // Two hours and five minutes after the failure; the meeting is still
+    // ahead (it starts three hours after `now`).
+    expect(
+        await fresh.plan(
+            now: now.add(const Duration(hours: 2, minutes: 45)), zone: la),
+        1);
+  });
+
+  test('a ready brief whose rewrite failed IS retried on the same moved '
+      'inputs once it is older than two hours', () async {
+    await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: 'stale',
+      status: EventBrief.ready,
+      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
+    );
+    expect(await plan(), 1);
+    await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+        status: 'done');
+    await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now));
+    expect(await plan(after: const Duration(minutes: 20)), 0,
+        reason: 'tried once while fresh');
+
+    // Two hours and a bit after the failed rewrite's stamp: the same moved
+    // inputs are tried again.
+    expect(await plan(after: const Duration(hours: 2, minutes: 5)), 1);
+    expect(await status('evt-1'), 'pending');
+  });
+
+  test('the planner makes no embedding call, even when the files have '
+      'passages', () async {
+    final chunks = _ChunkStore(db);
+    final server = FakeEmbedServer();
+    final counting = _CountingGatherer(
+      chunks,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: () => la,
+      embeddings: server.client,
+    );
+    final planning = BriefPlanner(chunks, calendar, counting);
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm-1',
+      'conversation_key': 'c-1',
+      'direction': 'inbound',
+      'from_name': 'Dana',
+      'from_address': dana,
+      'received_at':
+          MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+      'body_text': 'Deck attached.',
+      'triage_status': 'done',
+    });
+    await store.upsertAttachments('email', 'm-1', [
+      {
+        'attachment_id': 'a-deck',
+        'ordinal': 0,
+        'kind': 'file',
+        'name': 'deck.pptx',
+        'is_inline': 0,
+      },
+    ]);
+    await calendar.upsertEvents([meeting('evt-1'), meeting('evt-2')],
+        syncRun: 'run-1');
+
+    expect(await planning.plan(now: now, zone: la), 2);
+    expect(counting.gathers, 2);
+    expect(counting.passageAsks, [false, false]);
+    expect(server.calls, 0);
+    expect(chunks.knnCalls, 0);
+
+    // The handler's gather (the default) is the one that embeds — once.
+    final asked = await counting.gather(meeting('evt-1'), now: now);
+    expect((asked as BriefEligible).input.materials.single.passages,
+        isNotEmpty);
+    expect(server.calls, 1);
   });
 
   test('an old brief is requeued only when its inputs moved', () async {
@@ -369,13 +510,61 @@ class _CountingGatherer extends BriefGatherer {
     super.calendar, {
     required super.ownerAddress,
     required super.zone,
+    super.embeddings,
   });
 
   int gathers = 0;
 
+  /// The `passages` flag of every gather, in order.
+  final List<bool> passageAsks = [];
+
   @override
-  Future<BriefGather> gather(CalendarEvent event, {required DateTime now}) {
+  Future<BriefGather> gather(
+    CalendarEvent event, {
+    required DateTime now,
+    bool passages = true,
+  }) {
     gathers++;
-    return super.gather(event, now: now);
+    passageAsks.add(passages);
+    return super.gather(event, now: now, passages: passages);
+  }
+}
+
+/// [MessageStore] whose files always have chunks and whose KNN answers one
+/// passage per file, so a gather that asked for passages would embed.
+class _ChunkStore extends MessageStore {
+  _ChunkStore(super.db);
+
+  int knnCalls = 0;
+
+  @override
+  Future<bool> hasAttachmentChunks(
+    String source, {
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+  }) async =>
+      true;
+
+  @override
+  Future<List<AttachmentChunkHit>?> chunkKnn(
+    Uint8List query, {
+    required String embedModel,
+    required String source,
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+    int limit = 6,
+  }) async {
+    knnCalls++;
+    return [
+      for (final id in attachmentIds)
+        AttachmentChunkHit(
+          ref: AttachmentRef(source: source, messageId: 'm-1', attachmentId: id),
+          chunkId: 1,
+          seq: 0,
+          locator: 'slide 1',
+          text: 'Words.',
+          outbound: false,
+        ),
+    ];
   }
 }

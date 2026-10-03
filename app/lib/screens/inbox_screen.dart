@@ -10,7 +10,13 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
-import '../models/calendar_models.dart' show CalendarDate, CalendarEvent, MailboxSettings;
+import '../models/calendar_models.dart'
+    show
+        BriefMaterialRef,
+        CalendarDate,
+        CalendarEvent,
+        MailboxSettings,
+        MeetingBrief;
 import '../models/context_models.dart' show ContextScopeKind;
 import '../models/draft_provenance.dart';
 import '../models/label_models.dart';
@@ -489,7 +495,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// day only means anything on the Day stop — and deliberately NOT by
   /// [_select] and the other openers that leave the stop in place, so
   /// closing a thread opened from a Day row lands back on the same day.
+  ///
+  /// Every write goes through [_setSelectedDay], which also closes the
+  /// briefs opened under the last day's meetings.
   CalendarDate? _selectedDay;
+
+  /// The agenda's meetings whose brief is open under their row, by event id.
+  /// A view state of one day, so a new day starts with every brief closed.
+  final Set<String> _expandedBriefs = {};
 
   /// Whether the Day stop is showing the invites owed rather than a day.
   bool _showingInvites = false;
@@ -1910,7 +1923,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // snapshots its own pile — see [_pileAtSessionStart].
       _resetPileProgress();
       _section = section;
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       if (section != RailSection.day) _forgetCommand();
       _selectedId = null;
@@ -1936,7 +1949,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _clearOverlays();
       _section = RailSection.people;
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       _forgetCommand();
       _selectedRoomKey = key;
@@ -1956,7 +1969,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _clearOverlays();
       _section = RailSection.archive;
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       _forgetCommand();
       _archiveTab = ArchiveTab.later;
@@ -1967,6 +1980,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedRoomKey = null;
     });
   }
+
+  /// The one writer of [_selectedDay], called inside a `setState`: a brief
+  /// opened under one day's meeting is not left open under the next day's.
+  void _setSelectedDay(CalendarDate? day) {
+    if (day != _selectedDay) _expandedBriefs.clear();
+    _selectedDay = day;
+  }
+
+  /// Opens or closes one agenda meeting's brief under its row.
+  void _toggleBrief(String eventId) => setState(() {
+        if (!_expandedBriefs.remove(eventId)) _expandedBriefs.add(eventId);
+      });
 
   /// Opens one day on the Day stop. The section moves with it, for
   /// [_selectLaterDay]'s reason: backing out of whatever opens next lands on
@@ -1997,7 +2022,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _clearOverlays();
       }
       _section = RailSection.day;
-      _selectedDay = day == today ? null : day;
+      _setSelectedDay(day == today ? null : day);
       _showingInvites = false;
       _selectedId = null;
       _selectedSource = null;
@@ -3616,7 +3641,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _find = text;
       _section = sectionForLabelFind(_section);
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       if (_section != RailSection.day) _forgetCommand();
     });
@@ -4372,6 +4397,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       calendarShown: calendar.shown,
       todayShown: calendar.todayShown,
       todayMeetings: calendar.todayMeetings,
+      todayGlances: calendar.todayGlances,
       calendarZone: calendar.zone,
       now: calendar.now,
       invitesCount: calendar.invites,
@@ -4418,6 +4444,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     DateTime now,
     CalendarDate? today,
     List<CalendarEvent> todayMeetings,
+    Map<String, String> todayGlances,
     List<(CalendarDate, DaySummary)> dayRows,
     int invites,
   }) _railCalendar(List<Conversation> conversations) {
@@ -4433,6 +4460,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         now: now,
         today: null,
         todayMeetings: const [],
+        todayGlances: const {},
         dayRows: const [],
         invites: 0,
       );
@@ -4451,6 +4479,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       today: today,
       todayMeetings:
           remainingToday(events: upcoming, nowUtc: now.toUtc(), zone: zone),
+      // The glances under those meetings, from the agenda's own read of the
+      // day's briefs; only while the Today section is drawn.
+      todayGlances: calendarShowsToday(availability)
+          ? {
+              for (final MapEntry(:key, :value)
+                  in (ref.watch(dayBriefsProvider(today)).valueOrNull ??
+                          const <String, MeetingBrief>{})
+                      .entries)
+                key: value.headline,
+            }
+          : const {},
       // The day rows are the Day stop's column and nobody else's, and they
       // are the one costly part of this — fifteen merges on every build — so
       // they are worked out only while that column is on screen. The Today
@@ -5246,10 +5285,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // mirror is hidden (SDK mode, a missing scope) there is none to ask.
       commandBar: shows ? _commandBar(zone, today) : null,
       planCard: shows ? _commandCard(zone, today) : null,
-      briefHeadlines: shows
-          ? ref.watch(briefHeadlinesProvider(day)).valueOrNull ??
-              const <String, String>{}
-          : const <String, String>{},
+      briefs: shows
+          ? ref.watch(dayBriefsProvider(day)).valueOrNull ??
+              const <String, MeetingBrief>{}
+          : const <String, MeetingBrief>{},
+      expandedBriefs: _expandedBriefs,
+      onToggleBrief: _toggleBrief,
+      briefBody: (id) => _briefBody(id, now: now),
       inviteActions: (entry) => CalendarWriteFlow(
         key: ValueKey('invite-write-${entry.event.id}'),
         writer: ref.read(calendarWritesProvider),
@@ -6463,7 +6505,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         durationMinutes: entry.minutes,
         hints: entry.hints);
     final today = zone.dateOf(now.toUtc());
-    setState(() => _selectedDay = w.firstDay == today ? null : w.firstDay);
+    setState(() => _setSelectedDay(w.firstDay == today ? null : w.firstDay));
   }
 
   /// A pill pressed: the new length or week, and the search again. [change]
@@ -8123,8 +8165,52 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       now: now,
       onOpenThread: (source, key) =>
           _openThreadBeside(source, key, push: true),
+      onOpenMaterial: (material) => unawaited(_openMaterial(material)),
       onRegenerate: () => unawaited(_regenerateBrief(shown.id)),
     );
+  }
+
+  /// One agenda meeting's brief, opened under its row: the compact face,
+  /// which draws only a ready brief (the glance above it is the headline).
+  /// A [Consumer] so a new brief landing rebuilds this body and not the day.
+  Widget _briefBody(String eventId, {required DateTime now}) => Consumer(
+        builder: (context, ref, _) => BriefSection(
+          compact: true,
+          view: ref.watch(eventBriefProvider(eventId)).valueOrNull,
+          now: now,
+          onOpenThread: (source, key) =>
+              _openThreadBeside(source, key, push: true),
+          onOpenMaterial: (material) => unawaited(_openMaterial(material)),
+          onRegenerate: () => unawaited(_regenerateBrief(eventId)),
+        ),
+      );
+
+  static const String _materialGone = 'That file is no longer here.';
+
+  /// Opens a file a brief names, beside whatever is showing, from the row the
+  /// store holds now: the brief carries only the file's ids, so a file a
+  /// re-sync or Forget has since removed says so instead of opening empty.
+  /// No conversation key rides along: briefs read mail only, where the
+  /// message id is enough to fetch the file.
+  Future<void> _openMaterial(BriefMaterialRef material) async {
+    final Map<String, Object?>? row;
+    try {
+      row = await ref.read(messageStoreProvider).attachmentRow(
+            material.source,
+            material.messageId,
+            material.attachmentId,
+          );
+    } on Object catch (e) {
+      debugPrint('a brief\'s file could not be read: ${e.runtimeType}');
+      if (mounted) _toast(_materialGone);
+      return;
+    }
+    if (!mounted) return;
+    if (row == null) {
+      _toast(_materialGone);
+      return;
+    }
+    _openBeside(FilePanel(attachment: AttachmentRef.fromRow(row)), push: true);
   }
 
   /// The keys, read beside the list. No ⤢, for [_whyPanel]'s reason: a short

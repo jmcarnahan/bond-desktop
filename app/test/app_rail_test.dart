@@ -2040,6 +2040,7 @@ void main() {
       bool calendarShown = true,
       bool todayShown = true,
       List<CalendarEvent> todayMeetings = const [],
+      Map<String, String> todayGlances = const {},
       int invitesCount = 0,
       List<(CalendarDate, DaySummary)> dayRows = const [],
       CalendarDate? selectedDay,
@@ -2064,6 +2065,7 @@ void main() {
         calendarShown: calendarShown,
         todayShown: todayShown,
         todayMeetings: todayMeetings,
+        todayGlances: todayGlances,
         calendarZone: CalendarZone.tryNamed('America/Los_Angeles')!,
         now: now,
         invitesCount: invitesCount,
@@ -2131,6 +2133,29 @@ void main() {
       expect(tester.getTopLeft(find.text('NEEDS YOU')).dy, lessThan(todayY));
       expect(
           tester.getTopLeft(find.text('DRAFTS & SENT')).dy, greaterThan(todayY));
+    });
+
+    testWidgets('a glance under a meeting row', (tester) async {
+      await pumpRail(
+        tester,
+        todayMeetings: [
+          meeting('m1', 'Standup with Fabrikam', 17),
+          meeting('m2', 'Design review', 18),
+        ],
+        todayGlances: const {'m1': 'Dana is waiting on the quote.'},
+      );
+
+      final glance = find.byKey(AppRail.todayGlanceKeyFor('m1'));
+      expect(glance, findsOneWidget);
+      expect(tester.widget<Text>(glance).data, 'Dana is waiting on the quote.');
+      expect(tester.widget<Text>(glance).maxLines, 2);
+      expect(find.byKey(AppRail.todayGlanceKeyFor('m2')), findsNothing);
+      // Under its own row, above the next one.
+      final y = tester.getTopLeft(glance).dy;
+      expect(tester.getTopLeft(find.text('10:00 AM · Standup with Fabrikam')).dy,
+          lessThan(y));
+      expect(tester.getTopLeft(find.text('11:00 AM · Design review')).dy,
+          greaterThan(y));
     });
 
     testWidgets('the countdown shows inside the hour', (tester) async {

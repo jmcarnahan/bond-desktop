@@ -512,6 +512,11 @@ class AppRail extends StatefulWidget {
   /// What is still ahead today, at most three (`remainingToday`).
   final List<CalendarEvent> todayMeetings;
 
+  /// Brief glances by event id, each drawn under its Today meeting row so
+  /// the morning look at the rail already says where each meeting stands.
+  /// Model output, so plain text.
+  final Map<String, String> todayGlances;
+
   /// The display zone the Today rows' times are read in. Null draws no
   /// meeting rows: a time printed in the wrong zone is worse than none.
   final CalendarZone? calendarZone;
@@ -599,6 +604,7 @@ class AppRail extends StatefulWidget {
     this.calendarShown = false,
     this.todayShown = false,
     this.todayMeetings = const [],
+    this.todayGlances = const {},
     this.calendarZone,
     this.now,
     this.invitesCount = 0,
@@ -615,6 +621,10 @@ class AppRail extends StatefulWidget {
 
   /// Fixed: the rail is a landmark, not a resizable pane.
   static const double width = 260;
+
+  /// The key of a Today meeting's brief glance.
+  static Key todayGlanceKeyFor(String eventId) =>
+      ValueKey('today-glance-$eventId');
 
   @override
   State<AppRail> createState() => _AppRailState();
@@ -1027,7 +1037,7 @@ class _AppRailState extends State<AppRail> {
     final rows = <Widget>[
       if (zone != null)
         for (final e in widget.todayMeetings.take(3))
-          if (e.startUtc != null)
+          if (e.startUtc != null) ...[
             _calendarRow(
               label: '${formatEventTime(zone, e.startUtc!)} · '
                   '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}',
@@ -1043,6 +1053,9 @@ class _AppRailState extends State<AppRail> {
                 ),
               ),
             ),
+            if ((widget.todayGlances[e.id] ?? '').isNotEmpty)
+              _todayGlance(e.id, widget.todayGlances[e.id]!),
+          ],
       if (widget.invitesCount > 0)
         _calendarRow(
           label: 'Invites · ${widget.invitesCount}',
@@ -1055,6 +1068,26 @@ class _AppRailState extends State<AppRail> {
       label: 'Today',
       rows: rows,
       placeholder: 'Nothing else today',
+    );
+  }
+
+  /// A brief's glance under its Today meeting row, indented to the row's
+  /// label, in the placeholder's muted ink.
+  Widget _todayGlance(String id, String glance) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s12 + BondSpacing.s8,
+        0,
+        BondSpacing.s12 + BondSpacing.s8,
+        BondSpacing.s4,
+      ),
+      child: Text(
+        glance,
+        key: AppRail.todayGlanceKeyFor(id),
+        style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
   }
 

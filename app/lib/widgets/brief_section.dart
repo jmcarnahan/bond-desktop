@@ -11,8 +11,15 @@ import 'time_format.dart';
 /// Prop-only. The host reads [view] through `eventBriefProvider` and passes
 /// `now`, so a test pins both. Every string in a brief is model output over
 /// other people's mail, so it is plain [Text]: nothing in it is a link, and
-/// the only things that open anything are the thread chips, which open a
-/// thread this app stored, by its key.
+/// the only things that open anything are the chips: a thread chip opens a
+/// thread this app stored, by its key, and a material chip opens a file this
+/// app stored, by its ids ([onOpenMaterial]).
+///
+/// [compact] is the agenda's face, drawn under a meeting row whose glance
+/// already shows the headline: ONLY a ready brief's body — points,
+/// Materials, Questions, Open asks, Prep and one Regenerate — with no
+/// heading, headline, footer or status sentence, and nothing at all in any
+/// other state (the event panel is where those say why).
 ///
 /// The states, in the order they win:
 /// 0. declined or cancelled ([eligible] false with that reason) — even over
@@ -35,6 +42,9 @@ class BriefSection extends StatelessWidget {
     required this.onRegenerate,
     this.eligible,
     this.ineligibleReason,
+    this.onOpenMaterial,
+    this.compact = false,
+    this.padding = EdgeInsets.zero,
   });
 
   static const Key headlineKey = ValueKey('brief-headline');
@@ -44,6 +54,9 @@ class BriefSection extends StatelessWidget {
   static Key askKeyFor(int i) => ValueKey('brief-ask-$i');
   static Key pointThreadKeyFor(int i) => ValueKey('brief-point-thread-$i');
   static Key askThreadKeyFor(int i) => ValueKey('brief-ask-thread-$i');
+  static Key materialKeyFor(int i) => ValueKey('brief-material-$i');
+  static Key materialTextKeyFor(int i) => ValueKey('brief-material-text-$i');
+  static Key questionKeyFor(int i) => ValueKey('brief-question-$i');
 
   static const String writingText = 'Writing the brief…';
   static const String rewritingText = 'Rewriting…';
@@ -78,13 +91,58 @@ class BriefSection extends StatelessWidget {
   final void Function(String source, String conversationKey) onOpenThread;
   final VoidCallback onRegenerate;
 
+  /// Opens one of the brief's files. Null draws the file names as plain
+  /// text.
+  final void Function(BriefMaterialRef ref)? onOpenMaterial;
+
+  /// The agenda's face; see the class comment.
+  final bool compact;
+
+  /// Around the whole section when it draws anything. The agenda indents the
+  /// compact body under its row's subject column; the panel needs none.
+  final EdgeInsets padding;
+
   static final TextStyle _muted =
       BondType.small.copyWith(color: BondColors.inkMuted);
 
   @override
   Widget build(BuildContext context) {
+    final drawn = compact ? _compact() : _panel();
+    if (drawn == null) return const SizedBox.shrink();
+    return padding == EdgeInsets.zero
+        ? drawn
+        : Padding(padding: padding, child: drawn);
+  }
+
+  /// The agenda's face: a ready brief's body, else nothing.
+  Widget? _compact() {
     final v = view;
-    if (v == null) return const SizedBox.shrink();
+    final brief = v?.brief?.brief;
+    if (v == null || brief == null || brief.headline.isEmpty) return null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ..._body(brief),
+        // The panel footer's rule: a rewrite already asked for says so
+        // rather than offering a second press.
+        Align(
+          alignment: Alignment.centerLeft,
+          child: v.queued
+              ? Padding(
+                  padding: const EdgeInsets.only(top: BondSpacing.s4),
+                  child: Text(v.processingOn ? rewritingText : pausedText,
+                      style: BondType.caption
+                          .copyWith(color: BondColors.inkMuted)),
+                )
+              : _regenerate(),
+        ),
+      ],
+    );
+  }
+
+  Widget? _panel() {
+    final v = view;
+    if (v == null) return null;
     // A meeting the owner declined or that was cancelled is not one they are
     // going to: a brief stored before that stops being offered.
     if (eligible == false && _ends.contains(ineligibleReason)) {
@@ -145,6 +203,34 @@ class BriefSection extends StatelessWidget {
           key: headlineKey,
           style: BondType.body.copyWith(fontWeight: FontWeight.w600),
         ),
+        ..._body(brief),
+        const SizedBox(height: BondSpacing.s4),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              age == null ? 'Generated' : 'Generated $age',
+              key: statusKey,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
+            Text(' · ',
+                style: BondType.caption.copyWith(color: BondColors.inkMuted)),
+            // Offered with processing off too: the request waits in the
+            // queue and runs when the switch comes back, like any other.
+            if (v.queued)
+              Text(v.processingOn ? rewritingText : pausedText,
+                  style: BondType.caption.copyWith(color: BondColors.inkMuted))
+            else
+              _regenerate(),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// What both faces draw under the headline, in order: the points, the
+  /// materials, the questions, the open asks and the prep.
+  List<Widget> _body(MeetingBrief brief) => [
         for (var i = 0; i < brief.points.length; i++)
           _line(
             key: pointKeyFor(i),
@@ -152,6 +238,24 @@ class BriefSection extends StatelessWidget {
             thread: brief.threadAt(brief.points[i].thread),
             chipKey: pointThreadKeyFor(i),
           ),
+        if (brief.materials.isNotEmpty) ...[
+          const SizedBox(height: BondSpacing.s8),
+          Text('Materials', style: BondType.label),
+          for (var i = 0; i < brief.materials.length; i++)
+            _material(
+                i, brief.materials[i], brief.materialAt(brief.materials[i].file)),
+        ],
+        if (brief.questions.isNotEmpty) ...[
+          const SizedBox(height: BondSpacing.s8),
+          Text('Questions', style: BondType.label),
+          for (var i = 0; i < brief.questions.length; i++)
+            Padding(
+              key: questionKeyFor(i),
+              padding: const EdgeInsets.only(top: BondSpacing.s4),
+              child: Text('${i + 1}. ${brief.questions[i]}',
+                  style: BondType.small),
+            ),
+        ],
         if (brief.openAsks.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s8),
           Text('Open asks', style: BondType.label),
@@ -174,25 +278,46 @@ class BriefSection extends StatelessWidget {
               child: Text('• $p', style: BondType.small),
             ),
         ],
-        const SizedBox(height: BondSpacing.s4),
-        Wrap(
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Text(
-              age == null ? 'Generated' : 'Generated $age',
-              key: statusKey,
-              style: BondType.caption.copyWith(color: BondColors.inkMuted),
-            ),
-            Text(' · ',
-                style: BondType.caption.copyWith(color: BondColors.inkMuted)),
-            // Offered with processing off too: the request waits in the
-            // queue and runs when the switch comes back, like any other.
-            if (v.queued)
-              Text(v.processingOn ? rewritingText : pausedText,
-                  style: BondType.caption.copyWith(color: BondColors.inkMuted))
-            else
-              _regenerate(),
-          ],
+      ];
+
+  /// One material: the file's chip when the brief still holds its ref, then
+  /// what the file says. A takeaway whose ref is missing (a row from an
+  /// older build) is drawn alone rather than dropped. The chip's label is the
+  /// file name as stored with the brief — the sender's text, so plain.
+  Widget _material(int i, BriefMaterialOut m, BriefMaterialRef? ref) {
+    final open = onOpenMaterial;
+    final name = ref == null || ref.name.isEmpty ? '(no name)' : ref.name;
+    final label = Text(
+      name,
+      style: BondType.caption.copyWith(
+        fontWeight: FontWeight.w600,
+        color: open == null ? BondColors.inkSecondary : BondColors.primary,
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (ref != null)
+          Padding(
+            padding: const EdgeInsets.only(top: BondSpacing.s4),
+            child: open == null
+                ? label
+                : Tooltip(
+                    message: 'Open the file',
+                    child: InkWell(
+                      key: materialKeyFor(i),
+                      onTap: () => open(ref),
+                      borderRadius: BondRadii.smAll,
+                      child: label,
+                    ),
+                  ),
+          ),
+        Padding(
+          key: materialTextKeyFor(i),
+          padding: const EdgeInsets.only(top: BondSpacing.s4),
+          child: Text(m.takeaway, style: BondType.small),
         ),
       ],
     );

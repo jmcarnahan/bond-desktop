@@ -4,6 +4,7 @@ import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
@@ -133,6 +134,7 @@ void main() {
   }
 
   const answer = {
+    'evidence': 'A renewal call; Dana is waiting on the quote.',
     'headline': 'Dana is waiting on the quote.',
     'points': [
       {'text': 'The quote is owed.', 'thread': 1},
@@ -140,6 +142,8 @@ void main() {
     'open_asks': [
       {'person': 'Dana', 'ask': 'Send the quote', 'thread': 1},
     ],
+    'materials': [],
+    'questions': ['Is the price final?'],
     'prep': ['Have the quote ready'],
   };
 
@@ -152,7 +156,7 @@ void main() {
 
     expect(llm.schemas, ['meeting_brief']);
     expect(llm.temperatures, [0.2]);
-    expect(llm.budgets['meeting_brief'], 700);
+    expect(llm.budgets['meeting_brief'], 900);
     final row = (await calendar.brief('evt-1'))!;
     expect(row.status, EventBrief.ready);
     expect(row.inputsHash, isNot(startsWith(EventBrief.ineligiblePrefix)));
@@ -163,6 +167,62 @@ void main() {
     expect((ref.source, ref.conversationKey, ref.subject),
         ('email', 'c-1', 'Fabrikam renewal'));
     expect(stored, 1);
+  });
+
+  test('the stored brief carries its material refs and the activity counts '
+      'them', () async {
+    await seedEvent();
+    await seedThread();
+    await store.upsertAttachments('email', 'm-1', [
+      {
+        'attachment_id': 'a-quote',
+        'ordinal': 0,
+        'kind': 'file',
+        'name': 'quote.pdf',
+        'content_type': 'application/pdf',
+        'is_inline': 0,
+      },
+    ]);
+    final llm = ScriptedLlm(answers: {
+      'meeting_brief': {
+        ...answer,
+        'materials': [
+          {'file': 1, 'takeaway': 'The quote is attached, unread.'},
+          {'file': 2, 'takeaway': 'There is no second file.'},
+        ],
+      },
+    });
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect(llm.userMessages.single, contains('Materials they sent, numbered:'));
+    final brief = (await calendar.brief('evt-1'))!.brief!;
+    expect(brief.evidence, 'A renewal call; Dana is waiting on the quote.');
+    expect(brief.questions, ['Is the price final?']);
+    expect(brief.materials.single.file, 0,
+        reason: 'the number past the list is dropped');
+    final ref = brief.materialAt(0)!;
+    expect((ref.source, ref.messageId, ref.attachmentId, ref.name),
+        ('email', 'm-1', 'a-quote', 'quote.pdf'));
+
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    final detail =
+        jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
+    expect(detail['materials'], 1);
+    expect(detail['questions'], 1);
+    expect(detail['threads'], 1);
   });
 
   test('an ineligible meeting is skipped with its reason, and no call',

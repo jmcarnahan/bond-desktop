@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/foundation.dart' show debugPrint, immutable;
 import 'package:intl/intl.dart' show DateFormat;
 
 import '../../data/calendar_store.dart';
 import '../../data/message_store.dart';
+import '../../models/attachment_models.dart';
 import '../../models/calendar_models.dart';
 import '../../models/message_models.dart';
 import '../decision/decision_policy.dart';
@@ -14,6 +16,7 @@ import '../decision/needs_you_predicate.dart' show needsYouAt;
 import '../decision/stored_decision.dart';
 import '../attachments/attachment_markers.dart';
 import '../html_text.dart' show stripLinkTargets;
+import '../llm/embeddings_client.dart';
 import '../llm/prompt_guard.dart';
 import 'calendar_zone.dart';
 import 'day_items.dart' show formatEventRange;
@@ -121,6 +124,74 @@ class BriefStoryline {
   });
 }
 
+/// A file one of the meeting's people sent, as the brief task is shown it.
+///
+/// The identity ([source], [messageId], [attachmentId]) is what the handler
+/// stores so the agenda can open the file; the rest is what the model reads.
+/// [name] and [sender] are raw (the task fences them as it lays the list
+/// out); every passage is already inside [wrapUntrusted].
+///
+/// A file whose text has not been read ([textStatus] not `done`) is still a
+/// material: it carries no [digest] and no [passages], and the brief names it
+/// as arrived rather than summarising words nobody has read.
+@immutable
+class BriefMaterial {
+  final String source;
+  final String messageId;
+  final String attachmentId;
+  final String name;
+  final String contentType;
+
+  /// The invite's name for whoever sent it, else the sender's, else the
+  /// address.
+  final String sender;
+
+  /// `yyyy-MM-dd` of the mail that carried it, in the display zone; '' when
+  /// the mail has no readable stamp.
+  final String date;
+
+  /// `attachments.text_status`: `pending`, `done` or `skipped`.
+  final String textStatus;
+
+  /// `attachments.digest_status`, for the inputs hash only.
+  final String digestStatus;
+
+  /// What the digest stage made of it, or null before it has (or when it
+  /// never will).
+  final AttachmentDigest? digest;
+
+  /// The passages nearest the meeting, at most two, each already fenced.
+  final List<String> passages;
+
+  const BriefMaterial({
+    required this.source,
+    required this.messageId,
+    required this.attachmentId,
+    required this.name,
+    this.contentType = '',
+    this.sender = '',
+    this.date = '',
+    this.textStatus = 'pending',
+    this.digestStatus = '',
+    this.digest,
+    this.passages = const [],
+  });
+
+  BriefMaterial withPassages(List<String> passages) => BriefMaterial(
+        source: source,
+        messageId: messageId,
+        attachmentId: attachmentId,
+        name: name,
+        contentType: contentType,
+        sender: sender,
+        date: date,
+        textStatus: textStatus,
+        digestStatus: digestStatus,
+        digest: digest,
+        passages: passages,
+      );
+}
+
 /// Everything the brief task is shown about one meeting, gathered without a
 /// model call.
 ///
@@ -161,8 +232,8 @@ class BriefInput {
   final List<BriefThread> waitingOn;
   final List<BriefStoryline> storylines;
 
-  /// Attachment names from the attendees' messages in [threads]. Raw.
-  final List<String> files;
+  /// The files the attendees sent on [threads], newest first.
+  final List<BriefMaterial> materials;
 
   /// "Last met 3 days ago", or null when the mirror holds no earlier meeting
   /// with any of them.
@@ -183,7 +254,7 @@ class BriefInput {
     this.openAsks = const [],
     this.waitingOn = const [],
     this.storylines = const [],
-    this.files = const [],
+    this.materials = const [],
     this.lastMet,
     this.invitePreview,
     required this.inputsHash,
@@ -373,8 +444,11 @@ BriefIneligibility? briefQuickCheck(
 }
 
 /// Collects what a pre-meeting brief is written from. Deterministic and
-/// model-free: store reads only, so the planner can afford to run it for
-/// every meeting in the window just to learn whether anything changed.
+/// model-free: with `passages: false` it is store reads only, so the planner
+/// can afford to run it for every meeting in the window just to learn
+/// whether anything changed. The handler's gather (the default) also embeds
+/// the meeting once to find the materials' passages — never hashed, so both
+/// gathers hash alike.
 ///
 /// Always handed the OCCURRENCE to brief. A series master carries the
 /// series' first meeting's times; the planner targets occurrence ids (the
@@ -386,25 +460,46 @@ BriefIneligibility? briefQuickCheck(
 /// `teams:<id>`, not addresses, so no chat is ever matched; mapping them
 /// through the people directory is a follow-up. `participants_json` also
 /// holds at most eight people per conversation, so an attendee beyond the
-/// eighth in a busy thread is not matched by that thread.
+/// eighth in a busy thread is not matched by that thread. The meeting's own
+/// invite mails (`messagesForEvent`) are read first whoever sent them, so a
+/// meeting whose only mail is its invite is still briefed.
+///
+/// With [embeddings] given, the materials carry the passages of their text
+/// nearest the meeting; without it (tests, or no embedding server wired)
+/// they carry the digest only. That one step makes a network call, only when
+/// `gather` is asked for passages, and it can never fail the brief.
 class BriefGatherer {
   BriefGatherer(
     this._store,
     this._calendar, {
     required this._ownerAddress,
     required this._zone,
+    this._embeddings,
   });
 
   final MessageStore _store;
   final CalendarStore _calendar;
   final Future<String?> Function() _ownerAddress;
   final CalendarZone Function() _zone;
+  final EmbeddingsClient? _embeddings;
 
   static const int maxThreads = 6;
   static const int maxAsks = 4;
   static const int maxWaiting = 3;
   static const int maxStorylines = 2;
-  static const int maxFiles = 8;
+  static const int maxMaterials = 6;
+
+  /// How many of the six threads the meeting's own invite threads may take:
+  /// a long weekly series has an invite thread per update, and must not push
+  /// out the ranked mail with the people.
+  static const int maxInviteThreads = 3;
+
+  /// How many nearest passages are asked for PER material, and how many of
+  /// them it keeps. One search per file, so a long deck cannot fill the
+  /// shortlist and starve the others.
+  static const int passageLimit = 4;
+  static const int passagesPerMaterial = 2;
+  static const int passageCap = 350;
 
   /// How many conversations are read to rank. Each costs a thread read, and
   /// twenty is more mail with a meeting's people in a month than six slots
@@ -435,9 +530,12 @@ class BriefGatherer {
     }
   }
 
+  /// [passages] false skips the one network call (the planner's gathers,
+  /// which only need the hash); the inputs hash is the same either way.
   Future<BriefGather> gather(
     CalendarEvent event, {
     required DateTime now,
+    bool passages = true,
   }) async {
     final owner = await this.owner();
     // Unknown, the owner's own attendee row counts as somebody else, and a
@@ -456,12 +554,26 @@ class BriefGatherer {
         if (p.name.isNotEmpty) p.address: p.name,
     };
 
+    // The meeting's own mails — the invite, its updates, and for an
+    // occurrence the series' — whoever sent them and however long ago. They
+    // are the likeliest place for the deck sent ahead, and the organiser's
+    // assistant who sent the invite matches no attendee's address.
+    final inviteKeys = <(String, String)>[];
+    for (final id in [
+      event.id,
+      if (event.seriesMasterId.isNotEmpty) event.seriesMasterId,
+    ]) {
+      for (final r in await _calendar.messagesForEvent(id)) {
+        final key = (r.source, r.conversationKey);
+        if (!inviteKeys.contains(key)) inviteKeys.add(key);
+      }
+    }
+
     final conversations = await _store.conversationsWithAddresses(
       addresses,
       sinceIso: MessageStore.isoStamp(nowUtc.subtract(briefMailWindow)),
       limit: candidateLimit,
     );
-    if (conversations.isEmpty) return const BriefIneligible(BriefIneligibility.noMail);
 
     // One read per candidate: its messages, and the decision on its newest
     // inbound message, which is what the ranking turns on.
@@ -472,12 +584,29 @@ class BriefGatherer {
       return decisions[key] = await _store.decisionFor(m.source, m.id);
     }
 
-    final candidates = <_Candidate>[];
-    for (final c in conversations) {
+    Future<_Candidate> candidateOf(Conversation c) async {
       final messages = await _store.loadThread(c.id, sources: [c.source]);
       final latestIn = messages.lastWhereOrNull((m) => !m.outbound);
       final decision = latestIn == null ? null : await decisionOf(latestIn);
-      candidates.add(_Candidate(c, messages, _pressing(decision)));
+      return _Candidate(c, messages, _pressing(decision));
+    }
+
+    final invites = <_Candidate>[];
+    for (final (source, key) in inviteKeys) {
+      final row = await _store.getConversationRow(source, key);
+      if (row == null) continue;
+      invites.add(await candidateOf(Conversation.fromRow(row)));
+    }
+    // An invite thread alone is mail about this meeting: the rule is "no
+    // threads at all", not "no address match".
+    if (invites.isEmpty && conversations.isEmpty) {
+      return const BriefIneligible(BriefIneligibility.noMail);
+    }
+
+    final candidates = <_Candidate>[];
+    for (final c in conversations) {
+      if (inviteKeys.contains((c.source, c.id))) continue;
+      candidates.add(await candidateOf(c));
     }
     // Urgent or important first, then the most recently active; the
     // conversation key breaks a tie so the same mail always ranks one way.
@@ -487,7 +616,11 @@ class BriefGatherer {
           (b.c.lastMessageAt ?? '').compareTo(a.c.lastMessageAt ?? '');
       return byTime != 0 ? byTime : a.c.id.compareTo(b.c.id);
     });
-    final chosen = candidates.take(maxThreads).toList();
+    // The invite threads lead, newest first as the store returns them, and
+    // count toward the six.
+    final chosen = [...invites.take(maxInviteThreads), ...candidates]
+        .take(maxThreads)
+        .toList();
 
     final threads = [
       for (final k in chosen)
@@ -571,23 +704,8 @@ class BriefGatherer {
       }
     }
 
-    // The files the attendees sent — never the owner's own, and never an
-    // inline logo, a quoted message or a card, which are not documents.
-    final files = <String>[];
-    final seenFiles = <String>{};
-    for (final k in chosen) {
-      for (final m in k.messages) {
-        if (m.outbound) continue;
-        for (final a in m.attachments) {
-          final name = (a.name ?? '').trim();
-          if (name.isEmpty || a.isInline) continue;
-          if (a.kind == 'message_reference' || a.kind == 'card') continue;
-          if (files.length < maxFiles && seenFiles.add(name.toLowerCase())) {
-            files.add(name);
-          }
-        }
-      }
-    }
+    final found = _materialsOf(chosen, nameOf, zone);
+    final materials = passages ? await _withPassages(event, found) : found;
 
     final today = zone.dateOf(nowUtc);
     final met = await _calendar.lastMetWith(addresses, nowUtc: nowUtc);
@@ -599,7 +717,7 @@ class BriefGatherer {
       threads: threads,
       asks: asks,
       storylines: storylines,
-      files: files,
+      materials: materials,
     );
 
     return BriefEligible(BriefInput(
@@ -614,7 +732,7 @@ class BriefGatherer {
       openAsks: asks,
       waitingOn: waitingOn,
       storylines: storylines,
-      files: files,
+      materials: materials,
       lastMet: met == null ? null : lastMetLabel(met, zone: zone, today: today),
       invitePreview: preview.isEmpty
           ? null
@@ -646,6 +764,137 @@ class BriefGatherer {
     return intent != null && askIntents.contains(intent) ? intent : null;
   }
 
+  /// The files the people in [chosen] sent, newest mail first, at most
+  /// [maxMaterials]: documents only — never the owner's own, never an inline
+  /// logo, a picture, a quoted message or a card. A file not read yet is
+  /// still listed, so the brief can say it arrived. One material per file
+  /// NAME (case-insensitive), the newest copy: the same deck re-attached on
+  /// every reply is one thing to read, not six.
+  static List<BriefMaterial> _materialsOf(
+    List<_Candidate> chosen,
+    Map<String, String> nameOf,
+    CalendarZone zone,
+  ) {
+    final inbound = [
+      for (final k in chosen)
+        for (final m in k.messages)
+          if (!m.outbound && m.attachments.isNotEmpty) m,
+    ]..sort((a, b) {
+        final byTime = (b.receivedAt ?? '').compareTo(a.receivedAt ?? '');
+        return byTime != 0 ? byTime : a.id.compareTo(b.id);
+      });
+    final out = <BriefMaterial>[];
+    final seen = <String>{};
+    for (final m in inbound) {
+      for (final a in m.attachments) {
+        if (out.length >= maxMaterials) return out;
+        final name = (a.name ?? '').trim();
+        if (name.isEmpty || a.isInline) continue;
+        if (a.kind != 'file' && a.kind != 'reference') continue;
+        if ((a.contentType ?? '').toLowerCase().startsWith('image/')) continue;
+        if (!seen.add(name.toLowerCase())) continue;
+        out.add(BriefMaterial(
+          source: m.source,
+          messageId: m.id,
+          attachmentId: a.attachmentId,
+          name: name,
+          contentType: a.contentType ?? '',
+          sender: _who(m, nameOf),
+          date: _dayOf(m.receivedAt, zone),
+          textStatus: a.textStatus,
+          digestStatus: a.digestStatus,
+          digest: a.digest,
+        ));
+      }
+    }
+    return out;
+  }
+
+  /// `yyyy-MM-dd` of [iso] in [zone] — the day the owner saw the mail
+  /// arrive, not the UTC day. '' for an empty or unreadable stamp.
+  static String _dayOf(String? iso, CalendarZone zone) {
+    final at = DateTime.tryParse(iso ?? '');
+    if (at == null) return '';
+    final d = zone.dateOf(at.toUtc());
+    return DateFormat('yyyy-MM-dd').format(DateTime(d.year, d.month, d.day));
+  }
+
+  /// [materials] with the passages of their text nearest the meeting: the
+  /// subject and the invite's preview embedded as a document — the
+  /// retriever's rule, since chunks are documents too — and searched only
+  /// among these files' chunks, never the mailbox. The digest chunk comes out
+  /// (it is a model's summary, already shown as the digest), and no file
+  /// keeps more than [passagesPerMaterial] of its [passageLimit] nearest.
+  ///
+  /// Every failure — no embedding client, no server, no index, a store
+  /// error — returns [materials] as they were. Passages make a brief better;
+  /// they are never a reason for there to be none.
+  Future<List<BriefMaterial>> _withPassages(
+    CalendarEvent event,
+    List<BriefMaterial> materials,
+  ) async {
+    final embeddings = _embeddings;
+    if (embeddings == null || materials.isEmpty) return materials;
+    try {
+      Uint8List? query;
+      var asked = false;
+      final out = <BriefMaterial>[];
+      for (final m in materials) {
+        // The attachment id alone scopes the read: the message's id would
+        // widen it (an OR) to every other file on that message.
+        if (!await _store.hasAttachmentChunks(m.source,
+            attachmentIds: [m.attachmentId])) {
+          out.add(m);
+          continue;
+        }
+        // Embedded once, on the first file that has passages at all.
+        if (!asked) {
+          asked = true;
+          final vector = (await embeddings.embedResult(
+            '${event.subject}\n${event.bodyPreview}',
+            prefix: EmbeddingsClient.documentPrefix,
+          ))
+              .vector;
+          query = vector == null ? null : encodeEmbedding(vector);
+        }
+        final q = query;
+        // No vector — the server is down or refused the text — means no
+        // passages for ANY file: the same answer for the rest, so stop here
+        // rather than ask the index a question with nothing to compare.
+        if (q == null) return materials;
+        // One search per file, so a long deck cannot fill the shortlist and
+        // leave the others none.
+        final hits = await _store.chunkKnn(
+          q,
+          embedModel: EmbeddingsClient.documentModelTag,
+          source: m.source,
+          attachmentIds: [m.attachmentId],
+          limit: passageLimit,
+        );
+        final kept = <String>[];
+        for (final hit in hits ?? const <AttachmentChunkHit>[]) {
+          if (kept.length >= passagesPerMaterial) break;
+          if (hit.locator == 'digest') continue;
+          // An attachment id is not unique across messages, so the hit must
+          // be THIS file, message and all.
+          if (hit.ref.messageId != m.messageId ||
+              hit.ref.attachmentId != m.attachmentId) {
+            continue;
+          }
+          kept.add(wrapUntrusted(
+            'passage',
+            _cap('[${hit.locator}] ${hit.text}', passageCap),
+          ));
+        }
+        out.add(kept.isEmpty ? m : m.withPassages(kept));
+      }
+      return out;
+    } on Object catch (e) {
+      debugPrint('BriefGatherer: no passages (${e.runtimeType})');
+      return materials;
+    }
+  }
+
   static String _who(Message m, Map<String, String> nameOf) {
     if (m.outbound) return 'You';
     final from = (m.fromAddress ?? '').trim().toLowerCase();
@@ -670,17 +919,20 @@ class BriefGatherer {
 
   /// sha256 over every input that could change what the brief says: the
   /// event's version and times, the owner, and the ids and stamps of every
-  /// thread, ask and file. The snippets are not hashed — a thread whose
+  /// thread, ask and material. The snippets are not hashed — a thread whose
   /// newest message changed moved its stamp and its count. A storyline's
   /// text is: a recap is rewritten in place, and neither its id nor any
-  /// stamp moves when it falls back to a rewritten summary.
+  /// stamp moves when it falls back to a rewritten summary. A material's
+  /// text and digest states are, so a deck whose words or digest land after
+  /// the first brief moves the hash; its name is not — a rename says nothing
+  /// new. Passages are not: they follow from the text, which is hashed.
   static String _hash({
     required CalendarEvent event,
     required String? owner,
     required List<BriefThread> threads,
     required List<BriefAsk> asks,
     required List<BriefStoryline> storylines,
-    required List<String> files,
+    required List<BriefMaterial> materials,
   }) {
     final lines = <String>[
       'event|${event.id}|${event.changeKey}',
@@ -692,7 +944,9 @@ class BriefGatherer {
       for (final a in asks) 'ask|${a.messageId}',
       for (final s in storylines)
         'storyline|${s.id}|${sha256.convert(utf8.encode(s.summary))}',
-      for (final f in files) 'file|$f',
+      for (final m in materials)
+        'material|${m.messageId}|${m.attachmentId}|${m.textStatus}|'
+            '${m.digestStatus}',
     ];
     return sha256.convert(utf8.encode(lines.join('\n'))).toString();
   }

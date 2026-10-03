@@ -2097,7 +2097,7 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
 });
 
 /// Bumped after every brief the handler stores and after a Regenerate, so an
-/// open event panel and the Day agenda's teasers re-read `event_briefs`.
+/// open event panel and the Day agenda's glances re-read `event_briefs`.
 final briefRevisionProvider = StateProvider<int>((ref) => 0);
 
 /// Ticks each time the draft lane reports on `meeting_brief` work — after
@@ -2133,6 +2133,9 @@ final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
           return CalendarZone.utc();
         }
       },
+      // The retriever's client: the materials' passages are searched the
+      // way a draft's are.
+      embeddings: ref.watch(embeddingsClientProvider),
     ));
 
 /// The `meeting_brief` handler, on the draft lane. Its client is the stage's

@@ -120,7 +120,11 @@ be gated between those two moments.
 | `over_cap` | the sixth attachment by the connector's own ordinal |
 
 Outbound messages ARE processed: the owner's own documents are usually the
-most quotable thing on a thread.
+most quotable thing on a thread. A meeting invite needs no exemption: the
+triage gates never skip a `meetingRequest` (`gates.dart` gates only the
+responses, and a test pins it), so the deck on an invite is read like any
+other file — unless the invite is gated for an ordinary reason (its sender's
+own rule, a no-reply address, the backlog cutoff, a learned drop).
 
 **A refusal is written on the row at enqueue time.** All three enqueue sites —
 the mail detail fetch, the chat insert loop, and Restore — call
@@ -1026,6 +1030,24 @@ date, text, and the `AttachmentRef` behind them.
 
 Where the excerpts land, what the payload carries and how provenance is
 recorded is in `07-replies.md`.
+
+**…and into briefs.** A pre-meeting brief reads the same text without the
+retriever class (`BriefGatherer._withPassages`,
+`app/lib/services/calendar/brief_gatherer.dart`): each file the meeting's
+people sent (up to 6) brings its digest from `attachments.digest_json`, and,
+when `hasAttachmentChunks` says its attachment id holds passages, the 4
+chunks nearest the meeting's subject and invite preview — embedded once per
+gather under `documentPrefix`, the same document-against-documents rule —
+from one KNN per file scoped by its attachment id inside the index query
+(so a long deck cannot starve the others), with the digest chunk dropped,
+each hit matched to its file by message AND attachment id, and at most 2 per
+file, each capped at 350. Only the handler's gather does this; the planner
+gathers with `passages: false` and makes no embedding call. In the brief's
+user message the digests and passages share a 3000-character budget filled
+in material order; past it a file is named and dated only, marked `(not
+shown)`. A file not read yet is marked `(unread)` with nothing else. As
+here, any failure costs the passages and never the brief.
+`14-calendar.md` "Briefs" has the rest.
 
 ## Recap lines
 

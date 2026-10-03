@@ -9,6 +9,8 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
     show
         Attendee,
+        BriefMaterialOut,
+        BriefMaterialRef,
         BriefPoint,
         BriefThreadRef,
         CalendarDate,
@@ -51,6 +53,8 @@ import 'package:bond_inbox/widgets/find_field.dart' show FindField, askDayLabel;
 import 'package:bond_inbox/widgets/meeting_card.dart' show MeetingCard;
 import 'package:bond_inbox/widgets/person_meeting_line.dart'
     show PersonMeetingLine;
+import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart'
+    show AttachmentPreviewPanel;
 import 'package:bond_inbox/widgets/side_panel.dart' show SidePanelHost;
 import 'package:bond_inbox/widgets/write_confirm_strip.dart'
     show WriteConfirmStrip;
@@ -837,6 +841,126 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+
+    /// A meeting under way now (on today's pane at any hour, and still ahead
+    /// for the Today section), with a ready brief that names two files: one
+    /// stored on the invite's mail, one the store no longer holds.
+    Future<void> seedBriefWithMaterials() async {
+      await seedMeetingAndInvite();
+      await store.upsertAttachments('email', 'inv-m1', [
+        {
+          'attachment_id': 'att-deck',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Planning deck.pdf',
+          'content_type': 'application/pdf',
+          'size': 120 * 1024,
+        },
+      ]);
+      final start =
+          DateTime.now().toUtc().subtract(const Duration(minutes: 10));
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-brief',
+          subject: 'Fabrikam sync',
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 2)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          attendees: const [
+            Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+          ],
+        ),
+      ], syncRun: 'run-2');
+      const brief = MeetingBrief(
+        headline: 'Dana is waiting on the plan; the deck arrived.',
+        points: [BriefPoint(text: 'The planning invite is open.', thread: 0)],
+        materials: [
+          BriefMaterialOut(file: 0, takeaway: 'The deck proposes two phases.'),
+          BriefMaterialOut(file: 1, takeaway: 'The old sheet had the dates.'),
+        ],
+        questions: ['Which phase starts first?'],
+        threads: [
+          BriefThreadRef(
+            source: 'email',
+            conversationKey: 'c-inv',
+            subject: invite,
+          ),
+        ],
+        materialRefs: [
+          BriefMaterialRef(
+            source: 'email',
+            messageId: 'inv-m1',
+            attachmentId: 'att-deck',
+            name: 'Planning deck.pdf',
+          ),
+          BriefMaterialRef(
+            source: 'email',
+            messageId: 'inv-m1',
+            attachmentId: 'att-gone',
+            name: 'Old dates.xlsx',
+          ),
+        ],
+      );
+      await CalendarStore(db).putBrief(
+        eventId: 'evt-brief',
+        inputsHash: 'h',
+        status: EventBrief.ready,
+        briefJson: jsonEncode(brief.toJson()),
+        generatedAt: calendarStamp(DateTime.now()),
+      );
+    }
+
+    testWidgets('the agenda opens a brief inline and a material chip opens '
+        'the file panel', (tester) async {
+      await seedBriefWithMaterials();
+      await pumpScreen(tester);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('evt-brief')), findsOneWidget);
+      expect(find.text('1. Which phase starts first?'), findsNothing,
+          reason: 'closed until asked');
+
+      await tester.tap(find.byKey(DayPane.briefToggleKeyFor('evt-brief')));
+      await pumps(tester);
+      expect(find.text('1. Which phase starts first?'), findsOneWidget);
+      expect(find.text('The deck proposes two phases.'), findsOneWidget);
+      expect(find.byType(SidePanelHost), findsNothing,
+          reason: 'the toggle opens the brief, not the event');
+
+      // A file the store no longer holds says so and opens nothing.
+      await tester.tap(find.byKey(BriefSection.materialKeyFor(1)));
+      await pumps(tester);
+      expect(find.text('That file is no longer here.'), findsOneWidget);
+      expect(find.byType(SidePanelHost), findsNothing);
+
+      await tester.tap(find.byKey(BriefSection.materialKeyFor(0)));
+      await pumps(tester);
+      expect(
+        find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(AttachmentPreviewPanel),
+        ),
+        findsOneWidget,
+      );
+
+      // Closing it again is the same toggle.
+      await tester.tap(find.byKey(DayPane.briefToggleKeyFor('evt-brief')));
+      await pumps(tester);
+      expect(find.text('1. Which phase starts first?'), findsNothing);
+    });
+
+    testWidgets('the Today section shows the glance', (tester) async {
+      await seedBriefWithMaterials();
+      // Home carries the Today section.
+      await pumpScreen(tester, section: RailSection.home);
+
+      final glance = find.byKey(AppRail.todayGlanceKeyFor('evt-brief'));
+      expect(glance, findsOneWidget);
+      expect(tester.widget<Text>(glance).data,
+          'Dana is waiting on the plan; the deck arrived.');
     });
   });
 

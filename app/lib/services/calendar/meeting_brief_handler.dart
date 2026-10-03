@@ -142,7 +142,10 @@ class MeetingBriefHandler extends WorkHandler {
     try {
       final brief = await runTask(
         _client(),
-        MeetingBriefTask(threadCount: input.threads.length),
+        MeetingBriefTask(
+          threadCount: input.threads.length,
+          materialCount: input.materials.length,
+        ),
         input,
         temperature: MeetingBriefTask.temperature,
         maxTokens: MeetingBriefTask.maxTokens,
@@ -160,6 +163,14 @@ class MeetingBriefHandler extends WorkHandler {
             conversationKey: t.conversationKey,
             subject: t.subject,
           ),
+      ]).withMaterials([
+        for (final m in input.materials)
+          BriefMaterialRef(
+            source: m.source,
+            messageId: m.messageId,
+            attachmentId: m.attachmentId,
+            name: m.name,
+          ),
       ]);
       await _calendar.putBrief(
         eventId: id,
@@ -172,6 +183,8 @@ class MeetingBriefHandler extends WorkHandler {
       _log.note({
         'threads': input.threads.length,
         'asks': withThreads.openAsks.length,
+        'materials': input.materials.length,
+        'questions': withThreads.questions.length,
       });
       _stored();
     } on LlmUnavailableException {
@@ -203,7 +216,7 @@ class MeetingBriefHandler extends WorkHandler {
   /// of the window, still has a brief worth reading) with only its stamp
   /// moved. A meeting the owner declined, or one cancelled or gone, is not
   /// one they are going to: the skip replaces its brief, so neither the
-  /// panel nor the Day's teaser goes on offering it.
+  /// panel nor the agenda's glance goes on offering it.
   Future<void> _skip(
     String id,
     BriefIneligibility why,
