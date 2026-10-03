@@ -139,10 +139,6 @@ String _ownWords(String body) {
   return m == null ? body : body.substring(0, m.start);
 }
 
-/// How far back a day may be and still mean its weekday: a message from last
-/// week saying "Thursday" means a Thursday. Older dates are another meeting.
-const int _rollDays = 7;
-
 /// How far outside a meal's hours a time it names may sit and still be
 /// that meal's: "dinner at 4" is a reach, "drinks at midnight" is not drinks
 /// hours at all.
@@ -159,14 +155,14 @@ const int _mealReachMinutes = 120;
 ///   else [now]; whether that day is gone is judged at [now].
 /// - **Day**: the resolver's, read as a question (a bare weekday on its own
 ///   day is today). A week ("next week") is not a day. Only a WEEKDAY
-///   recurs: one at most seven days past (an old message's "Thursday")
-///   rolls forward to its next occurrence — today, when it is today's
-///   weekday — because the ask may be days old and the weekday is what the
-///   person meant; an older one is dropped. A relative day ("tomorrow" in
-///   Monday's message, read on Wednesday) or a date ("Oct 2", read on Oct 5)
-///   that has gone is dropped: each named one day, not a weekday — the
-///   same rule as "too late" below. "yesterday" is no day (the resolver
-///   does not read it).
+///   recurs: one that has gone (an old message's "Thursday", however old
+///   the message — the ask is still open) rolls forward to its NEXT
+///   occurrence — today, when it is today's weekday — because the weekday
+///   is what the person meant and the next one is the nearest answer. A
+///   relative day ("tomorrow" in Monday's message, read on Wednesday) or a
+///   date ("Oct 2", read on Oct 5) that has gone is dropped: each named one
+///   day, not a weekday — the same rule as "too late" below. "yesterday" is
+///   no day (the resolver does not read it).
 /// - **Hours**, most specific first: an explicit clock time (two hours from
 ///   it, or the range it names), else a meal or social word (the earliest
 ///   in the text: breakfast, coffee, lunch, dinner, drinks or happy hour),
@@ -205,7 +201,7 @@ AskHints readAskHints({
 
   CalendarDate? day = w.rangeEnd == null ? w.day : null;
   if (day != null && day.isBefore(today)) {
-    if (!weekday || day.isBefore(today.addDays(-_rollDays))) {
+    if (!weekday) {
       day = null;
     } else {
       final delta = (day.weekday - today.weekday + 7) % 7;

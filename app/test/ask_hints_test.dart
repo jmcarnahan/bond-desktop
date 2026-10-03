@@ -168,8 +168,23 @@ void main() {
     expect(h.hours?.startHour, 17);
   });
 
-  test('a day long past is dropped, not rolled', () {
+  test('a date long past is dropped, not rolled', () {
     expect(read('Dinner Jan 5?').day, isNull);
+  });
+
+  test('a weekday in a month-old ask still open rolls to its next '
+      'occurrence, not dropped', () {
+    // Sent Monday Aug 31 (late evening in LA): "friday" was Sep 4. Read on
+    // Saturday Oct 3 the ask is still open, and the nearest Friday is the
+    // answer: Oct 9 — not "no day" (the owner's live case, 2026-10-03).
+    final h = readAskHints(
+        subject: 'dinner on friday',
+        body: 'want to get dinner on friday',
+        now: DateTime.utc(2026, 10, 3, 16, 40),
+        sentAt: DateTime.utc(2026, 9, 1, 2, 34),
+        zone: la);
+    expect(h.day, const CalendarDate(2026, 10, 9));
+    expect(h.said, 'Asked for: Fri Oct 9 · dinner');
   });
 
   test('yesterday is no day', () {

@@ -1669,10 +1669,12 @@ the row's next open; one read in flight, which every caller awaits) into `AskHin
 - **The day** is `resolveWhen(…, mode: question)`'s, its relative words
   read against the message's own time when the host passes it
   (`readAskHints(sentAt:)`), else now; whether it has gone is judged at now.
-  A week ("next week") is not a day. Only a weekday recurs: one at most
-  seven days past (an old message's "Thursday") rolls to its next
-  occurrence — today when it is today's weekday — because the ask may be
-  days old; an older one is dropped. A relative day ("tomorrow" in Monday's
+  A week ("next week") is not a day. Only a weekday recurs: one that has
+  gone (an old message's "Thursday", however old the message — the ask is
+  still open) rolls to its NEXT occurrence — today when it is today's
+  weekday — because the weekday is what they meant and the nearest one is
+  the answer (a month-old "dinner on friday" opened on a Saturday is the
+  coming Friday). A relative day ("tomorrow" in Monday's
   message read on Wednesday) or a date ("Oct 2" read on Oct 5) that has
   gone is dropped: each named one day (`WhenResolution.dayMention`; the
   hours stay). "yesterday" is no day. The same rule for a day that is today
