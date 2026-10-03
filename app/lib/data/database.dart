@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 26;
+  int get schemaVersion => 27;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -864,6 +864,27 @@ WHERE needs_you_p IS NULL''');
                 if (!await _tableExists('ask_readings')) {
                   await m.createTable(schema.askReadings);
                 }
+              },
+              // v27 — reminders carried by Microsoft To Do (the
+              // calendar-automation round's Phase 5). One KEPT table,
+              // `reminders`: each row points at a task in the owner's To Do,
+              // so Clear AI results keeps it and only `wipeAll` deletes it.
+              //
+              // Nothing to backfill: a reminder exists only once the owner
+              // (or the deadline planner) sets one. Indexes as IF NOT EXISTS
+              // statements, the v25 rule.
+              from26To27: (m, schema) async {
+                if (!await _tableExists('reminders')) {
+                  await m.createTable(schema.reminders);
+                }
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_reminders_thread '
+                  'ON reminders(source, conversation_key, status)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_reminders_at '
+                  'ON reminders(status, remind_at)',
+                );
               },
             ),
           ),

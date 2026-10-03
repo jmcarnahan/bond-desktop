@@ -482,7 +482,12 @@ backend maps `read_email`'s `meeting_message_type` onto the same key and adds
 `calendarEventId`, stored as `event_id` — the link from a message to its
 calendar event ([14-calendar.md](14-calendar.md)). It also maps `is_auto_reply`
 to `isAutoReply`, stored as `auto_reply: true` only when true and read by
-`Message.isAutoReply`; nothing gates on it yet.
+`Message.isAutoReply`; nothing gates on it, and a follow-up reminder's
+reconcile reads it so an out-of-office does not count as the reply
+([15-reminders.md](15-reminders.md)). And it maps `web_link` (Graph's
+Outlook-on-the-web link to the message) to `webLink`, stored as `web_link`
+only when non-empty and read by `Message.webLink` (http(s) only): the link a
+To Do reminder carries back to the mail. The SDK detail asks for none.
 
 Two one-shots repair what earlier builds stored, and neither stamps
 `messages.updated_at`, so the keyword index keeps the old text until a

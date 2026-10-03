@@ -202,6 +202,8 @@ class DayGrid extends StatefulWidget {
   /// A deadline ([kind] `due`) or return (`back`) tile. The source and the
   /// kind are both in it: a Teams chat and a mail thread can share an id,
   /// and one thread can be due on Tuesday and back on Thursday of one week.
+  /// A reminder's tile (`reminder`) is keyed by the REMINDER's id in place
+  /// of the conversation key, since one thread may carry two.
   static Key markerKeyFor(String source, String conversationKey,
           {required String kind}) =>
       ValueKey('day-grid-marker-$kind-$source-$conversationKey');
@@ -217,7 +219,7 @@ class DayGrid extends StatefulWidget {
   State<DayGrid> createState() => _DayGridState();
 }
 
-enum _TileKind { event, deadline, returning, proposal }
+enum _TileKind { event, deadline, returning, reminder, proposal }
 
 /// One tile's worth of what the grid needs to draw and route it. The
 /// package restores id, interaction and isAllDay after a drag, so
@@ -468,6 +470,11 @@ class _DayGridState extends State<DayGrid> {
             zone.dateOf(atUtc),
             'Back: ${_subject(conversation.subject ?? '')}',
           ),
+        ReminderItem(:final reminder, :final atUtc) => (
+            _TileKind.reminder,
+            zone.dateOf(atUtc),
+            'Reminder · ${_subject(reminder.title)}',
+          ),
         _ => (null, null, ''),
       };
       if (kind == null || date == null) continue;
@@ -520,6 +527,9 @@ class _DayGridState extends State<DayGrid> {
             ReturnItem(:final conversation, :final atUtc) =>
               'r\u0000${conversation.source}\u0000${conversation.id}\u0000'
                   '${atUtc.toIso8601String()}\u0000${conversation.subject}',
+            ReminderItem(:final reminder, :final atUtc) =>
+              'm\u0000${reminder.source}\u0000${reminder.id}\u0000'
+                  '${atUtc.toIso8601String()}\u0000${reminder.title}',
             _ => '',
           },
       ];
@@ -536,6 +546,7 @@ class _DayGridState extends State<DayGrid> {
         widget.onOpenEvent?.call(event.eventId);
       case _TileKind.deadline:
       case _TileKind.returning:
+      case _TileKind.reminder:
         final item = event.item;
         if (item != null) widget.onOpenItem?.call(item);
       case _TileKind.proposal:
@@ -696,6 +707,9 @@ class _DayGridState extends State<DayGrid> {
       case _TileKind.returning:
         fill = BondColors.neutralTint;
         bar = BondColors.inkMuted;
+      case _TileKind.reminder:
+        fill = BondColors.neutralTint;
+        bar = BondColors.primary;
       case _TileKind.event:
         fill = BondColors.primary
             .withValues(alpha: event.tentative ? 0.08 : 0.18);
@@ -809,6 +823,9 @@ class _DayGridState extends State<DayGrid> {
         ReturnItem(:final conversation) => DayGrid.markerKeyFor(
             conversation.source, conversation.id,
             kind: 'back'),
+        ReminderItem(:final reminder) => DayGrid.markerKeyFor(
+            reminder.source, reminder.id,
+            kind: 'reminder'),
         _ => const ValueKey('day-grid-marker'),
       };
 

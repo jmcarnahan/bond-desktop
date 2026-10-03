@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/calendar_models.dart';
 import '../models/message_models.dart';
+import '../models/reminder_models.dart';
 import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
@@ -69,6 +70,7 @@ class DayPane extends StatelessWidget {
     this.briefBody,
     this.commandBar,
     this.planCard,
+    this.reminders = const [],
   });
 
   /// The key of a meeting row's brief glance.
@@ -172,6 +174,11 @@ class DayPane extends StatelessWidget {
   /// What the bar's last Enter produced (`CommandPlanCard`), drawn directly
   /// under the bar and above the list or the grid, where the eye already is.
   final Widget? planCard;
+
+  /// The active To Do reminders (soonest first, as the store answers them);
+  /// the merge places each on the local date of its instant, and its row
+  /// opens its thread through [onOpenConversation].
+  final List<Reminder> reminders;
 
   /// [onOpenEvent] bound to [e], or null when there is nothing to open with.
   VoidCallback? _openEvent(CalendarEvent e) {
@@ -364,6 +371,7 @@ class DayPane extends StatelessWidget {
           conversations: conversations,
           now: t,
           zone: zone,
+          reminders: reminders,
         );
         final hasRows = items.any((i) => i is! NowMarker);
         if (!hasRows) {
@@ -391,6 +399,7 @@ class DayPane extends StatelessWidget {
         AllDayItem(:final event) => _allDayRow(event),
         DeadlineItem() => _deadlineRow(item),
         ReturnItem() => _returnRow(item),
+        ReminderItem() => _reminderRow(item),
         NowMarker() => _nowRow(),
       };
 
@@ -636,6 +645,34 @@ class DayPane extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ],
+      ),
+    );
+  }
+
+  /// The key of a reminder's row, by its id.
+  static Key reminderRowKeyFor(String id) => ValueKey('day-reminder-$id');
+
+  /// A To Do reminder: when it fires, where it lives, and its title — the
+  /// app's own words, so plain text. A tap opens the thread it is about.
+  Widget _reminderRow(ReminderItem item) {
+    final r = item.reminder;
+    return KeyedSubtree(
+      key: reminderRowKeyFor(r.id),
+      child: _row(
+        when: _when(formatEventTime(zone, item.atUtc)),
+        onTap: () => onOpenConversation(r.source, r.conversationKey),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Reminder · in To Do', style: _caption),
+            Text(
+              _subject(r.title),
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
       ),
     );
   }

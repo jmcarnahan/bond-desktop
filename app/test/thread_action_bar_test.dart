@@ -44,6 +44,11 @@ void main() {
     bool inNeedsYou = false,
     bool withNeedsYou = false,
     bool needsYouDecided = true,
+    void Function(DateTime atUtc, String label)? onRemind,
+    List<ReminderPill> remindPills = const [],
+    ReminderPill? Function(String text)? resolveRemindText,
+    String? remindUnavailable,
+    VoidCallback? onOpenConnectionSettings,
   }) async {
     await tester.binding.setSurfaceSize(Size(width, 400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -71,6 +76,11 @@ void main() {
               contextLinked: contextLinked,
               onCompose: fullBar ? () {} : null,
               onFindTime: onFindTime,
+              onRemind: onRemind,
+              remindPills: remindPills,
+              resolveRemindText: resolveRemindText,
+              remindUnavailable: remindUnavailable,
+              onOpenConnectionSettings: onOpenConnectionSettings,
               labels: labels,
               onAddLabel: withAddLabel ? () {} : null,
               onRemoveLabel: (l) => removed.add(l.id),
@@ -81,6 +91,172 @@ void main() {
       ),
     ));
   }
+
+  group('Remind me', () {
+    final tomorrow = ReminderPill(
+      label: 'Tomorrow 9 am',
+      atUtc: DateTime.utc(2026, 9, 30, 16),
+      key: ThreadActionBar.remindPillKeyFor('tomorrow'),
+    );
+    final inTwo = ReminderPill(
+      label: 'In 2 hours',
+      atUtc: DateTime.utc(2026, 9, 29, 18),
+      key: ThreadActionBar.remindPillKeyFor('in-2-hours'),
+    );
+    late List<(DateTime, String)> reminded;
+    setUp(() => reminded = []);
+    void remind(DateTime at, String label) => reminded.add((at, label));
+
+    testWidgets('drawn only when wired, and never on a done thread',
+        (tester) async {
+      await pump(tester);
+      expect(find.byKey(ThreadActionBar.remindKey), findsNothing);
+
+      await pump(tester, onRemind: remind);
+      expect(find.byKey(ThreadActionBar.remindKey), findsOneWidget);
+      expect(find.byTooltip('Remind me — in To Do'), findsOneWidget);
+
+      await pump(tester, onRemind: remind, isDone: true);
+      expect(find.byKey(ThreadActionBar.remindKey), findsNothing);
+    });
+
+    testWidgets('it opens its choices, Escape shuts them, and it opens shut '
+        "Mark done's", (tester) async {
+      await pump(tester, onRemind: remind, remindPills: [inTwo, tomorrow]);
+      await tester.tap(find.byKey(ThreadActionBar.doneKey));
+      await tester.pump();
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsOneWidget);
+
+      await tester.tap(find.byKey(ThreadActionBar.remindKey));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(ThreadActionBar.remindChoicesKey), findsOneWidget);
+      expect(find.byKey(ThreadActionBar.doneChoicesKey), findsNothing);
+      expect(find.text('In 2 hours'), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(find.byKey(ThreadActionBar.remindChoicesKey), findsNothing);
+      expect(reminded, isEmpty);
+    });
+
+    testWidgets('a pill hands the host its instant and its words, and shuts',
+        (tester) async {
+      await pump(tester, onRemind: remind, remindPills: [inTwo, tomorrow]);
+      await tester.tap(find.byKey(ThreadActionBar.remindKey));
+      await tester.pump();
+
+      await tester.tap(find.byKey(ThreadActionBar.remindPillKeyFor('tomorrow')));
+      await tester.pump();
+
+      expect(reminded, [(DateTime.utc(2026, 9, 30, 16), 'Tomorrow 9 am')]);
+      expect(find.byKey(ThreadActionBar.remindChoicesKey), findsNothing);
+    });
+
+    testWidgets('a typed time previews what the host read, and Enter sets it',
+        (tester) async {
+      final asked = <String>[];
+      await pump(
+        tester,
+        onRemind: remind,
+        remindPills: [tomorrow],
+        resolveRemindText: (text) {
+          asked.add(text);
+          return text == 'Thu 3pm'
+              ? ReminderPill(
+                  label: 'Thu Oct 1, 3:00 PM',
+                  atUtc: DateTime.utc(2026, 10, 1, 22),
+                  key: ThreadActionBar.remindPillKeyFor('typed'),
+                )
+              : null;
+        },
+      );
+      await tester.tap(find.byKey(ThreadActionBar.remindKey));
+      await tester.pump();
+
+      await tester.enterText(find.byKey(ThreadActionBar.remindTypedKey), 'Thu');
+      await tester.pump();
+      expect(
+        tester.widget<Text>(find.byKey(ThreadActionBar.remindPreviewKey)).data,
+        "Type a day or a time — e.g. 'Thu 3pm'.",
+      );
+      // Enter on words that name nothing sets nothing and keeps the strip.
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(reminded, isEmpty);
+      expect(find.byKey(ThreadActionBar.remindChoicesKey), findsOneWidget);
+
+      await tester.enterText(
+          find.byKey(ThreadActionBar.remindTypedKey), 'Thu 3pm');
+      await tester.pump();
+      expect(find.text('Thu Oct 1, 3:00 PM'), findsOneWidget);
+
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(reminded, [(DateTime.utc(2026, 10, 1, 22), 'Thu Oct 1, 3:00 PM')]);
+      expect(find.byKey(ThreadActionBar.remindChoicesKey), findsNothing);
+      expect(asked, contains('Thu 3pm'));
+    });
+
+    testWidgets('unavailable: the sentence and Settings, no pills, no field',
+        (tester) async {
+      var settings = 0;
+      await pump(
+        tester,
+        onRemind: remind,
+        remindPills: [tomorrow],
+        resolveRemindText: (_) => null,
+        remindUnavailable:
+            'Reminders need the To Do permission — Settings › Connection',
+        onOpenConnectionSettings: () => settings++,
+      );
+      await tester.tap(find.byKey(ThreadActionBar.remindKey));
+      await tester.pump();
+
+      expect(
+          find.text(
+              'Reminders need the To Do permission — Settings › Connection'),
+          findsOneWidget);
+      expect(find.byKey(ThreadActionBar.remindPillKeyFor('tomorrow')),
+          findsNothing);
+      expect(find.byKey(ThreadActionBar.remindTypedKey), findsNothing);
+
+      await tester.tap(find.byKey(ThreadActionBar.remindSettingsKey));
+      await tester.pump();
+      expect(settings, 1);
+      expect(find.byKey(ThreadActionBar.remindChoicesKey), findsNothing);
+      expect(reminded, isEmpty);
+    });
+
+    testWidgets('it says whether its choices are open', (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pump(tester, onRemind: remind, remindPills: [tomorrow]);
+      final button = find.bySemanticsLabel('Remind me — in To Do');
+      expect(
+        tester.getSemantics(button),
+        isSemantics(isButton: true, hasExpandedState: true, isExpanded: false,
+            hasTapAction: true),
+      );
+      await tester.tap(find.byKey(ThreadActionBar.remindKey));
+      await tester.pump();
+      expect(
+        tester.getSemantics(button),
+        isSemantics(isButton: true, hasExpandedState: true, isExpanded: true,
+            hasTapAction: true),
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('counted in the row: beside, it costs its width and nothing '
+        'overflows', (tester) async {
+      for (final w in const [260.0, 380.0, 420.0, 900.0]) {
+        await pump(tester,
+            width: w, onRemind: remind, onFindTime: () {}, labels: [jira]);
+        expect(tester.takeException(), isNull, reason: 'at ${w}px');
+        expect(find.byKey(ThreadActionBar.remindKey), findsOneWidget);
+      }
+    });
+  });
 
   group('Find a time', () {
     testWidgets('worded in a full pane, its icon alone beside, and either '
@@ -442,6 +618,7 @@ void main() {
                       onContext: () {},
                       contextLinked: 12,
                       onCompose: () {},
+                      onRemind: (_, _) {},
                       labels: labels,
                       onAddLabel: () {},
                       onRemoveLabel: (_) {},

@@ -4,6 +4,7 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart' show ModelPlacement;
+import 'package:bond_inbox/services/reminders/tasks_availability.dart';
 import 'package:bond_inbox/services/server/server_state.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/settings_labels_section.dart';
@@ -50,6 +51,9 @@ void main() {
     void Function(String)? onDeleteLabel,
     bool replySendMarksDone = false,
     void Function(bool)? onReplySendMarksDoneChanged,
+    bool remindDeadlines = true,
+    void Function(bool)? onRemindDeadlinesChanged,
+    TasksAvailability tasksAvailability = TasksAvailability.available,
     ({int removed, int added})? needsYouAnswers,
     Future<void> Function()? onForgetNeedsYouAnswers,
   }) async {
@@ -83,6 +87,9 @@ void main() {
           onDeleteLabel: onDeleteLabel,
           replySendMarksDone: replySendMarksDone,
           onReplySendMarksDoneChanged: onReplySendMarksDoneChanged,
+          remindDeadlines: remindDeadlines,
+          onRemindDeadlinesChanged: onRemindDeadlinesChanged,
+          tasksAvailability: tasksAvailability,
           needsYouAnswers: needsYouAnswers,
           onForgetNeedsYouAnswers: onForgetNeedsYouAnswers,
         ),
@@ -319,6 +326,86 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(tester.widget<SwitchListTile>(row).value, isFalse);
+    });
+  });
+
+  group('remind me in To Do about deadlines', () {
+    const caption =
+        'A Needs You thread with a deadline gets a To Do reminder that morning';
+
+    testWidgets('is absent when the host cannot write it', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      expect(find.byKey(SettingsScreen.remindDeadlinesKey), findsNothing);
+    });
+
+    testWidgets('reads on by default, with its words under it',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onRemindDeadlinesChanged: (_) {},
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.remindDeadlinesKey);
+      expect(tester.widget<SwitchListTile>(row).value, isTrue);
+      expect(find.text('Remind me in To Do about deadlines'), findsOneWidget);
+      expect(find.text(caption), findsOneWidget);
+    });
+
+    testWidgets('toggles and calls back', (tester) async {
+      final written = <bool>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onRemindDeadlinesChanged: written.add,
+      );
+      await expand(tester, 'Needs You');
+
+      final row = find.byKey(SettingsScreen.remindDeadlinesKey);
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+
+      expect(written, [false]);
+      expect(tester.widget<SwitchListTile>(row).value, isFalse);
+
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+
+      expect(written, [false, true]);
+      expect(tester.widget<SwitchListTile>(row).value, isTrue);
+    });
+
+    testWidgets('names the missing permission and stays live without it',
+        (tester) async {
+      final written = <bool>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onRemindDeadlinesChanged: written.add,
+        tasksAvailability: TasksAvailability.scopeMissing,
+      );
+      await expand(tester, 'Needs You');
+
+      expect(find.text('$caption · Needs the To Do permission'),
+          findsOneWidget);
+      // The pref is the owner's wish, kept until the permission arrives.
+      final row = find.byKey(SettingsScreen.remindDeadlinesKey);
+      expect(tester.widget<SwitchListTile>(row).onChanged, isNotNull);
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      expect(written, [false]);
     });
   });
 
@@ -1049,7 +1136,7 @@ void main() {
       expect(find.text('Microsoft permissions'), findsNothing);
     });
 
-    testWidgets('a full grant ticks all four and offers no sign-in',
+    testWidgets('a full grant ticks all five and offers no sign-in',
         (tester) async {
       await open(
         tester,
@@ -1064,7 +1151,8 @@ void main() {
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
       expect(find.text('Calendar (read and write)'), findsOneWidget);
-      expect(find.byIcon(Icons.check), findsNWidgets(4));
+      expect(find.text('To Do reminders'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsNWidgets(5));
       expect(find.byIcon(Icons.close), findsNothing);
       // A tenant that granted everything has nothing to be nagged about.
       expect(find.text('Sign in again to enable'), findsNothing);
@@ -1090,9 +1178,10 @@ void main() {
         'mail.readwrite',
         'chat.read',
         'calendars.readwrite',
+        'tasks.readwrite',
       ]);
       expect(find.byIcon(Icons.check), findsOneWidget);
-      expect(find.byIcon(Icons.close), findsNWidgets(3));
+      expect(find.byIcon(Icons.close), findsNWidgets(4));
       expect(find.text('Sign in again to enable'), findsOneWidget);
     });
 
@@ -1128,6 +1217,24 @@ void main() {
       await expand(tester, 'Microsoft connection');
 
       expect(find.text('Calendar (read and write)'), findsOneWidget);
+      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.text('Sign in again to enable'), findsNothing);
+    });
+
+    testWidgets('a missing To Do grant alone offers no sign-in',
+        (tester) async {
+      // Tasks.ReadWrite arrives with the owner's consent round and a
+      // platform-side reconnect, like the calendar's: reported, never offered.
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (scope) async => scope != 'tasks.readwrite',
+        onSignInAgain: () {},
+      );
+      await expand(tester, 'Microsoft connection');
+
+      expect(find.text('To Do reminders'), findsOneWidget);
       expect(find.byIcon(Icons.close), findsOneWidget);
       expect(find.text('Sign in again to enable'), findsNothing);
     });
@@ -1169,7 +1276,7 @@ void main() {
       await tester.drag(find.byType(Slider), const Offset(-100, 0));
       await tester.pumpAndSettle();
 
-      expect(reads, 4, reason: 'four scopes, asked once each');
+      expect(reads, 5, reason: 'five scopes, asked once each');
     });
   });
 

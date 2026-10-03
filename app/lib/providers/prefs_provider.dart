@@ -17,7 +17,7 @@ import '../services/token_store.dart';
 import 'app_providers.dart';
 
 export '../data/message_store.dart'
-    show aboutMeKey, needsYouThresholdKey;
+    show aboutMeKey, needsYouThresholdKey, remindDeadlinesKey;
 
 /// The setter below takes a [NeedsYouSort], so whoever reads this file for the
 /// preference has the vocabulary to change it in the same import.
@@ -152,6 +152,13 @@ class AppPrefs {
   /// thread composer and the in-list box go through, so the two surfaces
   /// cannot disagree about it.
   final bool replySendMarksDone;
+
+  /// Whether a Needs You thread with a deadline gets a To Do reminder at
+  /// 09:00 on its day (the reminder planner). ON by default: the reminder
+  /// lands in the owner's own To Do, emails nobody, and is the point of the
+  /// deadline having been read at all. Until the To Do permission is granted
+  /// it plans nothing, whatever this says.
+  final bool remindDeadlines;
 
   /// When a suggested reply is written without anyone asking for it.
   /// [DraftPolicy.needsYou] by default: the messages the pipeline judged to
@@ -386,6 +393,7 @@ class AppPrefs {
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
     this.replySendMarksDone = false,
+    this.remindDeadlines = true,
     this.draftPolicy = DraftPolicy.needsYou,
     this.modelPlacement = defaultModelPlacement,
     this.boxBigUrl = '',
@@ -679,6 +687,7 @@ class AppPrefs {
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
     bool? replySendMarksDone,
+    bool? remindDeadlines,
     DraftPolicy? draftPolicy,
     ModelPlacement? modelPlacement,
     String? boxBigUrl,
@@ -720,6 +729,7 @@ class AppPrefs {
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
         replySendMarksDone: replySendMarksDone ?? this.replySendMarksDone,
+        remindDeadlines: remindDeadlines ?? this.remindDeadlines,
         draftPolicy: draftPolicy ?? this.draftPolicy,
         modelPlacement: modelPlacement ?? this.modelPlacement,
         boxBigUrl: boxBigUrl ?? this.boxBigUrl,
@@ -758,7 +768,8 @@ class AppPrefs {
 /// [aboutMeKey] lives in `message_store.dart` — `wipeAll` has to clear it and
 /// that layer imports nothing above itself — and is re-exported here so this
 /// file stays where prefs keys are found. So does [needsYouThresholdKey],
-/// which the store reads itself for the extraction claim's order.
+/// which the store reads itself for the extraction claim's order, and
+/// [remindDeadlinesKey], which sits beside it.
 const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
@@ -1197,6 +1208,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       // reader never agreed to have dismissed.
       replySendMarksDone:
           await store.getPref(replySendMarksDoneKey) == 'true',
+      // Defaults ON, read as [contextSelectExpand] is: only the one spelling
+      // this notifier writes for off reads as off.
+      remindDeadlines: await store.getPref(remindDeadlinesKey) != 'false',
       draftPolicy: _enumOrDefault(
         DraftPolicy.values,
         await store.getPref(draftPolicyKey),
@@ -1694,6 +1708,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setReplySendMarksDone(bool value) async {
     state = state.copyWith(replySendMarksDone: value);
     await _store.setPref(replySendMarksDoneKey, value.toString());
+  }
+
+  Future<void> setRemindDeadlines(bool value) async {
+    state = state.copyWith(remindDeadlines: value);
+    await _store.setPref(remindDeadlinesKey, value.toString());
   }
 
   /// When suggested replies are written without anyone asking. Written as the

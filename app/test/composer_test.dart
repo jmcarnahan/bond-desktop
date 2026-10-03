@@ -628,4 +628,88 @@ void main() {
       expect(find.text('Friday works.'), findsOneWidget);
     });
   });
+
+  group('the follow-up pills', () {
+    Future<void> pumpFollowUp(
+      WidgetTester tester, {
+      double width = 900,
+      bool improve = true,
+      bool available = true,
+      FollowUpChoice followUp = FollowUpChoice.none,
+      void Function(FollowUpChoice)? onChanged,
+      required void Function(String) onSend,
+    }) async {
+      await tester.binding.setSurfaceSize(Size(width, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Composer(
+            capability: SendCapability.send,
+            suggestedBody: 'Signed and sent back.',
+            onSend: onSend,
+            onGenerate: () {},
+            improveLabel: improve ? 'Improve with Claude' : null,
+            onImprove: () {},
+            followUp: followUp,
+            onFollowUpChanged: onChanged,
+            followUpAvailable: available,
+          ),
+        ),
+      ));
+    }
+
+    testWidgets('exist only when available and wired', (tester) async {
+      await pumpFollowUp(tester, available: false, onChanged: (_) {},
+          onSend: (_) {});
+      expect(find.byKey(Composer.followUpKey), findsNothing);
+
+      await pumpFollowUp(tester, onSend: (_) {});
+      expect(find.byKey(Composer.followUpKey), findsNothing);
+
+      await pumpFollowUp(tester, onChanged: (_) {}, onSend: (_) {});
+      expect(find.byKey(Composer.followUpKey), findsOneWidget);
+      for (final c in FollowUpChoice.values) {
+        expect(find.byKey(Composer.followUpChoiceKeyFor(c)), findsOneWidget);
+      }
+      expect(find.byTooltip('Follow up if nobody replies'), findsOneWidget);
+    });
+
+    testWidgets('default none; a press tells the host and sends nothing',
+        (tester) async {
+      final changed = <FollowUpChoice>[];
+      final sent = <String>[];
+      await pumpFollowUp(tester, onChanged: changed.add, onSend: sent.add);
+      final none = tester.widget<Semantics>(find.ancestor(
+        of: find.byKey(Composer.followUpChoiceKeyFor(FollowUpChoice.none)),
+        matching: find.byWidgetPredicate(
+            (w) => w is Semantics && w.properties.selected != null),
+      ).first);
+      expect(none.properties.selected, isTrue);
+
+      await tester.tap(
+          find.byKey(Composer.followUpChoiceKeyFor(FollowUpChoice.twoDays)));
+      await tester.pump();
+      expect(changed, [FollowUpChoice.twoDays]);
+      expect(sent, isEmpty);
+
+      expect(FollowUpChoice.twoDays.label, '2 days');
+      expect(FollowUpChoice.twoDays.businessDays, 2);
+      expect(FollowUpChoice.oneWeek.businessDays, 5);
+    });
+
+    testWidgets('a side panel row does not overflow with them', (tester) async {
+      // From the side panel's 420px floor up. Without Improve: its button
+      // already runs 3.7px past a 420px row beside Draft reply and Send, with
+      // or without the pills, which have a line of their own.
+      for (final w in const [420.0, 600.0, 900.0]) {
+        await pumpFollowUp(tester,
+            width: w,
+            improve: false,
+            followUp: FollowUpChoice.oneWeek,
+            onChanged: (_) {},
+            onSend: (_) {});
+        expect(tester.takeException(), isNull, reason: 'at ${w}px');
+      }
+    });
+  });
 }

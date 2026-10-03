@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/models/reminder_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart'
     show CalendarAvailability;
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
@@ -95,6 +96,7 @@ void main() {
     Widget Function(String)? briefBody,
     Widget? commandBar,
     Widget? planCard,
+    List<Reminder> reminders = const [],
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -128,6 +130,7 @@ void main() {
           briefBody: briefBody,
           commandBar: commandBar,
           planCard: planCard,
+          reminders: reminders,
         ),
       ),
     ));
@@ -409,6 +412,36 @@ void main() {
       expect(find.text('Due'), findsOneWidget);
       await tester.tap(find.text('Fabrikam quote'));
       expect(opened, [('teams', 'conv-7')]);
+    });
+
+    testWidgets('a reminder row says when and where it lives, and opens its '
+        'thread', (tester) async {
+      final opened = <(String, String)>[];
+      await pumpPane(
+        tester,
+        reminders: [
+          Reminder(
+            id: 'rem-1',
+            kind: ReminderKind.replyBy,
+            source: 'email',
+            conversationKey: 'conv-9',
+            title: 'Reply to Contoso: Q3 numbers',
+            // 2:00 PM in Los Angeles, today.
+            remindAt: DateTime.utc(2026, 9, 29, 21).toIso8601String(),
+            status: ReminderStatus.active,
+            createdFrom: ReminderOrigin.bar,
+            createdAt: '2026-09-29T15:00:00.000000Z',
+            updatedAt: '2026-09-29T15:00:00.000000Z',
+          ),
+        ],
+        onOpenConversation: (s, id) => opened.add((s, id)),
+      );
+
+      expect(find.byKey(DayPane.reminderRowKeyFor('rem-1')), findsOneWidget);
+      expect(find.text('Reminder · in To Do'), findsOneWidget);
+      expect(find.text('2:00 PM'), findsOneWidget);
+      await tester.tap(find.text('Reply to Contoso: Q3 numbers'));
+      expect(opened, [('email', 'conv-9')]);
     });
 
     testWidgets('Agenda | Grid switches the view, and Day | Week shows only '

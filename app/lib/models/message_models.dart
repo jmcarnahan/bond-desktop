@@ -802,6 +802,28 @@ class Message {
     }
   }
 
+  /// The Outlook-on-the-web link to this message — `read_email`'s `web_link`,
+  /// stored as `web_link` by the detail fetch. What a To Do reminder links
+  /// back to. MCP only, and null for a blob that is null, invalid, or silent
+  /// or empty about the key; never anything but an http(s) address.
+  String? get webLink {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final link = decoded['web_link'];
+      if (link is! String) return null;
+      final uri = Uri.tryParse(link);
+      if (uri == null || !(uri.isScheme('https') || uri.isScheme('http'))) {
+        return null;
+      }
+      return link;
+    } on FormatException {
+      return null;
+    }
+  }
+
   /// Whether the server said this is an automatic reply — `read_email`'s
   /// `is_auto_reply`, stored as `auto_reply` only when true. MCP only, so
   /// false means "nobody said", never "a person wrote it".

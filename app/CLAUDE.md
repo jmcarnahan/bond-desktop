@@ -1168,3 +1168,41 @@ that bite.
     compound command, so stage and commit as separate commands.
   - The commit hook only WARNS when the gate stamp is older than the staged
     files. Re-run the gate.
+
+## Reminders (the calendar-automation round, 2026-10)
+
+`docs/pipeline/15-reminders.md` describes the feature. The rules that bite:
+
+- **The carrier is To Do, and it is dark until consent.** Every To Do call
+  answers `tasks_scope_missing` (`TasksScopeMissing`) until the owner's
+  consent round: that is UNAVAILABLE, never retried and never an error row.
+  Every door reads `tasksAvailabilityProvider` first and, when it is not
+  `available`, shows `tasksUnavailableSentence` and offers nothing to pick.
+  Widget tests that make it available override BOTH `tasksBackendProvider`
+  (a recording fake declared in the test, every method implemented) AND
+  `tasksAvailabilityProvider` (`overrideWith((ref) async =>
+  TasksAvailability.available)`); the default under `flutter test` is
+  unavailable (`inbox_reminders_test.dart`).
+- **The host computes every instant.** `ThreadActionBar` never reads the
+  clock or the zone: the inbox builds its `ReminderPill`s
+  (`remindChoices`, `services/reminders/remind_choices.dart`) and reads a
+  typed time through `resolveRemindText` (the bar's callback returns a
+  `ReminderPill?`, previewed by its label). The strip is Mark done's inline
+  choices pattern (its own focus node taken as it opens, Escape, the
+  `_choicesCap` height, one strip at a time); Remind me has NO key (`r` is
+  Reply).
+- **Bumps are the caller's.** The service bumps nothing (services never
+  import providers): the inbox bumps `reminderRevisionProvider` after every
+  `create` and `cancel`, and after a tend whose `reconcile()` or `plan()`
+  returned > 0, reading the notifier ONCE before the awaits.
+- **The poll's tend is single-flight** (`_tending`): `reconcile()` then
+  `plan()` in one try off `_refresh`'s `finally`, everything caught and
+  traced by type, skipped until the zone resolves. Reminders have no work
+  kinds, so there is nothing to `requeueWork`.
+- **Follow-up at send**: `DraftNotifier.lastEchoId` is the local echo id of
+  the last mail reply sent (null otherwise); `_send` reads the choice before
+  the await and creates the reminder RIGHT after `send` returns `sent`
+  (anchor and Graph id = the echo id; the re-anchor is a 15-minute time
+  match). A reminder toast passes `cleared: 0` so the pile's progress line
+  is untouched; with reply-marks-done on, the follow-up is a line on the
+  done toast and its Undo stays the done's.

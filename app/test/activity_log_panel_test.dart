@@ -917,6 +917,38 @@ void main() {
       expect(ActivityLogPanel.kindLabel('ask_read'), 'Ask reading');
     });
 
+    test('a reminder says what happened to it in To Do, in enum words only',
+        () {
+      String row(Map<String, Object?> detail, {String status = 'ok'}) =>
+          ActivityLogPanel.describe(
+              _event(kind: 'reminder', status: status, detail: detail));
+      expect(
+          row({'action': 'create', 'kind': 'reply_by', 'created_from': 'bar',
+              'flagged': false, 'linked': true}),
+          'Reminder set in To Do (reply by)');
+      expect(
+          row({'action': 'create', 'kind': 'follow_up', 'created_from': 'send',
+              'flagged': true, 'linked': false}),
+          'Reminder set in To Do (follow up)');
+      expect(
+          row({'action': 'create', 'kind': 'deadline', 'created_from': 'auto',
+              'flagged': false, 'linked': false}),
+          'Reminder set in To Do (deadline)');
+      expect(row({'action': 'complete', 'kind': 'follow_up', 'reason': 'reply'}),
+          'Reminder done — answered');
+      expect(row({'action': 'complete', 'kind': 'reply_by', 'reason': 'done'}),
+          'Reminder done — thread done');
+      expect(row({'action': 'complete', 'kind': 'custom', 'reason': 'owner'}),
+          'Reminder done — by you');
+      expect(row({'action': 'cancel', 'kind': 'reply_by'}),
+          'Reminder cancelled');
+      // The follow-up's flag never fails the reminder, so its one error row
+      // reads as what did not happen.
+      expect(row({'action': 'flag', 'kind': 'follow_up'}, status: 'error'),
+          'Could not flag the mail');
+      expect(ActivityLogPanel.kindLabel('reminder'), 'Reminder');
+    });
+
     test('a calendar write says what it did and how many it emailed', () {
       String write(String action,
               {String status = 'ok',

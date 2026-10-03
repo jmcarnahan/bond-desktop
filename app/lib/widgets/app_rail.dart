@@ -24,6 +24,11 @@ import 'scheduling_ask_rows.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
+// [isNeedsYou] moved to the predicate's own file so a service (the reminder
+// planner) can ask it without importing a widget; re-exported here for the
+// widgets and tests that have always found it beside [needsYouRows].
+export '../services/decision/needs_you_predicate.dart' show isNeedsYou;
+
 /// The app's destinations, and the icon rail's vocabulary.
 ///
 /// [RailSection.home] leads because it is where the app lands, and because it
@@ -93,36 +98,6 @@ String _stripReplyPrefixes(String subject) {
     out = out.substring(match.end);
   }
   return out.trim();
-}
-
-/// Whether one thread is the user's to answer.
-///
-/// THE predicate the two halves of the live inbox partition on: Needs You is
-/// everything this returns true for, and every live thread it returns false
-/// for is what is left over — the rows People's rooms are built from.
-/// One function rather than a filter in each, because two filters that were
-/// meant to be complements are two filters that will eventually disagree — and
-/// the symptom is mail in both sections, or in neither.
-///
-/// Three tests: nothing deferred to Later, which is the whole point of Later;
-/// nothing already closed; and the thread's needs-you probability
-/// ([Conversation.needsYouP], the decision model's highest p over the kept
-/// inbound the owner has not answered) at or above [threshold], the owner's
-/// slider ([needsYouAt]). Nothing else gates: not triage's ask, not the
-/// thread's `needs_reply` state, not the attention score, which only ORDERS
-/// the rows ([needsYouRows]). An undecided thread (a null probability) needs
-/// nobody until the model has read it.
-///
-/// The store spells the same rule once in SQL for the tile and the Needs You
-/// filter, over the same probability expression, so the rail and the tile
-/// cannot count different threads.
-bool isNeedsYou(
-  Conversation c, {
-  double threshold = NeedsYouTuning.defaultThreshold,
-}) {
-  if (c.bucket == 'later') return false;
-  if (c.state == ConversationState.done) return false;
-  return needsYouAt(c.needsYouP, threshold);
 }
 
 /// What the user is on the hook for, loudest first — [isNeedsYou], sorted.

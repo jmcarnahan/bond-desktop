@@ -50,6 +50,7 @@ is always the authority when they disagree.
 |---|-------|-----|-----|
 | 1 | Sync / ingest — Graph delta pull, upsert, enqueue downstream work | no | [01-sync-ingest.md](01-sync-ingest.md) |
 | 1b | Calendar mirror — the primary calendar over a rolling window, synced fire-and-forget after each mail load (MCP mode only); not a stage a message passes through | no | [14-calendar.md](14-calendar.md) |
+| 1c | Reminders — what the app reminds the owner of goes INTO Microsoft To Do (a task with a reminder; a flag on a sent mail for a follow-up); reconciled and planned on the poll beside the calendar sync (MCP mode only, dark until the To Do permission is consented); not a stage a message passes through | no | [15-reminders.md](15-reminders.md) |
 | 2 | Tier-1 gates — sender-only checks on delta fields | no | [02-gates.md](02-gates.md) |
 | 3 | Detail fetch (mail) — full body + headers | no | [02-gates.md](02-gates.md) |
 | 4 | Tier-2 gates — list/auto-generated header checks | no | [02-gates.md](02-gates.md) |

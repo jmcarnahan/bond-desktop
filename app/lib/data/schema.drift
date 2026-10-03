@@ -863,6 +863,33 @@ CREATE TABLE decision_labels (
   vector_model TEXT
 ) STRICT;
 
+-- A reminder the app placed in Microsoft To Do (the calendar-automation round's
+-- Phase 5): why, for which thread, when it fires, and the task that carries it.
+-- KEPT, not derived: the row points at a task in the owner's To Do, and Clear
+-- AI results must not orphan one. `id` is also the task's linked-resource
+-- external_id. `AS ReminderRow` keeps drift's generated class off the model
+-- class `Reminder`; the store is raw SQL.
+CREATE TABLE reminders (
+  id TEXT NOT NULL PRIMARY KEY,
+  kind TEXT NOT NULL,                      -- reply_by | follow_up | deadline | custom
+  source TEXT NOT NULL,
+  conversation_key TEXT NOT NULL,
+  anchor_message_id TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  remind_at TEXT NOT NULL,                 -- isoStamp UTC
+  due_date TEXT NOT NULL DEFAULT '',       -- yyyy-mm-dd in the owner's zone
+  status TEXT NOT NULL,                    -- active | done | cancelled
+  created_from TEXT NOT NULL,              -- bar | send | auto
+  todo_list_id TEXT NOT NULL DEFAULT '',
+  todo_task_id TEXT NOT NULL DEFAULT '',
+  flag_message_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  done_at TEXT
+) STRICT AS ReminderRow;
+CREATE INDEX ix_reminders_thread ON reminders(source, conversation_key, status);
+CREATE INDEX ix_reminders_at ON reminders(status, remind_at);
+
 -- The calendar mirror: the owner's PRIMARY calendar, read through bond-mcps
 -- `sync_calendar` over a rolling window (`services/calendar/calendar_sync.dart`,
 -- docs/pipeline/14-calendar.md). SYNCED — it is mailbox data, so Clear AI

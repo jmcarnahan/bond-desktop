@@ -24,6 +24,8 @@ import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/people_sort.dart';
 import '../models/person.dart';
+import '../models/reminder_models.dart'
+    show Reminder, ReminderKind, ReminderOrigin;
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
@@ -54,6 +56,14 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
+import '../services/backend/tasks_errors.dart'
+    show TasksScopeMissing, TasksUnavailable;
+import '../services/calendar/ask_words.dart' show askOwnWords;
+import '../services/reminders/business_days.dart' show nextBusinessDaysAt;
+import '../services/reminders/remind_choices.dart';
+import '../services/reminders/reminder_service.dart'
+    show ReminderPast, ReminderRequest;
+import '../services/reminders/tasks_availability.dart';
 import '../services/calendar/ask_hints.dart'
     show AskHints, readAskHints, readAskHintsFromRead;
 import '../services/calendar/ask_reader.dart' show AskReading;
@@ -160,6 +170,7 @@ import '../widgets/sort_menu.dart';
 import '../widgets/source_filter.dart';
 import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
+import '../widgets/thread_action_bar.dart' show ReminderPill, ThreadActionBar;
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
 import '../widgets/triage_intents.dart';
@@ -743,6 +754,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// in the pane, and every setter clears the rest.
   bool _showingSettings = false;
 
+  /// Each reply box's follow-up choice, by [_stageKey]: read by [_send] at
+  /// the moment of a composer's send and forgotten once it went.
+  final Map<String, FollowUpChoice> _followUps = {};
+
+  /// The poll's reminder pass in flight ([_tendReminders]), so a second
+  /// poll landing on it joins it rather than reconciling twice.
+  Future<void>? _tending;
+
   /// Whether the main pane is showing the New message screen. The same
   /// exclusive set again: composing is not a section, and it clears whatever
   /// was being read exactly as Settings and the log do.
@@ -1277,6 +1296,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _notePulling(mail: false);
       // Un-awaited, as everywhere: the calendar never holds up this pass.
       if (mounted) _syncCalendar(force: forceCalendar);
+      // Beside it, on the same rule: To Do's reminders are reconciled and
+      // the deadline ones planned without the mail ever waiting on them.
+      if (mounted) unawaited(_tendReminders());
     }
     if (!mounted) return;
     final selected = _selectedId;
@@ -1425,6 +1447,48 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         debugPrint('calendar sync was not run: $e');
       }
     }());
+  }
+
+  /// The poll's reminder pass: [ReminderService.reconcile] (rows whose
+  /// thread was answered or closed are completed, follow-ups re-anchored on
+  /// their Sent Items copy), then the deadline planner over the loaded list.
+  /// Both do nothing while To Do is unavailable.
+  ///
+  /// Single-flight: a poll that lands while one runs gets the same future.
+  /// Skipped until the zone has resolved (the planner's 09:00 is a wall
+  /// time). Everything is caught here and traced by type only — an
+  /// exception's text can carry an endpoint — so nothing escapes the poll's
+  /// `finally`; a lost grant reaches the owner through the mail load, which
+  /// meets the same `ReconsentRequired`.
+  Future<void> _tendReminders() {
+    final running = _tending;
+    if (running != null) return running;
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) return Future<void>.value();
+    // Read once, before the awaits, and captured (app/CLAUDE.md).
+    final revision = ref.read(reminderRevisionProvider.notifier);
+    final service = ref.read(reminderServiceProvider);
+    final planner = ref.read(reminderPlannerProvider);
+    final threshold = ref.read(appPrefsProvider).needsYouThreshold;
+    final loaded = ref.read(conversationsProvider);
+    final conversations = loaded is ConversationsLoaded
+        ? loaded.conversations
+        : const <Conversation>[];
+    final pass = () async {
+      try {
+        final changed = await service.reconcile();
+        final planned = await planner.plan(
+          zone: zone,
+          needsYouThreshold: threshold,
+          conversations: conversations,
+        );
+        if (changed > 0 || planned > 0) revision.state++;
+      } on Object catch (e) {
+        debugPrint('reminders were not tended: ${e.runtimeType}');
+      }
+    }();
+    _tending = pass;
+    return pass.whenComplete(() => _tending = null);
   }
 
   /// Queues the briefs the calendar now makes due and wakes the draft lane
@@ -4503,6 +4567,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               invites: invites,
               now: now,
               zone: zone,
+              reminders: ref.watch(remindersProvider).valueOrNull ?? const [],
             )
           : const [],
       invites: invites.length,
@@ -5292,6 +5357,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       expandedBriefs: _expandedBriefs,
       onToggleBrief: _toggleBrief,
       briefBody: (id) => _briefBody(id, now: now),
+      // The owner's To Do reminders, on the local day each fires; a row
+      // opens its thread through `onOpenConversation`.
+      reminders: ref.watch(remindersProvider).valueOrNull ?? const [],
       inviteActions: (entry) => CalendarWriteFlow(
         key: ValueKey('invite-write-${entry.event.id}'),
         writer: ref.read(calendarWritesProvider),
@@ -5360,6 +5428,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       conversations: conversations,
       now: now,
       zone: zone,
+      reminders: ref.watch(remindersProvider).valueOrNull ?? const [],
     );
     final pending = _gridMove;
     // A standing command proposal is the ghost too, whenever no drop is
@@ -5425,6 +5494,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             case DeadlineItem(:final conversation):
             case ReturnItem(:final conversation):
               _select(conversation.id, source: conversation.source);
+            case ReminderItem(:final reminder):
+              _select(reminder.conversationKey, source: reminder.source);
             default:
               break;
           }
@@ -6122,6 +6193,230 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (inbound == null) return false;
     if (outbound != null && outbound.compareTo(inbound) > 0) return false;
     return _otherPeople(thread).isNotEmpty;
+  }
+
+  // ── reminders ──────────────────────────────────────────────────────────
+
+  /// Whether To Do can carry a reminder now, watched in build: null while
+  /// the precheck runs, which offers the choices (a pick then meets the
+  /// service's own precheck).
+  TasksAvailability? _tasksAvailability() =>
+      ref.watch(tasksAvailabilityProvider).valueOrNull;
+
+  /// The thread bar's Remind me choices for [thread], every instant worked
+  /// out HERE from the clock and the display zone ([remindChoices]) — the
+  /// bar never reads either. Empty until the zone has resolved.
+  List<ReminderPill> _remindPillsFor(Conversation thread) {
+    final zone = ref.watch(calendarZoneProvider).valueOrNull;
+    if (zone == null) return const [];
+    final now = DateTime.now();
+    return [
+      for (final c in remindChoices(
+        now: now,
+        zone: zone,
+        deadlineDay: remindDeadlineDay(thread, now),
+      ))
+        ReminderPill(
+          label: c.label,
+          atUtc: c.atUtc,
+          key: ThreadActionBar.remindPillKeyFor(c.id),
+        ),
+    ];
+  }
+
+  /// A typed time under the pills, read at the moment it is typed
+  /// ([resolveRemindText]).
+  ReminderPill? _resolveRemind(String text) {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) return null;
+    final c = resolveRemindText(text, now: DateTime.now(), zone: zone);
+    if (c == null) return null;
+    return ReminderPill(
+      label: c.label,
+      atUtc: c.atUtc,
+      key: ThreadActionBar.remindPillKeyFor(c.id),
+    );
+  }
+
+  /// What a reminder that was not set says: the carrier's own sentence for
+  /// a missing permission or SDK mode (their `toString` IS it), the calendar
+  /// writes' reconnect sentence for a grant that needs signing in again, and
+  /// one plain line for anything else. By type only — an exception's text
+  /// can carry an endpoint.
+  static String _reminderFailure(Object e) => switch (e) {
+        TasksScopeMissing() || TasksUnavailable() || ReminderPast() =>
+          e.toString(),
+        ReconsentRequired() || NotSignedIn() =>
+          'Reconnect Microsoft in Settings, then try again. Nothing was set.',
+        _ => "Couldn't reach To Do. Nothing was set.",
+      };
+
+  /// What an Undo that did not cancel says: the same carrier and reconnect
+  /// sentences as [_reminderFailure], but the reminder STANDS — nothing was
+  /// undone. By type only.
+  static String _cancelFailure(Object e) => switch (e) {
+        TasksScopeMissing() || TasksUnavailable() => e.toString(),
+        ReconsentRequired() || NotSignedIn() =>
+          'Reconnect Microsoft in Settings, then try again. '
+              'The reminder stands.',
+        _ => "Couldn't reach To Do. The reminder stands.",
+      };
+
+  /// Remind me, picked on the thread bar: one To Do task at [atUtc] about
+  /// the thread's newest inbound message (its own words for the body, its
+  /// Outlook link when the detail fetch stored one). The toast's Undo
+  /// cancels it, task and row.
+  Future<void> _remind(
+    Conversation thread,
+    DateTime atUtc,
+    String label,
+  ) async {
+    final revision = ref.read(reminderRevisionProvider.notifier);
+    final service = ref.read(reminderServiceProvider);
+    try {
+      final messages = await ref
+          .read(messageStoreProvider)
+          .loadThread(thread.id, sources: [thread.source]);
+      Message? newest;
+      for (final m in messages.reversed) {
+        if (!m.outbound) {
+          newest = m;
+          break;
+        }
+      }
+      final subject = thread.subject?.trim() ?? '';
+      final words = newest?.bodyText ?? newest?.bodyPreview;
+      final own = words == null ? '' : askOwnWords(words).trim();
+      // A second Remind me on the thread MOVES the first: once the new one
+      // is set, the earlier bar reminder is cancelled (its task deleted), so
+      // the owner never holds two tasks for one thread. The new one first,
+      // so a create that fails leaves the old one standing. Follow-ups and
+      // the planner's deadline reminders are other kinds and stand.
+      final earlier = [
+        for (final r in await ref
+            .read(messageStoreProvider)
+            .remindersForThread(thread.source, thread.id))
+          if (r.isActive &&
+              r.kind == ReminderKind.replyBy &&
+              r.createdFrom == ReminderOrigin.bar)
+            r.id,
+      ];
+      final reminder = await service.create(ReminderRequest(
+        kind: ReminderKind.replyBy,
+        source: thread.source,
+        conversationKey: thread.id,
+        anchorMessageId: newest?.id ?? '',
+        title: 'Reply to ${replyToName(thread, newest)}: '
+            '${subject.isEmpty ? '(no subject)' : subject}',
+        remindAtUtc: atUtc,
+        createdFrom: ReminderOrigin.bar,
+        bodyText: own.isEmpty ? null : own,
+        anchorWebLink: newest?.webLink,
+        anchorGraphId: newest?.id,
+      ));
+      // Each cancel on its own: the new one IS set, so a cancel that
+      // throws must not reach the create's catch ("Nothing was set") — the
+      // old one stands and the toast still says the new one was set.
+      for (final id in earlier) {
+        try {
+          await service.cancel(id);
+        } on Object catch (e) {
+          debugPrint('earlier reminder was not cancelled: ${e.runtimeType}');
+        }
+      }
+      revision.state++;
+      if (!mounted) return;
+      _toast(
+        'Reminder set in To Do · $label',
+        cleared: 0,
+        onUndo: () => unawaited(_cancelReminder(reminder.id, revision)),
+      );
+    } on Object catch (e) {
+      if (e is! TasksScopeMissing && e is! TasksUnavailable) {
+        debugPrint('reminder was not set: ${e.runtimeType}');
+      }
+      if (mounted) _toast(_reminderFailure(e), cleared: 0, keepUndo: true);
+    }
+  }
+
+  /// The Undo of a reminder just set: the task deleted and the row
+  /// cancelled ([ReminderService.cancel], a no-op on a row no longer
+  /// active). [revision] was read before the act, as the bump that follows
+  /// an await must be.
+  Future<void> _cancelReminder(
+    String id,
+    StateController<int> revision,
+  ) async {
+    try {
+      await ref.read(reminderServiceProvider).cancel(id);
+      revision.state++;
+    } on Object catch (e) {
+      debugPrint('reminder was not cancelled: ${e.runtimeType}');
+      if (mounted) _toast(_cancelFailure(e), cleared: 0, keepUndo: true);
+    }
+  }
+
+  /// The follow-up a composer's send asked for, set right after the send
+  /// returned `sent` (the re-anchor onto the Sent Items copy is a time match
+  /// on the row's `created_at`). Anchored on the local echo [echoId] until
+  /// the copy lands; never flagged here, since an echo id is no Graph id.
+  /// Answers the toast's line ("Following up Thu 9:00 AM") and the reminder,
+  /// or the sentence saying why none was set. Nothing is set before the
+  /// zone has resolved: "three business days at 09:00" is a wall time, and
+  /// a UTC stand-in would ring at the wrong hour.
+  Future<({Reminder? reminder, String line})> _setFollowUp(
+    DraftTarget target,
+    FollowUpChoice choice, {
+    required String? echoId,
+    required StateController<int> revision,
+  }) async {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) {
+      return (
+        reminder: null,
+        line: 'No follow-up set — the time zone is not known yet.',
+      );
+    }
+    try {
+      final at = nextBusinessDaysAt(
+        days: choice.businessDays,
+        from: DateTime.now(),
+        zone: zone,
+      );
+      final thread = _loadedRow(
+        (source: target.source, key: target.conversationKey),
+      );
+      final names = [
+        for (final p in thread == null ? const <({String name, String address})>[]
+            : _otherPeople(thread))
+          p.name.trim().isEmpty ? p.address : p.name.trim(),
+      ];
+      final subject = thread?.subject?.trim() ?? '';
+      final reminder = await ref.read(reminderServiceProvider).create(
+            ReminderRequest(
+              kind: ReminderKind.followUp,
+              source: target.source,
+              conversationKey: target.conversationKey,
+              anchorMessageId: echoId ?? '',
+              title: 'Waiting on '
+                  '${names.isEmpty ? 'a reply' : names.join(', ')}: '
+                  '${subject.isEmpty ? '(no subject)' : subject}',
+              remindAtUtc: at,
+              createdFrom: ReminderOrigin.send,
+              anchorGraphId: echoId,
+            ),
+          );
+      revision.state++;
+      return (
+        reminder: reminder,
+        line: 'Following up ${followUpWhen(at, zone)}',
+      );
+    } on Object catch (e) {
+      if (e is! TasksScopeMissing && e is! TasksUnavailable) {
+        debugPrint('follow-up was not set: ${e.runtimeType}');
+      }
+      return (reminder: null, line: _reminderFailure(e));
+    }
   }
 
   /// [thread]'s other people with an address, the owner left out
@@ -7890,6 +8185,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onFindTime: _canFindTime(selected)
           ? () => unawaited(_openFindTime(selected))
           : null,
+      // Remind me, on any open thread: one To Do task. Until To Do can
+      // carry it the strip says why (the carrier's sentence) and offers
+      // nothing to pick.
+      onRemind: (atUtc, label) => unawaited(_remind(selected, atUtc, label)),
+      remindPills: _remindPillsFor(selected),
+      resolveRemindText: _resolveRemind,
+      remindUnavailable: switch (_tasksAvailability()) {
+        final TasksAvailability a => tasksUnavailableSentence(a),
+        null => null,
+      },
+      onOpenConnectionSettings: _openSettings,
       // Opening a file always lands on the split, never on the full pane the
       // user may have left open for the last one. From the MAIN thread it is a
       // selection like any other and replaces whatever was beside; from the
@@ -9340,7 +9646,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               return '$name is not in this chat, so a mention would not '
                   'reach them. Start a new chat to include them.';
             },
-      onSend: (body) => _send(target, body),
+      onSend: (body) => _send(target, body, fromComposer: true),
+      // Follow up if nobody replies: a mail reply this build really sends,
+      // while To Do can carry the reminder. The choice is held here and
+      // read by [_send]; the in-list box and the cards carry none.
+      followUp: _followUps[_stageKey(target)] ?? FollowUpChoice.none,
+      onFollowUpChanged: (choice) =>
+          setState(() => _followUps[_stageKey(target)] = choice),
+      followUpAvailable: target.source == 'email' &&
+          draft.capability == SendCapability.send &&
+          _tasksAvailability() == TasksAvailability.available,
       // Both sources, unconditionally. A chat is drafted through the same
       // queue and the same system prompt a mail is — only the channel's style
       // rules differ, and those ride in the user message — so Regenerate means
@@ -9469,16 +9784,50 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// pile is marked done through [_triageAndAdvance], so the reader lands on
   /// the next row and the progress line counts it; a thread from anywhere else
   /// is marked done in place and left open.
-  Future<void> _send(DraftTarget target, String body, {String? replyTo}) async {
+  ///
+  /// [fromComposer] is the docked reply box's send, the one place a
+  /// follow-up is chosen: when it sent and its box chose one, the To Do
+  /// reminder is set at once ([_setFollowUp]) and the toast says when it
+  /// fires, with an Undo that cancels the reminder only. With
+  /// `replySendMarksDone` on, the toast's Undo stays the done's, and the
+  /// follow-up is a line on it with no Undo of its own.
+  Future<void> _send(
+    DraftTarget target,
+    String body, {
+    String? replyTo,
+    bool fromComposer = false,
+  }) async {
     // An explicit message outranks the pane's own caption: a card sends the
     // reply to the message it was drawn under, whatever the box above it was
     // pointed at. Failing that, only this pane's own override — a message
     // named in the thread beside must not steer a send from the main pane.
     final replyToId =
         replyTo ?? (_replyTo?.target == target ? _replyTo!.messageId : null);
-    final outcome = await ref
-        .read(draftProvider(target).notifier)
-        .send(body, replyTo: replyToId);
+    final drafts = ref.read(draftProvider(target).notifier);
+    // Read before the await, with the bump it will need (app/CLAUDE.md).
+    // A choice is honoured only while To Do can carry it: when the box's
+    // follow-up choices are hidden, a choice made earlier is dropped, not
+    // set behind the owner's back.
+    final tasksReady = ref.read(tasksAvailabilityProvider).valueOrNull ==
+        TasksAvailability.available;
+    if (fromComposer && !tasksReady) _followUps.remove(_stageKey(target));
+    final choice = fromComposer && tasksReady
+        ? _followUps[_stageKey(target)] ?? FollowUpChoice.none
+        : FollowUpChoice.none;
+    final revision = ref.read(reminderRevisionProvider.notifier);
+    final outcome = await drafts.send(body, replyTo: replyToId);
+    // Right after the send, before anything else awaits: the reminder's
+    // re-anchor matches the Sent Items copy by time.
+    ({Reminder? reminder, String line})? followUp;
+    if (outcome == SendOutcome.sent && choice != FollowUpChoice.none) {
+      followUp = await _setFollowUp(
+        target,
+        choice,
+        echoId: drafts.lastEchoId,
+        revision: revision,
+      );
+    }
+    if (outcome == SendOutcome.sent) _followUps.remove(_stageKey(target));
     if (!mounted) return;
     // Anything but a failure means the named message has been answered, and a
     // caption that outlived its send would steer the NEXT one. A failure keeps
@@ -9515,12 +9864,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             final conversations = ref.read(conversationsProvider.notifier);
             final undo = await conversations.markDone(t.source, t.key);
             if (!mounted) return undo != null;
+            // The follow-up rides as a line; the one Undo stays the done's.
+            final also = followUp == null ? '' : ' ${followUp.line}';
             if (undo == null) {
-              _toast("Reply sent. Couldn't mark it done.");
+              _toast("Reply sent. Couldn't mark it done.$also");
               return false;
             }
             _toast(
-              'Reply sent · Marked done.',
+              followUp == null
+                  ? 'Reply sent · Marked done.'
+                  : 'Reply sent · Marked done ·$also',
               onUndo: () => unawaited(conversations.undoMarkDone(undo)),
             );
             return true;
@@ -9543,8 +9896,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           } else {
             await markDone(thread);
           }
-        } else {
+        } else if (followUp == null) {
           _toast('Reply sent.');
+        } else {
+          final reminder = followUp.reminder;
+          // Its Undo cancels the reminder and nothing else; the reply has
+          // gone. A follow-up that was not set says why, with no Undo.
+          _toast(
+            reminder == null
+                ? 'Reply sent. ${followUp.line}'
+                : 'Reply sent · ${followUp.line}',
+            cleared: 0,
+            onUndo: reminder == null
+                ? null
+                : () => unawaited(_cancelReminder(reminder.id, revision)),
+          );
         }
       case SendOutcome.savedToOutlook:
         _toast('Saved to your Outlook drafts.');

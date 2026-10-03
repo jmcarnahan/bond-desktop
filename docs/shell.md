@@ -211,6 +211,7 @@ alone, and only the setters that move `_section` clear it.
 | the Day stop, or a day row in its column | `DayPane`'s agenda or grid for that day (`_selectDay`; paging the grid lands here too); the stop's arrival forces a calendar sync tick |
 | `Invites · N` (in the Day column or the Inbox stack's Today section) | `DayPane` in invites mode (`_openInvites`); `‹ Day` returns to the day it left |
 | a Due or Back-from-Later row on the agenda | that thread, in main (`_select`) |
+| a reminder row on the agenda (*Reminder · in To Do*), or its tile in the grid's header | the thread it is about, in main (`_select`) |
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
@@ -227,6 +228,19 @@ the main thread and on a thread beside. A press is the owner's word that the
 thread asks for a time (a `scheduling_ask` label `yes`, unless it is already
 listed) and goes to the Day stop with that ask open in the column, its
 search running; there is no main-pane Find a time any more.
+
+**Remind me** (`docs/pipeline/15-reminders.md` "The three doors") is the
+thread bar's alarm icon right after Later / Keep in inbox, on any thread that
+is not done, main or beside. It has no key: `r` is Reply. A press opens its
+choices under the bar the way Mark done's open — one strip at a time, Escape
+or ✕ shuts it — holding the host's pills (In 2 hours, 5 pm today, Tomorrow 9
+am, Next Monday 9 am, On the deadline) and a typed-time field previewed as an
+absolute time; a pick is a To Do task and a toast with Undo. Until To Do can
+carry it the strip says the permission sentence beside a **Settings** button.
+The docked reply box carries **No follow-up | 2 days | 1 week** on a line just
+above Send on a mail thread it can really send, while To Do is available; the
+send's toast says when the follow-up fires. Reminders show on the Day
+timeline as rows and grid-header tiles that open their thread.
 
 ---
 

@@ -2018,6 +2018,11 @@ class SyncService implements MailSync {
     // `read_email`'s `is_auto_reply`, MCP only. Stored as a fact and only
     // when true, so an ordinary row carries no key; nothing gates on it yet.
     final autoReply = detail['isAutoReply'] == true;
+    // The Outlook-on-the-web link to the message, which a To Do reminder
+    // links back to (`Message.webLink`). MCP only: the SDK detail asks for
+    // no `webLink`, so it never carries one.
+    final webLink = (detail['webLink'] as String?)?.trim();
+    final hasWebLink = webLink != null && webLink.isNotEmpty;
 
     final rawAttachments = detail['attachments'];
     final rawCount = rawAttachments is List ? rawAttachments.length : 0;
@@ -2070,13 +2075,15 @@ class SyncService implements MailSync {
       sourceMetaJson: headers.isEmpty &&
               !hasMeeting &&
               !hasEventId &&
-              !autoReply
+              !autoReply &&
+              !hasWebLink
           ? null
           : jsonEncode({
               if (headers.isNotEmpty) 'headers': headers,
               if (hasMeeting) 'meeting': meeting,
               if (hasEventId) 'event_id': eventId,
               if (autoReply) 'auto_reply': true,
+              if (hasWebLink) 'web_link': webLink,
             }),
     );
 

@@ -453,11 +453,12 @@ void main() {
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
       expect(find.text('Calendar (read and write)'), findsOneWidget);
+      expect(find.text('To Do reminders'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(2));
-      // Chat.Read and Calendars.ReadWrite were not granted; there is nothing
-      // on this screen that can change that, so there is no offer beside
-      // either of them.
-      expect(find.byIcon(Icons.close), findsNWidgets(2));
+      // Chat.Read, Calendars.ReadWrite and Tasks.ReadWrite were not granted;
+      // there is nothing on this screen that can change that, so there is no
+      // offer beside any of them.
+      expect(find.byIcon(Icons.close), findsNWidgets(3));
       expect(find.text('Sign in again to enable'), findsNothing);
     });
 
@@ -484,7 +485,9 @@ void main() {
       await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.check), findsNWidgets(4));
-      expect(find.byIcon(Icons.close), findsNothing);
+      // Tasks.ReadWrite is satisfied by no wider grant: until the consent
+      // round adds it, its row is the one cross.
+      expect(find.byIcon(Icons.close), findsOneWidget);
     });
 
     testWidgets('a connected account with no scopes recorded is mail-only',
@@ -499,7 +502,7 @@ void main() {
       await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.check), findsNWidgets(2));
-      expect(find.byIcon(Icons.close), findsNWidgets(2));
+      expect(find.byIcon(Icons.close), findsNWidgets(3));
     });
 
     testWidgets('nothing connected offers the connect step', (tester) async {
@@ -576,8 +579,9 @@ void main() {
         'mail.readwrite',
         'chat.read',
         'calendars.readwrite',
+        'tasks.readwrite',
       ]);
-      expect(find.byIcon(Icons.check), findsNWidgets(4));
+      expect(find.byIcon(Icons.check), findsNWidgets(5));
       expect(find.text('Connect Microsoft'), findsNothing);
     });
   });
@@ -780,7 +784,7 @@ void main() {
       );
       await expand(tester, 'Microsoft connection');
 
-      expect(find.byIcon(Icons.close), findsNWidgets(4));
+      expect(find.byIcon(Icons.close), findsNWidgets(5));
       expect(find.text('Sign in again to enable'), findsNothing);
       expect(find.text('Sign out of this server'), findsOneWidget);
     });

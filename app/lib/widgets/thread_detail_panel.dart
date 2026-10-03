@@ -14,7 +14,6 @@ import '../services/mention_index.dart';
 import '../services/profile_photos.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
-import 'app_rail.dart' show isNeedsYou;
 import 'attachment_card.dart';
 import 'attachment_format.dart';
 import 'bot_run_row.dart';
@@ -243,6 +242,16 @@ class ThreadDetailPanel extends StatefulWidget {
   /// no button.
   final VoidCallback? onFindTime;
 
+  /// Remind me on the thread bar, passed through as the bar takes it
+  /// ([ThreadActionBar.onRemind] and the four beside it): the host builds
+  /// the pills, reads a typed time, and says when To Do cannot carry one.
+  /// Null [onRemind] draws no button.
+  final void Function(DateTime remindAtUtc, String label)? onRemind;
+  final List<ReminderPill> remindPills;
+  final ReminderPill? Function(String text)? resolveRemindText;
+  final String? remindUnavailable;
+  final VoidCallback? onOpenConnectionSettings;
+
   /// What opening one of the thread's files does. Null leaves every chip and
   /// picture in the transcript a statement — the panel has nowhere of its own
   /// to show a file, and never invents one.
@@ -389,6 +398,11 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onPeople,
     this.onCompose,
     this.onFindTime,
+    this.onRemind,
+    this.remindPills = const [],
+    this.resolveRemindText,
+    this.remindUnavailable,
+    this.onOpenConnectionSettings,
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
@@ -1375,6 +1389,11 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       contextLinked: widget.contextLinked,
       onCompose: widget.onCompose,
       onFindTime: widget.onFindTime,
+      onRemind: widget.onRemind,
+      remindPills: widget.remindPills,
+      resolveRemindText: widget.resolveRemindText,
+      remindUnavailable: widget.remindUnavailable,
+      onOpenConnectionSettings: widget.onOpenConnectionSettings,
       labels: c.labels,
       onAddLabel: open == null ? null : () => open(LabelPickerMode.label),
       onRemoveLabel: widget.onRemoveLabel,

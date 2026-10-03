@@ -21,7 +21,8 @@ import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
 import '../services/reply_policy.dart' show replySuppressed;
-import '../services/mail_echo.dart' show firstLine, mailEchoRow, nowSecondsZ;
+import '../services/mail_echo.dart'
+    show firstLine, localEchoPrefix, mailEchoRow, nowSecondsZ;
 import '../services/outbound_chat.dart'
     show queueRecapFor, writeOutboundChatRow;
 import '../services/pipeline_progress.dart';
@@ -513,6 +514,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
   final String _source;
 
   final String conversationKey;
+
+  /// The local echo id (`local:<draft id>`) of the last mail reply [send]
+  /// sent, or null when the last send was not one (a chat, a copy, an
+  /// Outlook hand-off, a failure). A follow-up reminder set at the send
+  /// anchors on it until the Sent Items copy replaces the echo.
+  String? lastEchoId;
 
   /// This notifier's own copy of [undoWindow]. Injectable so a test can hold a
   /// fifty-millisecond window instead of blocking a suite for five seconds per
@@ -1141,6 +1148,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
   Future<SendOutcome> send(String body, {String? replyTo}) async {
     final text = body.trim();
     if (text.isEmpty || state.sending) return SendOutcome.failed;
+    lastEchoId = null;
 
     if (state.capability == SendCapability.copyOnly) {
       await Clipboard.setData(ClipboardData(text: text));
@@ -1346,6 +1354,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     // poll that started before this send can beat it — and is replaced by
     // that copy when it does land, matched on the internet message id. See
     // `mail_echo.dart` for the whole contract.
+    lastEchoId = '$localEchoPrefix${sent.draftId}';
     await step(() => _store.insertLocalEcho(mailEchoRow(
           sent: sent,
           text: text,

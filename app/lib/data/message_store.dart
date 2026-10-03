@@ -12,6 +12,7 @@ import '../models/home_sort.dart';
 import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
+import '../models/reminder_models.dart';
 import '../models/storyline_models.dart';
 // The second thing this layer reads out of `services/`, on the same licence as
 // `conversation_state.dart` below: `chat_roster.dart` is arithmetic over rows
@@ -111,6 +112,18 @@ const String needsYouRulesKey = 'needs_you_rules';
 /// order, and this layer imports nothing above itself; `prefs_provider.dart`
 /// re-exports it for everything that reads or writes the setting.
 const String needsYouThresholdKey = 'needs_you_threshold';
+
+/// Whether a Needs You thread with a deadline gets a To Do reminder that
+/// morning (`AppPrefs.remindDeadlines`, on by default). A user preference, so
+/// `wipeAll` leaves it alone; declared beside the slider it works with and
+/// re-exported by `prefs_provider.dart`.
+const String remindDeadlinesKey = 'remind_deadlines';
+
+/// The id of the app's own To Do list ("Bond follow-ups"), found or created
+/// once per account by `ensure_list` and reused for every reminder, because
+/// the tool is find-then-create and not atomic. Per-person: `wipeAll` clears
+/// it with the account's other keys.
+const String todoListIdKey = 'todo_list_id';
 
 /// The oldest floor a bootstrap ever deliberately drained this source back to,
 /// one key per connector, ISO-8601 UTC.
@@ -3815,6 +3828,11 @@ RETURNING *
   /// here for the same reason — the owner's storyline and Needs You presses,
   /// which nothing re-derives (the next decision applies a Needs You label
   /// again). All three are still deleted by [wipeAll] — see
+  /// [_wipeTables]. `reminders` is here because each row points at a task in
+  /// the owner's Microsoft To Do: clearing it would orphan the task, and
+  /// nothing re-derives it. Unlike those three it also survives
+  /// [wipeAll] with the identity kept (**Forget everything and re-sync**) and
+  /// goes only on the full wipe (sign-out, `IdentityGuard`) — see
   /// [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
@@ -3823,6 +3841,7 @@ RETURNING *
     'labels',
     'conversation_labels',
     'decision_labels',
+    'reminders',
   ];
 
   /// The five tables a wipe leaves alone although two of them are derived.
@@ -3913,6 +3932,16 @@ RETURNING *
         // deletes, and carries a title and charter, or a message and its
         // vector, taken from that mail.
         'decision_labels',
+        // The reminders go only with the person, unlike the labels: Forget
+        // everything and re-sync re-syncs the SAME mailbox, whose
+        // conversation keys are Graph ids and come back unchanged, so a row
+        // still names its thread — and a deleted row would orphan its To Do
+        // task, leave its follow-up uncompleted, and let the deadline
+        // planner make a duplicate task on the next poll. On the full wipe
+        // (sign-out, `IdentityGuard`) they go with [todoListIdKey]; their
+        // tasks stay in the owner's To Do, which is the owner's own list and
+        // not this mailbox's copy of anything.
+        if (!keepIdentity) 'reminders',
       ];
 
   /// Every row: a reset is not paced, the sync is. The cap [clearDerived]
@@ -4257,7 +4286,9 @@ FROM messages
   ///
   /// [keepIdentity] is the Settings action **Forget everything and re-sync**,
   /// which is this wipe with the person left in place: the sign-in, the two
-  /// texts they wrote and their standing sender rules survive, and the
+  /// texts they wrote and their standing sender rules survive, and so do
+  /// their reminders (each row is a task in their To Do, on a thread the
+  /// re-sync brings back under the same key) with the To Do list id; the
   /// mailbox does not. Everything else still goes, `sync_state` and both
   /// bootstrap floors included — the next poll has to fetch the lookback
   /// window again from nothing, which is exactly what that button promises.
@@ -4270,7 +4301,14 @@ FROM messages
         // The three that describe one PERSON — the identity claim on these
         // rows, and the two texts they wrote about themselves and their
         // inbox. Kept only when the person is staying.
-        if (!keepIdentity) ...[dbOwnerKey, aboutMeKey, needsYouRulesKey],
+        if (!keepIdentity) ...[
+          dbOwnerKey,
+          aboutMeKey,
+          needsYouRulesKey,
+          // The To Do list is the account's: the next person's list is
+          // found again by `ensure_list`, never this one's id reused.
+          todoListIdKey,
+        ],
         // The one-shot markers. Each says "this catch-up has already run
         // over these rows" — and the rows are about to be deleted, so on
         // the next account they would be a claim about a mailbox that was
@@ -5696,6 +5734,107 @@ SELECT conversation_key FROM (
             .customSelect('SELECT * FROM decision_labels ORDER BY id')
             .get())
           row.data,
+      ];
+
+  // ── reminders ────────────────────────────────────────────────────────
+
+  /// Stores a reminder the service has just placed in To Do.
+  Future<void> insertReminder(Reminder reminder) async {
+    final row = reminder.toRow();
+    await db.customUpdate(
+      'INSERT INTO reminders (${row.keys.join(', ')}) '
+      'VALUES (${_placeholders(row.length)})',
+      variables: _args(row.values.toList()),
+    );
+  }
+
+  /// Moves one reminder on: its status, the To Do ids it gained, the message
+  /// it is anchored to or flagged on, when it was done. Only the fields
+  /// given are written, and [updatedAt] always is.
+  ///
+  /// A move to `done` or `cancelled` lands only on a row still `active`, so
+  /// a complete racing a cancel cannot flip a cancelled row to done or back.
+  Future<void> updateReminder(
+    String id, {
+    ReminderStatus? status,
+    String? todoListId,
+    String? todoTaskId,
+    String? flagMessageId,
+    String? anchorMessageId,
+    String? doneAt,
+    required String updatedAt,
+  }) async {
+    final sets = <String, Object?>{
+      'status': ?status?.wire,
+      'todo_list_id': ?todoListId,
+      'todo_task_id': ?todoTaskId,
+      'flag_message_id': ?flagMessageId,
+      'anchor_message_id': ?anchorMessageId,
+      'done_at': ?doneAt,
+      'updated_at': updatedAt,
+    };
+    final ends = status == ReminderStatus.done ||
+        status == ReminderStatus.cancelled;
+    await db.customUpdate(
+      'UPDATE reminders SET ${sets.keys.map((k) => '$k = ?').join(', ')} '
+      "WHERE id = ?${ends ? " AND status = 'active'" : ''}",
+      variables: _args([...sets.values, id]),
+    );
+  }
+
+  /// Every active reminder, soonest first.
+  Future<List<Reminder>> activeReminders() => _reminders(
+        "SELECT * FROM reminders WHERE status = 'active' "
+        'ORDER BY remind_at, id',
+        const [],
+      );
+
+  /// Every reminder on one thread, whatever its status, newest first.
+  Future<List<Reminder>> remindersForThread(
+    String source,
+    String conversationKey,
+  ) =>
+      _reminders(
+        'SELECT * FROM reminders WHERE source = ? AND conversation_key = ? '
+        'ORDER BY created_at DESC, id',
+        [source, conversationKey],
+      );
+
+  /// The active reminders that fire in [startIso, endIsoExclusive), by
+  /// `remind_at` — what the Day timeline draws. Both bounds are `isoStamp`s.
+  Future<List<Reminder>> remindersBetween({
+    required String startIso,
+    required String endIsoExclusive,
+  }) =>
+      _reminders(
+        "SELECT * FROM reminders WHERE status = 'active' "
+        'AND remind_at >= ? AND remind_at < ? ORDER BY remind_at, id',
+        [startIso, endIsoExclusive],
+      );
+
+  Future<Reminder?> reminderById(String id) async =>
+      (await _reminders('SELECT * FROM reminders WHERE id = ?', [id]))
+          .firstOrNull;
+
+  /// Whether the thread already carries an active reminder (of [kind], when
+  /// given) — the planner's once-per-thread rule.
+  Future<bool> hasActiveReminder(
+    String source,
+    String conversationKey, {
+    ReminderKind? kind,
+  }) async {
+    final rows = await db.customSelect(
+      'SELECT 1 FROM reminders WHERE source = ? AND conversation_key = ? '
+      "AND status = 'active'${kind == null ? '' : ' AND kind = ?'} LIMIT 1",
+      variables: _args([source, conversationKey, ?kind?.wire]),
+    ).get();
+    return rows.isNotEmpty;
+  }
+
+  Future<List<Reminder>> _reminders(String sql, List<Object?> args) async => [
+        for (final row
+            in await db.customSelect(sql, variables: _args(args)).get())
+          Reminder.fromRow(row.data),
       ];
 
   // ── activity ─────────────────────────────────────────────────────────

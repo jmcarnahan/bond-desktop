@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/models/reminder_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/widgets/day_grid.dart';
@@ -310,6 +311,34 @@ void main() {
         find.byKey(DayGrid.markerKeyFor('email', 'conv-9', kind: 'due'));
     expect(marker, findsOneWidget);
     expect(find.text('Due · Contoso quote · by Wednesday'), findsOneWidget);
+    await tester.tap(marker);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(opened, [item]);
+    await unmount(tester);
+  });
+
+  testWidgets('a reminder sits in the header, keyed by its id, and its tap '
+      'opens the item', (tester) async {
+    final reminder = Reminder(
+      id: 'rem-1',
+      kind: ReminderKind.followUp,
+      source: 'email',
+      conversationKey: 'conv-9',
+      title: 'Waiting on Fabrikam: quote',
+      remindAt: la.localDateTime(day, 9, 0).toUtc().toIso8601String(),
+      status: ReminderStatus.active,
+      createdFrom: ReminderOrigin.send,
+      createdAt: '2026-10-05T16:00:00.000000Z',
+      updatedAt: '2026-10-05T16:00:00.000000Z',
+    );
+    final item = ReminderItem(reminder, reminder.remindAtUtc);
+    final opened = <DayItem>[];
+    await pumpGrid(tester, markers: [item], onOpenItem: opened.add);
+
+    final marker =
+        find.byKey(DayGrid.markerKeyFor('email', 'rem-1', kind: 'reminder'));
+    expect(marker, findsOneWidget);
+    expect(find.text('Reminder · Waiting on Fabrikam: quote'), findsOneWidget);
     await tester.tap(marker);
     await tester.pump(const Duration(milliseconds: 100));
     expect(opened, [item]);

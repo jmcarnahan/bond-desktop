@@ -5,6 +5,22 @@ import '../models/label_models.dart';
 import '../theme/tokens.dart';
 import 'label_chip.dart';
 
+/// One way to set a reminder from the bar: the words on its button and the
+/// instant it means. The HOST builds every one — the bar never reads the
+/// clock or the zone — and keys it, so a test can press it by name.
+@immutable
+class ReminderPill {
+  final String label;
+  final DateTime atUtc;
+  final Key key;
+
+  const ReminderPill({
+    required this.label,
+    required this.atUtc,
+    required this.key,
+  });
+}
+
 /// Everything that can be done TO a thread, in one row under its header, and
 /// the thread's own words under that.
 ///
@@ -76,6 +92,27 @@ class ThreadActionBar extends StatefulWidget {
   /// would not say where it goes.
   final VoidCallback? onFindTime;
 
+  /// Remind me: a press opens the choices under the bar (Mark done's
+  /// pattern), and a pick hands the host the instant and the words it was
+  /// picked by. Drawn on a thread that is not done; null draws no button.
+  final void Function(DateTime remindAtUtc, String label)? onRemind;
+
+  /// The choices the strip offers, in order, built by the host.
+  final List<ReminderPill> remindPills;
+
+  /// The typed time under the pills, read by the host (the bar imports no
+  /// resolver): the reminder those words mean, previewed by its label, or
+  /// null when they name nothing ahead. Null draws no field.
+  final ReminderPill? Function(String text)? resolveRemindText;
+
+  /// Why a reminder cannot be set now — the carrier's sentence — or null when
+  /// it can. Set, the strip says it beside a Settings button and offers no
+  /// choice at all.
+  final String? remindUnavailable;
+
+  /// Where the unavailable strip's Settings button goes. Null draws none.
+  final VoidCallback? onOpenConnectionSettings;
+
   /// The thread's labels, most-used first (the store's order).
   final List<Label> labels;
   final VoidCallback? onAddLabel;
@@ -100,6 +137,11 @@ class ThreadActionBar extends StatefulWidget {
     this.contextLinked = 0,
     this.onCompose,
     this.onFindTime,
+    this.onRemind,
+    this.remindPills = const [],
+    this.resolveRemindText,
+    this.remindUnavailable,
+    this.onOpenConnectionSettings,
     this.labels = const [],
     this.onAddLabel,
     this.onRemoveLabel,
@@ -120,6 +162,18 @@ class ThreadActionBar extends StatefulWidget {
   static const Key contextKey = ValueKey('thread-context');
   static const Key composeKey = ValueKey('thread-compose');
   static const Key findTimeKey = ValueKey('thread-action-find-time');
+  static const Key remindKey = ValueKey('thread-action-remind');
+  static const Key remindChoicesKey =
+      ValueKey('thread-action-remind-choices');
+  static const Key remindTypedKey = ValueKey('thread-action-remind-typed');
+  static const Key remindPreviewKey =
+      ValueKey('thread-action-remind-preview');
+  static const Key remindSettingsKey =
+      ValueKey('thread-action-remind-settings');
+
+  /// The key a host gives the pill it calls [id] ('tomorrow', 'deadline'…).
+  static Key remindPillKeyFor(String id) =>
+      ValueKey('thread-action-remind-pill-$id');
   static const Key addLabelKey = ValueKey('thread-label');
   static const Key labelRowKey = ValueKey('thread-action-labels');
 
@@ -150,6 +204,17 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
   /// advancing into a new panel and the bar's disposal alike.
   final FocusNode _choicesFocus = FocusNode(debugLabel: 'Mark done choices');
 
+  /// Whether Remind me's choices are open under the bar. One strip at a
+  /// time: opening either shuts the other.
+  bool _reminding = false;
+
+  /// The Remind strip's own node, taken as it opens for [_choicesFocus]'s
+  /// reason, and given back the same way.
+  final FocusNode _remindFocus = FocusNode(debugLabel: 'Remind me choices');
+
+  /// The typed time in the Remind strip; emptied as the strip shuts.
+  final TextEditingController _remindText = TextEditingController();
+
   /// A thread that closed or reopened under open choices — `e` pressed while
   /// they were up, or a Reopen — starts from a shut bar. Hidden-but-set would
   /// bring the choices back unasked the next time the thread reopened. The
@@ -161,19 +226,53 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
     if (old.done != widget.done || widget.onDoneWithReason == null) {
       _choosing = false;
     }
+    // The same for Remind me: a closed thread offers none, and a host that
+    // stops offering it leaves nothing to pick.
+    if (old.done != widget.done || widget.onRemind == null) {
+      _reminding = false;
+      _remindText.clear();
+    }
   }
 
   @override
   void dispose() {
     _choicesFocus.dispose();
+    _remindFocus.dispose();
+    _remindText.dispose();
     super.dispose();
   }
 
   void _open() {
-    setState(() => _choosing = true);
+    setState(() {
+      _choosing = true;
+      _reminding = false;
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _choosing) _choicesFocus.requestFocus();
     });
+  }
+
+  void _openRemind() {
+    setState(() {
+      _reminding = true;
+      _choosing = false;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _reminding) _remindFocus.requestFocus();
+    });
+  }
+
+  void _closeRemind() {
+    if (!_reminding) return;
+    setState(() => _reminding = false);
+    _remindText.clear();
+  }
+
+  /// A pick: the strip shuts first, then the host hears the instant — the
+  /// order a Mark done choice keeps.
+  void _remind(ReminderPill pill) {
+    _closeRemind();
+    widget.onRemind?.call(pill.atUtc, pill.label);
   }
 
   void _close() {
@@ -338,6 +437,15 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
           shortcut: 's',
           onTap: widget.onLater!,
         ),
+      // No key of its own: `r` is the list's Reply.
+      if (_showRemind)
+        _ActionIcon(
+          key: ThreadActionBar.remindKey,
+          icon: Icons.alarm_add_outlined,
+          tooltip: 'Remind me — in To Do',
+          expanded: _reminding,
+          onTap: () => _reminding ? _closeRemind() : _openRemind(),
+        ),
       if (needsYou != null)
         _DoneButton(
           buttonKey: needsYou.key,
@@ -467,6 +575,7 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
               child: _chipList(),
             ),
           if (_choosing && !widget.done) _choices(),
+          if (_reminding && _showRemind) _remindStrip(),
         ],
       ),
     );
@@ -504,6 +613,10 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
   /// would move nothing anybody is looking at. (`s` still can.)
   bool get _showLater =>
       !widget.inLater && !widget.done && widget.onLater != null;
+
+  /// Remind me is for a thread still owed something; a closed one has
+  /// nothing left to be reminded of.
+  bool get _showRemind => !widget.done && widget.onRemind != null;
 
   /// The one Needs You button the bar draws, or null: Remove for a thread in
   /// Needs You, Add for one that is not and is still being worked (neither
@@ -544,6 +657,7 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
   int _iconCount() {
     var n = 0;
     if ((widget.inLater && widget.onKeepInInbox != null) || _showLater) n++;
+    if (_showRemind) n++;
     if (widget.onStoryline != null) n++;
     if (widget.onContext != null) n++;
     if (widget.onCompose != null) n++;
@@ -635,6 +749,147 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
       ),
     );
   }
+
+  /// Remind me's choices, open under the bar the way Mark done's are: the
+  /// host's pills, then a typed time previewed by what it means — or, when
+  /// To Do cannot carry a reminder, the sentence saying why and the way to
+  /// Settings, with nothing to pick. Focused as it opens and shut by Escape,
+  /// [_choices]' rule.
+  Widget _remindStrip() {
+    return Focus(
+      focusNode: _remindFocus,
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.escape) {
+          _closeRemind();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: _choicesCap(context)),
+        child: SingleChildScrollView(
+          child: Container(
+            key: ThreadActionBar.remindChoicesKey,
+            margin: const EdgeInsets.only(top: BondSpacing.s8),
+            padding: const EdgeInsets.all(BondSpacing.s8),
+            decoration: BoxDecoration(
+              color: BondColors.primary.withValues(alpha: 0.05),
+              borderRadius: BondRadii.mdAll,
+              border: Border.all(
+                color: BondColors.primary.withValues(alpha: 0.25),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _remindBody()),
+                IconButton(
+                  tooltip: 'Close',
+                  iconSize: 16,
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _closeRemind,
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _remindBody() {
+    final unavailable = widget.remindUnavailable;
+    if (unavailable != null) {
+      final settings = widget.onOpenConnectionSettings;
+      return Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: BondSpacing.s8,
+        children: [
+          Text(unavailable, style: BondType.small),
+          if (settings != null)
+            TextButton(
+              key: ThreadActionBar.remindSettingsKey,
+              onPressed: () {
+                _closeRemind();
+                settings();
+              },
+              style: _remindPillStyle,
+              child: const Text('Settings'),
+            ),
+        ],
+      );
+    }
+    final resolve = widget.resolveRemindText;
+    final typed = _remindText.text.trim();
+    final resolved = resolve == null || typed.isEmpty ? null : resolve(typed);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Remind me — To Do raises it on every device',
+          style: BondType.caption,
+        ),
+        const SizedBox(height: BondSpacing.s4),
+        // A Wrap, so a side panel takes the pills over two lines rather
+        // than pushing the last one past the edge.
+        Wrap(
+          spacing: BondSpacing.s4,
+          runSpacing: BondSpacing.s4,
+          children: [
+            for (final pill in widget.remindPills)
+              TextButton(
+                key: pill.key,
+                onPressed: () => _remind(pill),
+                style: _remindPillStyle,
+                child: Text(pill.label),
+              ),
+          ],
+        ),
+        if (resolve != null) ...[
+          const SizedBox(height: BondSpacing.s8),
+          TextField(
+            key: ThreadActionBar.remindTypedKey,
+            controller: _remindText,
+            maxLines: 1,
+            style: BondType.small,
+            decoration: const InputDecoration(
+              isDense: true,
+              hintText: 'or type a time: "Thu 3pm"',
+              border: OutlineInputBorder(),
+            ),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) {
+              if (resolved != null) _remind(resolved);
+            },
+          ),
+          // What the words mean, absolutely, before Enter: the "Move to…"
+          // field's preview.
+          if (typed.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: BondSpacing.s4),
+              child: Text(
+                resolved?.label ?? "Type a day or a time — e.g. 'Thu 3pm'.",
+                key: ThreadActionBar.remindPreviewKey,
+                style: resolved == null
+                    ? BondType.caption.copyWith(color: BondColors.inkMuted)
+                    : BondType.small.copyWith(fontWeight: FontWeight.w600),
+              ),
+            ),
+        ],
+      ],
+    );
+  }
+
+  /// The strip's buttons: the Later digest's small pill.
+  static final ButtonStyle _remindPillStyle = TextButton.styleFrom(
+    padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+    minimumSize: const Size(0, 28),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    textStyle: BondType.caption,
+  );
 
   /// The add-label button first, then the chips, scrolling sideways in
   /// whatever width the verbs leave — a thread filed under six words keeps
@@ -735,6 +990,9 @@ class _ActionIcon extends StatelessWidget {
   final String? badge;
   final VoidCallback onTap;
 
+  /// Whether the choices it opens are showing; null for an icon that acts.
+  final bool? expanded;
+
   const _ActionIcon({
     super.key,
     required this.icon,
@@ -742,6 +1000,7 @@ class _ActionIcon extends StatelessWidget {
     required this.onTap,
     this.shortcut,
     this.badge,
+    this.expanded,
   });
 
   @override
@@ -791,6 +1050,7 @@ class _ActionIcon extends StatelessWidget {
         button: true,
         label: tooltip,
         hint: _shortcutHint(shortcut),
+        expanded: expanded,
         onTap: onTap,
         excludeSemantics: true,
         child: button,

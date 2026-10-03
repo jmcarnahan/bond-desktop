@@ -27,6 +27,27 @@ enum SendCapability {
   copyOnly,
 }
 
+/// "Follow up if nobody replies", chosen beside Send: none, or a To Do
+/// reminder that many working days after the send, at 09:00.
+enum FollowUpChoice {
+  none,
+  twoDays,
+  oneWeek;
+
+  String get label => switch (this) {
+        FollowUpChoice.none => 'No follow-up',
+        FollowUpChoice.twoDays => '2 days',
+        FollowUpChoice.oneWeek => '1 week',
+      };
+
+  /// Working days (Monday to Friday) after the send.
+  int get businessDays => switch (this) {
+        FollowUpChoice.none => 0,
+        FollowUpChoice.twoDays => 2,
+        FollowUpChoice.oneWeek => 5,
+      };
+}
+
 /// The reply box under a thread: a suggested draft the user edits, and the one
 /// button that sends it.
 ///
@@ -212,6 +233,16 @@ class Composer extends StatefulWidget {
   /// than letting a send go out naming a person Teams will not notify.
   final String? Function(Person person)? refuseRecipient;
 
+  /// The follow-up the next send sets, held by the HOST (which reads it at
+  /// send time — [onSend] is unchanged) and drawn as three pills beside
+  /// Send while [followUpAvailable] and [onFollowUpChanged] are both there.
+  final FollowUpChoice followUp;
+  final void Function(FollowUpChoice choice)? onFollowUpChanged;
+
+  /// Whether To Do can carry a follow-up on this thread now. False hides the
+  /// pills: no reminder is offered that could not be set.
+  final bool followUpAvailable;
+
   const Composer({
     super.key,
     this.suggestedBody,
@@ -240,6 +271,9 @@ class Composer extends StatefulWidget {
     this.recipientPhotos,
     this.recipientChannel = RecipientChannel.mail,
     this.refuseRecipient,
+    this.followUp = FollowUpChoice.none,
+    this.onFollowUpChanged,
+    this.followUpAvailable = false,
   });
 
   /// Long enough that a normal typing rhythm does not write to sqlite between
@@ -279,6 +313,11 @@ class Composer extends StatefulWidget {
   /// [refuseRecipient].
   static const Key recipientPickRefusedKey =
       Key('composer-recipient-pick-refused');
+
+  /// The follow-up pills beside Send, and each one by its choice.
+  static const Key followUpKey = Key('composer-follow-up');
+  static Key followUpChoiceKeyFor(FollowUpChoice choice) =>
+      ValueKey('composer-follow-up-${choice.name}');
 
   @override
   State<Composer> createState() => _ComposerState();
@@ -875,7 +914,7 @@ class _ComposerState extends State<Composer> {
       valueListenable: _body,
       builder: (context, value, _) {
         final text = value.text.trim();
-        return Row(
+        final row = Row(
           children: [
             if (widget.onGenerate != null) _generateButton(text.isNotEmpty),
             // Only beside a draft that exists: there is nothing to improve
@@ -891,7 +930,67 @@ class _ComposerState extends State<Composer> {
             _sendButton(text.isNotEmpty, value.text),
           ],
         );
+        if (!_followUpShown) return row;
+        // A line of their own just above Send, right-aligned under the box:
+        // in the row they would take Improve's room, which a side panel
+        // does not have, and they scroll sideways rather than overflow.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                reverse: true,
+                child: _followUpPills(),
+              ),
+            ),
+            row,
+          ],
+        );
       },
+    );
+  }
+
+  bool get _followUpShown =>
+      widget.followUpAvailable && widget.onFollowUpChanged != null;
+
+  /// No follow-up | 2 days | 1 week, the chosen one filled. A choice only:
+  /// nothing is set until Send, and the host reads it then.
+  Widget _followUpPills() {
+    final change = widget.onFollowUpChanged!;
+    return Tooltip(
+      message: 'Follow up if nobody replies',
+      waitDuration: const Duration(milliseconds: 300),
+      child: Row(
+        key: Composer.followUpKey,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.alarm_outlined,
+              size: 16, color: BondColors.inkMuted),
+          const SizedBox(width: BondSpacing.s4),
+          for (final choice in FollowUpChoice.values)
+            Semantics(
+              selected: choice == widget.followUp,
+              child: TextButton(
+                key: Composer.followUpChoiceKeyFor(choice),
+                onPressed: () => change(choice),
+                style: TextButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+                  minimumSize: const Size(0, 28),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: BondType.caption,
+                  backgroundColor: choice == widget.followUp
+                      ? BondColors.primary.withValues(alpha: 0.12)
+                      : null,
+                ),
+                child: Text(choice.label),
+              ),
+            ),
+        ],
+      ),
     );
   }
 

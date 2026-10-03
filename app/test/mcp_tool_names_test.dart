@@ -38,10 +38,10 @@ void main() {
     'send_draft',
   ];
 
-  /// Every name the desktop is allowed to send: the twenty-two published tools
-  /// it calls (the last six are the calendar's), and nothing else. The
-  /// migration is finished, so a name that is not on this list is either a
-  /// typo or a new dependency on the server.
+  /// Every name the desktop is allowed to send: the twenty-four published
+  /// tools it calls (six for the calendar, then the two the To Do reminders
+  /// use), and nothing else. The migration is finished, so a name that is not
+  /// on this list is either a typo or a new dependency on the server.
   const publishedToolNames = {
     'connection_status',
     'get_profile',
@@ -65,6 +65,8 @@ void main() {
     'manage_event',
     'create_calendar_event',
     'find_meeting_times',
+    'manage_todo_task',
+    'mark_mail_flag',
   };
 
   /// The package root: `flutter test` runs from it, so lib/ is right here. The
@@ -131,7 +133,7 @@ void main() {
 
     expect(
       publishedToolNames.length,
-      22,
+      24,
       reason: 'a name added here is a new server dependency and belongs in a '
           'review',
     );

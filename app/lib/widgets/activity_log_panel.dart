@@ -83,6 +83,7 @@ class ActivityLogPanel extends StatefulWidget {
     'find_time': 'Find a time',
     'scheduling_ask': 'Scheduling ask',
     'ask_read': 'Ask reading',
+    'reminder': 'Reminder',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -112,6 +113,21 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline_recap': 'Storyline recap',
     'meeting_brief': 'Meeting brief',
     'processing': 'Processing',
+  };
+
+  /// A reminder's kind (`ReminderKind.wire`), in words.
+  static const Map<String, String> _reminderKinds = {
+    'reply_by': 'reply by',
+    'follow_up': 'follow up',
+    'deadline': 'deadline',
+    'custom': 'reminder',
+  };
+
+  /// Why a reminder was completed, in words.
+  static const Map<String, String> _reminderReasons = {
+    'reply': 'answered',
+    'done': 'thread done',
+    'owner': 'by you',
   };
 
   /// Why a brief was skipped, in words. The row carries only the enum word
@@ -237,6 +253,25 @@ class ActivityLogPanel extends StatefulWidget {
               : '$label — skipped ($words)$kept';
         case 'error':
           return '$label — failed$kept';
+      }
+    }
+
+    // A reminder placed in, completed in or taken out of To Do, by its
+    // action — enum words only, never a title, a thread or a time. Its one
+    // error row is the follow-up's flag, which never fails the reminder, so
+    // it reads as what did not happen rather than as "Reminder failed".
+    if (e.kind == 'reminder') {
+      switch (detail['action']) {
+        case 'create':
+          final kind = _reminderKinds[detail['kind']] ?? 'reminder';
+          return 'Reminder set in To Do ($kind)';
+        case 'complete':
+          final why = _reminderReasons[detail['reason']];
+          return why == null ? 'Reminder done' : 'Reminder done — $why';
+        case 'cancel':
+          return 'Reminder cancelled';
+        case 'flag' when e.status == 'error':
+          return 'Could not flag the mail';
       }
     }
 

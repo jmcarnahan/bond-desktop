@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../models/calendar_models.dart';
 import '../../models/message_models.dart';
+import '../../models/reminder_models.dart';
 import '../decision/stored_decision.dart';
 import '../deadline_parse.dart';
 import 'calendar_sync.dart' show CalendarAvailability;
@@ -74,6 +75,15 @@ final class ReturnItem extends DayItem {
   final DateTime atUtc;
 
   const ReturnItem(this.conversation, this.atUtc);
+}
+
+/// An active To Do reminder the app set, at [atUtc] on this day. The task
+/// lives in To Do, which raises it; this row only says it is there.
+final class ReminderItem extends DayItem {
+  final Reminder reminder;
+  final DateTime atUtc;
+
+  const ReminderItem(this.reminder, this.atUtc);
 }
 
 /// Where "now" falls among the day's timed rows. Only ever on today.
@@ -174,11 +184,27 @@ CalendarDate? _returnDate(Conversation c, CalendarZone zone) {
   return at == null ? null : zone.dateOf(at);
 }
 
+/// The active [reminders] that fall on [day]'s local date, each with its
+/// instant, in the order given.
+Iterable<ReminderItem> _remindersOn(
+  List<Reminder> reminders,
+  CalendarDate day,
+  CalendarZone zone,
+) sync* {
+  for (final r in reminders) {
+    if (!r.isActive) continue;
+    final at = r.remindAtUtc;
+    if (zone.dateOf(at) == day) yield ReminderItem(r, at);
+  }
+}
+
 /// One day's agenda, in the order it is read.
 ///
 /// All-day events head it (in the order given — the store's), then the
 /// deadlines, which have a day but no hour, then everything with an instant
-/// — meetings, returns from Later and the Now marker — by that instant.
+/// — meetings, returns from Later, the owner's To Do [reminders] (active
+/// ones, on the local date of their instant, ranked with the returns) and
+/// the Now marker — by that instant.
 ///
 /// The Now marker sits after every timed row that started strictly before
 /// [now] and before every row starting at or after it, so a meeting starting
@@ -207,6 +233,7 @@ List<DayItem> buildDayItems({
   required List<Conversation> conversations,
   required DateTime now,
   required CalendarZone zone,
+  List<Reminder> reminders = const [],
 }) {
   final nowUtc = now.toUtc();
   final dayEvents = [
@@ -247,6 +274,9 @@ List<DayItem> buildDayItems({
     ));
   }
   for (final r in returns) {
+    timed.add((r.atUtc, 1, order++, r));
+  }
+  for (final r in _remindersOn(reminders, day, zone)) {
     timed.add((r.atUtc, 1, order++, r));
   }
   if (zone.dateOf(nowUtc) == day) {
@@ -291,9 +321,10 @@ Iterable<(CalendarDate, DayItem)> _markers(
   }
 }
 
-/// The deadlines and returns of every day in `[from, toExclusive)`, day by
-/// day, in the order [buildDayItems] lists them on each — deadlines first,
-/// then returns by their instant — and nothing else.
+/// The deadlines, returns and reminders of every day in `[from,
+/// toExclusive)`, day by day, in the order [buildDayItems] lists them on
+/// each — deadlines first, then returns and reminders by their instant —
+/// and nothing else.
 ///
 /// The grid's header wants only these, and a week of [buildDayItems] would
 /// run the overlap maths seven times over events the header never reads.
@@ -303,31 +334,41 @@ List<DayItem> rangeMarkers({
   required List<Conversation> conversations,
   required DateTime now,
   required CalendarZone zone,
+  List<Reminder> reminders = const [],
 }) {
   final deadlines = <CalendarDate, List<DayItem>>{};
-  final returns = <CalendarDate, List<ReturnItem>>{};
+  // Returns and reminders together: they rank alike, by instant.
+  final returns = <CalendarDate, List<(DateTime, DayItem)>>{};
   for (final (on, item) in _markers(conversations, now, zone)) {
     if (on.isBefore(from) || !on.isBefore(toExclusive)) continue;
     switch (item) {
       case DeadlineItem():
         (deadlines[on] ??= []).add(item);
       case ReturnItem():
-        (returns[on] ??= []).add(item);
+        (returns[on] ??= []).add((item.atUtc, item));
       default:
         break;
     }
   }
+  for (final r in reminders) {
+    if (!r.isActive) continue;
+    final at = r.remindAtUtc;
+    final on = zone.dateOf(at);
+    if (on.isBefore(from) || !on.isBefore(toExclusive)) continue;
+    (returns[on] ??= []).add((at, ReminderItem(r, at)));
+  }
   final out = <DayItem>[];
   for (var d = from; d.isBefore(toExclusive); d = d.addDays(1)) {
     out.addAll(deadlines[d] ?? const <DayItem>[]);
-    // By instant, ties in input order: [buildDayItems]' own sort, which
-    // List.sort alone would not promise (it is not stable).
+    // By instant, ties in input order (returns before reminders):
+    // [buildDayItems]' own sort, which List.sort alone would not promise
+    // (it is not stable).
     final back = [...?returns[d]].indexed.toList()
       ..sort((a, b) {
-        final byAt = a.$2.atUtc.compareTo(b.$2.atUtc);
+        final byAt = a.$2.$1.compareTo(b.$2.$1);
         return byAt != 0 ? byAt : a.$1.compareTo(b.$1);
       });
-    out.addAll([for (final (_, r) in back) r]);
+    out.addAll([for (final (_, (_, item)) in back) item]);
   }
   return out;
 }
@@ -476,14 +517,23 @@ class DaySummary {
   final int returns;
   final int invites;
 
+  /// Active To Do reminders on the day.
+  final int reminders;
+
   const DaySummary({
     this.meetings = 0,
     this.due = 0,
     this.returns = 0,
     this.invites = 0,
+    this.reminders = 0,
   });
 
-  bool get isEmpty => meetings == 0 && due == 0 && returns == 0 && invites == 0;
+  bool get isEmpty =>
+      meetings == 0 &&
+      due == 0 &&
+      returns == 0 &&
+      invites == 0 &&
+      reminders == 0;
 
   @override
   bool operator ==(Object other) =>
@@ -491,15 +541,16 @@ class DaySummary {
       other.meetings == meetings &&
       other.due == due &&
       other.returns == returns &&
-      other.invites == invites;
+      other.invites == invites &&
+      other.reminders == reminders;
 
   @override
-  int get hashCode => Object.hash(meetings, due, returns, invites);
+  int get hashCode => Object.hash(meetings, due, returns, invites, reminders);
 
   @override
   String toString() =>
       'DaySummary(meetings: $meetings, due: $due, returns: $returns, '
-      'invites: $invites)';
+      'invites: $invites, reminders: $reminders)';
 }
 
 /// [items] (one day's, from [buildDayItems]) and the owed [invites] starting
@@ -513,6 +564,7 @@ DaySummary daySummary({
   var meetings = 0;
   var due = 0;
   var returns = 0;
+  var reminders = 0;
   for (final item in items) {
     switch (item) {
       case MeetingItem(:final event) || AllDayItem(:final event):
@@ -521,6 +573,8 @@ DaySummary daySummary({
         due++;
       case ReturnItem():
         returns++;
+      case ReminderItem():
+        reminders++;
       case NowMarker():
         break;
     }
@@ -534,6 +588,7 @@ DaySummary daySummary({
     due: due,
     returns: returns,
     invites: owed,
+    reminders: reminders,
   );
 }
 
@@ -559,6 +614,7 @@ String dayRowLabel(CalendarDate day, CalendarDate today, DaySummary s) {
     if (s.due > 0) '${s.due} due',
     if (s.returns > 0) '${s.returns} back',
     if (s.invites > 0) _plural(s.invites, 'invite', 'invites'),
+    if (s.reminders > 0) _plural(s.reminders, 'reminder', 'reminders'),
   ];
   if (parts.isEmpty) return '$prefix · clear';
   return '$prefix · ${parts.join(' · ')}';
@@ -572,7 +628,8 @@ String dayRowLabel(CalendarDate day, CalendarDate today, DaySummary s) {
 /// the window — by the same [_deadlineOf] and [_returnDate] that
 /// [buildDayItems] places them with, so the two cannot disagree — and only
 /// those go into each day's merge. Otherwise every build of the column
-/// would parse every thread's deadline fifteen times over.
+/// would parse every thread's deadline fifteen times over. Active
+/// [reminders] are narrowed the same way and count on their local date.
 List<(CalendarDate, DaySummary)> upcomingDays({
   required CalendarDate today,
   required List<CalendarEvent> events,
@@ -581,6 +638,7 @@ List<(CalendarDate, DaySummary)> upcomingDays({
   required DateTime now,
   required CalendarZone zone,
   int horizon = 14,
+  List<Reminder> reminders = const [],
 }) {
   final last = today.addDays(horizon);
   bool inWindow(CalendarDate? d) =>
@@ -589,6 +647,10 @@ List<(CalendarDate, DaySummary)> upcomingDays({
     for (final c in conversations)
       if (inWindow(_deadlineOf(c, now)?.$1) || inWindow(_returnDate(c, zone)))
         c,
+  ];
+  final dueReminders = [
+    for (final r in reminders)
+      if (r.isActive && inWindow(zone.dateOf(r.remindAtUtc))) r,
   ];
   final out = <(CalendarDate, DaySummary)>[];
   for (var i = 0; i <= horizon; i++) {
@@ -599,6 +661,7 @@ List<(CalendarDate, DaySummary)> upcomingDays({
       conversations: candidates,
       now: now,
       zone: zone,
+      reminders: dueReminders,
     );
     final summary =
         daySummary(day: day, items: items, invites: invites, zone: zone);

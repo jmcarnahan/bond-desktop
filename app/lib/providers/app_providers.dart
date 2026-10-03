@@ -18,6 +18,7 @@ import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../data/setup_store.dart';
 import '../models/calendar_models.dart' show MailboxSettings;
+import '../models/reminder_models.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/ai_workers.dart';
@@ -33,6 +34,7 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/calendar_backend.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
+import '../services/backend/tasks_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/backend/unavailable_calendar_backend.dart';
 import '../services/calendar/ask_reader.dart';
@@ -84,6 +86,7 @@ import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_calendar_backend.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
+import '../services/mcp/mcp_tasks_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
 import '../services/models/managed_model_status.dart';
@@ -105,6 +108,9 @@ import '../services/pipeline_repair_service.dart';
 import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
+import '../services/reminders/reminder_planner.dart';
+import '../services/reminders/reminder_service.dart';
+import '../services/reminders/tasks_availability.dart';
 import '../services/restore_service.dart';
 import '../services/sample/sample_backends.dart';
 import '../services/sample/sample_data.dart';
@@ -1010,6 +1016,37 @@ final calendarBackendProvider = Provider<CalendarBackend>((ref) {
   return mode == backendModeSdk
       ? const UnavailableCalendarBackend()
       : McpCalendarBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Microsoft To Do, the carrier for the app's reminders (D1/D7). MCP mode
+/// only, exactly as [calendarBackendProvider]: SDK mode's sign-in asks for no
+/// Tasks scope and the sample sandbox serves no To Do, so both get the backend
+/// whose every call says so.
+final tasksBackendProvider = Provider<TasksBackend>((ref) {
+  if (sampleModeOn) return const UnavailableTasksBackend();
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? const UnavailableTasksBackend()
+      : McpTasksBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Whether reminders can be set ([tasksPrecheck]): SDK mode and the sample
+/// sandbox are [TasksAvailability.sdkMode], an MCP grant without
+/// `tasks.readwrite` — every one until the owner's consent round — is
+/// [TasksAvailability.scopeMissing].
+///
+/// The grant is re-read after every calendar tick that published
+/// ([calendarAvailabilityProvider], [calendarRevisionProvider]), which is how
+/// a reconnect that adds the scope lights the feature up without a restart;
+/// `hasScope` caches `connection_status` for 30 s, so a re-read costs at
+/// most one status call.
+final tasksAvailabilityProvider = FutureProvider<TasksAvailability>((ref) {
+  if (sampleModeOn) return TasksAvailability.sdkMode;
+  ref.watch(calendarAvailabilityProvider);
+  ref.watch(calendarRevisionProvider);
+  final auth = ref.watch(authSessionProvider);
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return tasksPrecheck(mode == backendModeSdk, auth.hasScope);
 });
 
 /// The calendar mirror's sync. Unlike [teamsSyncProvider] the inbox's poll
@@ -2173,6 +2210,44 @@ final draftSlotRefresherProvider =
           calendar: ref.watch(calendarStoreProvider),
           log: ref.watch(activityLogProvider),
         ));
+
+/// The reminders carried by Microsoft To Do (D7/D8). Every input is read at
+/// call time — the mailbox zone, the display zone, the grant — so a sync or
+/// a reconnect rebuilds nothing; only a backend switch (a new
+/// [tasksBackendProvider]) builds a new service.
+final reminderServiceProvider = Provider<ReminderService>((ref) =>
+    ReminderService(
+      store: ref.watch(messageStoreProvider),
+      backend: ref.watch(tasksBackendProvider),
+      mailbox: () => ref.read(mailboxSettingsProvider.future),
+      zone: () =>
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc(),
+      log: ref.watch(activityLogProvider),
+      availability: () => ref.read(tasksAvailabilityProvider.future),
+    ));
+
+/// Bumped by whoever changes a reminder row (a create, an Undo, a reconcile
+/// that changed rows), so [remindersProvider] reads the table again.
+final reminderRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// The active reminders, soonest first — what the Day timeline and the
+/// thread bar draw.
+final remindersProvider =
+    FutureProvider.autoDispose<List<Reminder>>((ref) {
+  ref.watch(reminderRevisionProvider);
+  return ref.watch(messageStoreProvider).activeReminders();
+});
+
+/// The deadline planner: on the poll, after the reconcile. The owner's
+/// switch is read at call time (`ref.read`, never `watch`, so moving it
+/// rebuilds nothing mid-pass).
+final reminderPlannerProvider = Provider<ReminderPlanner>((ref) =>
+    ReminderPlanner(
+      store: ref.watch(messageStoreProvider),
+      service: ref.watch(reminderServiceProvider),
+      enabled: () => ref.read(appPrefsProvider).remindDeadlines,
+      availability: () => ref.read(tasksAvailabilityProvider.future),
+    ));
 
 /// Who the owner is, from the account the sync signed in with.
 ///
