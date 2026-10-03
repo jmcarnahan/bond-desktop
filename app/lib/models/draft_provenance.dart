@@ -50,12 +50,20 @@ class DraftProvenance {
   /// came back from after the caption has nothing else to say.
   final String? improvedBy;
 
+  /// The free times Dart appended to this draft after the model call, or
+  /// null when it offers none (`draft_slots.dart`): `{slots: [{start_utc,
+  /// end_utc}], source, window, graph_calls, read, minutes}`. Not a source
+  /// either — the model never saw them — so [isEmpty] ignores it; it is what
+  /// the stale-times redraft (`DraftSlotRefresher`) reads back.
+  final Map<String, Object?>? calendar;
+
   const DraftProvenance({
     required this.documents,
     required this.directories,
     required this.files,
     required this.skills,
     this.improvedBy,
+    this.calendar,
   });
 
   static const DraftProvenance none = DraftProvenance(
@@ -84,14 +92,19 @@ class DraftProvenance {
   /// Whether there is nothing here worth storing at all — no sources AND no
   /// improving target. [isEmpty] keeps meaning "no sources", because that is
   /// the question the caption asks; this is the one the writer asks.
-  bool get isNone => isEmpty && improvedBy == null;
+  bool get isNone => isEmpty && improvedBy == null && calendar == null;
 
-  DraftProvenance copyWith({String? improvedBy}) => DraftProvenance(
+  DraftProvenance copyWith({
+    String? improvedBy,
+    Map<String, Object?>? calendar,
+  }) =>
+      DraftProvenance(
         documents: documents,
         directories: directories,
         files: files,
         skills: skills,
         improvedBy: improvedBy ?? this.improvedBy,
+        calendar: calendar ?? this.calendar,
       );
 
   /// Snake_case keys and all four of them, always — including the empty ones,
@@ -117,6 +130,8 @@ class DraftProvenance {
         // sources to report and only a rewritten one has a target, so writing
         // `null` here would say a draft was looked at and improved by nobody.
         if (improvedBy != null) 'improved_by': improvedBy,
+        // Only on a draft that offers times, for the same reason.
+        if (calendar != null) 'calendar': calendar,
       });
 
   /// A `context_json` column as a [DraftProvenance], or null.
@@ -137,6 +152,9 @@ class DraftProvenance {
         files: _files(decoded['files']),
         skills: _strings(decoded['skills']),
         improvedBy: _id(decoded['improved_by']),
+        calendar: decoded['calendar'] is Map
+            ? Map<String, Object?>.from(decoded['calendar'] as Map)
+            : null,
       );
     } on FormatException {
       return null;

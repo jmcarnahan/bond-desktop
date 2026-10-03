@@ -3,6 +3,7 @@ import 'package:intl/intl.dart' show DateFormat;
 
 import '../../data/calendar_store.dart';
 import '../../models/calendar_models.dart';
+import '../backend/backend_types.dart' show NotSignedIn, ReconsentRequired;
 import '../backend/calendar_backend.dart';
 import '../backend/calendar_errors.dart';
 import '../llm/llm_client.dart' show redactEndpoints;
@@ -115,6 +116,16 @@ List<FindTimeWindow> findTimeWindows(AskHints? hints) => [
       FindTimeWindow.nextWeek,
     ];
 
+/// The window an ask's search runs over for the pill [chosen]: their day
+/// ([FindTimeWindow.theirs]) only while the words name a day — read again
+/// without one ("dinner tonight" once tonight has gone), it is this week,
+/// which is what the row's pills then offer. The Day column's searches and
+/// a draft's offered times (`draft_slots.dart`) both seed through it.
+FindTimeWindow askWindowFor(FindTimeWindow chosen, AskHints? hints) =>
+    chosen == FindTimeWindow.theirs && hints?.day == null
+        ? FindTimeWindow.thisWeek
+        : chosen;
+
 /// The length pills: 30, 45 and 60, plus the ask's own length (dinner's 90)
 /// in its place when it is none of them.
 List<int> findTimeDurations(AskHints? hints) {
@@ -198,6 +209,14 @@ class FindTimeResult {
   /// day when the ask's hours were searched over several days.
   final int graphCalls;
 
+  /// What a `find_meeting_times` call threw, when one did: the FIRST auth
+  /// failure ([ReconsentRequired], [NotSignedIn]) over any other error, else
+  /// the first error — so a search of several days where one day needs a new
+  /// consent still says so. Null when nothing was thrown. The search never
+  /// throws; a caller that must act on an auth failure (the draft lane parks
+  /// on one) reads it here.
+  final Object? error;
+
   const FindTimeResult({
     this.slots = const [],
     this.source = 'local',
@@ -206,7 +225,18 @@ class FindTimeResult {
     this.availability = const {},
     this.failed = false,
     this.graphCalls = 0,
+    this.error,
   });
+}
+
+/// [FindTimeResult.error]'s pick among [errors]: the first auth failure,
+/// else the first error, else null.
+Object? _pickError(Iterable<Object?> errors) {
+  final thrown = errors.nonNulls;
+  return thrown
+          .where((e) => e is ReconsentRequired || e is NotSignedIn)
+          .firstOrNull ??
+      thrown.firstOrNull;
 }
 
 /// The note when the account cannot read other people's free/busy.
@@ -433,6 +463,7 @@ Future<FindTimeResult> searchFindTime({
   }
   final week = await once(wholeWeek: true);
   final calls = first.graphCalls + week.graphCalls;
+  final error = _pickError([first.error, week.error]);
   if (week.slots.isEmpty) {
     return FindTimeResult(
       slots: first.slots,
@@ -442,6 +473,7 @@ Future<FindTimeResult> searchFindTime({
       availability: first.availability,
       failed: first.failed,
       graphCalls: calls,
+      error: error,
     );
   }
   final weekday =
@@ -456,6 +488,7 @@ Future<FindTimeResult> searchFindTime({
     overlaps: week.overlaps,
     availability: week.availability,
     graphCalls: calls,
+    error: error,
   );
 }
 
@@ -492,6 +525,9 @@ Future<FindTimeResult> _searchOnce({
 
   // The calls made so far, which every result below reports.
   var graphCalls = 0;
+  // What the calls threw, in day order; every result below reports the pick
+  // ([FindTimeResult.error]).
+  final errors = <Object>[];
 
   FindTimeResult withOverlaps(List<FreeSlot> slots, String source,
           {String? note,
@@ -506,6 +542,7 @@ Future<FindTimeResult> _searchOnce({
         },
         availability: availability,
         graphCalls: graphCalls,
+        error: _pickError(errors),
       );
 
   // Their pill over several days asked for ("Tuesday or Thursday"): only
@@ -611,6 +648,7 @@ Future<FindTimeResult> _searchOnce({
       for (final o in outcomes)
         if (o.error case final e?) (error: e, stack: o.stack!),
     ];
+    errors.addAll([for (final f in failures) f.error]);
     // A failure every day would share — a missing permission, an account
     // that cannot look others up — is the search's own, as one call's
     // would be. Any other day failing costs that day; every day failing is
@@ -686,27 +724,34 @@ Future<FindTimeResult> _searchOnce({
       },
     );
   } on CalendarRefused catch (e) {
+    _noteError(errors, e);
     if (e.code == 'unsupported_account') return local(note: findTimeLocalNote);
     final sentence = firstSentence(e.reason);
     return FindTimeResult(
         source: 'graph',
         note: sentence.isEmpty ? e.message : sentence,
         failed: true,
-        graphCalls: graphCalls);
-  } on CalendarScopeMissing {
+        graphCalls: graphCalls,
+        error: _pickError(errors));
+  } on CalendarScopeMissing catch (e) {
+    _noteError(errors, e);
     return FindTimeResult(
       source: 'graph',
       note: 'Calendar permission missing — reconnect in Settings.',
       failed: true,
       graphCalls: graphCalls,
+      error: _pickError(errors),
     );
   } on CalendarUnavailable catch (e) {
+    _noteError(errors, e);
     return FindTimeResult(
         source: 'graph',
         note: e.sentence,
         failed: true,
-        graphCalls: graphCalls);
+        graphCalls: graphCalls,
+        error: _pickError(errors));
   } on Object catch (e) {
+    _noteError(errors, e);
     // The type alone said nothing when a live press failed (2026-10-02):
     // the server's reason, with any endpoint redacted, is what names a bad
     // window, a zone Graph refused or a tenant that will not answer.
@@ -717,8 +762,15 @@ Future<FindTimeResult> _searchOnce({
       note: "Couldn't reach the calendar to find a time.",
       failed: true,
       graphCalls: graphCalls,
+      error: _pickError(errors),
     );
   }
+}
+
+/// [e] added to [errors] unless a day's failure already put it there (a
+/// failure every day shares is rethrown to the handlers).
+void _noteError(List<Object> errors, Object e) {
+  if (!errors.any((x) => identical(x, e))) errors.add(e);
 }
 
 /// One day's ask answered: its answer, or what it threw.

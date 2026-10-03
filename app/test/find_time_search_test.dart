@@ -1,6 +1,8 @@
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart'
+    show ReconsentRequired;
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/calendar_errors.dart';
 import 'package:bond_inbox/services/calendar/ask_hints.dart';
@@ -970,6 +972,99 @@ void main() {
         expect(findTimeWindowLabel(FindTimeWindow.thisWeek, either),
             'This Thu');
       });
+    });
+  });
+
+  group('the error a search caught', () {
+    test('none when nothing was thrown', () async {
+      backend.answer = [
+        MeetingTimeSuggestion(
+            startUtc: ten, endUtc: ten.add(const Duration(minutes: 30))),
+      ];
+      expect((await search(['dana@fabrikam.example'])).error, isNull);
+    });
+
+    test('a failed search carries what failed it', () async {
+      backend.answer = const CalendarTransient('Graph answered 503.');
+      final r = await search(['dana@fabrikam.example']);
+      expect(r.failed, isTrue);
+      expect(r.error, isA<CalendarTransient>());
+    });
+
+    test('one day of several needing a new consent: the search answers with '
+        'the other days, and says so', () async {
+      // Tue Oct 20 or Thu Oct 22, afternoons: one call per day.
+      const tue = CalendarDate(2026, 10, 20);
+      const thu = CalendarDate(2026, 10, 22);
+      final tueStart = la.localDateTime(tue, 13, 0).toUtc();
+      backend.answerFor = (start, end) => la.dateOf(start) == thu
+          ? const ReconsentRequired()
+          : [
+              MeetingTimeSuggestion(
+                  startUtc: start,
+                  endUtc: start.add(const Duration(minutes: 30))),
+            ];
+      final r = await searchFindTime(
+        backend: backend,
+        calendar: calendar,
+        hours: null,
+        addresses: const ['dana@fabrikam.example'],
+        durationMinutes: 30,
+        window: FindTimeWindow.theirs,
+        now: now,
+        zone: la,
+        hints: const AskHints(
+          day: tue,
+          days: [tue, thu],
+          hours: AskHours(
+              startHour: 13, startMinute: 0, endHour: 17, endMinute: 0),
+        ),
+      );
+      expect(backend.windows, hasLength(2));
+      expect(r.failed, isFalse);
+      expect(r.slots.single.startUtc.isAtSameMomentAs(tueStart), isTrue);
+      expect(r.error, isA<ReconsentRequired>(),
+          reason: 'an auth failure is reported even when other days answered');
+    });
+
+    test('an auth failure wins over another error', () async {
+      const tue = CalendarDate(2026, 10, 20);
+      const thu = CalendarDate(2026, 10, 22);
+      backend.answerFor = (start, end) => la.dateOf(start) == thu
+          ? const ReconsentRequired()
+          : const CalendarTransient('Graph answered 503.');
+      final r = await searchFindTime(
+        backend: backend,
+        calendar: calendar,
+        hours: null,
+        addresses: const ['dana@fabrikam.example'],
+        durationMinutes: 30,
+        window: FindTimeWindow.theirs,
+        now: now,
+        zone: la,
+        hints: const AskHints(day: tue, days: [tue, thu]),
+      );
+      expect(r.failed, isTrue);
+      expect(r.error, isA<ReconsentRequired>());
+    });
+  });
+
+  group('askWindowFor', () {
+    test('their day stands only while the words name a day', () {
+      const friday = CalendarDate(2026, 10, 9);
+      expect(askWindowFor(FindTimeWindow.theirs, const AskHints(day: friday)),
+          FindTimeWindow.theirs);
+      expect(askWindowFor(FindTimeWindow.theirs, const AskHints()),
+          FindTimeWindow.thisWeek,
+          reason: 'read again with no day, their day is this week');
+      expect(askWindowFor(FindTimeWindow.theirs, null),
+          FindTimeWindow.thisWeek);
+      expect(askWindowFor(FindTimeWindow.nextWeek, null),
+          FindTimeWindow.nextWeek,
+          reason: 'the owner\'s own pill stands');
+      expect(askWindowFor(FindTimeWindow.thisWeek, const AskHints(day: friday)),
+          FindTimeWindow.thisWeek,
+          reason: 'a week pill is never turned into their day');
     });
   });
 }

@@ -1,21 +1,42 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/draft_provenance.dart';
+import 'package:bond_inbox/models/draft_request.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart'
+    show ReconsentRequired;
+import 'package:bond_inbox/services/backend/calendar_backend.dart';
+import 'package:bond_inbox/services/backend/calendar_errors.dart';
+import 'package:bond_inbox/services/calendar/ask_reader.dart';
+import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/draft_slot_refresher.dart';
+import 'package:bond_inbox/services/calendar/draft_slots.dart';
+import 'package:bond_inbox/services/calendar/find_time.dart'
+    show
+        FindTimeWindow,
+        findTimeReplyLine,
+        findTimeSlotLine,
+        findTimeWindowUtc;
+import 'package:bond_inbox/services/calendar/overlaps.dart' show FreeSlot;
+import 'package:bond_inbox/services/cloud_drafts.dart' show DraftRoutes;
 import 'package:bond_inbox/services/context/context_retriever.dart';
+import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_questions.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/draft_stream.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show LlmTargetSpec;
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -2017,4 +2038,609 @@ void main() {
       expect(events.last.done, isTrue);
     });
   });
+
+  group("a scheduling ask's draft offers real times", () {
+    const dana = 'dana@fabrikam.com';
+    const me = 'me@contoso.com';
+    late CalendarZone la;
+    late ActivityLog log;
+    late _SlotsBackend backend;
+    late List<FreeSlot> offered;
+
+    setUpAll(() async {
+      await initCalendarZones();
+    });
+
+    setUp(() {
+      la = CalendarZone.tryNamed('America/Los_Angeles')!;
+      log = ActivityLog(store);
+      // Two slots a week out, whenever the test runs: 10:00 and 14:00
+      // local, ranked by Graph's confidence in that order.
+      final day = la.dateOf(DateTime.now().toUtc()).addDays(7);
+      DateTime at(int h) => la.localDateTime(day, h, 0).toUtc();
+      offered = [
+        FreeSlot(at(10), at(10).add(const Duration(minutes: 30))),
+        FreeSlot(at(14), at(14).add(const Duration(minutes: 30))),
+      ];
+      backend = _SlotsBackend([
+        MeetingTimeSuggestion(
+            startUtc: offered[0].startUtc,
+            endUtc: offered[0].endUtc,
+            confidence: 90),
+        MeetingTimeSuggestion(
+            startUtc: offered[1].startUtc,
+            endUtc: offered[1].endUtc,
+            confidence: 50),
+      ]);
+    });
+
+    /// A needs-reply thread with Dana and the owner whose one message, an
+    /// hour old, the decision model read as [intent] at p 0.9, a reply
+    /// expected.
+    Future<void> seedAsk({
+      String body = 'Could we find half an hour this week to go over the '
+          'budget?',
+      String subject = 'Budget',
+      String intent = 'scheduling',
+      double replyExpected = 0.9,
+    }) async {
+      final received = MessageStore.isoStamp(
+          DateTime.now().toUtc().subtract(const Duration(hours: 1)));
+      await store.upsertMessage({
+        'source_message_id': 'm-ask',
+        'conversation_key': 'c-ask',
+        'direction': 'inbound',
+        'subject': subject,
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at': received,
+        'body_text': body,
+        'triage_status': 'done',
+      });
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-ask',
+        'subject': subject,
+        'participants_json':
+            '[{"name":"Dana","email":"$dana"},{"name":"Me","email":"$me"}]',
+        'state': 'needs_reply',
+        'message_count': 1,
+        'last_inbound_at': received,
+        'last_message_at': received,
+      });
+      await store.writeDecision(
+        'email',
+        'm-ask',
+        fakeDecision(fakeAnswers(
+            intent: intent, choiceP: 0.9, replyExpected: replyExpected)),
+        qhash: DecisionHeads.expectedQhash,
+        ownerKnown: true,
+      );
+    }
+
+    /// The model reader off unless a test reads with one: the rules alone.
+    DraftCalendar calendarFor({
+      AskReader? reader,
+      bool available = true,
+      Set<String> owner = const {me},
+    }) =>
+        DraftCalendar(
+          store: CalendarStore(db),
+          backend: backend,
+          mailbox: () async => null,
+          zone: () async => la,
+          reader: reader ??
+              AskReader(
+                store: store,
+                client: () => ScriptedLlm.never(label: 'ask_read off'),
+                log: log,
+                zone: () => la,
+                enabled: false,
+              ),
+          ownerAddresses: () async => owner,
+          available: () => available,
+        );
+
+    Map<String, dynamic> withOptions() => answer(
+          replyBody: 'Hi Dana — happy to go over the budget.',
+          options: const [
+            {'stance': 'Yes', 'reply_body': 'Happy to — let us meet.'},
+            {'stance': 'Later', 'reply_body': 'Could it wait a week?'},
+          ],
+        );
+
+    Future<Map<String, Object?>> runAsk(
+      ScriptedLlm llm, {
+      DraftCalendar? calendar,
+    }) async {
+      await runOne(
+        DraftHandler(store, llm,
+            activityLog: log, calendar: calendar ?? calendarFor()),
+        id: 'm-ask',
+      );
+      return (await store.getDraftForMessage('email', 'm-ask'))!;
+    }
+
+    Map<String, Object?>? calendarOf(Map<String, Object?> draft) =>
+        DraftProvenance.decode(draft['context_json'] as String?)?.calendar;
+
+    Future<List<Map<String, Object?>>> findTimeRows() async => [
+          for (final r in await store.recentActivity())
+            if (r['kind'] == 'find_time') r,
+        ];
+
+    test('the body and every option end with the real times', () async {
+      await seedAsk();
+      final draft = await runAsk(draftClient(draft: withOptions()));
+
+      final line = findTimeReplyLine(offered, la);
+      expect(draft['body'],
+          'Hi Dana — happy to go over the budget.\n\n$line');
+      final options =
+          (jsonDecode(draft['options_json'] as String) as List).cast<Map>();
+      expect([for (final o in options) o['body']], [
+        'Happy to — let us meet.\n\n$line',
+        'Could it wait a week?\n\n$line',
+      ]);
+      expect([for (final o in options) o['stance']], ['Yes', 'Later']);
+
+      final calendar = calendarOf(draft)!;
+      expect(calendar['slots'], [
+        for (final s in offered)
+          {
+            'start_utc': MessageStore.isoStamp(s.startUtc),
+            'end_utc': MessageStore.isoStamp(s.endUtc),
+          },
+      ]);
+      expect(calendar['read'], 'rules');
+      expect(calendar['source'], 'graph');
+      expect(calendar['window'], 'this_week');
+      expect(calendar['minutes'], 30);
+      expect(calendar['graph_calls'] as int, greaterThanOrEqualTo(1));
+      expect(backend.asked.first, [dana],
+          reason: 'the thread\'s other people, the owner left out');
+
+      final row = (await findTimeRows()).single;
+      expect(row['status'], 'ok');
+      expect(jsonDecode(row['detail_json'] as String), {
+        'action': 'draft',
+        'source': 'graph',
+        'slots': 2,
+        'people': 1,
+        'window': 'this_week',
+        'graph_calls': calendar['graph_calls'],
+        'read': 'rules',
+      });
+    });
+
+    test('the model never saw the times', () async {
+      await seedAsk();
+      final llm = draftClient(draft: withOptions());
+      await runAsk(llm);
+
+      final prompt = llm.users.single;
+      expect(prompt, isNot(contains('Would any of these work')));
+      for (final s in offered) {
+        expect(prompt, isNot(contains(findTimeSlotLine(s, la))));
+      }
+    });
+
+    test("the model's reading drives the window", () async {
+      await seedAsk(
+          subject: 'Dinner', body: 'Could we do dinner on Friday?');
+      final reading = ScriptedLlm(answers: {
+        'ask_read': {
+          'evidence': 'Dana asks to have dinner on Friday.',
+          'asks_for_time': true,
+          'when': ['Friday'],
+          'time': '',
+          'duration': '',
+          'meal': 'dinner',
+        },
+      });
+      // Each day's ask answered with its own opening, so the slot sits
+      // inside the evening Graph was asked about.
+      backend.answerFor = (start, end) => [
+            MeetingTimeSuggestion(
+                startUtc: start,
+                endUtc: start.add(const Duration(minutes: 90))),
+          ];
+      final draft = await runAsk(
+        draftClient(draft: answer()),
+        calendar: calendarFor(
+          reader: AskReader(
+            store: store,
+            client: () => reading,
+            log: log,
+            zone: () => la,
+          ),
+        ),
+      );
+
+      expect(reading.schemaNames, ['ask_read']);
+      final asked = la.toLocal(backend.windows.first.$1);
+      expect(asked.weekday, DateTime.friday,
+          reason: 'the Friday the model copied');
+      expect(asked.hour, greaterThanOrEqualTo(17),
+          reason: 'dinner is the evening');
+      expect(backend.minutes.first, 90, reason: "dinner's own length");
+      final calendar = calendarOf(draft)!;
+      expect(calendar['read'], 'model');
+      expect(calendar['window'], 'theirs');
+      expect(calendar['minutes'], 90);
+      expect(await store.askReading('email', 'm-ask'), isNotNull,
+          reason: 'the draft lane pre-warms the reading the Day column reads');
+    });
+
+    test('not a scheduling ask: no calendar call', () async {
+      await seedAsk(intent: 'question');
+      final draft = await runAsk(draftClient(draft: withOptions()));
+
+      expect(backend.asked, isEmpty);
+      expect(draft['body'], 'Hi Dana — happy to go over the budget.');
+      expect(calendarOf(draft), isNull);
+      expect(await findTimeRows(), isEmpty);
+    });
+
+    test('the calendar unavailable: the draft stands', () async {
+      await seedAsk();
+      final draft = await runAsk(draftClient(draft: withOptions()),
+          calendar: calendarFor(available: false));
+
+      expect(backend.asked, isEmpty);
+      expect(draft['body'], 'Hi Dana — happy to go over the budget.');
+      expect(calendarOf(draft), isNull);
+    });
+
+    test('a calendar error skips the times, not the draft', () async {
+      await seedAsk();
+      backend.throws = const CalendarTransient('Graph answered 503.');
+      final draft = await runAsk(draftClient(draft: withOptions()));
+
+      expect(backend.asked, isNotEmpty);
+      expect(draft['body'], 'Hi Dana — happy to go over the budget.');
+      expect(calendarOf(draft), isNull);
+      final row = (await findTimeRows()).single;
+      expect(row['status'], 'skipped');
+      expect(jsonDecode(row['detail_json'] as String),
+          {'action': 'draft', 'reason': 'transient'});
+    });
+
+    test('a lapsed consent still parks the drain', () async {
+      await seedAsk();
+      backend.throws = const ReconsentRequired();
+      await expectLater(
+        runOne(
+          DraftHandler(store, draftClient(draft: withOptions()),
+              activityLog: log, calendar: calendarFor()),
+          id: 'm-ask',
+        ),
+        throwsA(isA<ReconsentRequired>()),
+      );
+    });
+
+    test('a slot the mirror shows busy is not offered', () async {
+      await seedAsk();
+      // Two slots inside the week the search reads (its overlaps come from
+      // the mirror over the window's own days), both still ahead.
+      final w = findTimeWindowUtc(FindTimeWindow.thisWeek,
+          now: DateTime.now(), zone: la, durationMinutes: 30);
+      final a = w.startUtc.add(const Duration(minutes: 5));
+      final inWeek = [
+        FreeSlot(a, a.add(const Duration(minutes: 30))),
+        FreeSlot(a.add(const Duration(minutes: 30)),
+            a.add(const Duration(minutes: 60))),
+      ];
+      backend.answerFor = (_, _) => [
+            MeetingTimeSuggestion(
+                startUtc: inWeek[0].startUtc,
+                endUtc: inWeek[0].endUtc,
+                confidence: 90),
+            MeetingTimeSuggestion(
+                startUtc: inWeek[1].startUtc,
+                endUtc: inWeek[1].endUtc,
+                confidence: 50),
+          ];
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'busy-1',
+          subject: 'Planning',
+          startUtc: inWeek[0].startUtc,
+          endUtc: inWeek[0].endUtc,
+          showAs: 'busy',
+        ),
+      ], syncRun: 'run-1');
+      final draft = await runAsk(draftClient(draft: withOptions()));
+
+      expect(draft['body'],
+          endsWith('\n\n${findTimeReplyLine([inWeek[1]], la)}'));
+      expect(calendarOf(draft)!['slots'], hasLength(1));
+    });
+
+    test('an Improve keeps the offered times, unseen by its target too',
+        () async {
+      await seedAsk();
+      final improver = ScriptedLlm()
+        ..answer('draft_reply', answer(replyBody: 'Hi Dana — glad to.'));
+      final handler = DraftHandler(
+        store,
+        draftClient(draft: withOptions()),
+        activityLog: log,
+        calendar: calendarFor(),
+        improveClient: improver,
+        routes: DraftRoutes(
+          draftTarget: () => null,
+          improveTarget: () => _localTarget,
+          standing: () => false,
+        ),
+      );
+      await runOne(handler, id: 'm-ask');
+
+      expect(await handler.improve('email', 'm-ask'), isNull);
+      final draft = (await store.getDraftForMessage('email', 'm-ask'))!;
+      expect(draft['body'],
+          'Hi Dana — glad to.\n\n${findTimeReplyLine(offered, la)}');
+      expect(calendarOf(draft)!['slots'], hasLength(2));
+      expect(calendarOf(draft)!['improved'], isTrue);
+      expect(improver.users.single,
+          isNot(contains('Would any of these work')));
+      expect(backend.asked, hasLength(1),
+          reason: 'the stored times are kept, not searched again');
+    });
+
+    test('an Improve drops a stored time that has gone since', () async {
+      await seedAsk();
+      final improver = ScriptedLlm()
+        ..answer('draft_reply', answer(replyBody: 'Hi Dana — glad to.'));
+      final handler = DraftHandler(
+        store,
+        draftClient(draft: withOptions()),
+        activityLog: log,
+        calendar: calendarFor(),
+        improveClient: improver,
+        routes: DraftRoutes(
+          draftTarget: () => null,
+          improveTarget: () => _localTarget,
+          standing: () => false,
+        ),
+      );
+      await runOne(handler, id: 'm-ask');
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'busy-1',
+          startUtc: offered[0].startUtc,
+          endUtc: offered[0].endUtc,
+          showAs: 'busy',
+        ),
+      ], syncRun: 'run-1');
+
+      expect(await handler.improve('email', 'm-ask'), isNull);
+      final draft = (await store.getDraftForMessage('email', 'm-ask'))!;
+      expect(draft['body'],
+          'Hi Dana — glad to.\n\n${findTimeReplyLine([offered[1]], la)}');
+      expect(calendarOf(draft)!['slots'], hasLength(1));
+    });
+
+    test('the standing improve keeps them too', () async {
+      await seedAsk();
+      await db.customUpdate(
+        "UPDATE messages SET urgency = 'urgent' "
+        "WHERE source_message_id = 'm-ask'",
+      );
+      await store.writeNeedsYouP('email', 'm-ask', p: 0.95);
+      final improver = ScriptedLlm()
+        ..answer('draft_reply', answer(replyBody: 'Hi Dana — glad to.'));
+      await runOne(
+        DraftHandler(
+          store,
+          draftClient(draft: withOptions()),
+          activityLog: log,
+          calendar: calendarFor(),
+          improveClient: improver,
+          routes: DraftRoutes(
+            draftTarget: () => null,
+            improveTarget: () => _localTarget,
+            standing: () => true,
+          ),
+        ),
+        id: 'm-ask',
+      );
+
+      expect(improver.calls, hasLength(1), reason: 'the standing rule ran');
+      final draft = (await store.getDraftForMessage('email', 'm-ask'))!;
+      expect(draft['body'],
+          'Hi Dana — glad to.\n\n${findTimeReplyLine(offered, la)}');
+      expect(calendarOf(draft)!['slots'], hasLength(2));
+      expect(calendarOf(draft)!['improved'], isTrue,
+          reason: 'a rewrite that may have been a cloud call is never '
+              'redrafted');
+      expect(improver.users.single,
+          isNot(contains('Would any of these work')));
+    });
+
+    test('an older message of an ask thread gets no times', () async {
+      await seedAsk();
+      await store.upsertMessage({
+        'source_message_id': 'm-old',
+        'conversation_key': 'c-ask',
+        'direction': 'inbound',
+        'subject': 'Budget',
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at': MessageStore.isoStamp(
+            DateTime.now().toUtc().subtract(const Duration(hours: 3))),
+        'body_text': 'Could we meet this week?',
+        'triage_status': 'done',
+      });
+      await runOne(
+        DraftHandler(store, draftClient(draft: withOptions()),
+            activityLog: log, calendar: calendarFor()),
+        id: 'm-old',
+      );
+
+      final draft = (await store.getDraftForMessage('email', 'm-old'))!;
+      expect(draft['body'], 'Hi Dana — happy to go over the budget.');
+      expect(calendarOf(draft), isNull);
+      expect(backend.asked, isEmpty,
+          reason: 'the one rule names the thread\'s NEWEST inbound message');
+    });
+
+    test('a lapsed consent on one day of several still parks the drain',
+        () async {
+      await seedAsk(
+          subject: 'Catch up',
+          body: 'Could we meet Tuesday or Thursday afternoon?');
+      final reading = ScriptedLlm(answers: {
+        'ask_read': {
+          'evidence': 'Dana offers two afternoons.',
+          'asks_for_time': true,
+          'when': ['Tuesday', 'Thursday'],
+          'time': 'afternoon',
+          'duration': '',
+          'meal': 'none',
+        },
+      });
+      backend.answerFor = (start, end) => [
+            MeetingTimeSuggestion(
+                startUtc: start,
+                endUtc: start.add(const Duration(minutes: 30))),
+          ];
+      backend.throwOn = (n) => n == 1 ? const ReconsentRequired() : null;
+
+      await expectLater(
+        runOne(
+          DraftHandler(store, draftClient(draft: withOptions()),
+              activityLog: log,
+              calendar: calendarFor(
+                reader: AskReader(
+                  store: store,
+                  client: () => reading,
+                  log: log,
+                  zone: () => la,
+                ),
+              )),
+          id: 'm-ask',
+        ),
+        throwsA(isA<ReconsentRequired>()),
+      );
+      expect(backend.asked, hasLength(2), reason: 'one call per day named');
+    });
+
+    test('no owner address known: the owner is asked about too', () async {
+      // Today's behaviour, pinned: before the account is read the owner is
+      // nobody to leave out, and Graph is asked about them as an attendee —
+      // harmless, they are the organiser anyway.
+      await seedAsk();
+      await runAsk(draftClient(draft: withOptions()),
+          calendar: calendarFor(owner: const {}));
+      expect(backend.asked.first, [dana, me]);
+    });
+
+    test('an asked-for draft whose times went stale is redrafted, still '
+        'asked', () async {
+      // Reply not expected: only the press gets this message a draft.
+      await seedAsk(replyExpected: 0.1);
+      final asked = const DraftRequest(asked: true).encode();
+      Future<void> runAsked() async {
+        final item = {
+          'task_kind': 'draft',
+          'source': 'email',
+          'entity_id': 'm-ask',
+          'payload_json': await store.workPayload('draft', 'email', 'm-ask'),
+        };
+        await DraftHandler(store, draftClient(draft: withOptions()),
+                activityLog: log, calendar: calendarFor())
+            .run(item);
+      }
+
+      await store.requeueWork('draft', 'email', 'm-ask', payloadJson: asked);
+      await db.customUpdate(
+          "UPDATE work_items SET status = 'done' WHERE entity_id = 'm-ask'");
+      await runAsked();
+      expect(calendarOf((await store.getDraftForMessage('email', 'm-ask'))!),
+          isNotNull);
+
+      // A meeting lands on the first offered time.
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'busy-1',
+          startUtc: offered[0].startUtc,
+          endUtc: offered[0].endUtc,
+          showAs: 'busy',
+        ),
+      ], syncRun: 'run-1');
+      final refresher = DraftSlotRefresher(
+          store: store, calendar: CalendarStore(db), log: log);
+      expect(await refresher.refresh(now: DateTime.now(), zone: la), 1);
+      expect(await store.getDraftForMessage('email', 'm-ask'), isNull);
+      expect(await store.workPayload('draft', 'email', 'm-ask'), asked,
+          reason: 'the press survives the re-queue');
+
+      await runAsked();
+      final redrafted = await store.getDraftForMessage('email', 'm-ask');
+      expect(redrafted, isNotNull,
+          reason: 'neither no_reply_needed nor already_drafted skipped it');
+      expect(redrafted!['body'],
+          startsWith('Hi Dana — happy to go over the budget.\n\n'));
+    });
+
+    test('no calendar wired: the draft is what it always was', () async {
+      await seedAsk();
+      await runOne(
+        DraftHandler(store, draftClient(draft: withOptions()),
+            activityLog: log),
+        id: 'm-ask',
+      );
+      final draft = (await store.getDraftForMessage('email', 'm-ask'))!;
+      expect(draft['body'], 'Hi Dana — happy to go over the budget.');
+      expect(draft['context_json'], isNull);
+      expect(backend.asked, isEmpty);
+    });
+  });
+}
+
+/// A local improve target: nothing about it is third party.
+const LlmTargetSpec _localTarget = LlmTargetSpec(
+  id: 't-box',
+  name: 'Box 27B',
+  url: 'http://localhost:18100/v1/chat/completions',
+  model: 'qwen3.8',
+);
+
+/// `find_meeting_times` answering [slots] (or [answerFor] by each call's
+/// window, or throwing [throws]), each call recorded; every other method
+/// throws.
+class _SlotsBackend extends Fake implements CalendarBackend {
+  _SlotsBackend(this.slots);
+
+  final List<MeetingTimeSuggestion> slots;
+  final List<List<String>> asked = [];
+  final List<int> minutes = [];
+  final List<(DateTime, DateTime)> windows = [];
+  List<MeetingTimeSuggestion> Function(DateTime start, DateTime end)?
+      answerFor;
+  Object? throws;
+
+  /// When set, what call number [n] (from 0, in call order) throws, or null
+  /// to answer it.
+  Object? Function(int n)? throwOn;
+
+  @override
+  Future<MeetingTimes> findMeetingTimes({
+    required List<String> attendees,
+    required int durationMinutes,
+    required DateTime windowStartUtc,
+    required DateTime windowEndUtc,
+    int maxCandidates = 5,
+    String activityDomain = 'work',
+  }) async {
+    final n = asked.length;
+    asked.add(attendees);
+    minutes.add(durationMinutes);
+    windows.add((windowStartUtc, windowEndUtc));
+    final failure = throws ?? throwOn?.call(n);
+    if (failure != null) throw failure;
+    return MeetingTimes(
+        suggestions: answerFor?.call(windowStartUtc, windowEndUtc) ?? slots);
+  }
 }

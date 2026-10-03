@@ -8278,6 +8278,65 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
     );
   }
 
+  /// The `payload_json` of one work row, or null when there is no row or it
+  /// carries none. A `done` row keeps the payload it ran with, which is what
+  /// a re-queue that must not lose it (the stale-times redraft of an
+  /// asked-for draft) reads first.
+  Future<String?> workPayload(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT payload_json FROM work_items '
+          'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+          variables: _args([kind, source, entityId]),
+        )
+        .get();
+    return rows.isEmpty ? null : rows.first.data['payload_json'] as String?;
+  }
+
+  /// [deleteDraftForMessage] only while the draft is still `suggested`;
+  /// true when a row went. The stale-times redraft (`DraftSlotRefresher`)
+  /// reads its candidates first and deletes after, and an owner who started
+  /// typing in between has made the draft `edited` — their words are never
+  /// thrown away, so the status is checked in the DELETE itself.
+  Future<bool> deleteSuggestedDraft(String source, String messageId) async {
+    final gone = await db.customUpdate(
+      'DELETE FROM drafts WHERE source = ? AND reply_to_message_id = ? '
+      "AND status = 'suggested'",
+      variables: _args([source, messageId]),
+    );
+    return gone > 0;
+  }
+
+  /// The untouched drafts that offer free times (a `calendar.slots` record
+  /// in `context_json`, `draft_slots.dart`), newest first, at most [limit]:
+  /// what the stale-times redraft checks after a calendar sync. Only
+  /// `suggested` rows, and none whose record says `improved` — a draft the
+  /// owner edited, sent, dismissed or improved is never redrafted. `context_json` is read under `json_valid` inside a CASE,
+  /// which SQLite evaluates lazily (an AND it may reorder), so an unreadable
+  /// row is simply not a candidate rather than a malformed-JSON error.
+  Future<List<Map<String, Object?>>> draftsWithCalendarSlots({
+    int limit = 50,
+  }) async {
+    final rows = await db
+        .customSelect(
+          'SELECT source, conversation_key, reply_to_message_id, context_json '
+          "FROM drafts WHERE status = 'suggested' "
+          'AND CASE WHEN json_valid(context_json) '
+          "THEN json_extract(context_json, '\$.calendar.slots') IS NOT NULL "
+          "AND COALESCE(json_extract(context_json, '\$.calendar.improved'), 0) "
+          '= 0 '
+          'ELSE 0 END '
+          'ORDER BY updated_at DESC, reply_to_message_id DESC LIMIT ?',
+          variables: _args([limit]),
+        )
+        .get();
+    return [for (final r in rows) Map<String, Object?>.from(r.data)];
+  }
+
   /// The message a reply would answer: the thread's newest inbound one.
   ///
   /// Ties break on `source_message_id DESC`, the same way [latestInboundMeta]

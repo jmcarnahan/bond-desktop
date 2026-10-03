@@ -9,6 +9,8 @@ import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attachments/attachment_markers.dart';
 import 'attachments/attachment_retriever.dart';
+import 'calendar/draft_slots.dart';
+import 'calendar/find_time.dart' show findTimeReplyLine;
 import 'cloud_drafts.dart';
 import 'context/context_retriever.dart';
 import 'decision/needs_you_predicate.dart';
@@ -50,10 +52,13 @@ import 'reply_policy.dart';
 /// opens and publish nothing, which is right: nobody was shown a preview.
 ///
 /// It only ever writes to the `drafts` table. Nothing in this class — and
-/// nothing this class calls — touches Microsoft Graph: a suggestion is text in
-/// sqlite until a person presses Send, and keeping the model's output on this
-/// side of that line is what makes "never auto-send" a property of the code
-/// rather than a promise in a comment.
+/// nothing this class calls — writes to Microsoft Graph: a suggestion is text
+/// in sqlite until a person presses Send, and keeping the model's output on
+/// this side of that line is what makes "never auto-send" a property of the
+/// code rather than a promise in a comment. The one Graph call it may make is
+/// a READ — `find_meeting_times`, for the free times a draft answering a
+/// scheduling ask offers ([DraftCalendar], `draft_slots.dart`), made after
+/// the model call and never shown to the model.
 class DraftHandler extends WorkHandler {
   static const String _source = 'email';
 
@@ -139,6 +144,11 @@ class DraftHandler extends WorkHandler {
   /// read at the moment a draft is about to be written. See [DraftRoutes].
   final DraftRoutes _routes;
 
+  /// The calendar a draft answering a scheduling ask offers the owner's free
+  /// times from, or null in a build with none — every handler built before
+  /// this existed drafts exactly as it did. See [_slotsFor].
+  final DraftCalendar? _calendar;
+
   DraftHandler(
     this._store,
     this._client, {
@@ -156,6 +166,7 @@ class DraftHandler extends WorkHandler {
     this._concurrency,
     this._streams,
     this._stream = const DraftStreamBus.disabled(),
+    this._calendar,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         // ignore: prefer_initializing_formals
         _improveClient = improveClient,
@@ -388,7 +399,17 @@ class DraftHandler extends WorkHandler {
         );
       }
 
-      final provenance = _provenanceFor(excerpts, pack);
+      // The owner's real free times, when this message is a scheduling ask:
+      // searched AFTER the call and appended by Dart (the round's D3), so
+      // the prompt is the one the golden set measured and a cloud draft
+      // target never sees the calendar. After the empty-body throw, so a
+      // draft that is retried never searched; the options were capped by
+      // `validate` before this, so the line is never cut. The clock is read
+      // here, not before a slow streamed draft, so no slot that began during
+      // the call is offered.
+      final slots = await _slotsFor(source, id, row, key, DateTime.now());
+      final provenance =
+          _provenanceFor(excerpts, pack).copyWith(calendar: slots?.record);
       // The distinct paths the caption's directory files came from, for the
       // activity row below.
       final directoryFiles = {
@@ -399,9 +420,9 @@ class DraftHandler extends WorkHandler {
         source: source,
         conversationKey: key,
         replyToMessageId: replyTo.id,
-        body: result.replyBody,
+        body: _withTimes(result.replyBody, slots?.line),
         evidence: result.evidence,
-        optionsJson: _optionsJson(result),
+        optionsJson: _optionsJson(result, times: slots?.line),
         // The inventory of what went into the prompt, stored WITH the draft
         // rather than only in the activity row — the composer's caption names
         // what was read, and a caption assembled from the activity log would be
@@ -444,6 +465,7 @@ class DraftHandler extends WorkHandler {
           input,
           provenance,
           cloudCount: cloudDraft ? 1 : 0,
+          times: slots?.line,
         );
       }
     } finally {
@@ -594,15 +616,20 @@ class DraftHandler extends WorkHandler {
               'kept.';
         }
 
+        // The times the draft being replaced offered stay offered, less any
+        // that have gone since: the improve target never saw them either.
+        // The record says `improved`, so the stale-times redraft leaves this
+        // draft alone from now on, as it does an edited one.
+        final times = await _improvedTimes(stored?.calendar);
         final provenance = _provenanceFor(gathered.excerpts, gathered.pack)
-            .copyWith(improvedBy: target.id);
+            .copyWith(improvedBy: target.id, calendar: times?.record);
         await _store.upsertDraft(
           source: source,
           conversationKey: gathered.key,
           replyToMessageId: messageId,
-          body: result.replyBody,
+          body: _withTimes(result.replyBody, times?.line),
           evidence: result.evidence,
-          optionsJson: _optionsJson(result),
+          optionsJson: _optionsJson(result, times: times?.line),
           contextJson: provenance.isNone ? null : provenance.encode(),
           status: 'suggested',
         );
@@ -652,6 +679,7 @@ class DraftHandler extends WorkHandler {
     DraftInput input,
     DraftProvenance provenance, {
     required int cloudCount,
+    String? times,
   }) async {
     final target = _routes.improveTarget();
     if (target == null) return;
@@ -691,14 +719,19 @@ class DraftHandler extends WorkHandler {
         _log.note({'improve_error': 'empty'});
         return;
       }
-      final improved = provenance.copyWith(improvedBy: target.id);
+      // Marked `improved`, as the button's is: a rewrite that may have been
+      // a cloud call is never thrown away by the stale-times redraft.
+      final calendar = provenance.calendar;
+      final improved = provenance.copyWith(
+          improvedBy: target.id,
+          calendar: calendar == null ? null : {...calendar, 'improved': true});
       await _store.upsertDraft(
         source: source,
         conversationKey: key,
         replyToMessageId: replyToId,
-        body: result.replyBody,
+        body: _withTimes(result.replyBody, times),
         evidence: result.evidence,
-        optionsJson: _optionsJson(result),
+        optionsJson: _optionsJson(result, times: times),
         contextJson: improved.isNone ? null : improved.encode(),
         status: 'suggested',
       );
@@ -760,12 +793,97 @@ class DraftHandler extends WorkHandler {
   /// options were read and there were none" are the same thing to every
   /// reader, and one of the two spellings is shorter. One helper for all
   /// three writers — the draft, the standing improve and the button.
-  static String? _optionsJson(DraftResult result) => result.options.isEmpty
-      ? null
-      : jsonEncode([
-          for (final option in result.options)
-            {'stance': option.stance, 'body': option.body},
-        ]);
+  /// [times] is the offered-times line every option ends with, as the body
+  /// does ([_withTimes]).
+  static String? _optionsJson(DraftResult result, {String? times}) =>
+      result.options.isEmpty
+          ? null
+          : jsonEncode([
+              for (final option in result.options)
+                {
+                  'stance': option.stance,
+                  'body': _withTimes(option.body, times),
+                },
+            ]);
+
+  /// [text] with the offered-times line after a blank line, or [text] as it
+  /// is when no times are offered.
+  static String _withTimes(String text, String? times) =>
+      times == null ? text : '${text.trimRight()}\n\n$times';
+
+  /// The owner's free times for a draft answering [id], or null: no calendar
+  /// wired, not a scheduling ask, nothing free, or the calendar failed
+  /// ([draftSlotsFor] has the steps). The thread is the stored conversation
+  /// row (its participants are who the search asks about); a thread with no
+  /// row searches the owner's own calendar.
+  ///
+  /// In a span of its own: the ask reading's model call and the `find_time`
+  /// row are rows of their own, and must not take the draft row's tally.
+  Future<DraftSlots?> _slotsFor(
+    String source,
+    String id,
+    Map<String, Object?> row,
+    String key,
+    DateTime now,
+  ) async {
+    final calendar = _calendar;
+    if (calendar == null) return null;
+    final stored = await _store.getConversationRow(source, key);
+    final text = (row['body_text'] as String? ?? '').trim();
+    final received = row['received_at'];
+    return _log.inSpan(() => draftSlotsFor(
+          calendar: calendar,
+          store: _store,
+          source: source,
+          messageId: id,
+          thread: stored == null
+              ? Conversation(id: key, source: source)
+              : Conversation.fromRow(stored),
+          now: now,
+          sentAt: received is String ? DateTime.tryParse(received) : null,
+          subject: (row['subject'] as String? ?? '').trim(),
+          body: text.isNotEmpty
+              ? text
+              : (row['body_preview'] as String? ?? '').trim(),
+          log: _log,
+        ));
+  }
+
+  /// The offered-times line and record of a stored draft's `calendar`
+  /// record for an Improve that replaces its words: the slots that have not
+  /// gone ([slotGone], on one mirror read), the record marked `improved`.
+  /// Null when it offered none, none are left, no calendar is wired, or
+  /// anything fails — the improved draft then offers no times.
+  Future<({String line, Map<String, Object?> record})?> _improvedTimes(
+    Map<String, Object?>? calendar,
+  ) async {
+    final wired = _calendar;
+    if (wired == null || calendar == null) return null;
+    final slots = draftSlotsOf(calendar);
+    if (slots.isEmpty) return null;
+    try {
+      final zone = await wired.zone();
+      final kept = await liveSlots(wired.store, slots,
+          now: DateTime.now(), zone: zone);
+      if (kept.isEmpty) return null;
+      return (
+        line: findTimeReplyLine(kept, zone),
+        record: {
+          ...calendar,
+          'slots': [
+            for (final s in kept)
+              {
+                'start_utc': MessageStore.isoStamp(s.startUtc),
+                'end_utc': MessageStore.isoStamp(s.endUtc),
+              },
+          ],
+          'improved': true,
+        },
+      );
+    } on Object catch (_) {
+      return null;
+    }
+  }
 
   /// Everything one draft is written from, read once.
   ///

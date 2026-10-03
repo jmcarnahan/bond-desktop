@@ -1,5 +1,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart'
+    show Conversation, Participant;
 import 'package:bond_inbox/services/calendar/scheduling_ask.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_policy.dart';
@@ -432,6 +434,59 @@ void main() {
           outboundAfter: const Duration(minutes: 5));
       await store.reopenSchedulingAsk(source: 'email', conversationKey: 'c-1');
       expect(await keys(), isEmpty);
+    });
+  });
+
+  group('otherAddresses', () {
+    Conversation withPeople(List<Participant> people) =>
+        Conversation(id: 'c-1', participants: people);
+
+    test('the owner left out, each address once, trimmed and lowercased', () {
+      final thread = withPeople(const [
+        Participant(name: 'Dana', email: ' Dana@Fabrikam.example '),
+        Participant(name: 'Me', email: 'ME@contoso.example'),
+        Participant(name: 'Dana again', email: 'dana@fabrikam.example'),
+        Participant(name: 'Sam', email: 'sam@northwind.example'),
+      ]);
+      expect(otherAddresses(thread, owner: const {owner}),
+          ['dana@fabrikam.example', 'sam@northwind.example']);
+      expect(
+          otherPeople(thread, owner: const {owner}).first,
+          (name: 'Dana', address: 'dana@fabrikam.example'),
+          reason: 'the first spelling names the person');
+    });
+
+    test("every one of the owner's addresses is left out", () {
+      final thread = withPeople(const [
+        Participant(email: 'me@contoso.example'),
+        Participant(email: 'jo.m@contoso.example'),
+        Participant(email: 'dana@fabrikam.example'),
+      ]);
+      expect(
+          otherAddresses(thread,
+              owner: const {owner, 'jo.m@contoso.example'}),
+          ['dana@fabrikam.example'],
+          reason: 'mail and the UPN, when they differ');
+    });
+
+    test("the owner's set: mail and UPN, lowercased, one entry when the same",
+        () {
+      expect(ownerAddressesOf(' Me@Contoso.example ', 'jo.m@contoso.example'),
+          {owner, 'jo.m@contoso.example'});
+      expect(ownerAddressesOf(owner, 'ME@contoso.example'), {owner});
+      expect(ownerAddressesOf(null, ''), isEmpty);
+    });
+
+    test('a Teams roster entry, an empty or a missing address is nobody to '
+        'ask', () {
+      final thread = withPeople(const [
+        Participant(name: 'Dana', email: 'teams:8f2c'),
+        Participant(name: 'Blank', email: '  '),
+        Participant(name: 'None'),
+        Participant(email: 'sam@northwind.example'),
+      ]);
+      expect(otherAddresses(thread, owner: const {}),
+          ['sam@northwind.example']);
     });
   });
 }

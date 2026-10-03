@@ -65,7 +65,7 @@ is always the authority when they disagree.
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
 | 13b | **Pre-meeting briefs** (`meeting_brief`) — per MEETING, not per message: planned after each calendar sync the inbox runs (not the forced syncs after a write) for meetings in the next 36 h with people the owner has mail with, written on the draft lane after `draft` | **yes** | [14-calendar.md](14-calendar.md#briefs) |
 | 13c | **Calendar commands** (`calendar_intent`) — per COMMAND, not per message: the Day bar's request read by lookup (lexicon, resolvers, people and event match); the generative model only on Enter, only when the rules could not finish, and only to copy phrases | on demand | [14-calendar.md](14-calendar.md#commands) |
-| 13d | **Ask reading** (`ask_read`) — per scheduling ASK, not per message: the ask's newest inbound message read for the days, hours and length it asks for; the rules read it at once, the generative model copies phrases that Dart re-resolves through the same rules; cached per message in `ask_readings` (the draft lane pre-warms it from Phase 3) | on demand | [14-calendar.md](14-calendar.md#reading-the-ask) |
+| 13d | **Ask reading** (`ask_read`) — per scheduling ASK, not per message: the ask's newest inbound message read for the days, hours and length it asks for; the rules read it at once, the generative model copies phrases that Dart re-resolves through the same rules; cached per message in `ask_readings` (the draft lane pre-warms it) | on demand | [14-calendar.md](14-calendar.md#reading-the-ask) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 15 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
 
@@ -164,7 +164,7 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Improve a draft | Generative, or Cloud drafts when set and consented | `draft_improve` | `:8080` |
 | Pre-meeting brief | Generative (never Cloud drafts) | `meeting_brief` | `:8080` |
 | Calendar command (Enter only, when the rules could not finish) | Generative (never Cloud drafts) | `calendar_intent` | `:8080` |
-| Ask reading (a scheduling ask opened in the Day column; the draft lane pre-warms it from Phase 3) | Generative (never Cloud drafts) | `ask_read` | `:8080` |
+| Ask reading (a scheduling ask opened in the Day column; the draft lane pre-warms it) | Generative (never Cloud drafts) | `ask_read` | `:8080` |
 | Day-bar command action (only once a fitted head is adopted; live preview and Enter) | Decision | — (an Enter records `command_head`; the preview records nothing) | `:8083` |
 | Embeddings | Embeddings (not routed) | `embeddings` | `:8081` (`make embed`) |
 

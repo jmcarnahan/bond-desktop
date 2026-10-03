@@ -212,9 +212,10 @@ void main() {
 
   test('the ask reader is generative, on demand, and never a drafting stage',
       () {
-    // Called when a scheduling ask opens in the Day column (the draft lane
-    // pre-warms it from Phase 3). It reads somebody else's words for the owner and writes
-    // nothing in their name, so Cloud drafts never sees it.
+    // Called when a scheduling ask opens in the Day column, and by a draft
+    // answering one (which pre-warms it). It reads somebody else's words for
+    // the owner and writes nothing in their name, so Cloud drafts never sees
+    // it.
     final row = pipelineStages.singleWhere((s) => s.id == 'ask_read');
     expect(row.label, 'Ask reading');
     expect(row.description,

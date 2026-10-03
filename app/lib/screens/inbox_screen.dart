@@ -71,12 +71,14 @@ import '../services/calendar/find_time.dart'
     show
         FindTimeResult,
         FindTimeWindow,
+        askWindowFor,
         findTimeReplyLine,
         findTimeSubject,
         findTimeWindowLabels,
         findTimeWindowUtc,
         searchFindTime;
-import '../services/calendar/scheduling_ask.dart' show schedulingAskKey;
+import '../services/calendar/scheduling_ask.dart'
+    show otherAddresses, otherPeople, ownerAddressesOf, schedulingAskKey;
 import '../services/calendar/overlaps.dart'
     show FreeSlot, Overlaps, overlapsForEvent;
 import '../services/calendar/when_resolver.dart' show WhenResolution;
@@ -1384,7 +1386,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// One calendar sync tick, fire-and-forget. What it found reaches the
   /// calendar's readers through the sync's own publisher
   /// ([calendarOutcomePublisher]), as a write's forced read does; this only
-  /// plans briefs off it.
+  /// plans briefs and redrafts stale offered times off it.
   ///
   /// Never awaited by [_refresh] and never on `ConversationsNotifier.load`:
   /// a slow or failing calendar must not hold up or break the mail. The sync
@@ -1398,10 +1400,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (!mounted) return;
         // Briefs are planned only off a sync that completed, and only while
         // the models may run; the plan itself is store reads, and its pump
-        // is the draft lane's, so nothing here waits on a model.
+        // is the draft lane's, so nothing here waits on a model. Drafts whose
+        // offered times went stale are redrafted on the same rule: a redraft
+        // needs the draft lane, which runs only while processing is on.
         if (outcome.status == CalendarSyncStatus.synced &&
             ref.read(processingProvider)) {
           unawaited(_planBriefs());
+          unawaited(_refreshDraftSlots());
         }
       } on Object catch (e) {
         debugPrint('calendar sync was not run: $e');
@@ -1424,6 +1429,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       unawaited(ref.read(draftWorkerProvider).pump());
     } on Object catch (e) {
       debugPrint('briefs were not planned: ${e.runtimeType}');
+    }
+  }
+
+  /// Re-queues the untouched drafts whose offered times are gone (past, or
+  /// now busy on the mirror) and wakes the draft lane when it re-queued any;
+  /// the open thread's draft is re-read at once, as [_refresh] does, so a
+  /// deleted suggestion leaves the composer now. Fire-and-forget off
+  /// [_syncCalendar]; a failure is a trace and never reaches the mail.
+  Future<void> _refreshDraftSlots() async {
+    try {
+      final zone =
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc();
+      final requeued = await ref
+          .read(draftSlotRefresherProvider)
+          .refresh(now: DateTime.now(), zone: zone);
+      if (!mounted || requeued == 0) return;
+      unawaited(ref.read(draftWorkerProvider).pump());
+      final selected = _selectedId;
+      if (selected != null) {
+        ref
+            .read(draftProvider(
+              (source: _selectedSource ?? 'email', conversationKey: selected),
+            ).notifier)
+            .load();
+      }
+      ref.read(draftsInboxProvider.notifier).load();
+      await _reloadOpenThread();
+    } on Object catch (e) {
+      debugPrint('stale draft times were not checked: ${e.runtimeType}');
     }
   }
 
@@ -6048,28 +6082,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return _otherPeople(thread).isNotEmpty;
   }
 
-  /// [thread]'s other people with an address: the owner left out, a Teams
-  /// roster entry (no `@`) left out, each address once and lowercased. The
-  /// asks column searches and invites on it, and the thread bar's Find a
-  /// time offers itself only when it is non-empty.
-  List<({String name, String address})> _otherPeople(Conversation thread) {
-    final owner = _ownerRecord.address?.trim().toLowerCase();
-    final seen = <String>{};
-    return <({String name, String address})>[
-      for (final p in thread.participants)
-        if ((p.email ?? '').trim().isNotEmpty &&
-            p.email!.trim().toLowerCase() != owner &&
-            // A Teams roster entry is no address; a repeat is one person.
-            p.email!.contains('@') &&
-            seen.add(p.email!.trim().toLowerCase()))
-          // Lowercased, as the de-duplication above reads it: the search,
-          // the invite's attendees and the pills all key on the address.
-          (name: p.name ?? '', address: p.email!.trim().toLowerCase()),
-    ];
-  }
+  /// [thread]'s other people with an address, the owner left out
+  /// ([otherPeople], the one rule a draft's offered times share). The asks
+  /// column searches and invites on it, and the thread bar's Find a time
+  /// offers itself only when it is non-empty.
+  List<({String name, String address})> _otherPeople(Conversation thread) =>
+      otherPeople(thread, owner: _ownerAddresses);
 
   List<String> _otherAddresses(Conversation thread) =>
-      [for (final p in _otherPeople(thread)) p.address];
+      otherAddresses(thread, owner: _ownerAddresses);
+
+  /// The owner's addresses as [otherPeople] leaves them out — mail and
+  /// UPN ([ownerAddressesOf], the set a draft's search uses too); empty for
+  /// the first frames, before the account is read.
+  Set<String> get _ownerAddresses =>
+      ownerAddressesOf(_owner?.mail, _owner?.userPrincipalName);
 
   /// The loaded thread by its source and key, read rather than watched: the
   /// asks column's callbacks run outside build.
@@ -10102,16 +10129,6 @@ bool askHintsStale({
   required CalendarDate today,
 }) =>
     (newest != null && readFor != newest) || readOn != today;
-
-/// The window an ask's search runs over for the pill [chosen]: their day
-/// ([FindTimeWindow.theirs]) only while the words name a day — read again
-/// without one ("dinner tonight" once tonight has gone), it is this week,
-/// which is what the row's pills then offer.
-@visibleForTesting
-FindTimeWindow askWindowFor(FindTimeWindow chosen, AskHints? hints) =>
-    chosen == FindTimeWindow.theirs && hints?.day == null
-        ? FindTimeWindow.thisWeek
-        : chosen;
 
 /// The standing proposal's hand-off from the asks column or the grid — see
 /// [_InboxScreenState._proposal]. [name] and [attendees] are the blank

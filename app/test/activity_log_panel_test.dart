@@ -563,6 +563,61 @@ void main() {
       expect(said('later'), 'Scheduling ask');
     });
 
+    test('times offered in a draft: how many slots and from where; a skip '
+        'by its enum word', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'find_time',
+          detail: const {
+            'action': 'draft',
+            'source': 'graph',
+            'slots': 3,
+            'people': 1,
+            'window': 'this_week',
+            'graph_calls': 1,
+            'read': 'rules',
+          },
+        )),
+        'Times offered in a draft · 3 slots (graph)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'find_time',
+          detail: const {'action': 'draft', 'source': 'local', 'slots': 1},
+        )),
+        'Times offered in a draft · 1 slot (local)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'find_time',
+          status: 'skipped',
+          detail: const {'action': 'draft', 'reason': 'transient'},
+        )),
+        'Find a time skipped — transient',
+      );
+    });
+
+    test('the stale-times redraft: how many replies, never which', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'draft',
+          status: 'requeued',
+          count: 2,
+          detail: const {'reason': 'slots_stale'},
+        )),
+        'Redrafting 2 replies — their times are gone',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'draft',
+          status: 'requeued',
+          count: 1,
+          detail: const {'reason': 'slots_stale'},
+        )),
+        'Redrafting 1 reply — their times are gone',
+      );
+    });
+
     test('a meeting brief: written from how many threads, skipped with its '
         'reason in words, or failed', () {
       expect(

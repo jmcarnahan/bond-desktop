@@ -1140,6 +1140,20 @@ that bite.
   - An empty Graph answer falls back to the owner's free times unless
     `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
     one rule.
+  - A draft's times (`draft_slots.dart`) are appended by Dart after the
+    model call — the model never sees the calendar, so the v4 prompt stands
+    and a cloud target sees no slot. It reuses the column's helpers, never
+    copies: `askWindowFor` (`find_time.dart`) and `otherAddresses` /
+    `otherPeople` / `ownerAddressesOf` (`scheduling_ask.dart`, the inbox
+    delegates). Only `suggested`, never-improved drafts are redrafted when
+    their times go stale (`DraftSlotRefresher`, beside `_planBriefs`;
+    `slotGone` is the one rule, also applied before a draft offers a slot);
+    the delete is `deleteSuggestedDraft` (status checked in the DELETE) and
+    the re-queue passes the old `workPayload` back — `requeueWork` with no
+    payload over a done row clears it. The search never throws; an auth
+    failure reaches the lane through `FindTimeResult.error`. The reading's
+    call and the `find_time` row run in their own `inSpan`, or they would
+    drain the draft row's tally.
 - **Inbox widget tests** reach the real `McpCalendarBackend` through
   `calendarSyncProvider`, which fails fast and silently. To observe the sync,
   build a recording `CalendarSync` subclass INSIDE the test body

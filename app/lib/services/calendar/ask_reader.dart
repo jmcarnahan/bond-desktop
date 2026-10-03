@@ -31,9 +31,10 @@ class AskReading {
 /// (docs/pipeline/14-calendar.md "Reading the ask"), once per message.
 ///
 /// On demand, never a lane (the round's D9): the Day column asks when an ask
-/// opens (and the draft lane pre-warms it from Phase 3), so there is no work
-/// kind and no claim. A reading is stored as the model's PHRASES in `ask_readings` and
-/// the caller resolves it against today with `readAskHintsFromRead`; a
+/// opens, and a draft answering an ask asks first (`draft_slots.dart`), which
+/// pre-warms it, so there is no work kind and no claim. A reading is stored
+/// as the model's PHRASES in `ask_readings` and the caller resolves it
+/// against today with `readAskHintsFromRead`; a
 /// stored reading is never asked again, a failed one is never stored, so a
 /// later call retries. Whatever goes wrong, the answer is null and the
 /// caller keeps the rules' reading.

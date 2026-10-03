@@ -763,7 +763,7 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.generative,
   ),
   // On demand, not a lane: called from the Day column when a scheduling ask
-  // opens (the draft lane pre-warms it from Phase 3). Not in
+  // opens, and by a draft answering one (which pre-warms it). Not in
   // [draftStageIds]: it reads somebody else's words for the owner and writes
   // nothing in their name, so Cloud drafts never sees it.
   PipelineStageInfo(

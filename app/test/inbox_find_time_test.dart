@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/draft_provenance.dart' show DraftProvenance;
 import 'package:bond_inbox/models/calendar_models.dart'
     show MeetingTimeSuggestion, MeetingTimes, WritePreview;
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -17,8 +18,10 @@ import 'package:bond_inbox/screens/new_message_screen.dart'
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
 import 'package:bond_inbox/services/activity_log.dart' show ActivityLog;
+import 'package:bond_inbox/services/ai_worker.dart' show AiWorker;
+import 'package:bond_inbox/services/drain_gate.dart' show DrainGate;
 import 'package:bond_inbox/services/calendar/ask_hints.dart'
-    show AskHints, readAskHintsFromRead;
+    show readAskHintsFromRead;
 import 'package:bond_inbox/services/calendar/ask_reader.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
@@ -117,6 +120,22 @@ class _QuietCalendarSync extends CalendarSync {
 
   @override
   Future<CalendarSyncOutcome> syncNow({bool force = false}) => gate.future;
+}
+
+/// A calendar sync whose every tick completes at once, `synced`: what the
+/// inbox plans briefs and redrafts stale offered times off.
+class _SyncedCalendarSync extends CalendarSync {
+  _SyncedCalendarSync(MessageStore store, CalendarStore calendar)
+      : super(const UnavailableCalendarBackend(), store, calendar);
+
+  int ticks = 0;
+
+  @override
+  Future<CalendarSyncOutcome> syncNow({bool force = false}) {
+    ticks += 1;
+    return Future.value(
+        const CalendarSyncOutcome(CalendarSyncStatus.synced, upserts: 1));
+  }
 }
 
 /// `find_meeting_times` answering [slots], each call's attendees recorded.
@@ -328,10 +347,23 @@ void main() {
   Future<void> pumpScreen(WidgetTester tester,
       {bool zoneResolves = true,
       MessageStore? storeOverride,
-      AskReader? askReader}) async {
+      AskReader? askReader,
+      CalendarSync? calendarSyncOverride,
+      bool processing = false}) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    final calendarSync = _QuietCalendarSync(store, CalendarStore(db));
+    final calendarSync =
+        calendarSyncOverride ?? _QuietCalendarSync(store, CalendarStore(db));
+    // Processing on with three idle lanes: what runs off a sync is seen in
+    // the store, and no drain dials a server.
+    final idle = [
+      if (processing)
+        for (var i = 0; i < 3; i++)
+          AiWorker(store, handlers: const [], gate: DrainGate()),
+    ];
+    for (final w in idle) {
+      addTearDown(w.dispose);
+    }
     final client = MockClient((_) async => http.Response('{}', 200));
     final tokens = _Tokens();
     tokens.values['refresh_token'] = 'rt-1';
@@ -353,6 +385,12 @@ void main() {
         graphAuthProvider.overrideWithValue(auth),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         calendarSyncProvider.overrideWithValue(calendarSync),
+        if (processing) ...[
+          processingProvider.overrideWith((ref) => ProcessingNotifier(true)),
+          aiWorkerProvider.overrideWithValue(idle[0]),
+          storylineWorkerProvider.overrideWithValue(idle[1]),
+          draftWorkerProvider.overrideWithValue(idle[2]),
+        ],
         calendarAvailabilityProvider
             .overrideWith((ref) => CalendarAvailability.available),
         // A zone that never resolves is the one a slow mailbox read leaves.
@@ -1116,18 +1154,38 @@ void main() {
           isFalse);
     });
 
-    test('their day stands only while the words name a day', () {
-      const friday = CalendarDate(2026, 10, 9);
-      expect(askWindowFor(FindTimeWindow.theirs, const AskHints(day: friday)),
-          FindTimeWindow.theirs);
-      expect(askWindowFor(FindTimeWindow.theirs, const AskHints()),
-          FindTimeWindow.thisWeek,
-          reason: 'read again with no day, their day is this week');
-      expect(askWindowFor(FindTimeWindow.theirs, null),
-          FindTimeWindow.thisWeek);
-      expect(askWindowFor(FindTimeWindow.nextWeek, null),
-          FindTimeWindow.nextWeek,
-          reason: 'the owner\'s own pill stands');
+    testWidgets('the refresher runs on a synced outcome', (tester) async {
+      // A suggested draft whose one offered time began an hour ago.
+      final past = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'c-old',
+        replyToMessageId: 'old-m1',
+        body: 'Happy to.\n\nWould any of these work? · …',
+        contextJson: DraftProvenance.none.copyWith(calendar: {
+          'slots': [
+            {
+              'start_utc': MessageStore.isoStamp(past),
+              'end_utc': MessageStore.isoStamp(
+                  past.add(const Duration(minutes: 30))),
+            },
+          ],
+        }).encode(),
+      );
+      final sync = _SyncedCalendarSync(store, CalendarStore(db));
+      await pumpScreen(tester, calendarSyncOverride: sync, processing: true);
+      await pumps(tester);
+
+      expect(sync.ticks, greaterThanOrEqualTo(1));
+      expect(await store.getDraftForMessage('email', 'old-m1'), isNull,
+          reason: 'its time has gone');
+      final work = await db
+          .customSelect(
+            "SELECT status FROM work_items WHERE task_kind = 'draft' "
+            "AND source = 'email' AND entity_id = 'old-m1'",
+          )
+          .get();
+      expect(work.single.data['status'], 'pending');
     });
 
     testWidgets('the search\'s activity row counts its Graph calls',

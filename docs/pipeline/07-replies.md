@@ -217,6 +217,77 @@ expanded one with about ten seconds to spare, and 60 would cut either off
 mid-sentence. The bulk client keeps 120, where it costs nothing — see
 [10-model-routing.md](10-model-routing.md).
 
+### Times in a draft (2026-10)
+
+**A draft answering a scheduling ask ends with the owner's real free times**
+(`services/calendar/draft_slots.dart`, `draftSlotsFor`). The prompt is
+untouched — v4 forbids naming a time the owner has not said, and it is
+golden-measured — so the times are found and written by Dart AFTER the model
+call: the body and each option get a blank line and the line Put in reply
+writes (`findTimeReplyLine`: "Would any of these work? · Tue 14 Oct
+10:00–10:30 AM PDT · …"). The model never sees a slot, so **a cloud draft
+target never sees the calendar**. The known seam: the model may write "I'll
+check my calendar" above the real times; a prompt that is told the times is a
+later, golden-measured change. Only when the handler was given a
+`DraftCalendar` (the app always; no test unless it is testing this) and, in
+order: the mirror may be shown (`calendarShowsMirror`); the message is the
+one **the one rule** names for its thread (`schedulingAskMessageIds`, keyed
+by source and thread, so an older message of an ask thread offers nothing;
+an asked-for draft on a scheduling ask included; never re-derived); the hints are the model's reading
+of the ask when it gives one (`AskReader.readFor`, no timeout on the lane,
+which is what pre-warms the reading the Day column reads) else the rules'
+(`readAskHints`); the window is the Day column's first-read seed
+(`askWindowFor`: the day the ask named, else this week) and the length the
+hinted one, else 30 minutes; the people are the thread's other addresses
+(`otherAddresses`, the owner's mail and UPN left out — `ownerAddressesOf`;
+before the account is read the owner is asked about as an attendee, which is
+harmless); and the search is the Day column's own (`searchFindTime`, one
+Graph call per hinted day, the owner's own calendar when nobody else is on the
+thread). A slot that has begun or that the mirror the search read shows
+blocked is dropped (`slotGone`, the stale rule below, on the search's own
+overlaps). Nothing free, a calendar error, or anything else failing leaves
+the draft as it was, without times. An auth failure (`ReconsentRequired`,
+`NotSignedIn` — from `FindTimeResult.error`, the first auth failure of any
+day searched winning over other errors) still parks the drain; because the
+times come after the model call (the decided order), that draft's text is
+paid for again once the owner reconsents. The search runs after the
+empty-body check, so a draft that is retried never searched, and after
+`validate` capped the options at 500 characters, so the line is never cut;
+the clock is read just before it, not before a slow streamed draft. The
+streamed preview is unchanged: the line appears when the draft lands. The
+standing improve and the Improve button keep the line — the stored slots
+less any gone since, re-rendered, and none left is no line — and neither
+target sees it; either marks the record `improved: true`.
+
+**What is stored:** the provenance (`context_json`) gains a `calendar` record
+— `{slots: [{start_utc, end_utc}], source, window, graph_calls, read:
+model|rules, minutes}`, plus `improved: true` once improved — and the activity log one `find_time` row
+`{action: draft, source, slots, people, window, graph_calls, read}` ("Times
+offered in a draft · 2 slots (graph)"), or `skipped` with the error's enum
+word (`unavailable|scope_missing|transient|refused|other`). The reading's own
+model call and the row are recorded in a span of their own, so they never take
+the draft row's tally.
+
+**Stale times redraft the reply** (`DraftSlotRefresher`). A draft is written
+once, so after each calendar sync the inbox ran while processing is on (beside
+the brief planner), the 50 newest `suggested` drafts with a `calendar.slots`
+record are read, the mirror once over all their slots, and every one with a
+slot that has begun or that a mirror event now blocks — `slotGone`, the Day
+column's hard overlap: timed, not cancelled, not declined, `busy`, `oof` or no
+word; `tentative`, `free` and `workingElsewhere` block nothing — is deleted
+(only while still `suggested`, checked in the DELETE) and its `draft` work row
+re-queued with the payload it ran with (`workPayload`: an asked-for press and
+its pinned ids survive, so the redraft is not skipped by the gates the press
+overruled), and the handler re-gates the message and searches afresh. At most
+five per pass, newest first; one activity row per pass (`draft`, `requeued`,
+the count, `reason: slots_stale` — "Redrafting 2 replies — their times are
+gone"). A draft the owner edited, sent or dismissed is never touched, **nor
+one that was improved** (`improved` in its record, whether the owner pressed
+Improve or the standing rule rewrote it): that rewrite may have been a cloud
+call on the day's ledger, so it is treated like an edited draft — its times
+are kept even once they have gone; a draft the owner asks for anew searches
+afresh.
+
 ### Streaming
 
 **The draft call is the one call in this app that streams** (Round C, phase 3,

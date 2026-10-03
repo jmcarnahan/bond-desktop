@@ -1947,6 +1947,19 @@ slot with nobody on it writes no action row, and the invite's own
 `calendar_write` row is the writer's, as for every write).
 Counts and enum words only.
 
+**Drafts share the search** (`draft_slots.dart`; [07-replies.md](07-replies.md#times-in-a-draft-2026-10)).
+A reply draft to a scheduling ask — the one rule, `schedulingAskMessageIds` —
+ends with the owner's real free times: the draft handler, after its model
+call, reads the ask's hints (the model's reading, else the rules'), seeds the
+window as the column does on a first read (`askWindowFor`), searches the
+thread's other addresses (`otherAddresses`, shared with the column) through
+`searchFindTime`, and appends the `findTimeReplyLine` Put in reply writes. The
+draft model never sees the slots. Its `find_time` row is `{action: draft, …,
+read}`, and a draft whose times have started or that the mirror now shows
+blocked (`slotGone`) is redrafted after the next synced tick, beside the
+brief planner — `suggested` drafts only. Because the draft lane reads the ask
+first, it is also what pre-warms `ask_readings` for the column.
+
 ### Reading the ask
 
 The rules above read an ask at once and never need a model; the generative
@@ -2046,8 +2059,9 @@ still works out every date (the `calendar_intent` contract,
   line goes to the "Ask reading" ledger in
   [docs/model-bakeoff.md](../model-bakeoff.md).
 
-The Day column asks, refining an open ask's search with the reading (the
-draft lane pre-warms the cache from Phase 3).
+The Day column asks, refining an open ask's search with the reading; the
+draft lane pre-warms the cache, since a draft answering an ask reads it first
+([07-replies.md](07-replies.md#times-in-a-draft-2026-10)).
 
 ## Owner checks and follow-ups
 

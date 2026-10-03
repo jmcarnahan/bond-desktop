@@ -46,7 +46,11 @@ import '../services/calendar/command/command_lexicon.dart';
 import '../services/calendar/command/command_planner.dart';
 import '../services/calendar/command/command_router.dart';
 import '../services/calendar/command/decision_command_classifier.dart';
+import '../services/calendar/day_items.dart' show calendarShowsMirror;
+import '../services/calendar/draft_slot_refresher.dart';
+import '../services/calendar/draft_slots.dart';
 import '../services/calendar/meeting_brief_handler.dart';
+import '../services/calendar/scheduling_ask.dart' show ownerAddressesOf;
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
@@ -2047,6 +2051,25 @@ final draftHandlerProvider = Provider<DraftHandler>((ref) {
       standing: () => ref.read(appPrefsProvider).cloudDraftsStanding,
       ledger: ref.watch(cloudDraftLedgerProvider),
     ),
+    // A draft answering a scheduling ask ends with the owner's real free
+    // times, appended after the call (`draft_slots.dart`). The store, the
+    // backend and the reader are stable singletons; everything that moves
+    // with a sync tick — the hours, the zone, the account, the availability
+    // — is `read` inside a closure at the call, never watched, so a tick
+    // rebuilds no worker mid-drain.
+    calendar: DraftCalendar(
+      store: ref.watch(calendarStoreProvider),
+      backend: ref.watch(calendarBackendProvider),
+      mailbox: () => ref.read(mailboxSettingsProvider.future),
+      zone: () => ref.read(calendarZoneProvider.future),
+      reader: ref.watch(askReaderProvider),
+      ownerAddresses: () async {
+        final account = await ref.read(authSessionProvider).storedAccount;
+        return ownerAddressesOf(account?.mail, account?.userPrincipalName);
+      },
+      available: () =>
+          calendarShowsMirror(ref.read(calendarAvailabilityProvider)),
+    ),
   );
 });
 
@@ -2137,6 +2160,16 @@ final briefPlannerProvider = Provider<BriefPlanner>((ref) => BriefPlanner(
       ref.watch(calendarStoreProvider),
       ref.watch(briefGathererProvider),
     ));
+
+/// Re-queues the untouched drafts whose offered times are gone; the inbox
+/// calls it beside [briefPlannerProvider] after a sync that completed while
+/// processing is on, and pumps the draft lane when it re-queued any.
+final draftSlotRefresherProvider =
+    Provider<DraftSlotRefresher>((ref) => DraftSlotRefresher(
+          store: ref.watch(messageStoreProvider),
+          calendar: ref.watch(calendarStoreProvider),
+          log: ref.watch(activityLogProvider),
+        ));
 
 /// Who the owner is, from the account the sync signed in with.
 ///

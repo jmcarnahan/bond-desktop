@@ -31,7 +31,7 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `meeting_brief` | Generative — never cloud drafts |
 | `calendar_intent` | Generative — never cloud drafts; on demand, not a lane |
-| `ask_read` | Generative — never cloud drafts; on demand (the draft lane pre-warms it from Phase 3) |
+| `ask_read` | Generative — never cloud drafts; on demand (the draft lane pre-warms it) |
 | `embeddings` | Embeddings, not routed |
 
 `meeting_brief` (the pre-meeting brief, [14-calendar.md](14-calendar.md#briefs))
@@ -51,9 +51,10 @@ nothing in their name, so Cloud drafts never sees it.
 `ask_read` (a scheduling ask's own words read for the days, hours and
 length it asks for, [14-calendar.md](14-calendar.md#reading-the-ask)) is
 generative and on demand in the same way: no work kind and no lane —
-`AskReader.readFor` is called when an ask opens in the Day column (the
-draft lane pre-warms its cache from Phase 3). The model only copies phrases; Dart
-resolves every date. It is not in `draftStageIds`: it reads somebody
+`AskReader.readFor` is called when an ask opens in the Day column, and by
+a draft answering an ask before it searches for the times it offers, which
+pre-warms the cache ([07-replies.md](07-replies.md#times-in-a-draft-2026-10)).
+The model only copies phrases; Dart resolves every date. It is not in `draftStageIds`: it reads somebody
 else's words for the owner and writes nothing in their name, so Cloud
 drafts never sees it.
 

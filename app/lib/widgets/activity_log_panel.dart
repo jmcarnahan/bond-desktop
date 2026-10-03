@@ -288,6 +288,13 @@ class ActivityLogPanel extends StatefulWidget {
         ]);
         return parts.isEmpty ? label : '$label — $parts';
       case 'draft':
+        // The stale-times redraft's one row per pass: how many replies are
+        // being written again because the times they offered are gone.
+        if (detail['reason'] == 'slots_stale') {
+          final count = e.count ?? 0;
+          return 'Redrafting $count ${count == 1 ? 'reply' : 'replies'} '
+              '— their times are gone';
+        }
         final chars = detail['chars'];
         final written = chars is num
             ? 'Draft written — ${chars.toInt()} chars'
@@ -544,6 +551,11 @@ class ActivityLogPanel extends StatefulWidget {
         final n = slots is num ? slots.toInt() : 0;
         final from = detail['source'];
         final where = from is String && from.isNotEmpty ? ' ($from)' : '';
+        // The owner's free times appended to a draft answering an ask.
+        if (action == 'draft') {
+          return 'Times offered in a draft · $n '
+              '${n == 1 ? 'slot' : 'slots'}$where';
+        }
         return '$label — $n ${n == 1 ? 'slot' : 'slots'}$where';
       // The model's reading of a scheduling ask (`ask_read`): how many days
       // it copied, or that nobody asked for a time — a count and an enum
