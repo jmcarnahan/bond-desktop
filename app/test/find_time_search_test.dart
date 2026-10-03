@@ -820,5 +820,156 @@ void main() {
         expect(w.lastDay, nextFri);
       });
     });
+
+    group('several days asked for', () {
+      const thu = CalendarDate(2026, 10, 15);
+      const tue = CalendarDate(2026, 10, 20);
+      const afternoon =
+          AskHours(startHour: 12, startMinute: 0, endHour: 17, endMinute: 0);
+      const either = AskHints(day: thu, days: [thu, tue], hours: afternoon);
+
+      test('their pill asks Graph about those two days alone, none between',
+          () async {
+        final r = await hinted(either,
+            addresses: ['dana@fabrikam.example'], minutes: 30);
+        expect(r.graphCalls, 2);
+        expect(backend.windows, [
+          (local(thu, 12), local(thu, 17)),
+          (local(tue, 12), local(tue, 17)),
+        ]);
+        expect(backend.candidates, [5, 5]);
+        // Several days are no one named day: the domain stays work.
+        expect(backend.domains.toSet(), {'work'});
+      });
+
+      test('with no hours, still one call per day asked for, at the day\'s '
+          'hours', () async {
+        final r = await hinted(const AskHints(day: thu, days: [thu, tue]),
+            addresses: ['dana@fabrikam.example']);
+        expect(r.graphCalls, 2);
+        expect(backend.windows, [
+          (local(thu, 8), local(thu, 18)),
+          (local(tue, 8), local(tue, 18)),
+        ]);
+      });
+
+      test('the window spans the first to the last, and the pill names both',
+          () {
+        final w = findTimeWindowUtc(FindTimeWindow.theirs,
+            now: now, zone: la, hints: either);
+        expect(w.firstDay, thu);
+        expect(w.lastDay, tue);
+        expect(w.startUtc, local(thu, 12));
+        expect(w.endUtc, local(tue, 17));
+        expect(findTimeWindowLabel(FindTimeWindow.theirs, either),
+            'Thu Oct 15 or Tue Oct 20');
+      });
+
+      test('the owner alone: each day asked for is walked and the openings '
+          'merged by start', () async {
+        // Thursday afternoon is busy but for its last half hour, so the
+        // first three openings span both days.
+        await calendar.upsertEvents([
+          CalendarEvent(
+            id: 'thu-busy',
+            subject: 'Offsite planning',
+            startUtc: local(thu, 12),
+            endUtc: local(thu, 16, 30),
+            showAs: 'busy',
+          ),
+        ], syncRun: 'run-1');
+        final r = await hinted(either);
+        expect(r.source, 'local');
+        expect(r.slots, hasLength(3));
+        expect(r.slots.first.startUtc, local(thu, 16, 30));
+        expect(r.slots.map((s) => la.dateOf(s.startUtc)).toSet(), {thu, tue});
+        for (var i = 1; i < r.slots.length; i++) {
+          expect(r.slots[i].startUtc.isAfter(r.slots[i - 1].startUtc), isTrue);
+        }
+      });
+
+      test('a weekend day named among several is asked as personal time',
+          () async {
+        const sun = CalendarDate(2026, 10, 18);
+        await hinted(const AskHints(day: sat, days: [sat, sun], hours: morning),
+            addresses: ['dana@fabrikam.example']);
+        expect(backend.windows, [
+          (local(sat, 9), local(sat, 12)),
+          (local(sun, 9), local(sun, 12)),
+        ]);
+        expect(backend.domains, ['personal', 'personal']);
+        // A working day among them keeps the search's own domain, and
+        // dinner's unrestricted stands on a weekend day too.
+        backend.windows.clear();
+        backend.domains.clear();
+        await hinted(const AskHints(day: thu, days: [thu, sat], hours: morning),
+            addresses: ['dana@fabrikam.example']);
+        expect(backend.domains, ['work', 'personal']);
+        backend.domains.clear();
+        await hinted(const AskHints(day: thu, days: [thu, sat], hours: dinner),
+            addresses: ['dana@fabrikam.example'], minutes: 90);
+        expect(backend.domains, ['unrestricted', 'unrestricted']);
+      });
+
+      test('each day named keeps its best slot before one day fills the rest',
+          () async {
+        // Three good slots on Tuesday outrank Thursday's one; Thursday's
+        // still shows, then Tuesday's second.
+        backend.answerFor = (start, end) => start == local(tue, 12)
+            ? [
+                MeetingTimeSuggestion(
+                    startUtc: local(tue, 13),
+                    endUtc: local(tue, 13, 30),
+                    confidence: 100),
+                MeetingTimeSuggestion(
+                    startUtc: local(tue, 14),
+                    endUtc: local(tue, 14, 30),
+                    confidence: 90),
+                MeetingTimeSuggestion(
+                    startUtc: local(tue, 15),
+                    endUtc: local(tue, 15, 30),
+                    confidence: 80),
+              ]
+            : [
+                MeetingTimeSuggestion(
+                    startUtc: local(thu, 16),
+                    endUtc: local(thu, 16, 30),
+                    confidence: 50),
+              ];
+        final r = await hinted(either, addresses: ['dana@fabrikam.example']);
+        expect(r.slots, [
+          FreeSlot(local(thu, 16), local(thu, 16, 30)),
+          FreeSlot(local(tue, 13), local(tue, 13, 30)),
+          FreeSlot(local(tue, 14), local(tue, 14, 30)),
+        ]);
+      });
+
+      test('the owner alone: each day named keeps its first opening', () async {
+        // Both afternoons open: Thursday's three openings come first by
+        // start, yet Tuesday's first still shows.
+        final r = await hinted(either);
+        expect(r.slots, hasLength(3));
+        expect(r.slots.map((s) => la.dateOf(s.startUtc)).toList(),
+            [thu, tue, thu]);
+        expect(r.slots[0].startUtc, local(thu, 12));
+        expect(r.slots[1].startUtc, local(tue, 12));
+      });
+
+      test('a week pill with several days behaves as with the first day', () {
+        const first = AskHints(day: thu, hours: afternoon);
+        expect(
+            findTimeWindowUtc(FindTimeWindow.thisWeek,
+                now: now, zone: la, hints: either),
+            findTimeWindowUtc(FindTimeWindow.thisWeek,
+                now: now, zone: la, hints: first));
+        expect(
+            findTimeWindowUtc(FindTimeWindow.nextWeek,
+                now: now, zone: la, hints: either),
+            findTimeWindowUtc(FindTimeWindow.nextWeek,
+                now: now, zone: la, hints: first));
+        expect(findTimeWindowLabel(FindTimeWindow.thisWeek, either),
+            'This Thu');
+      });
+    });
   });
 }

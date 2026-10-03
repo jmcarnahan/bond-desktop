@@ -35,6 +35,7 @@ import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/backend/unavailable_calendar_backend.dart';
+import '../services/calendar/ask_reader.dart';
 import '../services/calendar/brief_gatherer.dart';
 import '../services/calendar/brief_planner.dart';
 import '../services/calendar/calendar_sync.dart';
@@ -1180,6 +1181,19 @@ final calendarZoneProvider = FutureProvider<CalendarZone>((ref) async {
   final settings = await ref.watch(mailboxSettingsProvider.future);
   return resolveCalendarZone(mailboxIana: settings?.timeZoneIana);
 });
+
+/// The scheduling ask's reader by the generative model (`ask_read`): on
+/// demand, cached per message in `ask_readings`. The client and the zone are
+/// read at call time, so a prefs write or a zone that resolves later
+/// rebuilds nothing; until the zone resolves, a reading's clock lines say
+/// UTC.
+final askReaderProvider = Provider<AskReader>((ref) => AskReader(
+      store: ref.watch(messageStoreProvider),
+      client: () => ref.read(stageLlmClientProvider('ask_read')),
+      log: ref.watch(activityLogProvider),
+      zone: () =>
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc(),
+    ));
 
 /// One chat client per pipeline stage. Constructing one opens nothing — the
 /// first call is what discovers whether a server is listening.

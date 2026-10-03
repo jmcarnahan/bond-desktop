@@ -1708,7 +1708,9 @@ the row's next open; one read in flight, which every caller awaits) into `AskHin
   meal and a time were both named).
 
 Hours that end where they start (a clock time at 23:59) hold no meeting:
-nothing is offered and Graph is not asked.
+nothing is offered and Graph is not asked. The generative model reads the
+same words a second time, for several days and a day ruled out, and its
+phrases go through these same rules ([Reading the ask](#reading-the-ask)).
 
 The first search of an ask starts from them: `minutes = hints.minutes ??
 30`, the window **Their day** when a day was read. `FindTimeWindow.theirs`
@@ -1944,6 +1946,108 @@ slot's invite gone through with people on it, from the card's `onDone`; a
 slot with nobody on it writes no action row, and the invite's own
 `calendar_write` row is the writer's, as for every write).
 Counts and enum words only.
+
+### Reading the ask
+
+The rules above read an ask at once and never need a model; the generative
+model reads it second, for what regular expressions cannot: two days offered
+("Tuesday or Thursday afternoon"), a day ruled out ("Friday doesn't work —
+how about Monday?", which the rules read as the day ruled out), and an ask
+told apart from the chatter around it. The model READS and COPIES; Dart
+still works out every date (the `calendar_intent` contract,
+[Commands](#commands)).
+
+- **The task** (`AskReadTask`, `app/lib/services/llm/ask_read_task.dart`,
+  stage `ask_read`, generative, never Cloud drafts —
+  [10-model-routing.md](10-model-routing.md)). The user message is the
+  owner's clock ("Now: Sat 3 Oct 2026, 9:40 AM PDT (America/Los_Angeles)"),
+  the message's own ("Sent: Tue 1 Sep 2026, 7:34 PM PDT", none without a
+  sent time), the subject, and the body's own words (`askOwnWords`, the
+  same quote cut as the rules) up to 1,500 characters cut at a word
+  (`askReadCap`; the rules keep their 600), fenced as untrusted. The schema,
+  flat and in this order: `evidence` (one sentence, first), `asks_for_time`,
+  `when` (the words naming WHICH day, one entry per alternative), `time` (the
+  clock or part-of-day words), `duration` (the words saying how long), `meal`
+  (breakfast, coffee, lunch, dinner, drinks or none). Temperature 0.1, 160
+  tokens; `validate` trims and caps every string at 80, keeps the first
+  three `when` entries, reads anything but `true` as not asking and an
+  unknown meal as none, and never throws.
+- **The guard** (`readAskHintsFromRead`, `ask_hints.dart`). Not asking is
+  no hints, whatever phrases came with it. A `when`, `time` or `duration`
+  phrase is kept only when it appears in the subject and own words on word
+  boundaries, ignoring case and spacing (`findPhrase`,
+  `app/lib/services/calendar/phrase_guard.dart`, the command bar's guard
+  moved to be shared); a meal is kept only when that meal's own word list
+  matches the text (so a "dinner" the message never says is no meal; drinks
+  covers "a drink" and "happy hour" through its list).
+- **The resolution** is the rules' own, through ONE core (`_hintsFrom`)
+  that both readers call. Each kept `when` phrase is resolved ON ITS OWN as
+  a question against the sent time; the `time` phrase gives the hours (or,
+  when it is empty, the first `when` phrase that carries a time or a part of
+  the day: "Friday at 3pm"); a `duration` phrase gives the length. Every day
+  rule above applies to each day — a past weekday rolls, a past relative
+  day or date is dropped, a week is no day, today too late rolls or drops —
+  and so does every hour and length rule (the meal's half of the day, the
+  two-hour reach, the midnight cut). Nothing kept is no hints.
+- **Several days.** The days that survive, deduped and sorted, are
+  `AskHints.days`; `day` is the first, for every reader. `said` names them
+  all: "Asked for: Thu Oct 8 or Tue Oct 13 · afternoon". Several days only
+  widen **Their day**: its window runs from the first day's opening to the
+  last day's close, its pill names each day ("Thu Oct 8 or Tue Oct 13"),
+  Graph is asked one call per day NAMED (at the hours, else 08:00–18:00) and
+  never about the days between, the owner-only walk takes each named day and
+  keeps the first three openings by start, and the domain stays `work`
+  (several days are no one named day). The week pills keep their single-day
+  behaviour on the first day.
+- **The cache** (`AskReader.readFor(source, messageId)`,
+  `app/lib/services/calendar/ask_reader.dart`, `askReaderProvider`). On
+  demand, never a lane: one call per message, single-flight, and the answer
+  stored in `ask_readings` (v26, DERIVED — Clear AI results empties it) as
+  `ready` or `none` with the copied PHRASES, never a date, so a reading is
+  re-resolved against today on every use. A model that cannot be reached, or
+  an answer that fails, stores nothing (a later open asks again) and the
+  caller keeps the rules' reading. The activity row, kind `ask_read`
+  labelled **Ask reading**, carries `{status, when: <count>, meal: <enum>}`
+  ("Read an ask · 2 days", "Read an ask · no time asked"), or the error's
+  type — never a phrase.
+- **The Day column** (`_readAskHintsNow`, `inbox_screen.dart`). Opening an
+  ask reads the RULES at once, so the row shows their words straight away,
+  and then asks the reader, waiting up to `InboxScreen.askReadWait` (4 s)
+  INSIDE the one read in flight (`_AskSearch.hintsReading`): every caller,
+  the first search included, waits the same once. A reading back within the
+  wait seeds the first search itself; past it the search runs on the rules
+  and the reading goes on in the background (`_AskSearch.refining`). When
+  it lands, `_refineAskHints` resolves it and holds it against the rules'
+  hints on days, hours and length. One `ask_read` activity row records the
+  verdict as booleans only, `{applied, agree, cached}` ("The model read
+  the ask the way the rules did" / "The model's reading replaced the
+  rules'"). Agreeing changes nothing.
+  Differing replaces the hints (`hintsSource` `model`; nothing on screen
+  says whose they are); if the first search already ran, the pills are
+  seeded again by the same rule the first search uses (`_seedFromHints`)
+  and the ask searches ONCE more, the older answer dropped by the serial. An
+  ask folded meanwhile is not searched; its answer is dropped so the next
+  open searches on the model's reading. A reading for an ask forgotten since
+  (a new day, a stale answer) or overtaken by a newer message is ignored. No
+  model (off, unreachable, a bad answer) leaves the rules standing: no
+  toast, no verdict row.
+- **The eval** (the round's D10). `app/test/fixtures/ask_reads/asks.jsonl`
+  holds 40 fictional asks: the shapes the rules tests pin and the hard ones
+  (a ruled-out day, two days, two times, a header-less quote above the ask,
+  a newsletter). Each row's `expect` is what a PERFECT reading yields once
+  Dart resolves it; a row the resolvers cannot read either ("the 14th")
+  expects what Dart can give and is marked `hard`. Offline,
+  `ask_read_fixture_test.dart` prints the rules' score (`rules: 33/40` when
+  it landed) and each miss, asserting only the fixture's shape, and pins
+  that a hand-written perfect reading of five hard rows resolves exactly to
+  `expect`. Live, `make ask-read-eval` runs the real task on the prose slot
+  and prints `model: m/40 · rules: k/40 · both: b/40 · disagree: d` with
+  every disagreement. It asserts shape only and is never in the gate. The
+  line goes to the "Ask reading" ledger in
+  [docs/model-bakeoff.md](../model-bakeoff.md).
+
+The Day column asks, refining an open ask's search with the reading (the
+draft lane pre-warms the cache from Phase 3).
 
 ## Owner checks and follow-ups
 

@@ -413,6 +413,13 @@ void main() {
       "model, generated_at) VALUES ('evt-1', 'h', 'ready', '{}', 'm', ?)",
       variables: args([fresh()]),
     );
+    // And one ask's reading by the model (derived): phrases, never a date.
+    await store.putAskReading(
+      source: 'email',
+      messageId: 'm-1',
+      status: 'none',
+      readAt: fresh(),
+    );
 
     // The owner's own vocabulary and one thread filed under it. Kept, like a
     // sender rule: the words are theirs, not the model's. `messages.label` is
@@ -470,7 +477,7 @@ void main() {
       expect(classified.toSet(), equals(declared));
       // Pairwise disjoint, which the set comparison above cannot see.
       expect(classified.length, classified.toSet().length);
-      expect(MessageStore.derivedTables, hasLength(18));
+      expect(MessageStore.derivedTables, hasLength(19));
       expect(MessageStore.syncedTables, hasLength(8));
       expect(MessageStore.keptTables, hasLength(6));
     });

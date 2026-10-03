@@ -931,3 +931,19 @@ CREATE TABLE event_briefs (
   model TEXT NOT NULL DEFAULT '',
   generated_at TEXT NOT NULL
 ) STRICT AS EventBriefRow;
+
+-- The generative model's reading of one scheduling ask's own words
+-- (`ask_read`, the calendar-automation round's Phase 2), one row per message.
+-- DERIVED — Clear AI results empties it and the reading is made again on
+-- demand. `read_json` holds the copied PHRASES (`AskRead.toJson()`), never a
+-- resolved date: a reading is re-resolved against today on every use, since
+-- the weekday roll depends on the day it is read.
+CREATE TABLE ask_readings (
+  source TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  status TEXT NOT NULL,            -- ready | none
+  read_json TEXT,                  -- AskRead.toJson(): the copied PHRASES, never a date
+  model TEXT NOT NULL DEFAULT '',
+  read_at TEXT NOT NULL,
+  PRIMARY KEY (source, source_message_id)
+) STRICT AS AskReadingRow;

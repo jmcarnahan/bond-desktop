@@ -82,6 +82,7 @@ class ActivityLogPanel extends StatefulWidget {
     'calendar_command': 'Calendar command',
     'find_time': 'Find a time',
     'scheduling_ask': 'Scheduling ask',
+    'ask_read': 'Ask reading',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -544,6 +545,24 @@ class ActivityLogPanel extends StatefulWidget {
         final from = detail['source'];
         final where = from is String && from.isNotEmpty ? ' ($from)' : '';
         return '$label — $n ${n == 1 ? 'slot' : 'slots'}$where';
+      // The model's reading of a scheduling ask (`ask_read`): how many days
+      // it copied, or that nobody asked for a time — a count and an enum
+      // word, never a phrase. The Day column's verdict on a reading is
+      // booleans: whether it agreed with the rules' or replaced them.
+      case 'ask_read':
+        if (detail['agree'] == true) {
+          return 'The model read the ask the way the rules did';
+        }
+        if (detail['applied'] == true) {
+          return "The model's reading replaced the rules'";
+        }
+        if (detail['status'] == 'none') return 'Read an ask · no time asked';
+        final when = detail['when'];
+        if (when is! num) return label;
+        final n = when.toInt();
+        return n == 0
+            ? 'Read an ask · no day named'
+            : 'Read an ask · $n ${n == 1 ? 'day' : 'days'}';
       // The owner's word on a scheduling ask, one row per label written or
       // taken back, by its origin — an enum word, never the thread.
       case 'scheduling_ask':

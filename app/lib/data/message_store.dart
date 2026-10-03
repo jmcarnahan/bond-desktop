@@ -70,6 +70,10 @@ import '../services/search_fusion.dart';
 // the ingest strips a fresh one, and a second spelling of the pattern here is
 // how the two would come to disagree about what the tip looks like.
 import '../services/mail_body.dart';
+// And the ask reading's codec, on the same licence: `AskRead.fromJson` is
+// the task's own clamps over a map, so a stored reading decodes exactly as
+// the model's answer did ([askReading]).
+import '../services/llm/ask_read_task.dart' show AskRead;
 import '../services/mail_text.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
@@ -3779,6 +3783,7 @@ RETURNING *
     'context_chunks',
     'message_decisions',
     'event_briefs',
+    'ask_readings',
   ];
 
   /// Every table a CONNECTOR or the user's own directory scan wrote.
@@ -8007,6 +8012,73 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
         .get();
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// The generative model's stored reading of one scheduling ask
+  /// (`ask_readings`), or null when it was never read. [read] is the copied
+  /// phrases ([AskRead.fromJson]; null for a row with no JSON, which a
+  /// `none` row may be), never a date — the reader resolves it against
+  /// today.
+  Future<({String status, AskRead? read, String model, String readAt})?>
+      askReading(String source, String messageId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT status, read_json, model, read_at FROM ask_readings '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, messageId]),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    final r = rows.first;
+    AskRead? read;
+    final raw = r.read<String?>('read_json');
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final json = jsonDecode(raw);
+        if (json is Map<String, dynamic>) read = AskRead.fromJson(json);
+      } on FormatException {
+        read = null;
+      }
+    }
+    return (
+      status: r.read<String>('status'),
+      read: read,
+      model: r.read<String>('model'),
+      readAt: r.read<String>('read_at'),
+    );
+  }
+
+  /// Stores one ask's reading, replacing any earlier one for the message.
+  /// [status] is `ready` (phrases worth resolving) or `none` (not asking for
+  /// a time, or nothing copied).
+  Future<void> putAskReading({
+    required String source,
+    required String messageId,
+    required String status,
+    AskRead? read,
+    String model = '',
+    required String readAt,
+  }) async {
+    await db.customUpdate(
+      '''
+INSERT INTO ask_readings (
+  source, source_message_id, status, read_json, model, read_at
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(source, source_message_id) DO UPDATE SET
+  status = excluded.status,
+  read_json = excluded.read_json,
+  model = excluded.model,
+  read_at = excluded.read_at
+''',
+      variables: _args([
+        source,
+        messageId,
+        status,
+        read == null ? null : jsonEncode(read.toJson()),
+        model,
+        readAt,
+      ]),
+    );
   }
 
   /// Every suggestion stored against this conversation's messages, whatever

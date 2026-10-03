@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -47,7 +48,9 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
-import '../services/calendar/ask_hints.dart' show AskHints, readAskHints;
+import '../services/calendar/ask_hints.dart'
+    show AskHints, readAskHints, readAskHintsFromRead;
+import '../services/calendar/ask_reader.dart' show AskReading;
 import '../services/calendar/brief_gatherer.dart' show briefQuickCheck;
 import '../services/calendar/meeting_brief_handler.dart' show BriefRequest;
 import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
@@ -378,6 +381,22 @@ class InboxScreen extends ConsumerStatefulWidget {
   final PreviewEngines? previewEngines;
   final AttachmentBytes? attachmentBytes;
   final FileDialogs? fileDialogs;
+
+  /// How long an ask's first search waits for the model's reading
+  /// (`ask_read`) before it runs on the rules' — inside the one read in
+  /// flight, so every caller waits the same once. A reading that lands later
+  /// still refines the row and searches once more.
+  static const Duration askReadWait = Duration(seconds: 4);
+
+  /// A test's shorter [askReadWait]; null in the app. Set it in the test
+  /// body and clear it in a tear-down.
+  @visibleForTesting
+  static Duration? askReadWaitOverride;
+
+  /// A test's shorter [askResultLifetime], so a reopen takes the staleness
+  /// path without a clock; null in the app. Cleared in a tear-down.
+  @visibleForTesting
+  static Duration? askResultLifetimeOverride;
 
   const InboxScreen({
     super.key,
@@ -4336,9 +4355,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       askCallbacks: SchedulingAskCallbacks(
         onToggle: _toggleAsk,
         onMinutes: (source, key, minutes) =>
-            _changeAsk(source, key, (e) => e.minutes = minutes),
-        onWindow: (source, key, window) =>
-            _changeAsk(source, key, (e) => e.window = window),
+            _changeAsk(source, key, (e) => e
+              ..minutes = minutes
+              ..pickedMinutes = true),
+        onWindow: (source, key, window) => _changeAsk(source, key, (e) => e
+          ..window = window
+          ..pickedWindow = true),
         onPickSlot: (source, key, slot) =>
             unawaited(_pickAskSlot(source, key, slot)),
         onPutInReply: (source, key) =>
@@ -6373,7 +6395,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 readOn: entry.hintsDay,
                 today: zone.dateOf(now.toUtc())) ||
             (entry.result != null &&
-                askResultStale(entry.searchedAt, now)))) {
+                askResultStale(entry.searchedAt, now,
+                    lifetime: InboxScreen.askResultLifetimeOverride ??
+                        askResultLifetime)))) {
       entry.forgetReading();
     }
     setState(() {
@@ -6415,15 +6439,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() => _selectedDay = w.firstDay == today ? null : w.firstDay);
   }
 
-  /// A pill pressed: the new length or week, and the search again.
+  /// A pill pressed: the new length or week, and the search again. [change]
+  /// marks the field it set as the owner's ([_AskSearch.pickedMinutes],
+  /// [_AskSearch.pickedWindow]), so no reading — the rules' still in its
+  /// wait, or the model's later — seeds over it.
   void _changeAsk(
       String source, String key, void Function(_AskSearch e) change) {
     final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
-    // The owner's own choice: a hint read still out must not overwrite it.
-    setState(() {
-      change(entry);
-      entry.searched = true;
-    });
+    setState(() => change(entry));
     unawaited(_runAskSearch(source, key));
   }
 
@@ -6438,16 +6461,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final serial = ++entry.serial;
     setState(() => entry.busy = true);
     // The ask's own words, read once; the first search starts from them.
-    if (!entry.hintsRead) {
+    // The rules' words are in before the model's wait ends, so a search
+    // started in the wait (a pill pressed) waits too and seeds after it.
+    if (!entry.hintsRead || entry.hintsReading != null) {
       await _readAskHints(source, key);
       if (!mounted || serial != entry.serial) return;
       if (!entry.searched) {
-        entry.minutes = entry.hints?.minutes ?? entry.minutes;
-        if (entry.hints?.day != null) entry.window = FindTimeWindow.theirs;
+        _seedFromHints(entry);
+      } else {
+        // Their day with no day read any more is this week, which is what
+        // the pills now offer.
+        entry.window = askWindowFor(entry.window, entry.hints);
       }
-      // Their day with no day read any more is this week, which is what
-      // the pills now offer.
-      entry.window = askWindowFor(entry.window, entry.hints);
     }
     entry.searched = true;
     // Only an ask still open moves the pane: one folded during the hint
@@ -6475,20 +6500,44 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     });
   }
 
+  /// The first search's pills out of what the words said: their length,
+  /// their day when they named one, and this week when their day has gone
+  /// ([askWindowFor]). The first read and a model's reading that differs
+  /// ([_refineAskHints]) seed alike, and neither touches a pill the owner
+  /// pressed.
+  void _seedFromHints(_AskSearch entry) {
+    final hints = entry.hints;
+    if (!entry.pickedMinutes) {
+      entry.minutes = hints?.minutes ?? entry.minutes;
+    }
+    if (!entry.pickedWindow) {
+      entry.window = hints?.day != null
+          ? FindTimeWindow.theirs
+          : askWindowFor(entry.window, hints);
+    }
+  }
+
   /// Reads what the ask [source]/[key] says about the time — its NEWEST
   /// inbound message (the one the rule read), subject and body, else the
   /// preview — into its search entry, once. A row that cannot be read leaves
   /// no hints, and the search runs as it always did.
   ///
   /// One read at a time per ask: a second caller (the pane, a pill pressed
-  /// during the first search) awaits the one already out.
+  /// during the first search) awaits the one already out — including its
+  /// wait for the model ([InboxScreen.askReadWait]).
   Future<void> _readAskHints(String source, String key) {
     final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
+    final reading = entry.hintsReading;
+    if (reading != null) return reading;
     if (entry.hintsRead) return Future.value();
-    return entry.hintsReading ??= _readAskHintsNow(source, key, entry)
+    return entry.hintsReading = _readAskHintsNow(source, key, entry)
         .whenComplete(() => entry.hintsReading = null);
   }
 
+  /// The rules' reading at once ([readAskHints]), so the row opens on it;
+  /// then the model's ([_refineAskHints]), waited for up to
+  /// [InboxScreen.askReadWait] so a quick answer seeds the first search.
+  /// A slower one goes on in the background ([_AskSearch.refining]).
   Future<void> _readAskHintsNow(
       String source, String key, _AskSearch entry) async {
     final zone = ref.read(calendarZoneProvider).valueOrNull;
@@ -6496,24 +6545,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         .read(schedulingAsksProvider)
         .valueOrNull?[schedulingAskKey(source, key)];
     AskHints? hints;
+    ({String subject, String body, DateTime? sentAt})? words;
     if (zone != null && messageId != null) {
       try {
         final row = await ref
             .read(messageStoreProvider)
             .getMessageRow(source, messageId);
         if (row != null) {
-          final body = (row['body_text'] as String?)?.trim();
+          final text = (row['body_text'] as String?)?.trim();
           // "Tomorrow" is the day after the message was SENT: its words are
           // read against its own stamp, and a day they named that has gone
           // is no day ([readAskHints]'s rule, against now).
           final sent = row['received_at'];
-          hints = readAskHints(
+          final read = (
             subject: row['subject'] as String? ?? '',
-            body: body == null || body.isEmpty
+            body: text == null || text.isEmpty
                 ? row['body_preview'] as String? ?? ''
-                : body,
-            now: DateTime.now(),
+                : text,
             sentAt: sent is String ? DateTime.tryParse(sent) : null,
+          );
+          words = read;
+          hints = readAskHints(
+            subject: read.subject,
+            body: read.body,
+            now: DateTime.now(),
+            sentAt: read.sentAt,
             zone: zone,
           );
         }
@@ -6526,8 +6582,118 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       ..hints = hints
       ..hintsMessageId = messageId
       ..hintsDay = zone?.dateOf(DateTime.now().toUtc())
-      ..hintsRead = true;
+      ..hintsRead = true
+      ..hintsSource = 'rules';
+    if (!mounted || zone == null || messageId == null || words == null) {
+      return;
+    }
+    // The row opens on the rules' words while the model reads.
+    setState(() {});
+    final id = '$source|$key';
+    late final Future<void> refining;
+    refining = _refineAskHints(source, key, entry,
+        messageId: messageId,
+        words: words,
+        zone: zone,
+        current: () =>
+            identical(entry.refining, refining) && _askSearches[id] == entry);
+    entry.refining = refining;
+    await refining.timeout(
+        InboxScreen.askReadWaitOverride ?? InboxScreen.askReadWait,
+        onTimeout: () {});
   }
+
+  /// The model's reading of the ask ([AskReader.readFor]), resolved by the
+  /// rules' own Dart ([readAskHintsFromRead]) and held against the rules'
+  /// reading on its days, hours and length. One `ask_read` row says whether
+  /// they agreed — booleans only. A reading that agrees changes nothing; one
+  /// that differs replaces the hints ([_AskSearch.hintsSource] `model`) and,
+  /// when the first search already ran on the rules, seeds the pills again
+  /// and searches ONCE more — or, for an ask folded since, drops the answer
+  /// so the next open searches on the model's reading.
+  ///
+  /// Nothing happens when the model could not be asked (null: off,
+  /// unavailable, a bad answer — the rules stand, quietly) or the entry
+  /// moved on: [current] false (it was forgotten, or a newer message made
+  /// it a new ask) or its words are another message's.
+  Future<void> _refineAskHints(
+    String source,
+    String key,
+    _AskSearch entry, {
+    required String messageId,
+    required ({String subject, String body, DateTime? sentAt}) words,
+    required CalendarZone zone,
+    required bool Function() current,
+  }) async {
+    final AskReading? reading;
+    try {
+      reading = await ref.read(askReaderProvider).readFor(source, messageId);
+    } on Object catch (e) {
+      debugPrint('scheduling ask: the model reading failed: ${e.runtimeType}');
+      return;
+    }
+    if (reading == null ||
+        !mounted ||
+        !current() ||
+        entry.hintsMessageId != messageId) {
+      return;
+    }
+    final model = readAskHintsFromRead(
+      read: reading.read,
+      subject: words.subject,
+      body: words.body,
+      now: DateTime.now(),
+      zone: zone,
+      sentAt: words.sentAt,
+    );
+    final rules = entry.hints ?? AskHints.none;
+    final agree = _sameHints(model, rules);
+    // The decision model already called this an ask: the model reading
+    // nobody asking is the riskiest answer to act on, so it never erases
+    // what the rules read.
+    final kept = !agree && !model.any && rules.any;
+    unawaited(ref
+        .read(activityLogProvider)
+        .record('ask_read',
+            source: source,
+            detail: {
+              'applied': !agree && !kept,
+              'agree': agree,
+              'cached': reading.fromCache,
+            })
+        .catchError((Object e) {
+      debugPrint('scheduling ask: the reading row failed: ${e.runtimeType}');
+    }));
+    if (agree || kept) return;
+    final ran = entry.searched && (entry.result != null || entry.busy);
+    setState(() {
+      entry
+        ..hints = model
+        ..hintsSource = 'model';
+      if (!ran) return;
+      // A pill the owner pressed stands: the search below runs on it.
+      _seedFromHints(entry);
+      if (!entry.expanded) {
+        // Folded since: its answer was the rules', and the next open
+        // ([_toggleAsk]) searches again when there is none.
+        entry
+          ..result = null
+          ..searchedAt = null
+          ..busy = false
+          ..serial += 1;
+      }
+    });
+    // Not yet searched: the search waiting on this read seeds from the
+    // model's hints itself.
+    if (ran && entry.expanded) unawaited(_runAskSearch(source, key));
+  }
+
+  /// Whether two readings would search alike: the same days, hours and
+  /// length. The words on the row ([AskHints.said]) do not count.
+  static bool _sameHints(AskHints a, AskHints b) =>
+      listEquals(a.days, b.days) &&
+      a.hours == b.hours &&
+      a.minutes == b.minutes;
 
   /// A slot picked in the asks column: the day it falls on, with the invite
   /// standing on it as the command bar's proposal — the card with who it
@@ -9918,10 +10084,12 @@ const String moveLeavesDay = 'A meeting stays on one day — pick a time inside 
 const Duration askResultLifetime = Duration(minutes: 30);
 
 /// Whether an ask's answer that landed at [searchedAt] is too old to show
-/// at [now] ([askResultLifetime]). An answer with no stamp is stale.
+/// at [now] ([lifetime], [askResultLifetime] unless a test shortens it).
+/// An answer with no stamp is stale.
 @visibleForTesting
-bool askResultStale(DateTime? searchedAt, DateTime now) =>
-    searchedAt == null || now.difference(searchedAt) > askResultLifetime;
+bool askResultStale(DateTime? searchedAt, DateTime now,
+        {Duration lifetime = askResultLifetime}) =>
+    searchedAt == null || now.difference(searchedAt) > lifetime;
 
 /// Whether an ask's words, read for the message [readFor] on the local date
 /// [readOn], must be read again: the asks now name a newer message
@@ -10013,16 +10181,35 @@ class _AskSearch {
   /// Bumped per search, so only the newest answer lands.
   int serial = 0;
 
+  /// Whose reading [hints] are: `rules` ([readAskHints], at once) or `model`
+  /// (the `ask_read` reading, when it differed). Nothing on screen shows it.
+  String hintsSource = 'rules';
+
+  /// The model's reading still out after the first search's wait, if any;
+  /// a forgotten reading nulls it, so its answer is dropped when it lands.
+  Future<void>? refining;
+
+  /// The owner pressed a length pill / a week pill
+  /// ([_InboxScreenState._changeAsk]): no reading seeds that field again —
+  /// not the rules' first seed when the pill went down during the model's
+  /// wait, not a model reading that lands later, not a reading after
+  /// [forgetReading]. The owner's pill wins, and any search more runs on it.
+  bool pickedMinutes = false;
+  bool pickedWindow = false;
+
   /// Forgets what was read and found — the words, the answer, any search
   /// still out (the serial moves) — and keeps the owner's own pills
-  /// ([minutes], [window], [searched]): what a new day or a stale answer
-  /// costs ([_InboxScreenState._toggleAsk]). A newer message is a new ask
-  /// and gets a new [_AskSearch] instead ([_InboxScreenState._askRow]).
+  /// ([minutes], [window], [searched], [pickedMinutes], [pickedWindow]):
+  /// what a new day or a stale answer costs ([_InboxScreenState._toggleAsk]).
+  /// A newer message is a new ask and gets a new [_AskSearch] instead
+  /// ([_InboxScreenState._askRow]).
   void forgetReading() {
     hints = null;
     hintsRead = false;
     hintsMessageId = null;
     hintsDay = null;
+    hintsSource = 'rules';
+    refining = null;
     result = null;
     searchedAt = null;
     busy = false;

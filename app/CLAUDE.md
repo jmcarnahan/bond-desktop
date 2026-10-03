@@ -1083,6 +1083,40 @@ that bite.
     call over the window starting now; without hours, one call for 5.
     Counted in the `find_time` row's `graph_calls`
     (`FindTimeResult.graphCalls`). The `_insideHours` drop is a belt only.
+  - Hints are read by the RULES at once (`readAskHints`) and by the model
+    (`ask_read`, `AskReader.readFor`) when it answers. The model copies
+    phrases that must appear in the subject and own words on word
+    boundaries (`findPhrase`, `phrase_guard.dart`, shared with the command
+    router) and a meal only when that meal's regex matches; Dart resolves
+    each phrase on its own through ONE core (`_hintsFrom`), so the 34 rules
+    tests in `ask_hints_test.dart` are the spec for both readers. Readings
+    are stored as PHRASES (`ask_readings`, derived) and re-resolved against
+    today. Several days (`AskHints.days`, `day` is the first) only widen the
+    `theirs` window: one Graph call per day named, none between; the week
+    pills keep the first day.
+  - The inbox waits `InboxScreen.askReadWait` (4 s) for the model INSIDE
+    the one read in flight, so every caller waits the same once; past it
+    the first search runs on the rules and the reading refines later
+    (`_AskSearch.refining`, nulled by `forgetReading`). A differing reading
+    sets `hintsSource = 'model'`, re-seeds through `_seedFromHints` (the
+    first search's own rule) and searches AT MOST once more per reading; a
+    folded ask drops its answer instead. **The owner's pills win**: a pill
+    press sets `pickedMinutes` / `pickedWindow` (kept by `forgetReading`,
+    never set by seeding — `_changeAsk` no longer sets `searched`), and
+    `_seedFromHints` leaves a picked field alone. **The model's "none"
+    never erases the rules' day**: a reading with nothing in it against a
+    rules reading that found something is kept as the rules', recorded
+    `agree: false, applied: false`. The `ask_read` verdict row is booleans
+    only. Screen tests override `askReaderProvider` (the helper defaults to
+    a disabled reader) and shorten the wait with
+    `InboxScreen.askReadWaitOverride` (and the stale path with
+    `askResultLifetimeOverride`), both cleared in `tearDown`; a held read
+    left pending at the end fails the test on the timeout's timer.
+  - The ask fixture (`test/fixtures/ask_reads/asks.jsonl`, 40 rows) is
+    scored offline by `ask_read_fixture_test.dart`, which PRINTS the rules'
+    score and asserts shape only; `expect` is a perfect reading, never the
+    rules' output. `make ask-read-eval` is live (`@Skip`'d, `--run-skipped`)
+    and never in the gate.
   - With a weekday read, a week pill means THAT weekday of the week
     (`weekdayWithin`, pills "This Fri" / "Next Fri", or the date they mean
     once this week's has gone), falling back to the

@@ -838,6 +838,30 @@ void main() {
       expect(ActivityLogPanel.kindLabel('find_time'), 'Find a time');
     });
 
+    test('an ask reading says how many days it read, or that nobody asked, '
+        'in counts and enum words', () {
+      String row(Map<String, Object?> detail, {String status = 'ok'}) =>
+          ActivityLogPanel.describe(
+              _event(kind: 'ask_read', status: status, detail: detail));
+      expect(row({'status': 'ready', 'when': 2, 'meal': 'none'}),
+          'Read an ask · 2 days');
+      expect(row({'status': 'ready', 'when': 1, 'meal': 'dinner'}),
+          'Read an ask · 1 day');
+      expect(row({'status': 'ready', 'when': 0, 'meal': 'coffee'}),
+          'Read an ask · no day named');
+      expect(row({'status': 'none', 'when': 0, 'meal': 'none'}),
+          'Read an ask · no time asked');
+      // The Day column's verdict: booleans only.
+      expect(row({'applied': false, 'agree': true, 'cached': true}),
+          'The model read the ask the way the rules did');
+      expect(row({'applied': true, 'agree': false, 'cached': false}),
+          "The model's reading replaced the rules'");
+      // An error takes the general sentence, with its type only.
+      expect(row({'error': 'LlmFormatException'}, status: 'error'),
+          'Ask reading failed — LlmFormatException');
+      expect(ActivityLogPanel.kindLabel('ask_read'), 'Ask reading');
+    });
+
     test('a calendar write says what it did and how many it emailed', () {
       String write(String action,
               {String status = 'ok',

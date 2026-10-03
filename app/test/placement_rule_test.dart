@@ -74,12 +74,12 @@ void main() {
         expect(spec.url, 'http://127.0.0.1:8080/v1/chat/completions');
         expect(spec.model, routerProseId, reason: id);
       }
-      // Twelve (triage and extraction became message_text, the reply decision
-      // became the decision model's, and needs-you, storyline membership and
-      // storyline grouping ask no language model at all; the calendar round
-      // added meeting_brief and calendar_intent), so the list has not quietly
-      // shrunk.
-      expect(generativeStages, hasLength(12));
+      // Thirteen (triage and extraction became message_text, the reply
+      // decision became the decision model's, and needs-you, storyline
+      // membership and storyline grouping ask no language model at all; the
+      // calendar round added meeting_brief and calendar_intent, and this round
+      // added ask_read), so the list has not quietly shrunk.
+      expect(generativeStages, hasLength(13));
       expect(generativeStages, isNot(contains('needs_you')));
       expect(generativeStages, isNot(contains('storyline_membership')));
       expect(generativeStages, isNot(contains('storyline_group')));

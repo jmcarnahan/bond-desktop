@@ -2,6 +2,7 @@ import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/calendar/ask_hints.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/when_resolver.dart';
+import 'package:bond_inbox/services/llm/ask_read_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// What an ask's own words say about the time it wants: the day, the hours
@@ -357,6 +358,212 @@ void main() {
       expect(h.hours,
           const AskHours(startHour: 4, startMinute: 0, endHour: 6, endMinute: 0));
       expect(h.minutes, 30);
+    });
+  });
+
+  group('read by the model', () {
+    // Mon Oct 5 and Tue Oct 6 2026, 10:00 AM and 6:00 PM in Los Angeles.
+    final monday = DateTime.utc(2026, 10, 5, 17);
+    final tuesdayEvening = DateTime.utc(2026, 10, 7, 1);
+    const thursday = CalendarDate(2026, 10, 8);
+    const tuesday = CalendarDate(2026, 10, 13);
+
+    AskHints fromRead(String subject, String body, AskRead r,
+            {DateTime? sentAt}) =>
+        readAskHintsFromRead(
+            read: r,
+            subject: subject,
+            body: body,
+            now: now,
+            zone: la,
+            sentAt: sentAt);
+
+    void expectSame(AskHints model, AskHints rules) {
+      expect(model.day, rules.day, reason: 'day');
+      expect(model.days, rules.days, reason: 'days');
+      expect(model.hours, rules.hours, reason: 'hours');
+      expect(model.minutes, rules.minutes, reason: 'minutes');
+      expect(model.said, rules.said, reason: 'said');
+      expect(model.timeWords, rules.timeWords, reason: 'timeWords');
+    }
+
+    test('a perfect read gives the rules\' reading, field for field', () {
+      final cases = <(String, String, AskRead, DateTime?)>[
+        (
+          'dinner on friday',
+          'could we grab dinner on Friday?',
+          const AskRead(asksForTime: true, when: ['Friday'],
+              meal: AskMeal.dinner),
+          null,
+        ),
+        (
+          'coffee tuesday morning?',
+          '',
+          const AskRead(asksForTime: true, when: ['tuesday'],
+              time: 'morning', meal: AskMeal.coffee),
+          null,
+        ),
+        (
+          'Lunch next week?',
+          '',
+          const AskRead(asksForTime: true, when: ['next week'],
+              meal: AskMeal.lunch),
+          null,
+        ),
+        (
+          'drinks 10pm-1am',
+          '',
+          const AskRead(asksForTime: true, time: '10pm-1am',
+              meal: AskMeal.drinks),
+          null,
+        ),
+        (
+          'tomorrow dinner?',
+          '',
+          const AskRead(asksForTime: true, when: ['tomorrow'],
+              meal: AskMeal.dinner),
+          tuesdayEvening,
+        ),
+        (
+          'tomorrow dinner?',
+          '',
+          const AskRead(asksForTime: true, when: ['tomorrow'],
+              meal: AskMeal.dinner),
+          monday,
+        ),
+      ];
+      for (final (subject, body, r, sentAt) in cases) {
+        final rules = readAskHints(
+            subject: subject, body: body, now: now, zone: la, sentAt: sentAt);
+        expect(rules.any, isTrue, reason: subject);
+        expectSame(fromRead(subject, body, r, sentAt: sentAt), rules);
+      }
+    });
+
+    test('Tuesday or Thursday afternoon is both days, sorted', () {
+      final h = fromRead('Sync', 'Could we talk Tuesday or Thursday afternoon?',
+          const AskRead(asksForTime: true, when: ['Tuesday', 'Thursday'],
+              time: 'afternoon'));
+      expect(h.days, [thursday, tuesday]);
+      expect(h.day, thursday);
+      expect(h.hours, AskHours.fromDayPart(DayPart.afternoon));
+      expect(h.hours,
+          const AskHours(startHour: 12, startMinute: 0, endHour: 17, endMinute: 0));
+      expect(h.said, 'Asked for: Thu Oct 8 or Tue Oct 13 · afternoon');
+      expect(h.timeWords, 'in the afternoon');
+    });
+
+    test('a when phrase not in the text is dropped', () {
+      const body = 'Could we grab dinner on Friday?';
+      // "Monday" is the model's own word: dropped; the meal stands.
+      final h = fromRead('Dinner', body,
+          const AskRead(asksForTime: true, when: ['Monday'],
+              meal: AskMeal.dinner));
+      expect(h.day, isNull);
+      expect(h.days, isEmpty);
+      expect(h.minutes, 90);
+      // With nothing else kept, nothing was read.
+      final none = fromRead('Dinner', body,
+          const AskRead(asksForTime: true, when: ['next Monday'],
+              time: 'at 7pm'));
+      expect(none.any, isFalse);
+      expect(none.said, isNull);
+      // A normalised date is not a copy either.
+      expect(
+          fromRead('Dinner', body,
+                  const AskRead(asksForTime: true, when: ['2026-10-09']))
+              .any,
+          isFalse);
+    });
+
+    test('a meal the text never says is dropped', () {
+      final h = fromRead('Catch up', 'Lunch on Friday?',
+          const AskRead(asksForTime: true, when: ['Friday'],
+              meal: AskMeal.dinner));
+      expect(h.day, friday);
+      expect(h.hours, isNull);
+      expect(h.minutes, isNull);
+      expect(h.said, 'Asked for: Fri Oct 9');
+      // Drinks covers "a drink" and "happy hour" through its own word list.
+      final drink = fromRead('After work', 'Happy hour on Friday?',
+          const AskRead(asksForTime: true, when: ['Friday'],
+              meal: AskMeal.drinks));
+      expect(drink.hours?.startHour, 17);
+      expect(drink.minutes, 60);
+    });
+
+    test('not asking for a time is nothing, whatever came with it', () {
+      final h = fromRead('Dinner', 'Could we grab dinner on Friday?',
+          const AskRead(asksForTime: false, when: ['Friday'],
+              meal: AskMeal.dinner));
+      expect(h.any, isFalse);
+      expect(h.said, isNull);
+    });
+
+    test('a ruled-out day the model did not copy is not read — the rules '
+        'read it', () {
+      const subject = 'Re: catch up';
+      const body = "How about Monday instead? Friday doesn't work for me.";
+      final h = fromRead(subject, body,
+          const AskRead(asksForTime: true, when: ['Monday']));
+      expect(h.day, const CalendarDate(2026, 10, 12));
+      // That is the point: the regex reader reads the day ruled out.
+      final rules =
+          readAskHints(subject: subject, body: body, now: now, zone: la);
+      expect(rules.day, friday);
+    });
+
+    test('relative words resolve against when the message was sent', () {
+      const read = AskRead(asksForTime: true, when: ['tomorrow'],
+          meal: AskMeal.dinner);
+      expect(fromRead('Dinner', 'tomorrow?', read, sentAt: tuesdayEvening).day,
+          const CalendarDate(2026, 10, 7));
+      // Monday's tomorrow has gone: dropped, the meal stands.
+      final gone = fromRead('Dinner', 'tomorrow?', read, sentAt: monday);
+      expect(gone.day, isNull);
+      expect(gone.minutes, 90);
+      expect(fromRead('Dinner', 'tomorrow?', read).day, thursday);
+    });
+
+    test('a past weekday rolls to its next occurrence', () {
+      // Tue Sep 1 2026's "Thursday" was Sep 3; the ask is still open.
+      final h = fromRead('Sync', 'Thursday afternoon?',
+          const AskRead(asksForTime: true, when: ['Thursday'],
+              time: 'afternoon'),
+          sentAt: DateTime.utc(2026, 9, 1, 17));
+      expect(h.day, thursday);
+      expect(h.days, [thursday]);
+    });
+
+    test('a when phrase carrying the time still gives the hours', () {
+      final h = fromRead('Review', 'Can we meet Friday at 3pm?',
+          const AskRead(asksForTime: true, when: ['Friday at 3pm']));
+      expect(h.day, friday);
+      expect(h.hours,
+          const AskHours(startHour: 15, startMinute: 0, endHour: 17, endMinute: 0));
+      expect(h.said, 'Asked for: Fri Oct 9 · 3:00 PM');
+    });
+
+    test('a copied length is the length', () {
+      final h = fromRead('Quick one', 'A quick 20 min call on Thursday?',
+          const AskRead(asksForTime: true, when: ['Thursday'],
+              duration: '20 min'));
+      expect(h.day, thursday);
+      expect(h.minutes, 20);
+      // A length the model did not copy is none.
+      expect(
+          fromRead('Quick one', 'A quick call on Thursday?',
+                  const AskRead(asksForTime: true, when: ['Thursday'],
+                      duration: '20 min'))
+              .minutes,
+          isNull);
+    });
+
+    test('a day read twice is one day', () {
+      final h = fromRead('Sync', 'Thursday? Or Thu, Oct 8, whichever.',
+          const AskRead(asksForTime: true, when: ['Thursday', 'Oct 8']));
+      expect(h.days, [thursday]);
+      expect(h.said, 'Asked for: Thu Oct 8');
     });
   });
 }

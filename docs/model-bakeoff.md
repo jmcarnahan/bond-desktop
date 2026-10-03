@@ -3106,7 +3106,8 @@ server started differently from the default.
 | 9 | all three | **the app's own filing path**, not a candidate: the sweep, the naming, the confirms and the assign shortlist over the golden set | `make golden-sweep GOLDEN_RUN=<bulk run file>` twice on the default card, `topics`, which is the card the app ships; `SWEEP_CARD=participants` is the explicit alternative and takes two passes of its own. All of them with the embed, bulk and prose servers up. `make golden-score R=<sweep run file>` on each. The bulk run file is the newest local-4B `make golden` run; a storyline or sweep run file carries no cards and is refused. The prose slot can be pointed elsewhere for the naming stage with `PROSE_URL=http://localhost:18100/v1/chat/completions PROSE_MODEL=qwen3.8`, which is how the Round E shoot-out rows were taken on the box; Bedrock was not a sweep target this round |
 | 10 | embed | **the clustering vector**, not a chat candidate: one card, one prefix, one embedding model over the golden pool | `make golden-vector GOLDEN_RUN=<bulk run file>` once per configuration, with only the embedding server up; the target is the sweep test under `SWEEP_STAGE=vector`, which is what stops it after the seeding. The prefix ladder is `SWEEP_EMBED_PREFIX` on the shipped card, the card ladder is `SWEEP_CARD` on the shipped prefix, and a candidate MODEL is a second server: `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS='<pooling flags>'`, then the same target with `EMBED_URL=http://localhost:8091/v1/embeddings`, then `make embed-stop EMBED_PORT=8091`. Deterministic, so one pass per row. No score and no run file: the numbers are on the "Clustering vector" table |
 | 11 | bulk | vLLM on the same `g6e.xlarge`, `Qwen/Qwen3-4B-Instruct-2507-FP8` as the box's second container (`tools/inference.sh restart --bulk-model Qwen/Qwen3-4B-Instruct-2507-FP8`, served as `qwen3-4b` on the box's :8001, tunnelled to the local port one above the prose slot's) | `make bench`, `make drain BENCH_K=1,3,6` and `make golden GOLDEN_CTX=none` with `BENCH_URL=http://localhost:18101/v1/chat/completions BENCH_MODEL=qwen3-4b BENCH_LABEL=vllm-g6e.xlarge/Qwen3-4B-Instruct-2507-FP8`; `--served-name`/`--model` on a `restart` for the bf16 isolation runs |
-| 12 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
+| 12 | prose | **the scheduling ask's reading** (`ask_read`), not a throughput row: the 40 fictional asks scored beside the rules | `make ask-read-eval` (the `PROSE_*` defines point it elsewhere), twice; see "Ask reading" under the ledger |
+| 13 | — | further candidates | Added here as they come up, one command per row. What is worth trying is best judged after the rows above have numbers |
 
 ## Ledger
 
@@ -3147,6 +3148,31 @@ lives in the golden ledger above.
 | 2026-09-20 | llamacpp/Qwen3.8-27B-Q4_K_M + MTP, ctx 16K | `prose-llamacpp-qwen3-8-27b-gguf-q4-k-m-20260920-154335.json` | 14.2 draft | 17648 (draft, ttft 2520) · 9549 (name) · 11598 (recap) | prose read by hand | — | Round F Phase 5 after-row on the final tree; second of two passes and the keeper; 0 failures; p95 24,221 / 12,481 / 14,844. Recap and draft are within 1% of the Round C row of record and the decode rate is identical at 14.2 tok/s, with first token 0.4 s faster. The name p50 is 1.2 s slower on a five-call p50, the same day-to-day drift the box showed in Phase 1 and inside the idle-machine band; nothing on the branch touches the naming prompt or the server. Wall 193 s |
 | 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 4 slots (drain) | `drain-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-k-1-20260920-154641.json` | 52.5 at K=1 · 34.1 per stream at K=3 | — | — | 18.6 / 34.3 / — | Round F Phase 5 after-row on the final tree, second of two passes and the keeper; both legs reproduce the Round C row inside the band (19.2 and 33.8); 1.84x at K=3 |
 | 2026-09-20 | llamacpp/Qwen3-4B-Instruct-2507-Q8_0, ctx 16K, 6 slots (drain, `make fast FAST_SLOTS=6`) | `drain-llamacpp-qwen3-4b-instruct-2507-q8-0-gguf-k-6-20260920-154752.json` | 20.6 per stream at K=6 | — | — | — / — / 40.6 | the K=6 read the ledger has owed since 2026-09-04, on a fresh six-slot process, second of two passes and the keeper. 40.6 msgs/min is 1.2 times the four-slot K=3 rate and well under the 56.9 of 2026-09-04, which ran 32K on an older build: per-stream decode falls to 20.6 tok/s at six streams on this build at 16K, so the sixth slot buys little on this machine today. The four-slot default stands and the server was put back |
+
+#### Ask reading (`ask_read`)
+
+`make ask-read-eval`: the 40 fictional scheduling asks in
+`app/test/fixtures/ask_reads/asks.jsonl` through the real `ask_read` task on
+the prose slot (the generative server; the usual `PROSE_URL` / `PROSE_MODEL` /
+`PROSE_LABEL` point it), each reading resolved by the app's own Dart
+(`readAskHintsFromRead`) and scored beside the rules (`readAskHints`) against
+the row's expectation: the days, the hours and the length a PERFECT reading
+yields (docs/pipeline/14-calendar.md "Reading the ask"). `bench-verify-prose`
+runs first, as before every prose bench.
+
+It prints one line — `model: m/40 · rules: k/40 · both: b/40 · disagree: d` —
+and then every row where the model missed or the two readers parted, with
+what each read, what was wanted and the phrases the model copied. It asserts
+shape only (every row came back as a reading): a score is recorded here, never
+gated on. The rules' own score is printed offline by
+`app/test/ask_read_fixture_test.dart` on every gate run (33/40 when the
+fixture landed, 2026-10-03), so `k` should match it. Run it twice and keep
+the second, like every row above. The model reading ships ON; the four
+numbers are what the owner reads to keep it on or flip it off.
+
+| date | label | model | rules | both | disagree | verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | /40 | /40 | /40 | | |
 
 #### Pipeline bench
 

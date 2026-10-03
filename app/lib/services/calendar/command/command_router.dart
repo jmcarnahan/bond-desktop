@@ -8,6 +8,7 @@ import '../../llm/calendar_intent_task.dart';
 import '../../llm/json_task.dart';
 import '../../llm/llm_client.dart';
 import '../calendar_zone.dart';
+import '../phrase_guard.dart';
 import '../when_resolver.dart';
 import 'command_lexicon.dart';
 import 'command_parser.dart';
@@ -345,7 +346,7 @@ class CommandRouter {
     String? copied(String phrase) {
       final t = phrase.trim();
       if (t.isEmpty) return null;
-      return _findPhrase(text, t) == null ? null : t;
+      return findPhrase(text, t) == null ? null : t;
     }
 
     // The action: the model's, when the rules had none or a weak one.
@@ -376,7 +377,7 @@ class CommandRouter {
         out.when.day == null &&
         out.when.time == null &&
         out.when.part == null) {
-      final (at, end) = _findPhrase(text, whenPhrase)!;
+      final (at, end) = findPhrase(text, whenPhrase)!;
       final r = _shift(
           resolveWhen(text.substring(at, end),
               now: now, zone: zone, mode: guess.mode),
@@ -569,19 +570,6 @@ String? directoryAddress(Person h) {
   final upn = (h.userPrincipalName ?? '').trim().toLowerCase();
   if (upn.contains('@') && !upn.contains('#ext#')) return upn;
   return null;
-}
-
-/// Where [phrase] sits in [text] as `[start, end)`, ignoring case and runs
-/// of whitespace, and only as whole words — "Dan" is not in "Danielle" —
-/// or null when it is not there. The check that keeps a model to copying.
-(int, int)? _findPhrase(String text, String phrase) {
-  final words = phrase.trim().split(RegExp(r'\s+')).map(RegExp.escape);
-  final m = RegExp(
-    '(?<![\\p{L}\\p{N}])${words.join(r'\s+')}(?![\\p{L}\\p{N}])',
-    caseSensitive: false,
-    unicode: true,
-  ).firstMatch(text);
-  return m == null ? null : (m.start, m.end);
 }
 
 /// [r] with its spans moved [by] characters: a phrase resolved on its own

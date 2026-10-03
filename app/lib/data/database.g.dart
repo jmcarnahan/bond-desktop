@@ -22549,6 +22549,429 @@ class EventBriefsCompanion extends UpdateCompanion<EventBriefRow> {
   }
 }
 
+class AskReadings extends Table with TableInfo<AskReadings, AskReadingRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  AskReadings(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _readJsonMeta = const VerificationMeta(
+    'readJson',
+  );
+  late final GeneratedColumn<String> readJson = GeneratedColumn<String>(
+    'read_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _modelMeta = const VerificationMeta('model');
+  late final GeneratedColumn<String> model = GeneratedColumn<String>(
+    'model',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _readAtMeta = const VerificationMeta('readAt');
+  late final GeneratedColumn<String> readAt = GeneratedColumn<String>(
+    'read_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    status,
+    readJson,
+    model,
+    readAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'ask_readings';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AskReadingRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_statusMeta);
+    }
+    if (data.containsKey('read_json')) {
+      context.handle(
+        _readJsonMeta,
+        readJson.isAcceptableOrUnknown(data['read_json']!, _readJsonMeta),
+      );
+    }
+    if (data.containsKey('model')) {
+      context.handle(
+        _modelMeta,
+        model.isAcceptableOrUnknown(data['model']!, _modelMeta),
+      );
+    }
+    if (data.containsKey('read_at')) {
+      context.handle(
+        _readAtMeta,
+        readAt.isAcceptableOrUnknown(data['read_at']!, _readAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_readAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {source, sourceMessageId};
+  @override
+  AskReadingRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AskReadingRow(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      readJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}read_json'],
+      ),
+      model: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}model'],
+      )!,
+      readAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}read_at'],
+      )!,
+    );
+  }
+
+  @override
+  AskReadings createAlias(String alias) {
+    return AskReadings(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class AskReadingRow extends DataClass implements Insertable<AskReadingRow> {
+  final String source;
+  final String sourceMessageId;
+  final String status;
+
+  /// ready | none
+  final String? readJson;
+
+  /// AskRead.toJson(): the copied PHRASES, never a date
+  final String model;
+  final String readAt;
+  const AskReadingRow({
+    required this.source,
+    required this.sourceMessageId,
+    required this.status,
+    this.readJson,
+    required this.model,
+    required this.readAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || readJson != null) {
+      map['read_json'] = Variable<String>(readJson);
+    }
+    map['model'] = Variable<String>(model);
+    map['read_at'] = Variable<String>(readAt);
+    return map;
+  }
+
+  AskReadingsCompanion toCompanion(bool nullToAbsent) {
+    return AskReadingsCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      status: Value(status),
+      readJson: readJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(readJson),
+      model: Value(model),
+      readAt: Value(readAt),
+    );
+  }
+
+  factory AskReadingRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AskReadingRow(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      status: serializer.fromJson<String>(json['status']),
+      readJson: serializer.fromJson<String?>(json['read_json']),
+      model: serializer.fromJson<String>(json['model']),
+      readAt: serializer.fromJson<String>(json['read_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'status': serializer.toJson<String>(status),
+      'read_json': serializer.toJson<String?>(readJson),
+      'model': serializer.toJson<String>(model),
+      'read_at': serializer.toJson<String>(readAt),
+    };
+  }
+
+  AskReadingRow copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? status,
+    Value<String?> readJson = const Value.absent(),
+    String? model,
+    String? readAt,
+  }) => AskReadingRow(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    status: status ?? this.status,
+    readJson: readJson.present ? readJson.value : this.readJson,
+    model: model ?? this.model,
+    readAt: readAt ?? this.readAt,
+  );
+  AskReadingRow copyWithCompanion(AskReadingsCompanion data) {
+    return AskReadingRow(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      status: data.status.present ? data.status.value : this.status,
+      readJson: data.readJson.present ? data.readJson.value : this.readJson,
+      model: data.model.present ? data.model.value : this.model,
+      readAt: data.readAt.present ? data.readAt.value : this.readAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AskReadingRow(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('status: $status, ')
+          ..write('readJson: $readJson, ')
+          ..write('model: $model, ')
+          ..write('readAt: $readAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(source, sourceMessageId, status, readJson, model, readAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AskReadingRow &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.status == this.status &&
+          other.readJson == this.readJson &&
+          other.model == this.model &&
+          other.readAt == this.readAt);
+}
+
+class AskReadingsCompanion extends UpdateCompanion<AskReadingRow> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> status;
+  final Value<String?> readJson;
+  final Value<String> model;
+  final Value<String> readAt;
+  final Value<int> rowid;
+  const AskReadingsCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.status = const Value.absent(),
+    this.readJson = const Value.absent(),
+    this.model = const Value.absent(),
+    this.readAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AskReadingsCompanion.insert({
+    required String source,
+    required String sourceMessageId,
+    required String status,
+    this.readJson = const Value.absent(),
+    this.model = const Value.absent(),
+    required String readAt,
+    this.rowid = const Value.absent(),
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       status = Value(status),
+       readAt = Value(readAt);
+  static Insertable<AskReadingRow> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? status,
+    Expression<String>? readJson,
+    Expression<String>? model,
+    Expression<String>? readAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (status != null) 'status': status,
+      if (readJson != null) 'read_json': readJson,
+      if (model != null) 'model': model,
+      if (readAt != null) 'read_at': readAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AskReadingsCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? status,
+    Value<String?>? readJson,
+    Value<String>? model,
+    Value<String>? readAt,
+    Value<int>? rowid,
+  }) {
+    return AskReadingsCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      status: status ?? this.status,
+      readJson: readJson ?? this.readJson,
+      model: model ?? this.model,
+      readAt: readAt ?? this.readAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (readJson.present) {
+      map['read_json'] = Variable<String>(readJson.value);
+    }
+    if (model.present) {
+      map['model'] = Variable<String>(model.value);
+    }
+    if (readAt.present) {
+      map['read_at'] = Variable<String>(readAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AskReadingsCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('status: $status, ')
+          ..write('readJson: $readJson, ')
+          ..write('model: $model, ')
+          ..write('readAt: $readAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -22705,6 +23128,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'CREATE INDEX ix_calendar_events_start_date ON calendar_events (start_date)',
   );
   late final EventBriefs eventBriefs = EventBriefs(this);
+  late final AskReadings askReadings = AskReadings(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -22772,6 +23196,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixCalendarEventsStartUtc,
     ixCalendarEventsStartDate,
     eventBriefs,
+    askReadings,
   ];
 }
 
@@ -33285,6 +33710,226 @@ typedef $EventBriefsProcessedTableManager =
       EventBriefRow,
       PrefetchHooks Function()
     >;
+typedef $AskReadingsCreateCompanionBuilder =
+    AskReadingsCompanion Function({
+      required String source,
+      required String sourceMessageId,
+      required String status,
+      Value<String?> readJson,
+      Value<String> model,
+      required String readAt,
+      Value<int> rowid,
+    });
+typedef $AskReadingsUpdateCompanionBuilder =
+    AskReadingsCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> status,
+      Value<String?> readJson,
+      Value<String> model,
+      Value<String> readAt,
+      Value<int> rowid,
+    });
+
+class $AskReadingsFilterComposer extends Composer<_$BondDatabase, AskReadings> {
+  $AskReadingsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get readJson => $composableBuilder(
+    column: $table.readJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get readAt => $composableBuilder(
+    column: $table.readAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $AskReadingsOrderingComposer
+    extends Composer<_$BondDatabase, AskReadings> {
+  $AskReadingsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get readJson => $composableBuilder(
+    column: $table.readJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get readAt => $composableBuilder(
+    column: $table.readAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $AskReadingsAnnotationComposer
+    extends Composer<_$BondDatabase, AskReadings> {
+  $AskReadingsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get readJson =>
+      $composableBuilder(column: $table.readJson, builder: (column) => column);
+
+  GeneratedColumn<String> get model =>
+      $composableBuilder(column: $table.model, builder: (column) => column);
+
+  GeneratedColumn<String> get readAt =>
+      $composableBuilder(column: $table.readAt, builder: (column) => column);
+}
+
+class $AskReadingsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          AskReadings,
+          AskReadingRow,
+          $AskReadingsFilterComposer,
+          $AskReadingsOrderingComposer,
+          $AskReadingsAnnotationComposer,
+          $AskReadingsCreateCompanionBuilder,
+          $AskReadingsUpdateCompanionBuilder,
+          (
+            AskReadingRow,
+            BaseReferences<_$BondDatabase, AskReadings, AskReadingRow>,
+          ),
+          AskReadingRow,
+          PrefetchHooks Function()
+        > {
+  $AskReadingsTableManager(_$BondDatabase db, AskReadings table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $AskReadingsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $AskReadingsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $AskReadingsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> readJson = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                Value<String> readAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AskReadingsCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                status: status,
+                readJson: readJson,
+                model: model,
+                readAt: readAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String source,
+                required String sourceMessageId,
+                required String status,
+                Value<String?> readJson = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                required String readAt,
+                Value<int> rowid = const Value.absent(),
+              }) => AskReadingsCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                status: status,
+                readJson: readJson,
+                model: model,
+                readAt: readAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $AskReadingsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      AskReadings,
+      AskReadingRow,
+      $AskReadingsFilterComposer,
+      $AskReadingsOrderingComposer,
+      $AskReadingsAnnotationComposer,
+      $AskReadingsCreateCompanionBuilder,
+      $AskReadingsUpdateCompanionBuilder,
+      (
+        AskReadingRow,
+        BaseReferences<_$BondDatabase, AskReadings, AskReadingRow>,
+      ),
+      AskReadingRow,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -33351,4 +33996,6 @@ class $BondDatabaseManager {
       $CalendarEventsTableManager(_db, _db.calendarEvents);
   $EventBriefsTableManager get eventBriefs =>
       $EventBriefsTableManager(_db, _db.eventBriefs);
+  $AskReadingsTableManager get askReadings =>
+      $AskReadingsTableManager(_db, _db.askReadings);
 }

@@ -181,6 +181,7 @@ RESET  := \033[0m
         decide decide-stop decide-install _wait-decide \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
+        ask-read-eval \
         ab drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
@@ -222,6 +223,7 @@ help:
 	@printf "  make bench-verify → does a target uphold the contract? (runs before every bench)\n"
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
 	@printf "  make bench-prose  → storyline names + drafted replies, verbatim (needs make model up)\n"
+	@printf "  make ask-read-eval → the 40 fixture asks read by ask_read on the prose slot, scored beside the rules (needs make model up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
@@ -1295,6 +1297,17 @@ bench:
 bench-prose:
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_prose_live_test.dart --run-skipped $(BENCH_DEFINES)
+
+# The scheduling ask's reading by the generative model (`ask_read`), measured:
+# the 40 fictional asks in app/test/fixtures/ask_reads/ through the real task on
+# the PROSE slot (the generative server; PROSE_URL/PROSE_MODEL point it),
+# resolved by the app's own Dart and printed beside the rules as
+# `model: m/40 · rules: k/40 · both: b/40 · disagree: d` plus every row that
+# missed. Live and never a gate: the test is @Skip'd, asserts shape only, and
+# its line goes to the ledger in docs/model-bakeoff.md ("Ask reading").
+ask-read-eval:
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/ask_read_eval_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # Side-by-side: the same corpus through the message-text call on BOTH servers,
 # printing where the 4B and the 27B disagree (counts) and what each cost. Live and never

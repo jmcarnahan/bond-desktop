@@ -63,7 +63,12 @@ String findTimeWindowLabel(
 }) {
   final day = hints?.day;
   if (day == null) return window.label;
-  if (window == FindTimeWindow.theirs) return shortDate(day);
+  // Several days asked for: their pill names each ("Thu Oct 8 or Tue Oct
+  // 13"); the weeks keep the first day's weekday.
+  if (window == FindTimeWindow.theirs) {
+    final days = hints!.days;
+    return days.length > 1 ? days.map(shortDate).join(' or ') : shortDate(day);
+  }
   final wd = DateFormat('EEE').format(DateTime(day.year, day.month, day.day));
   if (covers != null && today != null) {
     var monday = today.addDays(1 - today.weekday);
@@ -247,7 +252,10 @@ const int _dayEndHour = 18;
 ///
 /// **Their day** ([hints] naming a day) is that day alone, from the ask's
 /// hours' start (else 08:00) to their end (else 18:00), and from now when it
-/// is today. With no day read it is this week.
+/// is today. With no day read it is this week. With several days read
+/// ([AskHints.days], "Tuesday or Thursday") it runs from the first day's
+/// opening to the last day's close, and the search asks only about the
+/// days named, never the ones between.
 ///
 /// With [hints] hours, a week opens on its Monday at their start and closes
 /// on its Friday at their end, so Friday's dinner is inside "this week".
@@ -283,13 +291,17 @@ const int _dayEndHour = 18;
   final (closeH, closeM) = h == null ? (_dayEndHour, 0) : (h.endHour, h.endMinute);
   final theirDay = hints?.day;
   if (window == FindTimeWindow.theirs && theirDay != null) {
+    // Several days asked for span the first to the last; only the days
+    // asked for are searched (`_searchOnce`).
+    final days = hints!.days;
+    final lastDay = days.length > 1 ? days.last : theirDay;
     final opening = zone.localDateTime(theirDay, openH, openM).toUtc();
-    final closing = zone.localDateTime(theirDay, closeH, closeM).toUtc();
+    final closing = zone.localDateTime(lastDay, closeH, closeM).toUtc();
     return (
       startUtc: nowUtc.isAfter(opening) ? nowUtc : opening,
       endUtc: closing,
       firstDay: theirDay,
-      lastDay: theirDay,
+      lastDay: lastDay,
     );
   }
   // An instant plus a length is no wall-clock arithmetic: a DST change
@@ -496,8 +508,25 @@ Future<FindTimeResult> _searchOnce({
         graphCalls: graphCalls,
       );
 
+  // Their pill over several days asked for ("Tuesday or Thursday"): only
+  // those days are searched, each walked as a named day is.
+  final hinted = window == FindTimeWindow.theirs &&
+          hints != null &&
+          hints.days.length > 1
+      ? hints.days.toSet()
+      : null;
+
   FindTimeResult local({String? note}) => withOverlaps(
-        freeSlotsInRange(
+        hinted != null
+            ? _hintedFreeSlots(hinted,
+                events: events,
+                durationMinutes: durationMinutes,
+                zone: zone,
+                hours: hours,
+                now: now,
+                w: w,
+                dailyHours: hints?.hours)
+            : freeSlotsInRange(
           events: events,
           firstDay: w.firstDay,
           lastDay: w.lastDay,
@@ -532,9 +561,23 @@ Future<FindTimeResult> _searchOnce({
   final domain = _activityDomain(hints, hours,
       namedDay:
           hints?.day != null && w.firstDay == w.lastDay ? w.firstDay : null);
-  final asks = h != null
-      ? _hintedDays(w, h,
-          zone: zone, durationMinutes: durationMinutes, domain: domain)
+  // Several days asked for are asked one call each even with no hours (at
+  // the window's own day hours), so the days between are never offered.
+  final dayHours = h ??
+      (hinted == null
+          ? null
+          : const AskHours(
+              startHour: _dayStartHour,
+              startMinute: 0,
+              endHour: _dayEndHour,
+              endMinute: 0));
+  final asks = dayHours != null
+      ? _hintedDays(w, dayHours,
+          zone: zone,
+          durationMinutes: durationMinutes,
+          domain: domain,
+          only: hinted,
+          mailbox: hours)
       : [(startUtc: w.startUtc, endUtc: w.endUtc, domain: domain)];
   // Every hinted day already over: nothing to search, nobody asked.
   if (asks.isEmpty) return local();
@@ -625,7 +668,12 @@ Future<FindTimeResult> _searchOnce({
         if (byConfidence != 0) return byConfidence;
         return a.suggestion.startUtc.compareTo(b.suggestion.startUtc);
       });
-    final kept = ranked.take(3).toList();
+    // Several days asked for: each named day's best slot first, so one
+    // day's three good slots cannot hide the other day.
+    final kept = hinted == null
+        ? ranked.take(3).toList()
+        : _onePerDayFirst(ranked, hinted,
+            (r) => zone.dateOf(r.suggestion.startUtc.toUtc()));
     return withOverlaps(
       [
         for (final k in kept)
@@ -691,7 +739,12 @@ const int _maxHintedDays = 7;
 /// earlier of its end and that day's close — so a window that starts now
 /// (this week, their day today) is asked from the hours' opening, never
 /// from now. A day with no room left for [durationMinutes] is skipped; a
-/// window of one day is one ask. Each day's bounds come from
+/// window of one day is one ask; with [only] (several days asked for), a
+/// day not in it is not asked about, and each day named takes its own
+/// domain: `personal` for a day that is not a working day in [mailbox]
+/// (Graph's personal is the working hours plus the weekend — "Saturday or
+/// Sunday?" must not be asked as work time), [domain] otherwise, and
+/// `unrestricted` always stands. Each day's bounds come from
 /// [CalendarZone.localDateTime], so a DST change inside the week moves
 /// nothing.
 List<_GraphAsk> _hintedDays(
@@ -701,20 +754,90 @@ List<_GraphAsk> _hintedDays(
   required CalendarZone zone,
   required int durationMinutes,
   required String domain,
+  Set<CalendarDate>? only,
+  MailboxSettings? mailbox,
 }) {
   final needed = Duration(minutes: durationMinutes < 1 ? 1 : durationMinutes);
   final out = <_GraphAsk>[];
   for (var day = w.firstDay;
       !day.isAfter(w.lastDay) && out.length < _maxHintedDays;
       day = day.addDays(1)) {
+    if (only != null && !only.contains(day)) continue;
     final opening = zone.localDateTime(day, h.startHour, h.startMinute);
     final closing = zone.localDateTime(day, h.endHour, h.endMinute);
     final start = w.startUtc.isAfter(opening) ? w.startUtc : opening;
     final end = w.endUtc.isBefore(closing) ? w.endUtc : closing;
     if (start.add(needed).isAfter(end)) continue;
-    out.add((startUtc: start, endUtc: end, domain: domain));
+    final own = only != null &&
+            domain != 'unrestricted' &&
+            !isWorkingDay(mailbox, day)
+        ? 'personal'
+        : domain;
+    out.add((startUtc: start, endUtc: end, domain: own));
   }
   return out;
+}
+
+/// The owner's own openings on each of [days] (several days asked for),
+/// each walked as a named day is — at [dailyHours], never skipped as a
+/// weekend — inside [w], merged and kept to the first three by start.
+List<FreeSlot> _hintedFreeSlots(
+  Set<CalendarDate> days, {
+  required List<CalendarEvent> events,
+  required int durationMinutes,
+  required CalendarZone zone,
+  required MailboxSettings? hours,
+  required DateTime now,
+  required ({
+    DateTime startUtc,
+    DateTime endUtc,
+    CalendarDate firstDay,
+    CalendarDate lastDay
+  }) w,
+  required AskHours? dailyHours,
+}) {
+  final slots = [
+    for (final day in days.toList()..sort())
+      ...freeSlotsInRange(
+        events: events,
+        firstDay: day,
+        lastDay: day,
+        durationMinutes: durationMinutes,
+        zone: zone,
+        hours: hours,
+        limit: 3,
+        nowUtc: now.toUtc(),
+        windowStartUtc: w.startUtc,
+        windowEndUtc: w.endUtc,
+        dailyHours: dailyHours,
+        skipNonWorkingDays: false,
+      ),
+  ]..sort((a, b) => a.startUtc.compareTo(b.startUtc));
+  return _onePerDayFirst(slots, days, (s) => zone.dateOf(s.startUtc.toUtc()));
+}
+
+/// The first three of [ranked] with each of [days]' best first: the
+/// highest-ranked entry on each named day, in day order, then the rest by
+/// [ranked]'s own order. A day with nothing is skipped.
+List<T> _onePerDayFirst<T>(
+  List<T> ranked,
+  Set<CalendarDate> days,
+  CalendarDate Function(T) dayOf,
+) {
+  final picked = <T>[];
+  for (final day in days.toList()..sort()) {
+    for (final r in ranked) {
+      if (dayOf(r) == day) {
+        picked.add(r);
+        break;
+      }
+    }
+  }
+  return [
+    ...picked,
+    for (final r in ranked)
+      if (!picked.contains(r)) r,
+  ].take(3).toList(growable: false);
 }
 
 /// [t] as a plain UTC [DateTime]: a `TZDateTime`'s `==` compares its
