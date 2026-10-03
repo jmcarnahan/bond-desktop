@@ -351,8 +351,8 @@ void main() {
       expect(backend.domains.single, 'unrestricted');
     });
 
-    test('with hours on one day, Graph is asked once for twenty and only '
-        'those inside the hours are kept', () async {
+    test('with hours on one day, Graph is asked once over the hours for '
+        'five, and an answer outside them is dropped as a belt', () async {
       backend.answer = [
         MeetingTimeSuggestion(
             startUtc: local(fri, 16), endUtc: local(fri, 17, 30),
@@ -363,10 +363,34 @@ void main() {
       ];
       final r = await hinted(const AskHints(day: fri, hours: dinner),
           addresses: ['dana@fabrikam.example'], minutes: 90);
-      expect(backend.candidates.single, 20);
+      expect(backend.windows.single,
+          (local(fri, 17, 30), local(fri, 20, 30)));
+      expect(backend.candidates.single, 5);
       expect(r.graphCalls, 1);
       expect(r.source, 'graph');
       expect(r.slots, [FreeSlot(local(fri, 18), local(fri, 19, 30))]);
+    });
+
+    test('hours with no day on the week\'s last day are asked from their '
+        'opening, never from now', () async {
+      // Friday Oct 16 2026, 10:00 AM PDT: "dinner this week" is tonight.
+      // One call over the window would start at ten in the morning.
+      final r = await searchFindTime(
+        backend: backend,
+        calendar: calendar,
+        hours: null,
+        addresses: const ['dana@fabrikam.example'],
+        durationMinutes: 90,
+        window: FindTimeWindow.thisWeek,
+        now: DateTime.utc(2026, 10, 16, 17),
+        zone: la,
+        hints: const AskHints(hours: dinner),
+      );
+      expect(backend.windows.single,
+          (local(fri, 17, 30), local(fri, 20, 30)));
+      expect(backend.candidates.single, 5);
+      expect(backend.domains.single, 'unrestricted');
+      expect(r.graphCalls, 1);
     });
 
     test('hours over several days ask Graph one day at a time, inside the '
@@ -504,7 +528,8 @@ void main() {
       expect(late.note, 'Graph is busy.');
     });
 
-    test('nothing inside the hours falls back to your own, said', () async {
+    test('an answer wholly outside the hours asked is an empty answer: your '
+        'own openings in those hours, said as unreadable', () async {
       const tue = CalendarDate(2026, 10, 20);
       backend.answer = [
         MeetingTimeSuggestion(
@@ -515,7 +540,7 @@ void main() {
           window: FindTimeWindow.nextWeek,
           minutes: 90);
       expect(r.source, 'local');
-      expect(r.note, findTimeOutsideHoursNote);
+      expect(r.note, findTimeUnreadableNote);
       expect(r.slots, isNotEmpty);
       for (final s in r.slots) {
         expect(la.toLocal(s.startUtc).hour, greaterThanOrEqualTo(17));

@@ -558,7 +558,7 @@ class _NamedProposalState extends State<_NamedProposal> {
       text: widget.card.initialSubject ??
           () {
             final subject = (widget.proposal.write as CreateEvent).subject;
-            return subject == 'New event' ? '' : subject;
+            return subject == blankEventSubject ? '' : subject;
           }());
   final TextEditingController _with = TextEditingController();
 
@@ -606,7 +606,7 @@ class _NamedProposalState extends State<_NamedProposal> {
     final create = widget.proposal.write as CreateEvent;
     final name = _name.text.trim();
     return create
-        .withSubject(name.isEmpty ? 'New event' : name)
+        .withSubject(name.isEmpty ? blankEventSubject : name)
         .withAttendees([for (final p in _chips) p.address]);
   }
 

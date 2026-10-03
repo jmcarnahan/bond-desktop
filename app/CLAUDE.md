@@ -1031,8 +1031,8 @@ that bite.
     beside `keepingDecisionClient()` (`test/fixtures/fake_decision_client.dart`).
 - **Find a time:**
   - `MessageStore.schedulingAskConversations` is the ONE scheduling-ask
-    rule. Read it through `schedulingAskKeys` or `schedulingAskMessageIds`
-    (what `schedulingAsksProvider` holds), never re-derive it.
+    rule. Read it through `schedulingAskMessageIds` (what
+    `schedulingAsksProvider` holds), never re-derive it.
   - `findMeetingTimes` REFUSES empty attendees (the server does too). A
     search for the owner alone uses `freeSlotsInRange`.
   - Windows are built from components (`findTimeWindowUtc`).
@@ -1041,9 +1041,15 @@ that bite.
     (`SchedulingAskTile`, prop-driven; the inbox owns the searches in
     `_askSearches`); the agenda carries no asks group. A slot pick is the
     command proposal path (`_showProposal` → `_commandOutcome`), never a
-    second confirm. `_proposalAsk` is the slot-pick → card hand-off;
-    `_showProposal`, `_forgetCommand` and a typed Enter clear it, and the
-    card's onDone marks the ask before its serial guard.
+    second confirm. `_proposal` (ONE `_Proposal?` record: the ask, its
+    message id, whether it invites, blank, the typed name and chips) is the
+    slot-pick / grid → card hand-off; `_forgetCommand` and a typed Enter
+    null it in one place, and the card's onDone marks the ask before its
+    serial guard. Three ways to a card: `_submitCommand` (typed text),
+    `_reproposeCommand` (a slot pressed on the card, a ghost dragged — the
+    card stays up through the dry run) and `_showProposal` (a column slot
+    or a grid press; `keep: true` for an ask's ghost dragged, so its card,
+    ghost and "Proposed:" line stay up too). Do not add a fourth body.
   - The `scheduling_ask` label is the owner's word on an ask, pinned to the
     newest inbound message id (source + id), so a later inbound message is
     judged afresh: `no` (an invite sent from it, or the ×) closes it; `yes`
@@ -1052,7 +1058,7 @@ that bite.
     `schedulingAskConversations` is still the one rule; it reads both.
     `writeSchedulingAskLabel` stamps with the store's own `isoStamp` and
     returns `(id, createdAt)` for the undo. An invite labels the message
-    read at the slot pick (`_proposalMessageId`), never the newest at Send.
+    read at the slot pick (`_Proposal.messageId`), never the newest at Send.
   - The thread bar's Find a time is on ANY thread with somebody to answer
     (newest message inbound, `_otherPeople` non-empty) while the calendar
     can be searched (`calendarShowsMirror` and the zone resolved, the
@@ -1066,14 +1072,17 @@ that bite.
     named day alone), and the words are read again on a new day too
     (`hintsDay`). `activity_domain` (Graph's `personal` is working hours
     plus the weekend): `unrestricted` when the hinted hours leave the
-    working window; `personal` when ANY day the search covers is a
-    non-working day (read from the window's days, never the pill); `work`
-    else. A single hinted day is ONE call for 20 candidates, and the
-    suggestions outside the hours are dropped before the ranking; hours
-    over several days (no day read, or the rest-of-the-week fallback) are
-    ONE CALL PER DAY of the window (at most 7, 5 candidates each, each over
-    that day's hours, a day already over skipped), counted in the
-    `find_time` row's `graph_calls` (`FindTimeResult.graphCalls`).
+    working window; `personal` ONLY when the window IS the one hinted day
+    (read from the window's days, never the pill) and it is non-working;
+    `work` else — a window of several days stays `work` (a Sun–Thu
+    mailbox's plain "This week" must not go `personal`). Decided once per
+    search. With hours Graph is asked ONE CALL PER DAY of the window
+    (`_hintedDays`; a single day is one call), each over that day's hours
+    from the later of the window's start and the hours' opening, 5
+    candidates, at most 7 days, a day with no room skipped — never one
+    call over the window starting now; without hours, one call for 5.
+    Counted in the `find_time` row's `graph_calls`
+    (`FindTimeResult.graphCalls`). The `_insideHours` drop is a belt only.
   - With a weekday read, a week pill means THAT weekday of the week
     (`weekdayWithin`, pills "This Fri" / "Next Fri", or the date they mean
     once this week's has gone), falling back to the
@@ -1084,10 +1093,13 @@ that bite.
     on the day being searched. It sets `_selectedDay` ONLY (never
     `_selectDay`, which closes compose, Settings, the log, Invites and the
     selection), and only for an ask still open.
-  - Stale rows: a row drops slots that have ended (`_liveResult`), a kept
-    answer older than `askResultLifetime` is searched again on reopen, a
-    search read for an older message than the listed one is folded and
-    cleared in `_askRow`, and `_askRows` prunes searches whose ask left.
+  - Stale rows: a row drops slots that have ended (`_liveResult`); ONE
+    staleness on reopen (`_AskSearch.forgetReading`: a new day OR an answer
+    older than `askResultLifetime` re-reads the words and searches again,
+    the pills standing; `askWindowFor` turns a their-day with no day left
+    into this week); a newer message is a NEW `_AskSearch` in `_askRow`
+    (pills at defaults — never reset fields by hand); `_askRows` prunes
+    searches whose ask left.
   - The `find_time` activity row carries `graph_calls`
     (`FindTimeResult.graphCalls`); the `scheduling_ask` row is labelled
     **Scheduling ask** in the log.

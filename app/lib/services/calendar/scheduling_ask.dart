@@ -18,31 +18,15 @@ import '../decision/decision_policy.dart';
 /// ask only on the owner's word.
 ///
 /// The rule has ONE spelling, the store's query
-/// ([MessageStore.schedulingAskConversations]); the app reads it through
-/// [schedulingAskMessageIds] (`schedulingAsksProvider`), the tests through
-/// that or [schedulingAskKeys].
+/// ([MessageStore.schedulingAskConversations]); the app and the tests read
+/// it through [schedulingAskMessageIds] (`schedulingAsksProvider`).
 
-/// The `'$source|$id'` keys of every scheduling ask, newest first, at most
-/// [limit] of them — for the Day stop's group and the thread header. One
-/// query, whatever the number of threads.
-Future<Set<String>> schedulingAskKeys(
-  MessageStore store, {
-  int limit = 200,
-}) async {
-  final asks = await store.schedulingAskConversations(
-    limit: limit,
-    threshold: DecisionPolicy.booleanYes,
-  );
-  return {
-    for (final a in asks) schedulingAskKey(a.source, a.conversationKey),
-  };
-}
-
-/// Every scheduling ask by its `'$source|$id'` key, with the id of the
-/// thread's NEWEST inbound message — the one the rule read, and the one an
-/// invite or a dismiss labels (`MessageStore.writeSchedulingAskLabel`) and
-/// an owner's press of Find a time says yes about.
-/// What `schedulingAsksProvider` holds.
+/// Every scheduling ask by its `'$source|$id'` key ([schedulingAskKey]),
+/// newest first, at most [limit] of them, each with the id of the thread's
+/// NEWEST inbound message — the one the rule read, and the one an invite or
+/// a dismiss labels (`MessageStore.writeSchedulingAskLabel`) and an owner's
+/// press of Find a time says yes about. One query, whatever the number of
+/// threads. What `schedulingAsksProvider` holds.
 Future<Map<String, String>> schedulingAskMessageIds(
   MessageStore store, {
   int limit = 200,
@@ -57,5 +41,5 @@ Future<Map<String, String>> schedulingAskMessageIds(
   };
 }
 
-/// The key [schedulingAskKeys] answers with.
+/// The key [schedulingAskMessageIds] answers with.
 String schedulingAskKey(String source, String id) => '$source|$id';

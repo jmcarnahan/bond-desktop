@@ -73,10 +73,14 @@ void main() {
     expect(h.said, isNull);
   });
 
-  test('a day already past rolls to that weekday\'s next occurrence', () {
-    // Fri Oct 2 has gone by Wednesday Oct 7: the person meant a Friday.
-    final h = read('Dinner Oct 2?');
-    expect(h.day, friday);
+  test('a date already past is dropped; only a weekday rolls', () {
+    // Fri Oct 2 has gone by Wednesday Oct 7: "Oct 2" named that one day,
+    // so it is no day now (the hours stand); "Friday" means a Friday.
+    final dated = read('Dinner Oct 2?');
+    expect(dated.day, isNull);
+    expect(dated.hours?.startHour, 17);
+    expect(dated.said, 'Asked for: dinner');
+    expect(read('Dinner Friday?').day, friday);
   });
 
   test('only the opening of a long message is read', () {
@@ -156,10 +160,12 @@ void main() {
     expect(h.hours, isNull);
   });
 
-  test('a past day on today\'s weekday is today (seven days back at most)',
+  test('a past date is dropped even on today\'s weekday; the hours stay',
       () {
-    // Wed Sep 30 read on Wed Oct 7: the weekday is today.
-    expect(read('Dinner Sep 30?').day, const CalendarDate(2026, 10, 7));
+    // Wed Sep 30 read on Wed Oct 7: "Sep 30" named that day, not Wednesdays.
+    final h = read('Dinner Sep 30?');
+    expect(h.day, isNull);
+    expect(h.hours?.startHour, 17);
   });
 
   test('a day long past is dropped, not rolled', () {
@@ -298,11 +304,11 @@ void main() {
     });
 
     test('a range past midnight ends at the day\'s last minute, and its '
-        'length fits it', () {
+        'length is the quarter hours that fit', () {
       final h = read('drinks 10pm-1am');
       expect(h.hours,
           const AskHours(startHour: 22, startMinute: 0, endHour: 23, endMinute: 59));
-      expect(h.minutes, 119);
+      expect(h.minutes, 105, reason: '119 is nobody\'s length');
     });
 
     test('a named time far outside the meal\'s hours gives the meal\'s', () {

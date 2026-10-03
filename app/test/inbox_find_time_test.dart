@@ -16,6 +16,7 @@ import 'package:bond_inbox/screens/new_message_screen.dart'
     show NewMessageScreen;
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
+import 'package:bond_inbox/services/calendar/ask_hints.dart' show AskHints;
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
@@ -461,7 +462,7 @@ void main() {
             (r['detail_json'] as String? ?? '').contains('"source"'))
           r['detail_json'] as String,
     ];
-    expect(searches.single, contains('"surface":"column"'));
+    expect(searches.single, contains('"graph_calls":1'));
 
     // A length pressed searches again with it.
     await tester.tap(
@@ -1002,7 +1003,11 @@ void main() {
               'email', 'c-ask', FindTimeWindow.theirs)),
           findsNothing,
           reason: 'the day it named has gone');
-      expect(backend.minutes.single, 90, reason: 'still a dinner');
+      // Dinner with no day is one Graph call per day left in the window —
+      // one on a weekday evening, five once this week is over (a Friday
+      // evening run) — each for a dinner's length.
+      expect(backend.minutes, isNotEmpty);
+      expect(backend.minutes, everyElement(90), reason: 'still a dinner');
     });
   });
 
@@ -1087,6 +1092,20 @@ void main() {
           askHintsStale(readFor: 'm1', newest: null, readOn: monday,
               today: monday),
           isFalse);
+    });
+
+    test('their day stands only while the words name a day', () {
+      const friday = CalendarDate(2026, 10, 9);
+      expect(askWindowFor(FindTimeWindow.theirs, const AskHints(day: friday)),
+          FindTimeWindow.theirs);
+      expect(askWindowFor(FindTimeWindow.theirs, const AskHints()),
+          FindTimeWindow.thisWeek,
+          reason: 'read again with no day, their day is this week');
+      expect(askWindowFor(FindTimeWindow.theirs, null),
+          FindTimeWindow.thisWeek);
+      expect(askWindowFor(FindTimeWindow.nextWeek, null),
+          FindTimeWindow.nextWeek,
+          reason: 'the owner\'s own pill stands');
     });
 
     testWidgets('the search\'s activity row counts its Graph calls',
@@ -1248,6 +1267,49 @@ void main() {
           find.byKey(SchedulingAskTile.windowKeyFor(
               'email', 'c-ask', FindTimeWindow.theirs)),
           findsOneWidget);
+    });
+
+    testWidgets('a newer message that says nothing about a time is a new ask: '
+        'the pills go back to 30 minutes and this week', (tester) async {
+      await seedAsk(subject: 'lunch tuesday?', body: 'or lunch tuesday?');
+      await pumpScreen(tester);
+      await openAsk(tester);
+      expect(backend.minutes.single, 60);
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c-ask', FindTimeWindow.theirs)),
+          findsOneWidget);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.rowKeyFor('email', 'c-ask')));
+      await pumps(tester);
+
+      await seedAsk(
+          messageId: 'ask-m2',
+          subject: 'Quick sync',
+          body: 'Can we do a quick sync about the deck?',
+          minutesAgo: 10);
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+      await container.read(conversationsProvider.notifier).load();
+      await pumps(tester);
+      await pumps(tester);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.rowKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      await pumps(tester);
+      expect(backend.minutes.last, 30, reason: 'a fresh entry, not lunch\'s');
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c-ask', FindTimeWindow.theirs)),
+          findsNothing);
+      // This week is the pill chosen, not a their-day no pill offers.
+      final thisWeek = tester.widget<Material>(find
+          .descendant(
+              of: find.byKey(SchedulingAskTile.windowKeyFor(
+                  'email', 'c-ask', FindTimeWindow.thisWeek)),
+              matching: find.byType(Material))
+          .first);
+      expect(thisWeek.color, BondColors.onDarkTint);
     });
 
     testWidgets('following the search never closes the thread being read',
@@ -1902,6 +1964,36 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+    testWidgets('an ask\'s ghost dragged keeps its card, its ghost and the '
+        'row\'s Proposed line on screen through the dry run', (tester) async {
+      await seedAsk();
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c-ask')),
+          findsOneWidget);
+
+      writer.previewHold = Completer<void>();
+      await dragGhost(tester, const Offset(0, 42));
+      expect(find.byType(CommandPlanCard), findsOneWidget,
+          reason: 'the invite\'s card stands while the new span is dry-run');
+      expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c-ask')),
+          findsOneWidget, reason: 'the row still says it is proposed');
+      writer.previewHold!.complete();
+      writer.previewHold = null;
+      await pumps(tester);
+      expect(writer.previewed, hasLength(2));
+      final again = writer.previewed.last as CreateEvent;
+      expect(again.attendees, [_dana]);
+      expect(find.byType(CommandPlanCard), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c-ask')),
+          findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
     testWidgets('a second invite for the same ask, put up while the first '
         'is in the air, goes when the first closes the ask', (tester) async {
       await seedAsk();
@@ -2181,7 +2273,7 @@ void main() {
       final rows = await store.recentActivity(limit: 20);
       expect(
         [for (final r in rows) r['detail_json'] as String? ?? ''],
-        contains(contains('"surface":"column"')),
+        contains(contains('"graph_calls":1')),
       );
     });
 

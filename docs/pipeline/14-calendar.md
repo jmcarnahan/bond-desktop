@@ -628,15 +628,18 @@ in-memory.
   (`checkDrop`: "That's when it already is."). A same-length MOVE across
   midnight is refused in its own sentence, "A meeting stays on one day —
   pick a time inside it." (`moveLeavesDay`), since "move it instead" is what
-  the owner just did; a resize across it keeps the grid's. A blank event's
-  re-proposal keeps its card and ghost on screen through the dry run
-  (`_reproposeCommand`, as a typed command's), carrying its typed name
-  (`CommandPlanCard.initialSubject` ← `_proposalName`, so the new card —
-  keyed by the moved serial, built while the dry run is out — shows the
-  name as typed, not the old write's "New event") and its guests
-  (`_proposalAttendees`); text half-typed in the With line is not carried.
-  A dragged ask's invite keeps the message its slot was first picked for
-  (`_pickAskSlot(messageId: _proposalMessageId)`). While the card's write is out
+  the owner just did; a resize across it keeps the grid's. EVERY
+  re-proposal keeps its card and ghost on screen through the dry run — a
+  typed command's and a blank event's through `_reproposeCommand`, an ask's
+  invite through `_pickAskSlot(keep: true)` → `_showProposal(keep: true)`,
+  so the row's "Proposed:" line stays too. A blank event's carries its
+  typed name (`CommandPlanCard.initialSubject` ← `_Proposal.name`, so the
+  new card — keyed by the moved serial, built while the dry run is out —
+  shows the name as typed, not the old write's "New event",
+  `blankEventSubject`) and its guests (`_Proposal.attendees`); text
+  half-typed in the With line is not carried. A dragged ask's invite keeps
+  the message its slot was first picked for
+  (`_pickAskSlot(messageId: _Proposal.messageId)`). While the card's write is out
   (`CommandPlanCard.onWritingChanged` → `_writingSerial`, the serial of the
   card that reported it; `_cardWriting` holds only while THAT card stands,
   so a typed Enter, a slot pick or a re-proposal during the write leaves
@@ -713,9 +716,10 @@ in-memory.
   `directoryAddress`, as the router's Enter does; a failed search throws on
   and the card says "Couldn't search the directory.",
   `CommandPlanCard.directoryFailedText`, never that nobody has the name),
-  and keeps the chips (`onAttendeesChanged` → `_proposalAttendees`,
-  cleared with `_proposalName`), so a drag of the ghost re-proposes with
-  them and the new card starts from them (`initialAttendees`).
+  and keeps the chips (`onAttendeesChanged` → `_Proposal.attendees`, one
+  record with the typed name, the ask and its message, dropped whole with
+  the command), so a drag of the ghost re-proposes with them and the new
+  card starts from them (`initialAttendees`).
 
 ## Events, invite cards and people
 
@@ -1583,11 +1587,11 @@ The rule has ONE spelling, a single SQL query —
 threads joined to their newest inbound message LEFT joined to its decision
 (so the owner's yes lists a thread with none), read with `json_extract`
 under `json_valid` inside a CASE so a bad row is no ask rather than a failed
-read, newest first, capped at 200. `schedulingAskKeys`
-turns it into the `'$source|$id'` keys, the one path the app and the tests
-share; `schedulingAskMessageIds` keys the same rows to their newest inbound
-message id, and `schedulingAsksProvider` (`day_providers.dart`) holds that
-map (the keys for the thread bar and the column, the id for a label),
+read, newest first, capped at 200. `schedulingAskMessageIds` keys the rows by
+`'$source|$id'` (`schedulingAskKey`) to their newest inbound message id — the
+one path the app and the tests share — and `schedulingAsksProvider`
+(`day_providers.dart`) holds that map (the keys for the thread bar and the
+column, the id for a label),
 re-read when the conversation list reloads (which is what follows a triage
 pass writing new decisions, a reply going out, or a state change). No clock.
 
@@ -1665,20 +1669,22 @@ the row's next open; one read in flight, which every caller awaits) into `AskHin
 - **The day** is `resolveWhen(…, mode: question)`'s, its relative words
   read against the message's own time when the host passes it
   (`readAskHints(sentAt:)`), else now; whether it has gone is judged at now.
-  A week ("next week") is not a day. A weekday or a date at most seven days
-  past (an old message's "Thursday" or date) rolls to that weekday's next
+  A week ("next week") is not a day. Only a weekday recurs: one at most
+  seven days past (an old message's "Thursday") rolls to its next
   occurrence — today when it is today's weekday — because the ask may be
-  days old; an older one is dropped. A relative day that has gone
-  ("tomorrow" in Monday's message read on Wednesday) is dropped: it named
-  one day (`WhenResolution.dayMention`). "yesterday" is no day. A day that
-  is today whose hours have already ended rolls a week on when it was a
-  weekday ("dinner on Friday" read on Friday at nine is next Friday) and is
-  dropped when it was "today"/"tonight"/"tomorrow" or a date ("dinner Oct
-  9?" names that one day; the hours stay); with no hours today stands.
+  days old; an older one is dropped. A relative day ("tomorrow" in Monday's
+  message read on Wednesday) or a date ("Oct 2" read on Oct 5) that has
+  gone is dropped: each named one day (`WhenResolution.dayMention`; the
+  hours stay). "yesterday" is no day. The same rule for a day that is today
+  whose hours have already ended: it rolls a week on when it was a weekday
+  ("dinner on Friday" read on Friday at nine is next Friday) and is dropped
+  when it was "today"/"tonight"/"tomorrow" or a date ("dinner Oct 9?" names
+  that one day); with no hours today stands.
 - **The hours**, most specific first: an explicit clock time (a two-hour
   window from it, cut at 23:59; a range such as "2-3:30pm" ends where it
-  says, and one past midnight ends at 23:59 with the length cut to fit:
-  "drinks 10pm-1am" is 22:00–23:59 for 119 minutes), with a meal word
+  says, and one past midnight ends at 23:59 with the length cut to the
+  quarter hours that fit: "drinks 10pm-1am" is 22:00–23:59 for 105
+  minutes), with a meal word
   setting a BARE hour's half of the day ("dinner at 7" is 19:00, and a
   range's bare end moves with it: "dinner from 7 to 9" is 19:00–21:00;
   breakfast keeps its morning, and an hour with am/pm or on a 24-hour clock
@@ -1796,24 +1802,26 @@ never throws):
   week) stays `work`, since the owner's own walk skips its non-working
   days.
   `findMeetingTimes(activityDomain:)` puts the key in `options` only when
-  it is not `work`. Over ONE day Graph is asked once, for twenty
-  candidates, over the window; over several days (hours with no day read,
-  or the rest-of-the-week fallback) it is asked ONE CALL PER DAY (at most
-  seven, five candidates each, each over that day's hours from now at the
-  earliest; a day with no room left is skipped), asked together
-  (`Future.wait`), because one call over a week of evenings starting now
-  came back with daytime candidates only. The answers merge in day order
-  (each suggestion once; "nobody is free" only when every day said so); a
-  day whose call fails costs that day, and with nothing found the answer is
-  the unreadable fallback, never "nobody is free"; every day failing, or a
-  missing permission or `unsupported_account` on any day, is the search's
-  failure as one call's would be.
+  it is not `work`; the domain is decided once per search and shared by
+  every call. With hours Graph is asked ONE CALL PER DAY of the window
+  (`_hintedDays`; a single day — their day, a weekday on a week pill — is
+  one such call): each from the later of the window's start and that day's
+  opening to the earlier of its end and that day's close, five candidates;
+  at most seven days, a day with no room left skipped; asked together
+  (`Future.wait`). So "dinner this week" on a Friday morning asks Friday
+  17:30–20:30, never from ten o'clock, and one call over a week of evenings
+  starting now — which came back with daytime candidates only — is never
+  made. Without hours it is one call over the window for five. The answers
+  merge in day order (each suggestion once; "nobody is free" only when
+  every day said so); a day whose call fails costs that day, and with
+  nothing found the answer is the unreadable fallback, never "nobody is
+  free"; every day failing, or a missing permission or `unsupported_account`
+  on any day, is the search's failure as one call's would be.
   `FindTimeResult.graphCalls` counts the calls for the `find_time` row's
-  `graph_calls`. Every suggestion whose local start or end leaves those
-  hours on its own day is DROPPED before the ranking keeps three; none left
-  falls back to the owner's own openings in those hours under "No time
-  inside those hours from their calendar — showing your own free times."
-  (`findTimeOutsideHoursNote`).
+  `graph_calls`. As a belt, a suggestion whose local start or end leaves the
+  hours on its own day is dropped before the ranking keeps three (Graph was
+  asked over the hours, so it answers another question); none left is an
+  empty answer, read by Graph's reason as above.
 - Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
   the mailbox's working hours (source `local`; `find_meeting_times` refuses an
   empty list — gotcha 28).
@@ -1824,9 +1832,10 @@ never throws):
   sentence, the scope sentence, "Couldn't reach the calendar to find a time.").
 - Overlaps for every slot from the mirror (`findOverlaps`).
 
-Nothing found says "No time when everyone is free this week. Try next week."
-(or "No free time …" for a search of only the owner); a failed search shows
-only its sentence, never a false all-clear.
+Nothing found says the search's own note — "Nobody is free this week — try
+next week." when Graph read everyone — else the row's "No free time found
+this week — try next week." (`findTimeWindowWords`, "then" for their day);
+a failed search shows only its sentence, never a false all-clear.
 
 **The two actions** (from the column's row, below).
 
@@ -1864,23 +1873,26 @@ callbacks.
   and its day when one was read, else 30 minutes this week; tapping again
   folds it and keeps the answer. A pill pressed while the ask's words are
   still being read stays: the first search is seeded only if no pill has
-  been pressed. A kept answer older than 30 minutes (`askResultLifetime`,
-  `_AskSearch.searchedAt`, `askResultStale`) is searched again on the next
-  open rather than shown, and the words are read again on a new day as on a
-  newer message (`hintsDay`, `askHintsStale`: "tomorrow" read yesterday is
-  another date now).
+  been pressed. ONE staleness on the next open (`_AskSearch.forgetReading`):
+  a new day (`hintsDay`, `askHintsStale`: "tomorrow" read yesterday is
+  another date now) or a kept answer older than 30 minutes
+  (`askResultLifetime`, `_AskSearch.searchedAt`, `askResultStale`:
+  calendars move, and "dinner tonight" read at five names no day at nine)
+  reads the words again AND searches again, the owner's own pills standing;
+  their day read again without a day is this week (`askWindowFor`, the pill
+  the row then offers). A newer message is a new ask (below).
 - **Stale rows.** A row never offers a slot that has ENDED (`_liveResult`,
   for the row and for Put in reply); a slot under way still shows, and
   picking it is the past rule's refusal. Only `_closeAsk` removes a search
   on purpose, so an ask that leaves the list another way (the owner
   replied) has its search pruned when the column is next built; and a
   search read for an older message than the one now listed (a newer
-  message on an open row, or an ask that left and came back) is folded,
-  its slots and words dropped and any answer in flight ignored, so a grid
-  press is then a blank event, not an invite on the old search
-  (`_openAsk` checks the same). A slot's dry run that lands after its ask
-  was dismissed (or closed elsewhere) puts up no card (`_showProposal`
-  re-reads the asks).
+  message on an open row, or an ask that left and came back) is a new
+  ask's: a FRESH entry — folded, the pills at their defaults, no slots or
+  words — with any answer in flight ignored, so a grid press is then a
+  blank event, not an invite on the old search (`_openAsk` checks the
+  same). A slot's dry run that lands after its ask was dismissed (or closed
+  elsewhere) puts up no card (`_showProposal` re-reads the asks).
 - **Open**, it says what the ask asked for ("Asked for: Fri Oct 9 · dinner",
   when its words named anything), then two pill rows, `min 30 · 45 · 60`
   (plus the ask's own length) and `<their day> · This Fri · Next Fri` (their
@@ -1920,10 +1932,10 @@ callbacks.
 
 **Activity.** Kind `find_time`, labelled **Find a time**: one row per search,
 `detail: {source: graph|local, slots, people, window:
-theirs|this_week|next_week, surface: column, graph_calls}` (where the search
-was asked from; `pane`, the retired main-pane Find a time's word, is no
-longer written; `graph_calls` is `FindTimeResult.graphCalls`, zero for a
-search of the owner alone, one per day when the hours had no day) —
+theirs|this_week|next_week, graph_calls}` (`graph_calls` is
+`FindTimeResult.graphCalls`, zero for a search of the owner alone, one per
+day searched with hours; the `surface` word went with the main-pane Find a
+time it told apart) —
 "Find a time — 3 slots (graph)" — and one per action, `{action: put_in_reply |
 send_invite}` — "Find a time — put in reply", "Find a time — invite sent" (a
 slot's invite gone through with people on it, from the card's `onDone`; a

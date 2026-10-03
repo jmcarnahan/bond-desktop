@@ -52,7 +52,7 @@ import '../services/calendar/brief_gatherer.dart' show briefQuickCheck;
 import '../services/calendar/meeting_brief_handler.dart' show BriefRequest;
 import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
 import '../services/calendar/calendar_writes.dart'
-    show CalendarWrite, CreateEvent, MoveEvent;
+    show CalendarWrite, CreateEvent, MoveEvent, blankEventSubject;
 import '../services/calendar/calendar_zone.dart' show CalendarZone;
 import '../services/calendar/command/command_lexicon.dart'
     show looksLikeCalendarCommand;
@@ -539,32 +539,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// until its re-read lands. Undo of a dismiss takes the ask's entries out.
   final Set<String> _closedAsks = {};
 
-  /// The ask whose slot the standing proposal was built from, so the card's
-  /// write going through marks that ask. Cleared with the command
-  /// ([_forgetCommand]); [_proposalInvites] says whether its write invited
-  /// anybody (an ask with nobody else on it adds to the owner's calendar).
-  AskKey? _proposalAsk;
-  bool _proposalInvites = false;
-
-  /// The ask's newest inbound message when its slot was picked — the one
-  /// the invite answers, so the card's write labels THAT message, not one
-  /// that arrived while the card stood (a fresh request the label would
-  /// hide). Set and cleared with [_proposalAsk].
-  String? _proposalMessageId;
-
-  /// The standing proposal is a blank event picked on the grid, so its card
-  /// draws a name field. Cleared with the command ([_forgetCommand]).
-  bool _proposalBlank = false;
-
-  /// The blank event's name as its card's field now reads, so the grid's
-  /// ghost carries it too; null until typed. Cleared with the command.
-  String? _proposalName;
-
-  /// The blank event's guests as its card's chips now read (lowercased
-  /// addresses), so a drag of the ghost re-proposes with them and the new
-  /// card starts from them; null until a chip changes. Cleared with
-  /// [_proposalName].
-  List<String>? _proposalAttendees;
+  /// The standing proposal's hand-off when it came from the asks column or
+  /// the grid rather than typed text ([_Proposal]): the ask it answers and
+  /// the message it labels, whether it invites anybody, and — for a blank
+  /// event — the name and guests as its card now reads them, so the grid's
+  /// ghost carries them and a re-proposal's card starts from them. ONE
+  /// field, dropped in one place ([_forgetCommand]) and never half-reset;
+  /// null for a typed command's card.
+  _Proposal? _proposal;
 
   /// Bumped when the grid's ghost is tapped: the card flashes once. Back to
   /// zero with every new card, so a card never flashes as it appears.
@@ -5431,12 +5413,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _commandBusy = false;
     _commandSerial += 1;
     _pendingCommandText = null;
-    _proposalAsk = null;
-    _proposalMessageId = null;
-    _proposalInvites = false;
-    _proposalBlank = false;
-    _proposalName = null;
-    _proposalAttendees = null;
+    _proposal = null;
     _cardFlash = 0;
     _writingSerial = null;
   }
@@ -5502,18 +5479,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _commandText = text;
       _commandBinds = binds;
       _pendingCommandText = null;
-      // A typed Enter is not the asks column's slot: its card must not mark
-      // the ask whose proposal it replaces. A choice pressed on that card
-      // answers it, so the mark stays. Nor is it the blank event's: its card
-      // asks no name and its ghost carries no typed name or guests.
-      if (choice == null) {
-        _proposalAsk = null;
-        _proposalMessageId = null;
-        _proposalInvites = false;
-        _proposalBlank = false;
-        _proposalName = null;
-        _proposalAttendees = null;
-      }
+      // A typed Enter is not the asks column's slot or the grid's blank
+      // event: its card must not mark the ask whose proposal it replaces,
+      // asks no name and its ghost carries no typed name or guests. A choice
+      // pressed on that card answers it, so the hand-off stays.
+      if (choice == null) _proposal = null;
       // Either way a new card is coming, and a new card never flashes.
       _cardFlash = 0;
     });
@@ -5576,45 +5546,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// A slot pressed on a [SlotChoice]: its write's dry run, as the proposal
-  /// the card draws next.
+  /// the card draws next ([_reproposeCommand]).
   Future<void> _pickCommandSlot(
     SlotChoice choice,
     FreeSlot slot, {
     required CalendarZone zone,
     required CalendarDate today,
-  }) async {
-    final serial = _commandSerial + 1;
-    final previous = _commandOutcome;
-    setState(() {
-      _commandSerial = serial;
-      _commandBusy = true;
-    });
-    CommandPlan plan;
-    try {
-      plan = await ref.read(commandPlannerProvider).propose(
-            choice.buildWrite(slot),
-            target: choice.targetEvent,
-            zone: zone,
-            today: today,
-            now: DateTime.now(),
-          );
-    } on Object catch (e) {
-      // `propose` says its failures as plans; a throw is a belt, so the bar
-      // can never be left spinning.
-      debugPrint('calendar command: slot proposal failed: ${e.runtimeType}');
-      plan = const CannotDo('Something went wrong reading that.');
-    }
-    if (!mounted || serial != _commandSerial) return;
-    setState(() {
-      _commandBusy = false;
-      // A new card (the serial moved), which never flashes as it appears.
-      _cardFlash = 0;
-      if (previous != null) {
-        _commandOutcome = CommandOutcome(
-            plan: plan, path: previous.path, parsed: previous.parsed);
-      }
-    });
-  }
+  }) =>
+      _reproposeCommand(choice.buildWrite(slot), choice.targetEvent,
+          zone: zone, today: today);
 
   /// The bar, bound to this screen's clock, zone, people and meetings.
   Widget _commandBar(CalendarZone zone, CalendarDate today) {
@@ -5649,9 +5589,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final outcome = _commandOutcome;
     if (outcome == null) return null;
     final serial = _commandSerial;
-    final ask = _proposalAsk;
-    final askMessageId = _proposalMessageId;
-    final invites = _proposalInvites;
+    final proposal = _proposal;
+    final ask = proposal?.ask;
+    final askMessageId = proposal?.messageId;
+    final invites = proposal?.invites ?? false;
+    final blank = proposal?.blank ?? false;
     return CommandPlanCard(
       key: ValueKey('command-plan-$serial'),
       plan: outcome.plan,
@@ -5676,7 +5618,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           // A second invite for the same ask that went up while this one
           // was in the air (a grid press under a typed Enter's card) answers
           // an ask this write just closed: it goes with it.
-          final standing = _proposalAsk;
+          final standing = _proposal?.ask;
           if (serial != _commandSerial &&
               standing != null &&
               standing.source == ask.source &&
@@ -5694,20 +5636,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           _pickCommandSlot(choice, slot, zone: zone, today: today),
       onChoose: (option) =>
           _submitCommand(_commandText, zone: zone, choice: option),
-      subjectEditable: _proposalBlank,
-      onSubjectChanged: (name) => setState(() => _proposalName = name),
+      subjectEditable: blank,
+      onSubjectChanged: (name) =>
+          setState(() => _proposal = _proposal?.copyWith(name: name)),
       // The blank event's With line: the bar's people and its directory
       // lookup, so a name means on the card what it means typed in the bar.
       // The chips are kept here, so a drag of the ghost carries them into
       // the re-proposal and the new card starts from them.
-      people: _proposalBlank ? _commandPeople() : const [],
-      searchPeople: _proposalBlank ? _searchCommandPeople : null,
-      onAttendeesChanged: (addresses) =>
-          setState(() => _proposalAttendees = addresses),
-      initialAttendees: _proposalAttendees ?? const [],
+      people: blank ? _commandPeople() : const [],
+      searchPeople: blank ? _searchCommandPeople : null,
+      onAttendeesChanged: (addresses) => setState(
+          () => _proposal = _proposal?.copyWith(attendees: addresses)),
+      initialAttendees: proposal?.attendees ?? const [],
       // The name as typed, so a re-proposal's new card keeps it through the
       // dry run rather than starting from the old write's subject.
-      initialSubject: _proposalName,
+      initialSubject: proposal?.name,
       flash: _cardFlash,
       // Recorded with this card's serial, so it holds only while this card
       // stands ([_cardWriting]); its end clears only its own mark.
@@ -6153,26 +6096,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   SchedulingAskRow _askRow(Conversation c, DateTime now) {
-    final e = _askSearches['${c.source}|${c.id}'] ?? _AskSearch();
+    final id = '${c.source}|${c.id}';
+    var e = _askSearches[id] ?? _AskSearch();
     // A search read for an older message than the one now listed is a
-    // different ask's (it left and came back): folded, its slots and words
-    // dropped, and any answer still out ignored (the serial moves), so the
-    // next open reads and searches the new one.
+    // different ask's (a newer message, or it left and came back): a FRESH
+    // entry — folded, the pills at their defaults, no slots or words — so
+    // the next open reads and searches the new one from its own words. The
+    // old entry's serial moves first, so an answer still out for it is
+    // dropped and it moves the pane nowhere.
     final newest = ref
         .read(schedulingAsksProvider)
         .valueOrNull?[schedulingAskKey(c.source, c.id)];
     if (e.hintsRead && newest != null && e.hintsMessageId != newest) {
       e
         ..expanded = false
-        ..busy = false
-        ..result = null
-        ..hints = null
-        ..hintsRead = false
-        ..hintsMessageId = null
-        ..hintsDay = null
-        ..searched = false
-        ..searchedAt = null
         ..serial += 1;
+      e = _askSearches[id] = _AskSearch();
     }
     final subject = (c.subject ?? '').trim();
     return SchedulingAskRow(
@@ -6224,7 +6163,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// "Proposed: Fri Oct 2 · 7:15–8:45 PM" for the ask whose proposal stands
   /// on the card; null for any other row, and once the card goes.
   String? _proposedLine(String source, String key) {
-    final ask = _proposalAsk;
+    final ask = _proposal?.ask;
     final plan = _commandOutcome?.plan;
     if (ask == null || ask.source != source || ask.key != key) return null;
     if (plan is! CalendarProposal) return null;
@@ -6239,9 +6178,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// What the grid's ghost is named: the invite's or blank event's subject
   /// (the name as typed, for a blank one), or the moved meeting's.
   String _ghostSubject(CalendarProposal plan) => switch (plan.write) {
-        final CreateEvent w => _proposalBlank && _proposalName != null
-            ? (_proposalName!.trim().isEmpty ? 'New event' : _proposalName!)
-            : w.subject,
+        final CreateEvent w => switch (_proposal) {
+            _Proposal(blank: true, name: final name?) =>
+              name.trim().isEmpty ? blankEventSubject : name,
+            _ => w.subject,
+          },
         MoveEvent() => plan.targetEvent?.subject ?? '',
         _ => '',
       };
@@ -6313,25 +6254,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         return;
       }
     }
-    final ask = _proposalAsk;
-    if (ask != null) {
+    final proposal = _proposal;
+    final ask = proposal?.ask;
+    if (proposal != null && ask != null) {
+      // The ask's slot again, with the card and the ghost standing through
+      // the dry run (`keep`), as a blank event's re-proposal does below.
       unawaited(_pickAskSlot(ask.source, ask.key, FreeSlot(startUtc, endUtc),
-          messageId: _proposalMessageId));
+          messageId: proposal.messageId, keep: true));
       return;
     }
     // A blank event's: its name as typed and its guests as chipped, re-run
     // the way a typed command's is ([_reproposeCommand]), so the card and
     // the ghost stay on screen through the dry run and the name, the guests
     // and the blank card come across.
-    if (_proposalBlank && write is CreateEvent) {
-      final typed = (_proposalName ?? write.subject).trim();
+    if (proposal != null && proposal.blank && write is CreateEvent) {
+      final typed = (proposal.name ?? write.subject).trim();
       _selectDay(zone.dateOf(startUtc));
       unawaited(_reproposeCommand(
           CreateEvent.propose(
-                  subject: typed.isEmpty ? 'New event' : typed,
+                  subject: typed.isEmpty ? blankEventSubject : typed,
                   startUtc: startUtc,
                   endUtc: endUtc)
-              .withAttendees(_proposalAttendees ?? const []),
+              .withAttendees(proposal.attendees ?? const []),
           null,
           zone: zone,
           today: today));
@@ -6354,9 +6298,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     unawaited(_reproposeCommand(next, plan.targetEvent, zone: zone, today: today));
   }
 
-  /// A typed command's proposal made again on another span — the path a
-  /// slot pressed on its card takes ([_pickCommandSlot]), keeping the
-  /// outcome's path and parse.
+  /// [write]'s dry run as the standing card's next plan, keeping the
+  /// outcome's path and parse — a slot pressed on the card
+  /// ([_pickCommandSlot]), a typed command's or a blank event's ghost
+  /// dragged ([_reproposeFromGrid]). The card and the ghost stay on screen
+  /// through the dry run: only the serial moves, so the old card's answers
+  /// are dropped and the new card lands in its place.
   Future<void> _reproposeCommand(
     CalendarWrite write,
     CalendarEvent? target, {
@@ -6411,26 +6358,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         .valueOrNull?[schedulingAskKey(source, key)];
     final now = DateTime.now();
     final zone = ref.read(calendarZoneProvider).valueOrNull!;
+    // ONE staleness: a newer message or a new day changes what the words
+    // mean, and an answer older than [askResultLifetime] may show slots
+    // calendars have taken — or a day whose hours have closed since the
+    // words were read ("dinner tonight" read at five, reopened at nine). The
+    // words are read again and the search run again; the owner's own pills
+    // stand. A search still out was read on the old words: its answer is
+    // dropped (the serial moves) and the fresh search below is not held off
+    // by its busy mark.
     if (entry.hintsRead &&
-        askHintsStale(
-            readFor: entry.hintsMessageId,
-            newest: newest,
-            readOn: entry.hintsDay,
-            today: zone.dateOf(now.toUtc()))) {
-      // A search still out was read on the old words: its answer is
-      // dropped (the serial moves) and the fresh search below is not held
-      // off by its busy mark.
-      entry
-        ..hintsRead = false
-        ..searched = false
-        ..result = null
-        ..busy = false
-        ..serial += 1;
-    }
-    // A standing answer older than [askResultLifetime] is searched again
-    // rather than shown: calendars move, and its first slots may be gone.
-    if (entry.result != null && askResultStale(entry.searchedAt, now)) {
-      entry.result = null;
+        (askHintsStale(
+                readFor: entry.hintsMessageId,
+                newest: newest,
+                readOn: entry.hintsDay,
+                today: zone.dateOf(now.toUtc())) ||
+            (entry.result != null &&
+                askResultStale(entry.searchedAt, now)))) {
+      entry.forgetReading();
     }
     setState(() {
       for (final e in _askSearches.values) {
@@ -6501,6 +6445,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         entry.minutes = entry.hints?.minutes ?? entry.minutes;
         if (entry.hints?.day != null) entry.window = FindTimeWindow.theirs;
       }
+      // Their day with no day read any more is this week, which is what
+      // the pills now offer.
+      entry.window = askWindowFor(entry.window, entry.hints);
     }
     entry.searched = true;
     // Only an ask still open moves the pane: one folded during the hint
@@ -6514,7 +6461,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         durationMinutes: entry.minutes,
         window: entry.window,
         zone: zone,
-        surface: 'column',
         hints: entry.hints,
       );
     } on Object {
@@ -6593,10 +6539,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// [messageId] is the message the invite answers when the caller already
   /// holds it — a dragged ghost re-proposing the standing invite keeps the
-  /// one its slot was first picked for ([_proposalMessageId]), so a message
+  /// one its slot was first picked for ([_Proposal.messageId]), so a message
   /// that arrived since keeps its own ask; else the newest listed now.
+  /// [keep] leaves the standing card and ghost up through the dry run (the
+  /// drag), as [_showProposal] says.
   Future<bool> _pickAskSlot(String source, String key, FreeSlot slot,
-      {String? messageId}) async {
+      {String? messageId, bool keep = false}) async {
     // Refused is handled: true, so a grid press does not fall back to a
     // blank event at the same past time.
     if (_refusePast(slot.startUtc)) return true;
@@ -6623,7 +6571,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         today: today,
         ask: (source: source, key: key),
         askMessageId: answers,
-        invites: addresses.isNotEmpty);
+        invites: addresses.isNotEmpty,
+        keep: keep);
     return true;
   }
 
@@ -6683,7 +6632,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
       if (!mounted) return;
       final write = CreateEvent.propose(
-          subject: 'New event', startUtc: startUtc, endUtc: endUtc);
+          subject: blankEventSubject, startUtc: startUtc, endUtc: endUtc);
       await _showProposal(write, zone: zone, today: today, blank: true);
     }());
   }
@@ -6696,7 +6645,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// lands so the card's write marks it ([invites]: whether anybody is on
   /// it; [askMessageId]: the newest inbound message it answers, read at the
   /// pick); a newer command drops it with the card. [blank] is a blank event
-  /// picked on the grid, whose card asks for its name.
+  /// picked on the grid, whose card asks for its name. With [keep] the
+  /// standing card and ghost stay up through the dry run (a dragged ghost
+  /// re-proposing, [_reproposeCommand]'s way); without, whatever stood goes
+  /// first.
   Future<void> _showProposal(
     CalendarWrite write, {
     required CalendarZone zone,
@@ -6705,9 +6657,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     String? askMessageId,
     bool invites = false,
     bool blank = false,
+    bool keep = false,
   }) async {
     setState(() {
-      _forgetCommand();
+      if (keep) {
+        _commandSerial += 1;
+      } else {
+        _forgetCommand();
+      }
       _commandBusy = true;
     });
     final serial = _commandSerial;
@@ -6736,12 +6693,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
     setState(() {
       _commandBusy = false;
+      _cardFlash = 0;
       _commandOutcome =
           CommandOutcome(plan: plan, path: CommandPath.lexicon);
-      _proposalAsk = ask;
-      _proposalMessageId = ask == null ? null : askMessageId;
-      _proposalInvites = ask != null && invites;
-      _proposalBlank = blank;
+      _proposal = ask == null && !blank
+          ? null
+          : _Proposal(
+              ask: ask,
+              messageId: ask == null ? null : askMessageId,
+              invites: ask != null && invites,
+              blank: blank,
+            );
     });
   }
 
@@ -6798,7 +6760,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return;
     }
     // The ask's own proposal goes with it: the card and the ghost.
-    final standing = _proposalAsk;
+    final standing = _proposal?.ask;
     if (standing != null &&
         standing.source == source &&
         standing.key == key) {
@@ -6859,15 +6821,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// One Find a time search, and its activity row: how many slots, whose
-  /// calendars, how many people, which week, and where it was asked from
-  /// (`column`; the main-pane Find a time that wrote `pane` is retired) —
+  /// calendars, how many people, which week and how many Graph calls —
   /// counts and enum words only.
   Future<FindTimeResult> _findTimeSearch({
     required List<String> addresses,
     required int durationMinutes,
     required FindTimeWindow window,
     required CalendarZone zone,
-    required String surface,
     AskHints? hints,
   }) async {
     MailboxSettings? hours;
@@ -6892,7 +6852,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       'slots': result.slots.length,
       'people': addresses.length,
       'window': window.wire,
-      'surface': surface,
       'graph_calls': result.graphCalls,
     }));
     return result;
@@ -9976,6 +9935,46 @@ bool askHintsStale({
 }) =>
     (newest != null && readFor != newest) || readOn != today;
 
+/// The window an ask's search runs over for the pill [chosen]: their day
+/// ([FindTimeWindow.theirs]) only while the words name a day — read again
+/// without one ("dinner tonight" once tonight has gone), it is this week,
+/// which is what the row's pills then offer.
+@visibleForTesting
+FindTimeWindow askWindowFor(FindTimeWindow chosen, AskHints? hints) =>
+    chosen == FindTimeWindow.theirs && hints?.day == null
+        ? FindTimeWindow.thisWeek
+        : chosen;
+
+/// The standing proposal's hand-off from the asks column or the grid — see
+/// [_InboxScreenState._proposal]. [name] and [attendees] are the blank
+/// event's as its card now reads them; null until typed or chipped.
+class _Proposal {
+  final AskKey? ask;
+  final String? messageId;
+  final bool invites;
+  final bool blank;
+  final String? name;
+  final List<String>? attendees;
+
+  const _Proposal({
+    this.ask,
+    this.messageId,
+    this.invites = false,
+    this.blank = false,
+    this.name,
+    this.attendees,
+  });
+
+  _Proposal copyWith({String? name, List<String>? attendees}) => _Proposal(
+        ask: ask,
+        messageId: messageId,
+        invites: invites,
+        blank: blank,
+        name: name ?? this.name,
+        attendees: attendees ?? this.attendees,
+      );
+}
+
 /// One scheduling ask's inline search in the Day column — see
 /// [_InboxScreenState._askSearches].
 class _AskSearch {
@@ -10013,4 +10012,20 @@ class _AskSearch {
 
   /// Bumped per search, so only the newest answer lands.
   int serial = 0;
+
+  /// Forgets what was read and found — the words, the answer, any search
+  /// still out (the serial moves) — and keeps the owner's own pills
+  /// ([minutes], [window], [searched]): what a new day or a stale answer
+  /// costs ([_InboxScreenState._toggleAsk]). A newer message is a new ask
+  /// and gets a new [_AskSearch] instead ([_InboxScreenState._askRow]).
+  void forgetReading() {
+    hints = null;
+    hintsRead = false;
+    hintsMessageId = null;
+    hintsDay = null;
+    result = null;
+    searchedAt = null;
+    busy = false;
+    serial += 1;
+  }
 }

@@ -158,14 +158,15 @@ const int _mealReachMinutes = 120;
 ///   read against [sentAt], the message's own time, when the host has it,
 ///   else [now]; whether that day is gone is judged at [now].
 /// - **Day**: the resolver's, read as a question (a bare weekday on its own
-///   day is today). A week ("next week") is not a day. A WEEKDAY or a date
-///   at most seven days past (an old message's "Thursday", "Oct 2") rolls
-///   forward to that weekday's next occurrence — today, when it is today's
+///   day is today). A week ("next week") is not a day. Only a WEEKDAY
+///   recurs: one at most seven days past (an old message's "Thursday")
+///   rolls forward to its next occurrence — today, when it is today's
 ///   weekday — because the ask may be days old and the weekday is what the
-///   person meant; an older one is dropped. A relative day that has gone
-///   ("tomorrow" in Monday's message, read on Wednesday) is dropped: it
-///   named one day, not a weekday. "yesterday" is no day (the resolver does
-///   not read it).
+///   person meant; an older one is dropped. A relative day ("tomorrow" in
+///   Monday's message, read on Wednesday) or a date ("Oct 2", read on Oct 5)
+///   that has gone is dropped: each named one day, not a weekday — the
+///   same rule as "too late" below. "yesterday" is no day (the resolver
+///   does not read it).
 /// - **Hours**, most specific first: an explicit clock time (two hours from
 ///   it, or the range it names), else a meal or social word (the earliest
 ///   in the text: breakfast, coffee, lunch, dinner, drinks or happy hour),
@@ -177,8 +178,9 @@ const int _mealReachMinutes = 120;
 ///   written. A bare or named time ("midnight") more than two hours outside
 ///   the meal's hours is not that meal's: the meal's hours stand.
 /// - **Past midnight**: a window is cut at the day's last minute (the search
-///   walks one local day at a time), and the length is cut to what is left
-///   of it, so "drinks 10pm-1am" is 22:00–23:59 for 119 minutes.
+///   walks one local day at a time), and the length is cut to the quarter
+///   hours left in it, so "drinks 10pm-1am" is 22:00–23:59 for 105 minutes
+///   (a "119" pill is nobody's length).
 /// - **Today, too late**: a day that is today whose hours have already
 ///   ended rolls a week on when it was a weekday ("dinner on Friday" read
 ///   on Friday at nine is next Friday), and is dropped when it was a
@@ -199,12 +201,11 @@ AskHints readAskHints({
   final w = resolveWhen(text,
       now: sentAt ?? now, zone: zone, mode: WhenMode.question);
   final today = zone.dateOf(now.toUtc());
-  final relative = w.dayMention == DayMention.relative;
   final weekday = w.dayMention == DayMention.weekday;
 
   CalendarDate? day = w.rangeEnd == null ? w.day : null;
   if (day != null && day.isBefore(today)) {
-    if (relative || day.isBefore(today.addDays(-_rollDays))) {
+    if (!weekday || day.isBefore(today.addDays(-_rollDays))) {
       day = null;
     } else {
       final delta = (day.weekday - today.weekday + 7) % 7;
@@ -294,8 +295,12 @@ AskHints readAskHints({
   var minutes = named != null && named > 0
       ? named
       : rangeMinutes ?? meal?.minutes;
+  // Cut to the quarter hours that fit (a 119 is nobody's length), never
+  // under one quarter hour.
   final cut = cutWindow;
-  if (minutes != null && cut != null && minutes > cut) minutes = cut;
+  if (minutes != null && cut != null && minutes > cut) {
+    minutes = cut < 15 ? cut : cut - cut % 15;
+  }
 
   // Today's hours already gone: "dinner on Friday" read on Friday at nine
   // means next Friday. Gone means no room left for the meeting before they

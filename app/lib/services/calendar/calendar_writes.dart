@@ -141,6 +141,10 @@ final class DeleteEvent extends CalendarWrite {
   String get action => 'delete';
 }
 
+/// The subject a blank event picked on the grid writes under until it is
+/// named — the one spelling the card, the ghost and the inbox share.
+const String blankEventSubject = 'New event';
+
 final class CreateEvent extends CalendarWrite {
   const CreateEvent({
     required this.subject,

@@ -11,9 +11,9 @@ import 'fixtures/test_db.dart';
 
 /// Which threads are asking for a time: the decision model's intent head at
 /// `booleanYes`, a thread that still needs a reply, and nothing the owner
-/// wrote since — all through [schedulingAskKeys], the one path the app and
-/// these tests share, over ONE store query. Fixture times come from the
-/// clock.
+/// wrote since — all through [schedulingAskMessageIds], the one path the app
+/// (`schedulingAsksProvider`) and these tests share, over ONE store query.
+/// Fixture times come from the clock.
 void main() {
   const dana = 'dana@fabrikam.example';
   const owner = 'me@contoso.example';
@@ -82,8 +82,8 @@ void main() {
     }
   }
 
-  Future<Set<String>> keys({int limit = 200}) =>
-      schedulingAskKeys(store, limit: limit);
+  Future<Set<String>> keys({int limit = 200}) async =>
+      (await schedulingAskMessageIds(store, limit: limit)).keys.toSet();
 
   test('a needs-reply thread whose newest inbound mail asks for a time',
       () async {
