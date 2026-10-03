@@ -156,6 +156,13 @@ enforce the ones that are commands.
 - `services/` never imports `providers/`; no dialogs or popups
   (`test/no_dialogs_test.dart`) — every surface is a screen or pane with a
   back button.
+- Mail and chat HTML keep their links the same way: `holdAnchorRuns` before
+  the converter's own tag strip + entity decode, then `releaseHeldMarks` /
+  `stripHeldMarks` (`html_text.dart`; both `_mailText` and `stripChatHtml`).
+  `canonicalLinkRun` stores the URL as Dart READ it (`webTargetOf(...)`:
+  `%3a` → `%3A`, host lower-cased, `:443` dropped) — tests assert that form.
+  Old chat bodies are never re-pulled to repair links (the Teams rule: every
+  Teams call traces to a user action); a widened lookback or Forget does.
 - One shared prompt per LLM task across sources, pinned by parity tests;
   examples ride in the user message, never the system prompt.
 - Prefer narrow SQL statements over widening a `copyWith`. Request parameters
@@ -997,14 +1004,41 @@ that bite.
 - **Briefs:**
   - Briefs read MAIL only. Teams participants are `teams:<id>` and carry no
     address to match an attendee.
+  - Threads: the event's own invite threads first (`messagesForEvent` for the
+    occurrence, then its series master; ≤ 3), then the 30-day address match;
+    `noMail` means no threads at all. Materials (`BriefMaterial`) are the
+    chosen threads' inbound, non-inline `file|reference` attachments that are
+    not images, newest first, the newest copy per lowercased name, ≤ 6, each
+    with its digest and ≤ 2 passages from ONE scoped `chunkKnn` (attachment
+    ids, then the exact `(messageId, attachmentId)` pair). The planner
+    gathers with `passages: false` (a plan is store reads, never an
+    embedding; passages are unhashed, so the hash is the same); only the
+    handler embeds the meeting, once, lazily. The hash carries
+    `material|msg|att|textStatus|digestStatus`, so a deck whose text or
+    digest lands later re-briefs within the 15-minute recheck.
+  - The task is v2, evidence first: `evidence, headline (the glance, ≤ 240),
+    points, open_asks, materials[{file, takeaway}] ≤ 4, questions ≤ 3, prep`;
+    a material index outside the list is dropped, never -1; v1 stored rows
+    still decode. A material line puts `read|unread|not shown` OUTSIDE the
+    fence (`read` only when a digest or passage block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
-    forced sync after a write). It rechecks an event at
-    most every 15 minutes in memory, except rows with no brief, which it
-    plans at once after Clear AI results.
+    forced sync after a write). It skips an event only when its brief is
+    fresh (< 2 h) AND the inputs hash is unchanged; `_queuedFor` (event id →
+    last queued hash) stops a retry storm; it rechecks an event at most
+    every 15 minutes in memory, except rows with no brief, which it plans at
+    once after Clear AI results.
   - A failed or skipped run over a ready brief calls `touchBrief` (it moves
     only `generated_at`) — except a skip for `gone`, `declined` or
     `cancelled`, which replaces the brief with a skipped row.
   - Briefs are keyed by OCCURRENCE, never by master.
+  - The agenda: `dayBriefsProvider(day)` watches the day's events and
+    `briefRevisionProvider` (NOT `briefWorkTickProvider`); `DayPane` draws the
+    glance (`day-brief-teaser-$id`, two lines, not focusable) and the chevron
+    (`day-brief-toggle-$id`, the one keyboard toggle); `BriefSection(compact:)`
+    draws only a READY brief; `_setSelectedDay` is the one writer of
+    `_selectedDay` and clears `_expandedBriefs` only when the day changes;
+    `_openMaterial` rebuilds the `AttachmentRef` from `attachmentRow` and
+    toasts 'That file is no longer here.' on a missing row.
 - **The Day command bar:**
   - The order is: Dart resolution, then the decision head, then the
     lexicon, then the generative model on Enter only (under the 0.8 bar, or
@@ -1106,8 +1140,10 @@ that bite.
     `_seedFromHints` leaves a picked field alone. **The model's "none"
     never erases the rules' day**: a reading with nothing in it against a
     rules reading that found something is kept as the rules', recorded
-    `agree: false, applied: false`. The `ask_read` verdict row is booleans
-    only. Screen tests override `askReaderProvider` (the helper defaults to
+    `agree: false, applied: false`. `chooseAskHints(rules:, model:)` in
+    `ask_hints.dart` IS that rule — the draft's slot step calls it, and the
+    inbox's `kept` expression is the same rule (keep them equivalent). The
+    `ask_read` verdict row is booleans only. Screen tests override `askReaderProvider` (the helper defaults to
     a disabled reader) and shorten the wait with
     `InboxScreen.askReadWaitOverride` (and the stale path with
     `askResultLifetimeOverride`), both cleared in `tearDown`; a held read
@@ -1177,7 +1213,9 @@ that bite.
   answers `tasks_scope_missing` (`TasksScopeMissing`) until the owner's
   consent round: that is UNAVAILABLE, never retried and never an error row.
   Every door reads `tasksAvailabilityProvider` first and, when it is not
-  `available`, shows `tasksUnavailableSentence` and offers nothing to pick.
+  `available`, shows `tasksUnavailableSentence` and offers nothing to pick
+  (while it is still loading the pills draw; a pick then meets the
+  service's own precheck).
   Widget tests that make it available override BOTH `tasksBackendProvider`
   (a recording fake declared in the test, every method implemented) AND
   `tasksAvailabilityProvider` (`overrideWith((ref) async =>

@@ -3160,15 +3160,17 @@ the row's expectation: the days, the hours and the length a PERFECT reading
 yields (docs/pipeline/14-calendar.md "Reading the ask"). `bench-verify-prose`
 runs first, as before every prose bench.
 
-It prints one line — `model: m/40 · rules: k/40 · both: b/40 · disagree: d` —
-and then every row where the model missed or the two readers parted, with
-what each read, what was wanted and the phrases the model copied. It asserts
-shape only (every row came back as a reading): a score is recorded here, never
-gated on. The rules' own score is printed offline by
-`app/test/ask_read_fixture_test.dart` on every gate run (33/40 when the
-fixture landed, 2026-10-03), so `k` should match it. Run it twice and keep
+It prints one line — `model: m/40 · rules: k/40 · both: b/40 · disagree: d ·
+failed: f` — and then every row where the model missed or the two readers
+parted, with what each read, what was wanted and the phrases the model copied.
+It asserts shape only (every row came back as a reading: `failed` is 0): a
+score is recorded here, never gated on. The rules' own score is printed
+offline by `app/test/ask_read_fixture_test.dart` on every gate run (33/40 when
+the fixture landed, 2026-10-03), so `k` should match it. Run it twice and keep
 the second, like every row above. The model reading ships ON; the four
-numbers are what the owner reads to keep it on or flip it off.
+numbers are what the owner reads to keep it on or flip it off — off is
+`askReadOn = false` in `app/lib/services/calendar/ask_reader.dart` (the
+rules then read every ask alone).
 
 | date | label | model | rules | both | disagree | verdict |
 | --- | --- | --- | --- | --- | --- | --- |

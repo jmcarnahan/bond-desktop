@@ -1302,9 +1302,10 @@ bench-prose:
 # the 40 fictional asks in app/test/fixtures/ask_reads/ through the real task on
 # the PROSE slot (the generative server; PROSE_URL/PROSE_MODEL point it),
 # resolved by the app's own Dart and printed beside the rules as
-# `model: m/40 · rules: k/40 · both: b/40 · disagree: d` plus every row that
-# missed. Live and never a gate: the test is @Skip'd, asserts shape only, and
-# its line goes to the ledger in docs/model-bakeoff.md ("Ask reading").
+# `model: m/40 · rules: k/40 · both: b/40 · disagree: d · failed: f` plus every
+# row that missed. Live and never a gate: the test is @Skip'd, asserts shape
+# only (every row answered), and its line goes to the ledger in
+# docs/model-bakeoff.md ("Ask reading").
 ask-read-eval:
 	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/ask_read_eval_live_test.dart --run-skipped $(BENCH_DEFINES)

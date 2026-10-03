@@ -1260,8 +1260,8 @@ meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 `dayBriefsProvider(today)`, only while that section is shown.
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
-worker with the handler's notes: `ok` with `{threads, asks}` → "Meeting brief
-— written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word, or
+worker with the handler's notes: `ok` with `{threads, asks, materials,
+questions}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word, or
 `unchanged`) → "Meeting brief — skipped (no recent mail with these people)";
 `error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)
 adds "; the last brief stands"; a park keeps the general sentence. Counts
@@ -2100,9 +2100,11 @@ still works out every date (the `calendar_intent` contract,
   widen **Their day**: its window runs from the first day's opening to the
   last day's close, its pill names each day ("Thu Oct 8 or Tue Oct 13"),
   Graph is asked one call per day NAMED (at the hours, else 08:00–18:00) and
-  never about the days between, the owner-only walk takes each named day and
-  keeps the first three openings by start, and the domain stays `work`
-  (several days are no one named day). The week pills keep their single-day
+  never about the days between, and both the Graph answer and the owner-only
+  walk keep one opening per named day first (in day order,
+  `_onePerDayFirst`), then fill to three by rank. Each named day is asked
+  under its own domain: `personal` for a day outside the mailbox's working
+  days, the ask's domain otherwise. The week pills keep their single-day
   behaviour on the first day.
 - **The cache** (`AskReader.readFor(source, messageId)`,
   `app/lib/services/calendar/ask_reader.dart`, `askReaderProvider`). On
@@ -2146,9 +2148,10 @@ still works out every date (the `calendar_intent` contract,
   it landed) and each miss, asserting only the fixture's shape, and pins
   that a hand-written perfect reading of five hard rows resolves exactly to
   `expect`. Live, `make ask-read-eval` runs the real task on the prose slot
-  and prints `model: m/40 · rules: k/40 · both: b/40 · disagree: d` with
-  every disagreement. It asserts shape only and is never in the gate. The
-  line goes to the "Ask reading" ledger in
+  and prints `model: m/40 · rules: k/40 · both: b/40 · disagree: d · failed:
+  f` with every disagreement. It asserts shape only — every row answered
+  (`failed` is 0), never a score — and is never in the gate. The line goes
+  to the "Ask reading" ledger in
   [docs/model-bakeoff.md](../model-bakeoff.md).
 
 The Day column asks, refining an open ask's search with the reading; the
@@ -2156,6 +2159,46 @@ draft lane pre-warms the cache, since a draft answering an ask reads it first
 ([07-replies.md](07-replies.md#times-in-a-draft-2026-10)).
 
 ## Owner checks and follow-ups
+
+**The calendar-automation round (2026-10-03).** Owed by the owner before the
+PR merges; tests cannot settle these. Every surface below is reached from the
+main checkout after `make foreground W=calendar-automation` and
+`make app-run BOND_SAMPLE_DIR=` (the real account — the sandbox has no
+calendar and no To Do).
+
+- **Teams links.** A chat with a titled link, or a meeting's Join link, is
+  clickable and opens in the browser (which hands off to Teams). Only chats
+  synced since the round carry it: old bodies are not re-pulled.
+- **Reading the ask.** A thread asking "Tuesday or Thursday afternoon" opens
+  in the Day column with both days named and a slot on each; "Friday doesn't
+  work — Monday?" reads Monday; the activity log's `ask_read` rows carry
+  `agree` and `applied`. With the generative server up, `make ask-read-eval`
+  prints `model/rules/both/disagree/failed` over the 40 fictional asks (the
+  rules score 33/40 offline); record the line in the `docs/model-bakeoff.md`
+  ledger, row 12.
+- **Times in a draft.** A suggested reply on a scheduling-ask thread ends with
+  "Would any of these work? · …" and real slots; its `find_time` row carries
+  `action: draft`; the model's input (the activity detail) never named a
+  slot. After a conflicting event syncs, the still-untouched draft is written
+  again (`draft` requeued, `slots_stale`).
+- **Briefs in the agenda.** With processing on, a meeting in the next 36 h
+  with a deck sent ahead shows a two-line glance under its Day row; the
+  chevron opens the brief inline, the deck named under Materials with a chip
+  that opens the file beside; the Today section shows the glance. A deck that
+  arrives after the first brief rewrites it within about 15 minutes of its
+  digest landing.
+- **Reminders, before consent.** Remind me on a thread shows the permission
+  sentence and a Settings button, no pills; the reply box shows no follow-up
+  line; Settings › Connection lists **To Do reminders** with a cross; the
+  Needs You switch's caption ends "Needs the To Do permission".
+- **Reminders, after consent.** The checklist in
+  [15-reminders.md](15-reminders.md#dark-until-consent) (admin consent →
+  `Tasks.ReadWrite` in `MS_SCOPES` → deploy → every user reconnects), then
+  its [owner checks](15-reminders.md#owner-checks-owed-live-after-the-consent-round):
+  a Remind me task in To Do's "Bond follow-ups" list with its reminder and
+  link; Follow up · 2 days → a `waitingOnOthers` task and the flag on the sent
+  mail; a reply completes both; a deadline reminder for a Needs You thread
+  with a deadline; Undo deletes the task.
 
 **Phase 11–13 (2026-10-02).** Owed by the owner before the PR merges; tests
 cannot settle these.
@@ -2232,17 +2275,22 @@ server or the real calendar.
   meeting's own half of the day, is an owner call. Either way it changes
   only with a test.
 - **Resolver gaps:**
-  - "this weekend", "the 14th" and recurrence are not read;
+  - "this weekend" and recurrence are not read ("the 14th" is, since the
+    ask-reading round — the fixture row `the-14th-at-10`);
   - "in 30 min" is a duration, not a relative time.
 - **Auto-replies (D15).** `read_email`'s `is_auto_reply` is now kept:
   `McpMailBackend` maps it to `isAutoReply`, the sync stores
   `source_meta_json.auto_reply: true` (only when true), and
-  `Message.isAutoReply` reads it. Nothing gates on it yet; the follow-ups
-  round consumes it.
+  `Message.isAutoReply` reads it. Its first consumer is the reminders'
+  reconcile: an auto-reply never completes a follow-up
+  ([15-reminders.md](15-reminders.md#reconcile-completion-is-local)).
+  Nothing else gates on it.
 - **Out of scope for this round (D2, D3, D10, D11, D15):**
   - secondary and shared calendars, which need new scopes;
-  - the follow-ups engine F1–F4 and To Do, which still lacks
-    `Tasks.ReadWrite`;
+  - follow-ups beyond F1-lite: F1 shipped as To Do reminders
+    ([15-reminders.md](15-reminders.md) — Remind me, Follow up if no reply,
+    a deadline reminder), dark until the consent round grants
+    `Tasks.ReadWrite`; nudges to other people (F2–F4) are not built;
   - standing rules, capacity, and a daily brief;
   - a calendar in SDK mode;
   - meeting reminders, which stay Outlook's.
