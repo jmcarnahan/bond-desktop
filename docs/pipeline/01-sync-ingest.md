@@ -420,6 +420,25 @@ sends. The mail profile's rules, each pinned by a test:
   and open-head bodies cannot run past a later opener, so malformed input
   stays linear.
 
+**Teams chat bodies** are converted by `stripChatHtml`
+(`app/lib/services/teams_sync.dart`), a smaller converter than the mail
+profile, but its anchors take the mail path: `holdAnchorRuns` writes the same
+canonical `label <url>` run through the same `canonicalLinkRun` rules, so a
+titled link or a "Join the meeting now" stays clickable, and an anchor with no
+label (a linked external image) vanishes as it does in mail. The run's `&`,
+`<` and `>` ride behind hold marks through the tag strip and the entity
+decode, and `releaseHeldMarks` writes them back last; a raw mark in the input
+is stripped first (`stripHeldMarks`, mail's guard), so a Graph body cannot
+forge one. A `msteams:` link keeps only its words: `linkTargetOf` refuses
+every non-web scheme on purpose. Only the raw HTML carries the address and it
+is not stored, so a chat stored before this build gets its links from a
+widened Teams lookback (every chat re-reads from the new floor) or Forget
+everything and re-sync. Opening a chat or pressing Refresh re-reads only what
+changed since the chat's newest stored message, and only in a chat whose
+newest message is newer than the stored one (`_alreadyCurrent`), so an edit
+to an old message is picked up only once a newer message arrives in that
+chat.
+
 The mail detail fetch also REWRITES the body it stores. Outlook's "attach as
 link" is not in Graph's attachment list at all — it is a zero-width-space
 delimited run in the body — so `_fetchDetailInto` parses it out

@@ -8,6 +8,8 @@ import 'attachments/attachment_policy.dart';
 import 'chat_roster.dart' show teamsNamesSubject;
 import 'conversation_state.dart';
 import 'gates.dart';
+import 'html_text.dart'
+    show holdAnchorRuns, releaseHeldMarks, stripHeldMarks;
 import 'pipeline_progress.dart';
 import 'sender_display.dart';
 // One symbol only, and deliberately: `sync_service.dart` also declares a
@@ -1172,10 +1174,20 @@ final RegExp _blankRun = RegExp(r'\n{3,}');
 ///
 /// Entities are decoded LAST, after every tag is gone. The other order would
 /// turn a literal `&lt;b&gt;` a person typed into markup and then delete it.
+///
+/// An `<a href>` keeps its address as the canonical `label <url>` run mail
+/// writes, through the same `canonicalLinkRun` rules (`holdAnchorRuns`), so a
+/// titled link or a "Join the meeting now" stays clickable. The run's `&`, `<`
+/// and `>` ride behind hold marks through the tag strip and the entity decode
+/// and are written back last (`releaseHeldMarks`); a raw mark in the input is
+/// stripped first (`stripHeldMarks`). An anchor with no label (a linked
+/// external image) vanishes, as in mail.
 String stripChatHtml(String? html) {
   if (html == null || html.isEmpty) return '';
 
-  var text = html.replaceAll(_scriptOrStyle, '');
+  // The hold marks first, as mail does: a raw one in a Graph body would
+  // otherwise come out of [releaseHeldMarks] as a `<`, `>` or `&`.
+  var text = stripHeldMarks(html).replaceAll(_scriptOrStyle, '');
 
   // Markers FIRST, before any tag stripping, because both forms ARE tags and
   // the strippers below would delete them — which is exactly what used to
@@ -1190,6 +1202,10 @@ String stripChatHtml(String? html) {
   text = text.replaceAllMapped(_attachmentTag, (m) => '[[att:${m[1]}]]');
   text = text.replaceAllMapped(hostedImageTag, (m) => '[[img:${m[1]}]]');
 
+  // Anchors become the canonical `label <url>` run mail already writes, held
+  // behind marks so the tag strip and the entity decode below leave them be.
+  text = holdAnchorRuns(text);
+
   text = text.replaceAll(_breakRun, '\n');
   text = text.replaceAll(_anyTag, '');
   text = _decodeEntities(text);
@@ -1197,6 +1213,7 @@ String stripChatHtml(String? html) {
   text = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
   text = text.replaceAll(_spaceAroundNewline, '\n');
   text = text.replaceAll(_blankRun, '\n\n');
+  text = releaseHeldMarks(text);
   return text.trim();
 }
 
