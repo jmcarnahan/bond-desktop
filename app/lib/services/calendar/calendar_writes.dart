@@ -187,6 +187,12 @@ final class CreateEvent extends CalendarWrite {
   /// The same proposal under another name. Every other field stays,
   /// [transactionId] included: a blank event named on its card is still the
   /// one create, and a retry of it must not put a second one down.
+  ///
+  /// That sharing is right only BEFORE a commit. Graph de-duplicates a
+  /// create on its transaction id, so once this proposal has been sent a
+  /// renamed copy would be taken for the meeting already written and
+  /// silently dropped: a re-proposal after a write is a new
+  /// [CreateEvent.propose], never a [withSubject] or [withAttendees].
   CreateEvent withSubject(String subject) => CreateEvent(
         subject: subject,
         startUtc: startUtc,
@@ -196,6 +202,28 @@ final class CreateEvent extends CalendarWrite {
         body: body,
         transactionId: transactionId,
       );
+
+  /// The same proposal with [attendees] in place of its own: bare lowercase
+  /// addresses (trimmed, blanks dropped), and an online meeting exactly when
+  /// anybody is on it, as every invite the app builds is — so
+  /// `withAttendees([])` also clears [isOnlineMeeting]. Subject, times,
+  /// body and [transactionId] stay — the [withSubject] rule, and its
+  /// before-a-commit caveat, hold here too.
+  CreateEvent withAttendees(List<String> attendees) {
+    final bare = [
+      for (final a in attendees)
+        if (a.trim().isNotEmpty) a.trim().toLowerCase(),
+    ];
+    return CreateEvent(
+      subject: subject,
+      startUtc: startUtc,
+      endUtc: endUtc,
+      attendees: bare,
+      isOnlineMeeting: bare.isNotEmpty,
+      body: body,
+      transactionId: transactionId,
+    );
+  }
 
   @override
   String get eventId => '';

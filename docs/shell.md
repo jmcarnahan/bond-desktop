@@ -213,23 +213,19 @@ alone, and only the setters that move `_section` clear it.
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
-| a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time); the header and its chevron fold the section and bring it back |
-| a tap or drag on empty grid time | with an ask open, that ask's invite on the span (its proposal card, `Proposed` ghost, Send); else a blank event's card with a name field (`_createFromGrid`) — never a tile until written |
+| a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time), and the pane underneath moves to the day it searches (`_followAsk` sets `_selectedDay` alone, so a thread, New message, Settings, the log or Invites open there stays open); the header and its chevron fold the section and bring it back |
+| a tap or drag on empty grid time | with an ask open, that ask's invite on the span (its proposal card, `Proposed` ghost, Send); else a blank event's card with a name field and a With line (`_createFromGrid`) — never a tile until written; a time already past is a toast, "That time has passed.", and nothing opens |
 | an ask's **×** | the ask leaves the column (a `scheduling_ask` label), with Undo on the toast and `z`; a newer message from them brings it back |
 | a slot in an open ask | the slot's day (`_selectDay`) with the invite standing as the command card's proposal and the grid's `Proposed` tile (`_showProposal`) |
 | an ask's **Put in reply** / **Open thread** | that thread, in main (`_select`), with the slots staged in its reply box / as it is |
 
-**Find a time** (`FindTimePane`, `docs/pipeline/14-calendar.md` "Find a
-time") is an overlay on the MAIN thread, the pick-storyline picker's
-contract: the thread's action bar draws the worded **Find a time** button
-beside Mark done only on a `needs_reply` thread whose newest inbound mail the
-decision model read as scheduling — on the main thread and on a thread
-beside, where the press moves that thread into the main column (closing the
-side panel) and opens the pane over it, since the pane always takes the main
-pane. Until the display zone resolves it reads "Reading your calendar…" with
-Back, never a blank column. Its Back, a sent invite and **Put these
-in the reply** all return to the thread — the last with the slots written
-into its reply box and the cursor there — and any selection clears it.
+**Find a time** (`docs/pipeline/14-calendar.md` "Find a time") is the
+thread action bar's worded button beside Mark done, drawn on any thread with
+somebody to answer — its newest message inbound and other people on it — on
+the main thread and on a thread beside. A press is the owner's word that the
+thread asks for a time (a `scheduling_ask` label `yes`, unless it is already
+listed) and goes to the Day stop with that ask open in the column, its
+search running; there is no main-pane Find a time any more.
 
 ---
 

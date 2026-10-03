@@ -214,17 +214,27 @@ class SchedulingAskTile extends StatelessWidget {
             ),
           ),
         ),
-        Tooltip(
-          message: 'Dismiss',
-          child: InkWell(
-            key: dismissKeyFor(s, k),
-            onTap: () => callbacks.onDismiss(s, k),
-            borderRadius: BondRadii.fullAll,
-            hoverColor: BondColors.onDarkFaint,
-            child: const SizedBox(
-              width: 32,
-              height: 32,
-              child: Icon(Icons.close, size: 16, color: BondColors.onDarkMuted),
+        // A screen reader hears a button with a name, not a bare tooltip.
+        Semantics(
+          key: dismissKeyFor(s, k),
+          container: true,
+          button: true,
+          label: 'Dismiss ask',
+          onTap: () => callbacks.onDismiss(s, k),
+          child: ExcludeSemantics(
+            child: Tooltip(
+              message: 'Dismiss',
+              child: InkWell(
+                onTap: () => callbacks.onDismiss(s, k),
+                borderRadius: BondRadii.fullAll,
+                hoverColor: BondColors.onDarkFaint,
+                child: const SizedBox(
+                  width: 32,
+                  height: 32,
+                  child:
+                      Icon(Icons.close, size: 16, color: BondColors.onDarkMuted),
+                ),
+              ),
             ),
           ),
         ),
@@ -259,6 +269,7 @@ class SchedulingAskTile extends StatelessWidget {
               _Pill(
                 key: minutesKeyFor(s, k, m),
                 label: '$m',
+                semanticsLabel: '$m minutes',
                 selected: m == row.minutes,
                 onTap: () => callbacks.onMinutes(s, k, m),
               ),
@@ -391,14 +402,34 @@ class _Pill extends StatelessWidget {
     required this.label,
     required this.selected,
     required this.onTap,
+    this.semanticsLabel,
   });
 
   final String label;
   final bool selected;
   final VoidCallback onTap;
 
+  /// What a screen reader says for [label] when the bare word is not enough
+  /// ("30" is "30 minutes").
+  final String? semanticsLabel;
+
   @override
   Widget build(BuildContext context) {
+    // Read as a button that is selected or not. The chosen pill takes no
+    // tap, but it is chosen, not disabled, so it says so rather than reading
+    // as a control that is off.
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: true,
+      selected: selected,
+      label: semanticsLabel ?? label,
+      onTap: selected ? null : onTap,
+      child: ExcludeSemantics(child: _pill()),
+    );
+  }
+
+  Widget _pill() {
     return Material(
       color: selected ? BondColors.onDarkTint : BondColors.rail,
       borderRadius: BondRadii.fullAll,

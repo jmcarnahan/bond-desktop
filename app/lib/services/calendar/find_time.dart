@@ -188,6 +188,11 @@ class FindTimeResult {
   /// has no entry.
   final Map<FreeSlot, SlotAvailability> availability;
 
+  /// How many `find_meeting_times` calls the search made — the activity
+  /// row's `graph_calls`. Zero when nobody else was on it; one per hinted
+  /// day when the ask's hours were searched over several days.
+  final int graphCalls;
+
   const FindTimeResult({
     this.slots = const [],
     this.source = 'local',
@@ -195,6 +200,7 @@ class FindTimeResult {
     this.overlaps = const {},
     this.availability = const {},
     this.failed = false,
+    this.graphCalls = 0,
   });
 }
 
@@ -352,10 +358,20 @@ const int _dayEndHour = 18;
 /// [hints] (the ask's own words, [readAskHints]) narrow it: their hours
 /// clamp every day of the owner's own walk and of the window Graph is given,
 /// a day they named is not skipped as a weekend, and Graph's
-/// `activity_domain` follows the hours ([_activityDomain]). With a weekday
-/// read, a week searches that weekday ([findTimeWindowUtc]); when it offers
-/// nothing, the rest of its week at the same hours is offered under a note
-/// saying so.
+/// `activity_domain` follows the hours and the days searched
+/// ([_activityDomain]). Over a window of several days the hours are asked
+/// about ONE DAY AT A TIME (at most seven calls, five candidates each, a
+/// day already over skipped): one call over a week of evenings starting now
+/// got the daytime back, and every candidate fell outside the hours. The
+/// days are asked together. A day whose call fails costs only that day (and
+/// with nothing found the answer is the unreadable fallback, never "Nobody
+/// is free"); every day failing, or a failure every day would share (a
+/// missing permission, an account that cannot look others up), is the
+/// search failing. With a weekday read, a week searches that weekday
+/// ([findTimeWindowUtc]); when it offers nothing, the rest of its week at
+/// the same hours is offered under a note saying so — unless the rest of
+/// the week is the same window (that weekday is today, and the days before
+/// it have gone).
 ///
 /// Never throws: a calendar error is an empty result with its sentence.
 Future<FindTimeResult> searchFindTime({
@@ -392,8 +408,36 @@ Future<FindTimeResult> searchFindTime({
       first.failed) {
     return first;
   }
+  // Friday searched on a Friday: the rest of the week is today alone, the
+  // day just searched at the same hours (from now rather than from their
+  // opening, which the hours clamp makes the same walk). Asking again would
+  // only repeat the answer.
+  ({DateTime startUtc, DateTime endUtc, CalendarDate firstDay, CalendarDate lastDay})
+      windowOf({bool wholeWeek = false}) => findTimeWindowUtc(window,
+          now: now,
+          zone: zone,
+          durationMinutes: durationMinutes,
+          hints: hints,
+          wholeWeek: wholeWeek);
+  final searched = windowOf();
+  final rest = windowOf(wholeWeek: true);
+  if (rest.firstDay == searched.firstDay &&
+      rest.lastDay == searched.lastDay) {
+    return first;
+  }
   final week = await once(wholeWeek: true);
-  if (week.slots.isEmpty) return first;
+  final calls = first.graphCalls + week.graphCalls;
+  if (week.slots.isEmpty) {
+    return FindTimeResult(
+      slots: first.slots,
+      source: first.source,
+      note: first.note,
+      overlaps: first.overlaps,
+      availability: first.availability,
+      failed: first.failed,
+      graphCalls: calls,
+    );
+  }
   final weekday =
       DateFormat('EEEE').format(DateTime(day.year, day.month, day.day));
   final words = hints?.timeWords;
@@ -405,6 +449,7 @@ Future<FindTimeResult> searchFindTime({
     note: week.note == null ? note : '$note ${week.note}',
     overlaps: week.overlaps,
     availability: week.availability,
+    graphCalls: calls,
   );
 }
 
@@ -439,6 +484,9 @@ Future<FindTimeResult> _searchOnce({
     events = const [];
   }
 
+  // The calls made so far, which every result below reports.
+  var graphCalls = 0;
+
   FindTimeResult withOverlaps(List<FreeSlot> slots, String source,
           {String? note,
           Map<FreeSlot, SlotAvailability> availability = const {}}) =>
@@ -451,6 +499,7 @@ Future<FindTimeResult> _searchOnce({
             s: findOverlaps(events, s.startUtc, s.endUtc, zone: zone),
         },
         availability: availability,
+        graphCalls: graphCalls,
       );
 
   FindTimeResult local({String? note}) => withOverlaps(
@@ -484,17 +533,79 @@ Future<FindTimeResult> _searchOnce({
   // nothing and asks nobody.
   if (!w.endUtc.isAfter(w.startUtc)) return const FindTimeResult();
   if (addresses.isEmpty) return local();
+  // One ask of Graph per hinted day over a window of several days, else
+  // one over the whole window.
+  final asks = h != null && w.firstDay != w.lastDay
+      ? _hintedDays(w, h,
+          zone: zone,
+          durationMinutes: durationMinutes,
+          hints: hints,
+          hours: hours)
+      : [
+          (
+            startUtc: w.startUtc,
+            endUtc: w.endUtc,
+            // With the ask's hours Graph still answers across the whole
+            // window, so it is asked for more and those outside the hours
+            // are dropped below.
+            maxCandidates: h == null ? 5 : 20,
+            domain: _activityDomain(hints, hours,
+                namedDay: hints?.day != null && w.firstDay == w.lastDay
+                    ? w.firstDay
+                    : null),
+          ),
+        ];
+  // Every hinted day already over: nothing to search, nobody asked.
+  if (asks.isEmpty) return local();
   try {
-    final answered = await backend.findMeetingTimes(
-      attendees: addresses,
-      durationMinutes: durationMinutes,
-      windowStartUtc: w.startUtc,
-      windowEndUtc: w.endUtc,
-      // With the ask's hours Graph still answers across the whole window, so
-      // it is asked for more and those outside the hours are dropped below.
-      maxCandidates: h == null ? 5 : 20,
-      activityDomain: _activityDomain(hints, hours, window),
-    );
+    Future<MeetingTimes> ask(_GraphAsk a) => backend.findMeetingTimes(
+          attendees: addresses,
+          durationMinutes: durationMinutes,
+          windowStartUtc: a.startUtc,
+          windowEndUtc: a.endUtc,
+          maxCandidates: a.maxCandidates,
+          activityDomain: a.domain,
+        );
+    graphCalls = asks.length;
+    // The days are asked together, not one after another (five calls in
+    // series were five round trips), each failure caught on its own and the
+    // answers kept in day order. One ask throws straight to the handlers.
+    final List<_GraphOutcome> outcomes = asks.length == 1
+        ? [(answer: await ask(asks.single), error: null, stack: null)]
+        : await Future.wait([
+            for (final a in asks)
+              ask(a).then<_GraphOutcome>(
+                (answer) => (answer: answer, error: null, stack: null),
+                onError: (Object e, StackTrace st) =>
+                    (answer: null, error: e, stack: st),
+              ),
+          ]);
+    final answers = [for (final o in outcomes) ?o.answer];
+    final failures = [
+      for (final o in outcomes)
+        if (o.error case final e?) (error: e, stack: o.stack!),
+    ];
+    // A failure every day would share — a missing permission, an account
+    // that cannot look others up — is the search's own, as one call's
+    // would be. Any other day failing costs that day; every day failing is
+    // the search failing, through the handlers below.
+    for (final f in failures) {
+      final e = f.error;
+      if (e is CalendarScopeMissing ||
+          (e is CalendarRefused && e.code == 'unsupported_account')) {
+        Error.throwWithStackTrace(e, f.stack);
+      }
+    }
+    if (answers.isEmpty) {
+      Error.throwWithStackTrace(failures.first.error, failures.first.stack);
+    }
+    final answered = _merged(answers);
+    // A day nobody could read is not a day nobody is free: with any day
+    // unread and nothing found, the owner's own openings stand in, said as
+    // the unreadable fallback, never "Nobody is free".
+    if (failures.isNotEmpty && answered.suggestions.isEmpty) {
+      return local(note: findTimeUnreadableNote);
+    }
     var found = answered;
     if (h != null && answered.suggestions.isNotEmpty) {
       found = MeetingTimes(suggestions: [
@@ -546,27 +657,118 @@ Future<FindTimeResult> _searchOnce({
     return FindTimeResult(
         source: 'graph',
         note: sentence.isEmpty ? e.message : sentence,
-        failed: true);
+        failed: true,
+        graphCalls: graphCalls);
   } on CalendarScopeMissing {
-    return const FindTimeResult(
+    return FindTimeResult(
       source: 'graph',
       note: 'Calendar permission missing — reconnect in Settings.',
       failed: true,
+      graphCalls: graphCalls,
     );
   } on CalendarUnavailable catch (e) {
-    return FindTimeResult(source: 'graph', note: e.sentence, failed: true);
+    return FindTimeResult(
+        source: 'graph',
+        note: e.sentence,
+        failed: true,
+        graphCalls: graphCalls);
   } on Object catch (e) {
     // The type alone said nothing when a live press failed (2026-10-02):
     // the server's reason, with any endpoint redacted, is what names a bad
     // window, a zone Graph refused or a tenant that will not answer.
     debugPrint('find a time: find_meeting_times failed: ${e.runtimeType}: '
         '${redactEndpoints('$e')}');
-    return const FindTimeResult(
+    return FindTimeResult(
       source: 'graph',
       note: "Couldn't reach the calendar to find a time.",
       failed: true,
+      graphCalls: graphCalls,
     );
   }
+}
+
+/// One day's ask answered: its answer, or what it threw.
+typedef _GraphOutcome = ({
+  MeetingTimes? answer,
+  Object? error,
+  StackTrace? stack,
+});
+
+/// One ask of Graph: its window, how many candidates, and its domain.
+typedef _GraphAsk = ({
+  DateTime startUtc,
+  DateTime endUtc,
+  int maxCandidates,
+  String domain,
+});
+
+/// How many days the ask's hours are asked about one call each, at most.
+const int _maxHintedDays = 7;
+
+/// The ask's [h] on each day of [w], one Graph ask per day: from the later
+/// of the window's start and that day's opening to the earlier of its end
+/// and that day's close, five candidates, and that day's own domain. A day
+/// with no room left for [durationMinutes] is skipped. Each day's bounds come
+/// from [CalendarZone.localDateTime], so a DST change inside the week moves
+/// nothing.
+List<_GraphAsk> _hintedDays(
+  ({DateTime startUtc, DateTime endUtc, CalendarDate firstDay, CalendarDate lastDay})
+      w,
+  AskHours h, {
+  required CalendarZone zone,
+  required int durationMinutes,
+  required AskHints? hints,
+  required MailboxSettings? hours,
+}) {
+  final needed = Duration(minutes: durationMinutes < 1 ? 1 : durationMinutes);
+  final out = <_GraphAsk>[];
+  for (var day = w.firstDay;
+      !day.isAfter(w.lastDay) && out.length < _maxHintedDays;
+      day = day.addDays(1)) {
+    final opening =
+        _plainUtc(zone.localDateTime(day, h.startHour, h.startMinute));
+    final closing =
+        _plainUtc(zone.localDateTime(day, h.endHour, h.endMinute));
+    final start = w.startUtc.isAfter(opening) ? w.startUtc : opening;
+    final end = w.endUtc.isBefore(closing) ? w.endUtc : closing;
+    if (start.add(needed).isAfter(end)) continue;
+    out.add((
+      startUtc: start,
+      endUtc: end,
+      maxCandidates: 5,
+      // Several days are searched only with no day named (or the rest of
+      // its week), whose non-working days the owner's own walk skips too.
+      domain: _activityDomain(hints, hours),
+    ));
+  }
+  return out;
+}
+
+/// [t] as a plain UTC [DateTime]: a `TZDateTime`'s `==` compares its
+/// location too, and the backend seam takes instants.
+DateTime _plainUtc(DateTime t) =>
+    DateTime.fromMicrosecondsSinceEpoch(t.microsecondsSinceEpoch, isUtc: true);
+
+/// Several days' answers as one: every suggestion once (by its start and
+/// end), and, when none came back, `attendeesunavailable` only when every
+/// day said so — one day nobody could read is not "nobody is free".
+MeetingTimes _merged(List<MeetingTimes> answers) {
+  if (answers.length == 1) return answers.single;
+  final seen = <(DateTime, DateTime)>{};
+  final suggestions = [
+    for (final a in answers)
+      for (final s in a.suggestions)
+        if (seen.add((s.startUtc.toUtc(), s.endUtc.toUtc()))) s,
+  ];
+  if (suggestions.isNotEmpty) return MeetingTimes(suggestions: suggestions);
+  final reasons = [for (final a in answers) a.emptyReason];
+  final nobody = reasons.every(
+      (r) => findTimeEmptyFallback(r) == FindTimeEmpty.nobodyFree);
+  return MeetingTimes(
+      emptyReason: nobody
+          ? reasons.first
+          : reasons.firstWhere(
+              (r) => findTimeEmptyFallback(r) != FindTimeEmpty.nobodyFree));
 }
 
 /// Who is free for one suggestion, out of the people ASKED plus the owner:
@@ -590,11 +792,15 @@ SlotAvailability _availabilityOf(MeetingTimeSuggestion s, List<String> asked) {
 /// Graph's `activity_domain` for a search with [hints]. Graph's `personal`
 /// is the working hours PLUS the weekend, and only `unrestricted` opens
 /// every hour of every day, so: `unrestricted` when the ask's hours leave
-/// the mailbox's working window (dinner); `personal` when its own day is not
-/// a working day and its hours sit inside the window (Saturday morning);
-/// `work` (the server's default) otherwise.
-String _activityDomain(
-    AskHints? hints, MailboxSettings? hours, FindTimeWindow window) {
+/// the mailbox's working window (dinner); `personal` when the search is the
+/// ONE day the ask named ([namedDay]: the window's single day, whichever
+/// pill asked for it — "This week" with a Saturday read searches that
+/// Saturday) and that day is not a working day; `work` (the server's
+/// default) otherwise. A window of several days — no day named, or the rest
+/// of a week — stays `work`: the owner's own walk skips its non-working
+/// days, and Graph must not offer them either.
+String _activityDomain(AskHints? hints, MailboxSettings? hours,
+    {CalendarDate? namedDay}) {
   final h = hints?.hours;
   if (h != null) {
     final work = workingWindowOf(hours);
@@ -603,12 +809,7 @@ String _activityDomain(
       return 'unrestricted';
     }
   }
-  final day = hints?.day;
-  if (window == FindTimeWindow.theirs &&
-      day != null &&
-      !isWorkingDay(hours, day)) {
-    return 'personal';
-  }
+  if (namedDay != null && !isWorkingDay(hours, namedDay)) return 'personal';
   return 'work';
 }
 

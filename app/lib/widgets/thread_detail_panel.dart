@@ -238,8 +238,9 @@ class ThreadDetailPanel extends StatefulWidget {
   /// button, for a host with no compose to open.
   final VoidCallback? onCompose;
 
-  /// Opens Find a time for this thread. The host decides whether the thread
-  /// is asking for one (its scheduling read); null draws no button.
+  /// Find a time for this thread: the host decides whether it has somebody
+  /// to answer, and a press opens it as an ask in the Day column; null draws
+  /// no button.
   final VoidCallback? onFindTime;
 
   /// What opening one of the thread's files does. Null leaves every chip and

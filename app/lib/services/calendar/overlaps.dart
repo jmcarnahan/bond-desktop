@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../../models/calendar_models.dart';
-import 'ask_hints.dart' show AskHours;
+import 'ask_hours.dart';
 import 'calendar_zone.dart';
 
 /// Does this slot clash, and when is the person actually free?

@@ -57,7 +57,9 @@ void main() {
   const private = WritePreview(method: 'PATCH', path: '/me/events/e1');
 
   Future<void> pump(WidgetTester tester,
-          {CalendarWrite write = accept, VoidCallback? onIdle}) =>
+          {CalendarWrite write = accept,
+          VoidCallback? onIdle,
+          VoidCallback? onCommitting}) =>
       tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: CalendarWriteFlow(
@@ -65,6 +67,7 @@ void main() {
             onDone: (message, undo) => done.add((message, undo)),
             onFailed: failed.add,
             onIdle: onIdle,
+            onCommitting: onCommitting,
             builder: (context, start, busy) => TextButton(
               key: const ValueKey('go'),
               onPressed: busy
@@ -316,6 +319,50 @@ void main() {
     await settle(tester);
     expect(find.text('Try again later.'), findsOneWidget);
     expect(idle, 5);
+  });
+
+  group('onCommitting', () {
+    // Each entry says how many commits the writer had seen at that moment,
+    // so "committing:0" is before the write started.
+    late List<String> events;
+    setUp(() => events = []);
+
+    Future<void> pumpLogged(WidgetTester tester) => pump(tester,
+        onCommitting: () => events.add('committing:${writer.committed.length}'),
+        onIdle: () => events.add('idle:${writer.committed.length}'));
+
+    testWidgets('fires as the write goes out and onIdle once it ends, on the '
+        'at-once path', (tester) async {
+      writer.previews.add(const PreviewReady(private, needsConfirm: false));
+      final hold = writer.hold = Completer<WriteOutcome>();
+      await pumpLogged(tester);
+      await tester.tap(find.byKey(const ValueKey('go')));
+      await settle(tester);
+      expect(writer.previewed, hasLength(1));
+      expect(events, ['committing:0'],
+          reason: 'after the dry run, before the commit, and not idle while '
+              'the write is in the air');
+      hold.complete(const WriteOutcome.ok(eventId: 'e1'));
+      await settle(tester);
+      expect(events, ['committing:0', 'idle:1']);
+    });
+
+    testWidgets("fires on the strip's Send, never for the dry run or the strip "
+        'standing, and onIdle once the write ends', (tester) async {
+      writer.previews.add(const PreviewReady(toDana, needsConfirm: true));
+      final hold = writer.hold = Completer<WriteOutcome>();
+      await pumpLogged(tester);
+      await tester.tap(find.byKey(const ValueKey('go')));
+      await settle(tester);
+      expect(find.byType(WriteConfirmStrip), findsOneWidget);
+      expect(events, isEmpty);
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await settle(tester);
+      expect(events, ['committing:0']);
+      hold.complete(const WriteOutcome.ok(eventId: 'e1'));
+      await settle(tester);
+      expect(events, ['committing:0', 'idle:1']);
+    });
   });
 
   testWidgets('dismissing the strip sends nothing', (tester) async {

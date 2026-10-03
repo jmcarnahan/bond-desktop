@@ -321,13 +321,34 @@ class CommandPlanner {
   /// belongs to a series the confirm line says so — "· one meeting of a
   /// series" — which is where it differs, honestly, from an answer on a
   /// card or panel that reached the master and says "every meeting in".
+  ///
+  /// With [now], a create whose start is before it, or a move whose start
+  /// CHANGES to before it, is refused ("That time has passed.") before any
+  /// dry run: a slot or grid proposal held on screen past its start is no
+  /// longer a time to offer. A move that keeps its start (a meeting already
+  /// under way, re-proposed by its end) is not refused. The planner's own
+  /// paths check this themselves and pass nothing.
   Future<CommandPlan> propose(
     CalendarWrite write, {
     CalendarEvent? target,
     String lead = '',
     required CalendarZone zone,
     required CalendarDate today,
+    DateTime? now,
   }) async {
+    if (now != null) {
+      final start = switch (write) {
+        CreateEvent(:final startUtc) => startUtc,
+        MoveEvent(:final startUtc?)
+            when target?.startUtc == null ||
+                !startUtc.isAtSameMomentAs(target!.startUtc!) =>
+          startUtc,
+        _ => null,
+      };
+      if (start != null && start.isBefore(now)) {
+        return const CannotDo('That time has passed.');
+      }
+    }
     final result = await writer.preview(write);
     switch (result) {
       case PreviewFailed(:final message):

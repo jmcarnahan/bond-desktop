@@ -2802,19 +2802,28 @@ WHERE COALESCE(cta_text, '') <> ''
   /// [limit] — in ONE query, so the Day stop and the thread header cost a
   /// read, not a read per thread.
   ///
-  /// A thread is one when it `needs_reply`, its NEWEST inbound message (by
-  /// `received_at DESC, source_message_id DESC`, [latestInboundMeta]'s
-  /// order) has a `message_decisions` row whose intent head chose
-  /// `scheduling` with that option's probability — else the choice's own
-  /// confidence, for a row without per-option probabilities — at least
-  /// [threshold], and the owner has not written since that message
-  /// (`last_outbound_at` absent or not after it), and the owner has not
-  /// closed it: no `scheduling_ask` label ([writeSchedulingAskLabel]) on
-  /// that same newest inbound message. An invite sent from the ask, or a
-  /// dismiss, writes one. Pinned to the message by id, so a later inbound
-  /// message (the other person saying the time does not work) is a new
-  /// newest message, and the ask comes back by itself. This is the rule's
-  /// one spelling; the caller supplies only the policy's number.
+  /// A thread is one when the owner has not written since its NEWEST
+  /// inbound message (by `received_at DESC, source_message_id DESC`,
+  /// [latestInboundMeta]'s order; `last_outbound_at` absent or not after
+  /// it), the owner has not closed it — no `scheduling_ask` label with
+  /// `answer = 'no'` ([writeSchedulingAskLabel]: an invite sent from the
+  /// ask, or a dismiss) on that same newest message — and EITHER
+  ///
+  ///  * the model says so: the thread `needs_reply` and that message has a
+  ///    `message_decisions` row whose intent head chose `scheduling` with
+  ///    that option's probability — else the choice's own confidence, for a
+  ///    row without per-option probabilities — at least [threshold]; OR
+  ///  * the owner says so: a `scheduling_ask` label with `answer = 'yes'` on
+  ///    that newest message (the thread bar's Find a time,
+  ///    [reopenSchedulingAsk]) — with or without a decision row.
+  ///
+  /// Every label is pinned to the message by source and id, so a later
+  /// inbound message (the other person saying the time does not work) is a
+  /// new newest message that neither word is about: a closed ask comes back
+  /// by itself if the model reads the new message as one, and an ask the
+  /// owner opened stands only if the model agrees about the new message or
+  /// the owner presses again. This is the rule's one spelling; the caller
+  /// supplies only the policy's number.
   ///
   /// Each row carries that newest inbound message's id, which is what a
   /// label is written against.
@@ -2849,21 +2858,29 @@ WHERE COALESCE(cta_text, '') <> ''
       "  WHERE m.direction = 'inbound'"
       ') n ON n.source = c.source '
       '  AND n.conversation_key = c.conversation_key AND n.rn = 1 '
-      'JOIN message_decisions d ON d.source = n.source '
+      // LEFT: the owner's yes lists a thread the decision model never read.
+      'LEFT JOIN message_decisions d ON d.source = n.source '
       '  AND d.source_message_id = n.source_message_id '
-      "WHERE c.state = 'needs_reply' "
-      "  AND (c.last_outbound_at IS NULL OR c.last_outbound_at <= "
+      // A string compare, which holds only while both stamps carry the same
+      // ISO width ([isoStamp]'s six digits).
+      "WHERE (c.last_outbound_at IS NULL OR c.last_outbound_at <= "
       "       COALESCE(n.received_at, '')) "
       '  AND NOT EXISTS (SELECT 1 FROM decision_labels l '
-      "    WHERE l.question = 'scheduling_ask' AND l.source = n.source "
-      '    AND l.conversation_key = n.conversation_key '
+      "    WHERE l.question = 'scheduling_ask' AND l.answer = 'no' "
+      '    AND l.source = n.source '
       '    AND l.source_message_id = n.source_message_id) '
-      '  AND CASE WHEN json_valid(d.answers_json) THEN '
-      "    json_extract(d.answers_json, '\$.intent.choice') = 'scheduling' "
-      '    AND COALESCE('
-      "      json_extract(d.answers_json, '\$.intent.probabilities.scheduling'), "
-      "      json_extract(d.answers_json, '\$.intent.confidence'), 0) >= ? "
-      '  ELSE 0 END '
+      "  AND ((c.state = 'needs_reply' "
+      // No decision row: json_valid(NULL) is NULL, so the CASE says 0.
+      '    AND CASE WHEN json_valid(d.answers_json) THEN '
+      "      json_extract(d.answers_json, '\$.intent.choice') = 'scheduling' "
+      '      AND COALESCE('
+      "        json_extract(d.answers_json, '\$.intent.probabilities.scheduling'), "
+      "        json_extract(d.answers_json, '\$.intent.confidence'), 0) >= ? "
+      '    ELSE 0 END) '
+      '    OR EXISTS (SELECT 1 FROM decision_labels y '
+      "      WHERE y.question = 'scheduling_ask' AND y.answer = 'yes' "
+      '      AND y.source = n.source '
+      '      AND y.source_message_id = n.source_message_id)) '
       "ORDER BY COALESCE(c.last_message_at, c.last_inbound_at, '') DESC, "
       '  c.conversation_key DESC '
       'LIMIT ?',
@@ -5572,35 +5589,82 @@ SELECT conversation_key FROM (
     );
   }
 
-  /// Appends the owner's word that a thread no longer asks them for a time
-  /// and returns its row id: `question = 'scheduling_ask'`, `answer = 'no'`,
-  /// about [sourceMessageId], the ask's NEWEST inbound message — the one
-  /// [schedulingAskConversations] read. [origin] is `invite` (an invite
-  /// went out from the ask) or `dismiss` (the owner's ×). Append-only like
-  /// [writeNeedsYouLabel]; the undo of a dismiss deletes the row
-  /// ([deleteSchedulingAskLabel]). Kept by Clear AI results, like every
-  /// row of the log.
-  Future<int> writeSchedulingAskLabel({
+  /// Appends the owner's word about whether a thread asks them for a time
+  /// and returns its row id and the store's own stamp (an undo deletes by
+  /// both, [deleteSchedulingAskLabel]): `question = 'scheduling_ask'`, about
+  /// [sourceMessageId], the thread's NEWEST inbound message — the one
+  /// [schedulingAskConversations] reads. [answer] is `no` (the ask is
+  /// answered: [origin] `invite`, an invite went out from it, or `dismiss`,
+  /// the owner's ×) or `yes` (the owner says it is one — a press goes
+  /// through [reopenSchedulingAsk], which also clears an earlier `no`).
+  /// Append-only like [writeNeedsYouLabel]. Kept by Clear AI results, like
+  /// every row of the log.
+  Future<({int id, String createdAt})> writeSchedulingAskLabel({
     required String source,
     required String conversationKey,
     required String sourceMessageId,
+    required String answer,
     required String origin,
-    String? createdAt,
   }) async {
+    if (answer != 'yes' && answer != 'no') {
+      throw ArgumentError.value(answer, 'answer', 'is yes or no');
+    }
+    final createdAt = _nowIso();
     final rows = await db.customWriteReturning(
       'INSERT INTO decision_labels '
       '(question, answer, source, conversation_key, origin, created_at, '
       'source_message_id) '
-      "VALUES ('scheduling_ask', 'no', ?, ?, ?, ?, ?) RETURNING id",
+      "VALUES ('scheduling_ask', ?, ?, ?, ?, ?, ?) RETURNING id",
       variables: _args([
+        answer,
         source,
         conversationKey,
         origin,
-        createdAt ?? _nowIso(),
+        createdAt,
         sourceMessageId,
       ]),
     );
-    return rows.first.data['id'] as int;
+    return (id: rows.first.data['id'] as int, createdAt: createdAt);
+  }
+
+  /// The owner's press of Find a time on a thread: their word that it IS a
+  /// scheduling ask, about its NEWEST inbound message (read here, in
+  /// [schedulingAskConversations]' order, so the two cannot name different
+  /// messages). Any `no` on that same message — an earlier dismiss or
+  /// invite — goes first, in the same transaction: the owner's newer word
+  /// wins. Returns the yes row's id and stamp and the message it is about,
+  /// or null when the thread has no inbound message to be about.
+  Future<({int id, String createdAt, String sourceMessageId})?>
+      reopenSchedulingAsk({
+    required String source,
+    required String conversationKey,
+    String origin = 'owner',
+  }) {
+    return db.transaction(() async {
+      final newest = await db.customSelect(
+        'SELECT source_message_id FROM messages '
+        "WHERE source = ? AND conversation_key = ? AND direction = 'inbound' "
+        'ORDER BY received_at DESC, source_message_id DESC LIMIT 1',
+        variables: _args([source, conversationKey]),
+      ).getSingleOrNull();
+      final messageId = newest?.data['source_message_id'] as String?;
+      if (messageId == null) return null;
+      await db.customUpdate(
+        'DELETE FROM decision_labels '
+        "WHERE question = 'scheduling_ask' AND answer = 'no' "
+        'AND source = ? AND source_message_id = ?',
+        variables: _args([source, messageId]),
+        updateKind: UpdateKind.delete,
+      );
+      final yes = await writeSchedulingAskLabel(
+        source: source,
+        conversationKey: conversationKey,
+        sourceMessageId: messageId,
+        answer: 'yes',
+        origin: origin,
+      );
+      return (id: yes.id, createdAt: yes.createdAt, sourceMessageId: messageId);
+    });
   }
 
   /// Deletes the `scheduling_ask` label [id] stamped [createdAt] — the undo

@@ -88,6 +88,10 @@ void main() {
       var asked = 0;
       await pump(tester, onFindTime: () => asked++);
       expect(find.text('Find a time'), findsOneWidget);
+      // It says where it goes: the Day column, not a pane of its own.
+      expect(
+          find.byTooltip('Find a time — in the Day column, with these people'),
+          findsOneWidget);
       await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
       expect(asked, 1);
 

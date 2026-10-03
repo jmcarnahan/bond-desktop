@@ -2578,12 +2578,31 @@ void main() {
           calendarShown: true,
           calendarZone: la,
           today: today,
+          // Every line an open row can draw: the Asked for line, the
+          // their-day pill beside the weeks, and the Proposed line.
           schedulingAsks: [
-            ask('c1',
-                subject: 'Quarterly planning for the Fabrikam and Northwind '
-                    'integration programme',
-                expanded: true,
-                result: graphResult),
+            SchedulingAskRow(
+              source: 'email',
+              key: 'c1',
+              subject: 'Quarterly planning for the Fabrikam and Northwind '
+                  'integration programme',
+              askedBy: 'Dana Ortiz',
+              expanded: true,
+              result: graphResult,
+              minutes: 90,
+              window: FindTimeWindow.theirs,
+              hints: const AskHints(
+                day: CalendarDate(2026, 10, 9),
+                minutes: 90,
+                said: 'Asked for: Fri Oct 9 · dinner',
+              ),
+              windowLabels: const {
+                FindTimeWindow.theirs: 'Fri Oct 9',
+                FindTimeWindow.thisWeek: 'This Fri',
+                FindTimeWindow.nextWeek: 'Next Fri',
+              },
+              proposed: 'Proposed: Fri Oct 9 · 7:15–8:45 PM',
+            ),
           ],
           askCallbacks: callbacks(),
       )));
@@ -2593,6 +2612,13 @@ void main() {
           15);
       expect(tester.takeException(), isNull);
       expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(find.text('Asked for: Fri Oct 9 · dinner'), findsOneWidget);
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c1', FindTimeWindow.theirs)),
+          findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c1')),
+          findsOneWidget);
       for (var i = 0; i < 3; i++) {
         expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c1', i)),
             findsOneWidget);

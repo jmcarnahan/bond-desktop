@@ -4,15 +4,23 @@ import '../decision/decision_policy.dart';
 /// Which threads are asking for a time (docs/pipeline/14-calendar.md "Find a
 /// time").
 ///
-/// The signal is the decision model's, read back from `message_decisions`:
-/// the thread's NEWEST inbound message has `intent = scheduling` at
-/// p ≥ [DecisionPolicy.booleanYes], the thread still needs a reply, and the
-/// owner has not written since that message. Nothing here calls a model — a
-/// thread the decision model never read is simply not a scheduling ask.
+/// The signal is the decision model's or the owner's, read back from the
+/// store. Either way the owner has not written since the thread's NEWEST
+/// inbound message and has not closed the ask (no `scheduling_ask` label
+/// `no` on that message — an invite sent from it, or a dismiss); then EITHER
+/// that message has `intent = scheduling` at p ≥ [DecisionPolicy.booleanYes]
+/// in `message_decisions` and the thread still needs a reply, OR the owner
+/// pressed the thread bar's Find a time, a `scheduling_ask` label `yes` on
+/// that message (`MessageStore.reopenSchedulingAsk`, which also clears an
+/// earlier `no` there: the owner's newer word wins). Every label is pinned
+/// to the message by id, so a later inbound message is judged afresh.
+/// Nothing here calls a model — a thread the decision model never read is an
+/// ask only on the owner's word.
 ///
 /// The rule has ONE spelling, the store's query
-/// ([MessageStore.schedulingAskConversations]); the app and the tests both
-/// read it through [schedulingAskKeys].
+/// ([MessageStore.schedulingAskConversations]); the app reads it through
+/// [schedulingAskMessageIds] (`schedulingAsksProvider`), the tests through
+/// that or [schedulingAskKeys].
 
 /// The `'$source|$id'` keys of every scheduling ask, newest first, at most
 /// [limit] of them — for the Day stop's group and the thread header. One
@@ -32,7 +40,8 @@ Future<Set<String>> schedulingAskKeys(
 
 /// Every scheduling ask by its `'$source|$id'` key, with the id of the
 /// thread's NEWEST inbound message — the one the rule read, and the one an
-/// invite or a dismiss labels (`MessageStore.writeSchedulingAskLabel`).
+/// invite or a dismiss labels (`MessageStore.writeSchedulingAskLabel`) and
+/// an owner's press of Find a time says yes about.
 /// What `schedulingAsksProvider` holds.
 Future<Map<String, String>> schedulingAskMessageIds(
   MessageStore store, {

@@ -58,13 +58,16 @@ import '../services/calendar/command/command_lexicon.dart'
     show looksLikeCalendarCommand;
 import '../services/calendar/command/command_parser.dart' show parseCommand;
 import '../services/calendar/command/command_planner.dart';
-import '../services/calendar/command/command_router.dart' show CommandOutcome;
+import '../services/calendar/command/command_router.dart'
+    show CommandOutcome, directoryAddress;
 import '../services/calendar/command/command_types.dart'
     show CommandGuess, CommandPath, KnownPerson, ParsedCommand;
 import '../services/calendar/day_items.dart';
 import '../services/calendar/event_view.dart';
 import '../services/calendar/find_time.dart'
     show
+        FindTimeResult,
+        FindTimeWindow,
         findTimeReplyLine,
         findTimeSubject,
         findTimeWindowLabels,
@@ -115,7 +118,6 @@ import '../widgets/event_actions.dart';
 import '../widgets/event_panel.dart';
 import '../widgets/files_pane.dart';
 import '../widgets/find_field.dart';
-import '../widgets/find_time_pane.dart';
 import '../widgets/find_filter.dart';
 import '../widgets/bond_avatar.dart' show BondAvatar;
 import '../widgets/home_pane.dart';
@@ -528,12 +530,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// collapse state; an ask that stops being one simply stops being drawn.
   final Map<String, _AskSearch> _askSearches = {};
 
+  /// A thread bar Find a time press is in flight ([_openFindTime]).
+  bool _findingTime = false;
+
+  /// The asks this session closed, as `'<ask key>|<message id>'`: what a
+  /// slot's dry run landing after a dismiss checks first
+  /// ([_showProposal]), since the provider still holds its previous map
+  /// until its re-read lands. Undo of a dismiss takes the ask's entries out.
+  final Set<String> _closedAsks = {};
+
   /// The ask whose slot the standing proposal was built from, so the card's
   /// write going through marks that ask. Cleared with the command
   /// ([_forgetCommand]); [_proposalInvites] says whether its write invited
   /// anybody (an ask with nobody else on it adds to the owner's calendar).
   AskKey? _proposalAsk;
   bool _proposalInvites = false;
+
+  /// The ask's newest inbound message when its slot was picked — the one
+  /// the invite answers, so the card's write labels THAT message, not one
+  /// that arrived while the card stood (a fresh request the label would
+  /// hide). Set and cleared with [_proposalAsk].
+  String? _proposalMessageId;
 
   /// The standing proposal is a blank event picked on the grid, so its card
   /// draws a name field. Cleared with the command ([_forgetCommand]).
@@ -543,13 +560,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// ghost carries it too; null until typed. Cleared with the command.
   String? _proposalName;
 
+  /// The blank event's guests as its card's chips now read (lowercased
+  /// addresses), so a drag of the ghost re-proposes with them and the new
+  /// card starts from them; null until a chip changes. Cleared with
+  /// [_proposalName].
+  List<String>? _proposalAttendees;
+
   /// Bumped when the grid's ghost is tapped: the card flashes once. Back to
   /// zero with every new card, so a card never flashes as it appears.
   int _cardFlash = 0;
 
-  /// The card's write is going out: the ghost holds still and the grid
-  /// proposes nothing new until it lands or fails.
-  bool _cardWriting = false;
+  /// The serial of the card whose write is going out, or null. The ghost
+  /// holds still and the grid proposes nothing new while it is the STANDING
+  /// card's ([_cardWriting]): a typed Enter, a slot pick or a re-proposal
+  /// bumps [_commandSerial] and puts up a new card, and the old card's
+  /// write landing later (its `onWritingChanged(false)` dropped by the serial
+  /// guard, its `onDone` sparing the new card) can then never leave the new
+  /// card's ghost frozen and the grid deaf until Cancel.
+  int? _writingSerial;
+
+  /// The standing card's write is going out — see [_writingSerial].
+  bool get _cardWriting =>
+      _writingSerial != null && _writingSerial == _commandSerial;
 
   /// Words ⌘K's "Ask Day" row handed over, waiting for the bar to take them.
   /// One-shot: the bar submits them a frame after it sees them, and the
@@ -711,11 +743,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
-
-  /// The thread Find a time is open for — a pane over that thread, the same
-  /// overlay contract as the two above: Back and Put in reply return to the
-  /// thread underneath, and every selection clears it.
-  ({String source, String key})? _findTimeFor;
 
   /// Whether the New storyline pane is up — a storyline declared from a title
   /// and a charter with no thread in it yet. Same overlay contract as the two
@@ -1515,7 +1542,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _focusSideOnMount = null;
     _addingToStorylineId = null;
     _pickingStorylineForThread = null;
-    _findTimeFor = null;
     _declaringStoryline = false;
     _railOpen = false;
     _replyTo = null;
@@ -2510,7 +2536,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// [cleared] is how many rows the act took off the pile: one for every
   /// single-row act, N for a bulk act's one bar, and zero for an act that
   /// leaves its rows where they stand (a bulk Label).
-  void _toast(String message, {VoidCallback? onUndo, int cleared = 1}) {
+  void _toast(String message,
+      {VoidCallback? onUndo, int cleared = 1, bool keepUndo = false}) {
     if (!mounted) return;
     // The progress count (12g), fed where the act says what it did: an
     // undoable bar inside [_countingCleared]'s window is [cleared] rows gone,
@@ -2546,7 +2573,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // call, which makes it the one place the keyboard's undo can be fed from:
     // the sender rules, the thread actions and anything added later populate the
     // slot by construction rather than by remembering to. See [_lastUndo].
-    _lastUndo = onUndo;
+    // A bar with no Undo empties the slot — the act it reports is the newest
+    // thing done — except a REFUSAL ([keepUndo]: "That time has passed.", a
+    // span that leaves its day): nothing was done, so the Undo of the act
+    // before it stays where `z` reaches it.
+    if (onUndo != null || !keepUndo) _lastUndo = onUndo;
     final messenger = ScaffoldMessenger.of(context);
     // The previous bar goes now rather than queueing: correcting three senders
     // in a row should leave the third one's undo reachable, not the first's.
@@ -3550,7 +3581,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _find = text;
       _section = sectionForLabelFind(_section);
-      _findTimeFor = null;
       _selectedDay = null;
       _showingInvites = false;
       if (_section != RailSection.day) _forgetCommand();
@@ -5061,14 +5091,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final picking = _pickingStorylineForThread;
     if (picking != null) return _pickStorylinePane(picking);
 
-    // Over the thread it was opened for; a thread that went from under it
-    // falls through to whatever is next, and the next selection clears it.
-    final findFor = _findTimeFor;
-    if (findFor != null) {
-      final thread = _conversationFor(findFor.source, findFor.key);
-      if (thread != null) return _findTimePane(thread);
-    }
-
     final side = _side;
     // The full viewer stands wherever the file was opened from — a thread, a
     // storyline's shelf, a room, the Files stop, a person's files — as long as
@@ -5311,8 +5333,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // span. A tap on it flashes its card.
         onProposalChanged: (startUtc, endUtc) =>
             _reproposeFromGrid(startUtc, endUtc, zone: zone, today: today),
-        onProposalTapped: () => setState(() => _cardFlash += 1),
-        onRefused: (sentence) => _toast(sentence, cleared: 0),
+        // Not while the card writes: the tap is ignored, not a flash of a
+        // card whose buttons are already off.
+        onProposalTapped:
+            _cardWriting ? null : () => setState(() => _cardFlash += 1),
+        onRefused: (sentence) =>
+            _toast(sentence, cleared: 0, keepUndo: true),
         defaultCreateMinutes: _openAsk()?.entry.minutes ?? 30,
         onOpenItem: (item) {
           switch (item) {
@@ -5406,11 +5432,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _commandSerial += 1;
     _pendingCommandText = null;
     _proposalAsk = null;
+    _proposalMessageId = null;
     _proposalInvites = false;
     _proposalBlank = false;
     _proposalName = null;
+    _proposalAttendees = null;
     _cardFlash = 0;
-    _cardWriting = false;
+    _writingSerial = null;
   }
 
   void _clearCommand() {
@@ -5421,6 +5449,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The people the bar matches names against: every room's people with a
   /// mailbox ([knownPeopleOfRooms]), from the rooms [_body] last grouped.
   List<KnownPerson> _commandPeople() => knownPeopleOfRooms(_rooms);
+
+  /// A name [_commandPeople] lacks, looked up in the directory the way the
+  /// bar's Enter does (the router's `_lookUp`: five hits, each by its
+  /// invitable address, once). A failed search throws on to the card, which
+  /// says "Couldn't search the directory." — never that nobody has the name.
+  Future<List<KnownPerson>> _searchCommandPeople(String query) async {
+    final List<Person> hits;
+    try {
+      hits = await ref.read(peopleBackendProvider).searchPeople(query, top: 5);
+    } on Object catch (e) {
+      debugPrint('calendar card: directory search failed: ${e.runtimeType}');
+      rethrow;
+    }
+    final byAddress = <String, KnownPerson>{};
+    for (final h in hits) {
+      final address = directoryAddress(h);
+      if (address == null) continue;
+      byAddress.putIfAbsent(
+          address, () => KnownPerson(name: h.displayName, address: address));
+    }
+    return byAddress.values.toList();
+  }
 
   /// The meetings the bar matches against: the mirror's next two weeks.
   /// Family arg computed here from the clock, the day providers' rule.
@@ -5454,12 +5504,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _pendingCommandText = null;
       // A typed Enter is not the asks column's slot: its card must not mark
       // the ask whose proposal it replaces. A choice pressed on that card
-      // answers it, so the mark stays.
+      // answers it, so the mark stays. Nor is it the blank event's: its card
+      // asks no name and its ghost carries no typed name or guests.
       if (choice == null) {
         _proposalAsk = null;
+        _proposalMessageId = null;
         _proposalInvites = false;
-        _cardFlash = 0;
+        _proposalBlank = false;
+        _proposalName = null;
+        _proposalAttendees = null;
       }
+      // Either way a new card is coming, and a new card never flashes.
+      _cardFlash = 0;
     });
     CommandOutcome outcome;
     final now = DateTime.now();
@@ -5540,6 +5596,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             target: choice.targetEvent,
             zone: zone,
             today: today,
+            now: DateTime.now(),
           );
     } on Object catch (e) {
       // `propose` says its failures as plans; a throw is a belt, so the bar
@@ -5550,6 +5607,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted || serial != _commandSerial) return;
     setState(() {
       _commandBusy = false;
+      // A new card (the serial moved), which never flashes as it appears.
+      _cardFlash = 0;
       if (previous != null) {
         _commandOutcome = CommandOutcome(
             plan: plan, path: previous.path, parsed: previous.parsed);
@@ -5591,6 +5650,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (outcome == null) return null;
     final serial = _commandSerial;
     final ask = _proposalAsk;
+    final askMessageId = _proposalMessageId;
     final invites = _proposalInvites;
     return CommandPlanCard(
       key: ValueKey('command-plan-$serial'),
@@ -5606,8 +5666,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // because the write this card started did go through. A slot that
         // only went on the owner's calendar answers nobody, and the ask
         // stays owed.
+        // The label goes on the message the slot was picked for: a newer
+        // inbound one that landed meanwhile keeps its own ask standing.
         if (ask != null && invites) {
-          unawaited(_closeAsk(ask.source, ask.key, origin: 'invite'));
+          unawaited(_closeAsk(ask.source, ask.key,
+              origin: 'invite', messageId: askMessageId));
+          unawaited(ref.read(activityLogProvider).record('find_time',
+              detail: const {'action': 'send_invite'}));
+          // A second invite for the same ask that went up while this one
+          // was in the air (a grid press under a typed Enter's card) answers
+          // an ask this write just closed: it goes with it.
+          final standing = _proposalAsk;
+          if (serial != _commandSerial &&
+              standing != null &&
+              standing.source == ask.source &&
+              standing.key == ask.key) {
+            _clearCommand();
+          }
         }
         // Only the card this write came from: a new Enter while it was in
         // flight put up another card, and that one stands.
@@ -5621,10 +5696,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           _submitCommand(_commandText, zone: zone, choice: option),
       subjectEditable: _proposalBlank,
       onSubjectChanged: (name) => setState(() => _proposalName = name),
+      // The blank event's With line: the bar's people and its directory
+      // lookup, so a name means on the card what it means typed in the bar.
+      // The chips are kept here, so a drag of the ghost carries them into
+      // the re-proposal and the new card starts from them.
+      people: _proposalBlank ? _commandPeople() : const [],
+      searchPeople: _proposalBlank ? _searchCommandPeople : null,
+      onAttendeesChanged: (addresses) =>
+          setState(() => _proposalAttendees = addresses),
+      initialAttendees: _proposalAttendees ?? const [],
+      // The name as typed, so a re-proposal's new card keeps it through the
+      // dry run rather than starting from the old write's subject.
+      initialSubject: _proposalName,
       flash: _cardFlash,
+      // Recorded with this card's serial, so it holds only while this card
+      // stands ([_cardWriting]); its end clears only its own mark.
       onWritingChanged: (writing) {
-        if (mounted && serial == _commandSerial) {
-          setState(() => _cardWriting = writing);
+        if (!mounted) return;
+        if (writing && serial == _commandSerial) {
+          setState(() => _writingSerial = serial);
+        } else if (!writing && _writingSerial == serial) {
+          setState(() => _writingSerial = null);
         }
       },
       onOpenEvent: _openEvent,
@@ -5904,112 +5996,101 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     ];
   }
 
-  /// Opens Find a time over the thread: selected first when it is not the
-  /// main pane's already (a Day row, or the thread beside — whose panel the
-  /// selection closes, the thread now standing in the main column), so Back
-  /// and Put in reply land on it.
-  void _openFindTime(String source, String key) {
-    if (_selectedId != key || _selectedSource != source) {
-      _select(key, source: source);
-    }
-    setState(() => _findTimeFor = (source: source, key: key));
-    // The pane opens on the ask's own words; it waits on this read (one row,
-    // once per newest message), started here so its build only reads.
-    if ((ref.read(schedulingAsksProvider).valueOrNull ?? const {})
-        .containsKey(schedulingAskKey(source, key))) {
-      unawaited(_readAskHints(source, key)
-          .then((_) => mounted ? setState(() {}) : null));
+  /// Find a time on the thread bar: the owner's word that [thread] asks for
+  /// a time, then the Day stop with that ask open in the column — the path a
+  /// press on its row takes ([_toggleAsk]: the hints read, the default
+  /// search, the pane following to the ask's day).
+  ///
+  /// A thread already listed is only jumped to. Otherwise the press writes a
+  /// `scheduling_ask` label `yes` on the thread's newest inbound message
+  /// ([MessageStore.reopenSchedulingAsk], which also clears an earlier
+  /// dismiss there: the owner's newer word wins) and re-reads the asks,
+  /// awaiting the read, so the row exists before it is opened.
+  ///
+  /// One press at a time ([_findingTime]): a double press writes one yes.
+  Future<void> _openFindTime(Conversation thread) async {
+    if (_findingTime) return;
+    _findingTime = true;
+    try {
+      await _openFindTimeNow(thread);
+    } finally {
+      _findingTime = false;
     }
   }
 
-  /// Find a time for [thread]: its other people, the search, and the two
-  /// ways out of a slot — the reply box, or an invite through the write flow.
-  Widget _findTimePane(Conversation thread) {
-    void back() => setState(() => _findTimeFor = null);
-    final zone = ref.watch(calendarZoneProvider).valueOrNull;
-    // Never a blank column: until the zone resolves the pane has no clock to
-    // draw slots on, so it says what it is waiting for and keeps its way
-    // out. Not a UTC stand-in — a search run on the wrong clock would stand
-    // until the next change of people, length or week.
-    if (zone == null) {
-      return Padding(
-        padding: const EdgeInsets.all(BondSpacing.s24),
-        child: FindTimePane.waiting(
-          onBack: back,
-          onHome: () => _selectSection(RailSection.home),
-        ),
-      );
+  Future<void> _openFindTimeNow(Conversation thread) async {
+    final source = thread.source;
+    final key = thread.id;
+    final listed = (ref.read(schedulingAsksProvider).valueOrNull ?? const {})
+        .containsKey(schedulingAskKey(source, key));
+    if (!listed) {
+      try {
+        final yes = await ref
+            .read(messageStoreProvider)
+            .reopenSchedulingAsk(source: source, conversationKey: key);
+        if (yes == null) {
+          // No inbound message to pin the word to: said, not swallowed.
+          if (mounted) {
+            _toast('Nothing to find a time for — nobody wrote in this '
+                'thread.', cleared: 0);
+          }
+          return;
+        }
+      } on Object catch (e) {
+        debugPrint('scheduling ask: the yes write failed: ${e.runtimeType}');
+        if (mounted) _toast("Couldn't find a time just now.", cleared: 0);
+        return;
+      }
+      // The owner's yes outranks a close this session made.
+      final prefix = '${schedulingAskKey(source, key)}|';
+      _closedAsks.removeWhere((k) => k.startsWith(prefix));
+      unawaited(ref
+          .read(activityLogProvider)
+          .record('scheduling_ask', detail: const {'origin': 'owner'}));
+      if (!mounted) return;
+      ref.invalidate(schedulingAsksProvider);
+      try {
+        await ref.read(schedulingAsksProvider.future);
+      } on Object {
+        // The provider answers an empty map on a failed read; nothing to do.
+      }
+      if (!mounted) return;
     }
-    // An ask's own words seed the pane's length and day, so they are read
-    // before it opens (one row read, once per ask); a thread that is not an
-    // ask has none to read.
-    final entry = _askSearches['${thread.source}|${thread.id}'];
-    final isAsk = (ref.watch(schedulingAsksProvider).valueOrNull ?? const {})
-        .containsKey(schedulingAskKey(thread.source, thread.id));
-    // Waits only while the read [_openFindTime] started is out; build never
-    // starts one.
-    if (isAsk && entry?.hintsReading != null) {
-      return Padding(
-        padding: const EdgeInsets.all(BondSpacing.s24),
-        child: FindTimePane.waiting(
-          onBack: back,
-          onHome: () => _selectSection(RailSection.home),
-        ),
-      );
+    _selectSection(RailSection.day);
+    // Opened, never folded: a row the owner left open is opened afresh (its
+    // newer message re-read, the pane back on its day) rather than toggled
+    // shut.
+    _askSearches['$source|$key']?.expanded = false;
+    _toggleAsk(source, key);
+  }
+
+  /// Whether the thread bar offers Find a time on [thread]: a calendar to
+  /// find it on — the mirror shown and the zone resolved, the condition the
+  /// Day column draws its asks under, so a press never lands on a Day stop
+  /// with no asks column — and somebody to answer: its newest message is
+  /// inbound (the owner has not written since their last inbound one; the
+  /// stamps compare as strings at the store's one width) and it has other
+  /// people with an address to search on. Read in build (the thread bar).
+  bool _canFindTime(Conversation thread) {
+    if (!calendarShowsMirror(ref.watch(calendarAvailabilityProvider)) ||
+        ref.watch(calendarZoneProvider).valueOrNull == null) {
+      return false;
     }
-    final hints = isAsk ? entry?.hints : null;
-    final people = _otherPeople(thread);
-    final target = (source: thread.source, conversationKey: thread.id);
-    return Padding(
-      padding: const EdgeInsets.all(BondSpacing.s24),
-      child: FindTimePane(
-        key: ValueKey('find-time-${thread.source}|${thread.id}'),
-        hints: hints,
-        windowLabelsFor: (minutes) => _windowLabels(hints, minutes),
-        availability: ref.watch(calendarAvailabilityProvider),
-        subject: thread.subject,
-        participants: people,
-        zone: zone,
-        today: zone.dateOf(DateTime.now().toUtc()),
-        search: ({
-          required addresses,
-          required durationMinutes,
-          required window,
-        }) =>
-            _findTimeSearch(
-          addresses: addresses,
-          durationMinutes: durationMinutes,
-          window: window,
-          zone: zone,
-          surface: 'pane',
-          hints: hints,
-        ),
-        onPutInReply: (text) => _putInReply(target, text),
-        writer: ref.read(calendarWritesProvider),
-        onDone: (message, undo, invited) {
-          _calendarWriteDone(message, undo);
-          // `add_to_calendar` when nobody was on it: the event went on the
-          // owner's calendar and no invite went anywhere.
-          unawaited(ref.read(activityLogProvider).record('find_time',
-              detail: {
-                'action': invited ? 'send_invite' : 'add_to_calendar',
-              }));
-          if (mounted) back();
-        },
-        onFailed: _calendarWriteFailed,
-        onBack: back,
-        onHome: () => _selectSection(RailSection.home),
-      ),
-    );
+    final outbound = thread.lastOutboundAt;
+    final inbound = thread.lastInboundAt;
+    if (inbound == null) return false;
+    if (outbound != null && outbound.compareTo(inbound) > 0) return false;
+    return _otherPeople(thread).isNotEmpty;
   }
 
   /// [thread]'s other people with an address: the owner left out, a Teams
   /// roster entry (no `@`) left out, each address once and lowercased. The
-  /// pane and the asks column both search on it, so the two cannot drift.
-  List<FindTimePerson> _otherPeople(Conversation thread) {
+  /// asks column searches and invites on it, and the thread bar's Find a
+  /// time offers itself only when it is non-empty.
+  List<({String name, String address})> _otherPeople(Conversation thread) {
     final owner = _ownerRecord.address?.trim().toLowerCase();
     final seen = <String>{};
-    return <FindTimePerson>[
+    return <({String name, String address})>[
       for (final p in thread.participants)
         if ((p.email ?? '').trim().isNotEmpty &&
             p.email!.trim().toLowerCase() != owner &&
@@ -6051,11 +6132,48 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// The Day column's rows for [asks], each with its search as it stands.
-  List<SchedulingAskRow> _askRows(List<Conversation> asks) =>
-      [for (final c in asks) _askRow(c)];
+  ///
+  /// Only [_closeAsk] removes a search on purpose; an ask that leaves the
+  /// list another way (the owner replied, a decision changed) is pruned
+  /// here, once the asks have been read, so a search never outlives its ask
+  /// and comes back open over old slots when the ask does.
+  List<SchedulingAskRow> _askRows(List<Conversation> asks) {
+    // Only over a real read: the provider answers an empty map on a failed
+    // read, and a conversation list that is not loaded lists nothing, and
+    // neither may wipe every search.
+    final asksRead = ref.read(schedulingAsksProvider);
+    if (asksRead.hasValue &&
+        !asksRead.hasError &&
+        ref.read(conversationsProvider) is ConversationsLoaded) {
+      final listed = asksRead.requireValue;
+      _askSearches.removeWhere((key, _) => !listed.containsKey(key));
+    }
+    final now = DateTime.now();
+    return [for (final c in asks) _askRow(c, now)];
+  }
 
-  SchedulingAskRow _askRow(Conversation c) {
+  SchedulingAskRow _askRow(Conversation c, DateTime now) {
     final e = _askSearches['${c.source}|${c.id}'] ?? _AskSearch();
+    // A search read for an older message than the one now listed is a
+    // different ask's (it left and came back): folded, its slots and words
+    // dropped, and any answer still out ignored (the serial moves), so the
+    // next open reads and searches the new one.
+    final newest = ref
+        .read(schedulingAsksProvider)
+        .valueOrNull?[schedulingAskKey(c.source, c.id)];
+    if (e.hintsRead && newest != null && e.hintsMessageId != newest) {
+      e
+        ..expanded = false
+        ..busy = false
+        ..result = null
+        ..hints = null
+        ..hintsRead = false
+        ..hintsMessageId = null
+        ..hintsDay = null
+        ..searched = false
+        ..searchedAt = null
+        ..serial += 1;
+    }
     final subject = (c.subject ?? '').trim();
     return SchedulingAskRow(
       source: c.source,
@@ -6067,9 +6185,30 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       minutes: e.minutes,
       window: e.window,
       hints: e.hints,
-      result: e.result,
+      result: _liveResult(e.result, now),
       proposed: _proposedLine(c.source, c.id),
       windowLabels: _windowLabels(e.hints, e.minutes),
+    );
+  }
+
+  /// [result] without the slots that have ENDED by [now]: a row left open
+  /// past a slot never offers it. A slot under way still shows (picking it
+  /// is refused as past, in [_pickAskSlot]'s one sentence).
+  static FindTimeResult? _liveResult(FindTimeResult? result, DateTime now) {
+    if (result == null) return null;
+    final live = [
+      for (final s in result.slots)
+        if (s.endUtc.isAfter(now)) s,
+    ];
+    if (live.length == result.slots.length) return result;
+    return FindTimeResult(
+      slots: live,
+      source: result.source,
+      note: result.note,
+      overlaps: result.overlaps,
+      availability: result.availability,
+      failed: result.failed,
+      graphCalls: result.graphCalls,
     );
   }
 
@@ -6131,16 +6270,36 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }) {
     final plan = _commandOutcome?.plan;
     if (plan is! CalendarProposal || _cardWriting) return;
-    // A belt for any span handed in: the grid refuses a resize that leaves
-    // its day, and a move across midnight, or a span over a day, is refused
-    // here in the same words.
-    if (!DayGrid.staysOnOneDay(zone, startUtc, endUtc)) {
-      _toast(DayGrid.resizeLeavesDay, cleared: 0);
+    // The one past rule, first, as at every entry.
+    if (_refusePast(startUtc)) return;
+    // A belt for any span handed in, on the grid's own rule: a span on one
+    // day, or one inside the days the standing proposal already covered (an
+    // own overnight meeting shortened from either end,
+    // [DayGrid.resizeKeepsDays]). Anything else — a move across midnight, a
+    // span over a day, a resize out of its days — is refused here. A resize
+    // says so in the grid's own words; a same-length move has nothing to
+    // "move instead", so it says what would work.
+    final wasStart = plan.startUtc;
+    final wasEnd = plan.endUtc;
+    if (!DayGrid.staysOnOneDay(zone, startUtc, endUtc) &&
+        !(wasStart != null &&
+            wasEnd != null &&
+            DayGrid.resizeKeepsDays(
+                zone, wasStart, wasEnd, startUtc, endUtc))) {
+      final was = wasStart != null && wasEnd != null
+          ? wasEnd.difference(wasStart)
+          : null;
+      _toast(
+          was == endUtc.difference(startUtc)
+              ? moveLeavesDay
+              : DayGrid.resizeLeavesDay,
+          cleared: 0,
+          keepUndo: true);
       return;
     }
     final write = plan.write;
     // The drop's own refusals, in its words: a move checked as a dropped
-    // tile is, a create never into the past.
+    // tile is.
     final target = plan.targetEvent;
     if (write is MoveEvent && target != null) {
       final checked = checkDrop(
@@ -6149,30 +6308,33 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           endUtc: endUtc,
           now: DateTime.now());
       if (checked is NewTimeProblem) {
-        _toast(checked.reason, cleared: 0);
+        // A refusal: nothing was done, so `z` keeps the last write's Undo.
+        _toast(checked.reason, cleared: 0, keepUndo: true);
         return;
       }
-    } else if (write is CreateEvent &&
-        startUtc.isBefore(DateTime.now().toUtc())) {
-      _toast('That time has passed.', cleared: 0);
-      return;
     }
     final ask = _proposalAsk;
     if (ask != null) {
-      unawaited(_pickAskSlot(ask.source, ask.key, FreeSlot(startUtc, endUtc)));
+      unawaited(_pickAskSlot(ask.source, ask.key, FreeSlot(startUtc, endUtc),
+          messageId: _proposalMessageId));
       return;
     }
+    // A blank event's: its name as typed and its guests as chipped, re-run
+    // the way a typed command's is ([_reproposeCommand]), so the card and
+    // the ghost stay on screen through the dry run and the name, the guests
+    // and the blank card come across.
     if (_proposalBlank && write is CreateEvent) {
       final typed = (_proposalName ?? write.subject).trim();
       _selectDay(zone.dateOf(startUtc));
-      unawaited(_showProposal(
+      unawaited(_reproposeCommand(
           CreateEvent.propose(
-              subject: typed.isEmpty ? 'New event' : typed,
-              startUtc: startUtc,
-              endUtc: endUtc),
+                  subject: typed.isEmpty ? 'New event' : typed,
+                  startUtc: startUtc,
+                  endUtc: endUtc)
+              .withAttendees(_proposalAttendees ?? const []),
+          null,
           zone: zone,
-          today: today,
-          blank: true));
+          today: today));
       return;
     }
     final CalendarWrite? next = switch (write) {
@@ -6209,9 +6371,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     });
     CommandPlan plan;
     try {
-      plan = await ref
-          .read(commandPlannerProvider)
-          .propose(write, target: target, zone: zone, today: today);
+      plan = await ref.read(commandPlannerProvider).propose(write,
+          target: target, zone: zone, today: today, now: DateTime.now());
     } on Object catch (e) {
       debugPrint('calendar command: grid re-proposal failed: ${e.runtimeType}');
       plan = const CannotDo('Something went wrong reading that.');
@@ -6243,15 +6404,33 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return;
     }
     // A newer inbound message is a new ask in the same row: its words are
-    // read again and its first search starts from them.
+    // read again and its first search starts from them. So is a new day:
+    // "dinner tomorrow" read yesterday named a day that is today now.
     final newest = ref
         .read(schedulingAsksProvider)
         .valueOrNull?[schedulingAskKey(source, key)];
-    if (entry.hintsRead && newest != null && entry.hintsMessageId != newest) {
+    final now = DateTime.now();
+    final zone = ref.read(calendarZoneProvider).valueOrNull!;
+    if (entry.hintsRead &&
+        askHintsStale(
+            readFor: entry.hintsMessageId,
+            newest: newest,
+            readOn: entry.hintsDay,
+            today: zone.dateOf(now.toUtc()))) {
+      // A search still out was read on the old words: its answer is
+      // dropped (the serial moves) and the fresh search below is not held
+      // off by its busy mark.
       entry
         ..hintsRead = false
         ..searched = false
-        ..result = null;
+        ..result = null
+        ..busy = false
+        ..serial += 1;
+    }
+    // A standing answer older than [askResultLifetime] is searched again
+    // rather than shown: calendars move, and its first slots may be gone.
+    if (entry.result != null && askResultStale(entry.searchedAt, now)) {
+      entry.result = null;
     }
     setState(() {
       for (final e in _askSearches.values) {
@@ -6273,9 +6452,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// there proposes that Friday. [_selectDay] keeps the grid face as it is.
   ///
   /// It never takes the owner anywhere: off the Day stop (they left during
-  /// the hint read) it does nothing, and with a thread, storyline, room or
-  /// Later day open it only moves the day underneath, so the pane is on the
-  /// right day when they come back to it.
+  /// the hint read) it does nothing, and otherwise it sets the day and
+  /// nothing else — never [_selectDay], which closes a thread, storyline,
+  /// room or Later day, a compose, Settings, the activity log or Invites.
+  /// Whatever the owner has open stays; the pane is on the right day when
+  /// they come back to it.
   void _followAsk(_AskSearch entry) {
     if (_section != RailSection.day) return;
     final zone = ref.read(calendarZoneProvider).valueOrNull;
@@ -6286,16 +6467,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         zone: zone,
         durationMinutes: entry.minutes,
         hints: entry.hints);
-    final reading = _selectedId != null ||
-        _selectedStorylineId != null ||
-        _selectedRoomKey != null ||
-        _selectedLaterDay != null;
-    if (reading) {
-      final today = zone.dateOf(now.toUtc());
-      setState(() => _selectedDay = w.firstDay == today ? null : w.firstDay);
-      return;
-    }
-    _selectDay(w.firstDay);
+    final today = zone.dateOf(now.toUtc());
+    setState(() => _selectedDay = w.firstDay == today ? null : w.firstDay);
   }
 
   /// A pill pressed: the new length or week, and the search again.
@@ -6330,7 +6503,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
     }
     entry.searched = true;
-    _followAsk(entry);
+    // Only an ask still open moves the pane: one folded during the hint
+    // read (another opened meanwhile, one open at a time) must not pull
+    // the pane to its day under the ask now open.
+    if (entry.expanded) _followAsk(entry);
     FindTimeResult result;
     try {
       result = await _findTimeSearch(
@@ -6349,6 +6525,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       entry.busy = false;
       entry.result = result;
+      entry.searchedAt = DateTime.now();
     });
   }
 
@@ -6380,12 +6557,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             .getMessageRow(source, messageId);
         if (row != null) {
           final body = (row['body_text'] as String?)?.trim();
+          // "Tomorrow" is the day after the message was SENT: its words are
+          // read against its own stamp, and a day they named that has gone
+          // is no day ([readAskHints]'s rule, against now).
+          final sent = row['received_at'];
           hints = readAskHints(
             subject: row['subject'] as String? ?? '',
             body: body == null || body.isEmpty
                 ? row['body_preview'] as String? ?? ''
                 : body,
             now: DateTime.now(),
+            sentAt: sent is String ? DateTime.tryParse(sent) : null,
             zone: zone,
           );
         }
@@ -6397,6 +6579,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     entry
       ..hints = hints
       ..hintsMessageId = messageId
+      ..hintsDay = zone?.dateOf(DateTime.now().toUtc())
       ..hintsRead = true;
   }
 
@@ -6407,13 +6590,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// False when it cannot run (the thread or the zone is gone), so a grid
   /// press can fall back to a blank event.
-  Future<bool> _pickAskSlot(String source, String key, FreeSlot slot) async {
+  ///
+  /// [messageId] is the message the invite answers when the caller already
+  /// holds it — a dragged ghost re-proposing the standing invite keeps the
+  /// one its slot was first picked for ([_proposalMessageId]), so a message
+  /// that arrived since keeps its own ask; else the newest listed now.
+  Future<bool> _pickAskSlot(String source, String key, FreeSlot slot,
+      {String? messageId}) async {
+    // Refused is handled: true, so a grid press does not fall back to a
+    // blank event at the same past time.
+    if (_refusePast(slot.startUtc)) return true;
     final thread = _loadedConversation(source, key);
     final zone = ref.read(calendarZoneProvider).valueOrNull;
     if (thread == null || zone == null) return false;
     final today = zone.dateOf(DateTime.now().toUtc());
     _selectDay(zone.dateOf(slot.startUtc));
     final addresses = _otherAddresses(thread);
+    // Read now, at the pick: the message this invite answers.
+    final answers = messageId ??
+        ref
+            .read(schedulingAsksProvider)
+            .valueOrNull?[schedulingAskKey(source, key)];
     final write = CreateEvent.propose(
       subject: findTimeSubject(thread.subject),
       startUtc: slot.startUtc,
@@ -6425,16 +6622,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         zone: zone,
         today: today,
         ask: (source: source, key: key),
+        askMessageId: answers,
         invites: addresses.isNotEmpty);
     return true;
   }
 
-  /// The ask open in the Day column, if one is — and still an ask: a row
-  /// that closed or left the list while open counts for nothing.
+  /// The ask open in the Day column, if one is — and still the same ask: a
+  /// row that closed or left the list while open counts for nothing, and
+  /// neither does one whose newest message is not the one its search was
+  /// read for (it left and came back; [_askRow] folds it on the next build,
+  /// and a press before that is a blank event, not an invite on a stale
+  /// search).
   ({String source, String key, _AskSearch entry})? _openAsk() {
     final asks = ref.read(schedulingAsksProvider).valueOrNull ?? const {};
     for (final MapEntry(:key, :value) in _askSearches.entries) {
       if (!value.expanded || !asks.containsKey(key)) continue;
+      if (value.hintsRead && value.hintsMessageId != asks[key]) continue;
       final bar = key.indexOf('|');
       if (bar < 0) continue;
       return (
@@ -6444,6 +6647,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       );
     }
     return null;
+  }
+
+  /// The ONE past rule at every entry that proposes a time — a grid press
+  /// ([_createFromGrid]), an ask's slot ([_pickAskSlot]) and a dragged ghost
+  /// ([_reproposeFromGrid]): a start before now is refused in one sentence,
+  /// with nothing dry-run. True when refused. The planner refuses the same
+  /// start again (`propose(now:)`, passed at every call here) as the belt,
+  /// for a card held on screen past its start.
+  bool _refusePast(DateTime startUtc) {
+    if (!startUtc.isBefore(DateTime.now().toUtc())) return false;
+    _toast(pastRefusal, cleared: 0, keepUndo: true);
+    return true;
   }
 
   /// A press on empty grid time: with an ask open, that ask's invite on the
@@ -6458,6 +6673,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }) {
     // The card's write is in the air: nothing new is proposed under it.
     if (_cardWriting) return;
+    // The one past rule, before an ask's invite or a blank event is built.
+    if (_refusePast(startUtc)) return;
     unawaited(() async {
       final ask = _openAsk();
       if (ask != null &&
@@ -6477,13 +6694,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// [ask] is the ask the slot came from, set in the same frame the card
   /// lands so the card's write marks it ([invites]: whether anybody is on
-  /// it); a newer command drops it with the card. [blank] is a blank event
+  /// it; [askMessageId]: the newest inbound message it answers, read at the
+  /// pick); a newer command drops it with the card. [blank] is a blank event
   /// picked on the grid, whose card asks for its name.
   Future<void> _showProposal(
     CalendarWrite write, {
     required CalendarZone zone,
     required CalendarDate today,
     AskKey? ask,
+    String? askMessageId,
     bool invites = false,
     bool blank = false,
   }) async {
@@ -6496,17 +6715,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     try {
       plan = await ref
           .read(commandPlannerProvider)
-          .propose(write, zone: zone, today: today);
+          .propose(write, zone: zone, today: today, now: DateTime.now());
     } on Object catch (e) {
       debugPrint('find a time: slot proposal failed: ${e.runtimeType}');
       plan = const CannotDo('Something went wrong reading that.');
     }
     if (!mounted || serial != _commandSerial) return;
+    // The ask may have gone during the dry run (its × pressed, an invite
+    // sent elsewhere): an invite for an ask nobody owes any more is no
+    // proposal, and its card never lands.
+    // [_closedAsks] says so at once; the provider only once its re-read
+    // after the label has landed.
+    if (ask != null &&
+        (_closedAsks.contains(
+                '${schedulingAskKey(ask.source, ask.key)}|$askMessageId') ||
+            !(ref.read(schedulingAsksProvider).valueOrNull ?? const {})
+                .containsKey(schedulingAskKey(ask.source, ask.key)))) {
+      setState(_forgetCommand);
+      return;
+    }
     setState(() {
       _commandBusy = false;
       _commandOutcome =
           CommandOutcome(plan: plan, path: CommandPath.lexicon);
       _proposalAsk = ask;
+      _proposalMessageId = ask == null ? null : askMessageId;
       _proposalInvites = ask != null && invites;
       _proposalBlank = blank;
     });
@@ -6515,37 +6748,42 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Writes the owner's word that the ask [source]/[key] is answered — a
   /// `scheduling_ask` label on its NEWEST inbound message ([origin]
   /// `invite` or `dismiss`) — and re-reads the asks so its row goes at
-  /// once. Returns the label's id and stamp for an undo, or null when the
-  /// ask is not listed any more (nothing to close) or the write failed.
+  /// once. [messageId] is the message to label when the caller already
+  /// knows it (an invite: the one its slot was picked for), else the
+  /// listed newest. Returns the label's id and the store's stamp for an
+  /// undo, or null when there is nothing to close (no id given and the ask
+  /// is not listed any more) or the write failed.
   Future<({int id, String createdAt})?> _closeAsk(
     String source,
     String key, {
     required String origin,
+    String? messageId,
   }) async {
-    final messageId = ref
-        .read(schedulingAsksProvider)
-        .valueOrNull?[schedulingAskKey(source, key)];
-    if (messageId == null) return null;
-    final createdAt = DateTime.now().toUtc().toIso8601String();
-    final int id;
+    final about = messageId ??
+        ref
+            .read(schedulingAsksProvider)
+            .valueOrNull?[schedulingAskKey(source, key)];
+    if (about == null) return null;
+    final ({int id, String createdAt}) label;
     try {
-      id = await ref.read(messageStoreProvider).writeSchedulingAskLabel(
+      label = await ref.read(messageStoreProvider).writeSchedulingAskLabel(
             source: source,
             conversationKey: key,
-            sourceMessageId: messageId,
+            sourceMessageId: about,
+            answer: 'no',
             origin: origin,
-            createdAt: createdAt,
           );
     } on Object catch (e) {
       debugPrint('scheduling ask: the label write failed: ${e.runtimeType}');
       return null;
     }
     _askSearches.remove('$source|$key');
+    _closedAsks.add('${schedulingAskKey(source, key)}|$about');
     unawaited(ref
         .read(activityLogProvider)
         .record('scheduling_ask', detail: {'origin': origin}));
     if (mounted) ref.invalidate(schedulingAsksProvider);
-    return (id: id, createdAt: createdAt);
+    return label;
   }
 
   /// The ×: the ask leaves the column until the other person writes again
@@ -6569,11 +6807,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _toast(
       'Dismissed — it comes back if they write again.',
       cleared: 0,
-      onUndo: () => unawaited(_undoDismissAsk(closed)),
+      onUndo: () => unawaited(_undoDismissAsk(source, key, closed)),
     );
+    // The column's next read is the one without it, awaited here so
+    // whatever reads the asks after a dismiss reads them fresh.
+    try {
+      await ref.read(schedulingAsksProvider.future);
+    } on Object {
+      // The provider answers an empty map on a failed read.
+    }
   }
 
-  Future<void> _undoDismissAsk(({int id, String createdAt}) closed) async {
+  Future<void> _undoDismissAsk(
+      String source, String key, ({int id, String createdAt}) closed) async {
     try {
       await ref
           .read(messageStoreProvider)
@@ -6583,6 +6829,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (mounted) _toast("Couldn't undo that just now.", cleared: 0);
       return;
     }
+    final prefix = '${schedulingAskKey(source, key)}|';
+    _closedAsks.removeWhere((k) => k.startsWith(prefix));
     unawaited(ref
         .read(activityLogProvider)
         .record('scheduling_ask', detail: const {'origin': 'undo'}));
@@ -6596,7 +6844,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// not loaded yet, and a line staged over an unread draft would drop the
   /// owner's words already in it.
   Future<void> _askPutInReply(String source, String key) async {
-    final slots = _askSearches['$source|$key']?.result?.slots ?? const [];
+    // The slots the row shows: none that has ended.
+    final slots = _liveResult(
+            _askSearches['$source|$key']?.result, DateTime.now())
+        ?.slots ??
+        const [];
     final zone = ref.read(calendarZoneProvider).valueOrNull;
     if (slots.isEmpty || zone == null) return;
     final target = (source: source, conversationKey: key);
@@ -6608,7 +6860,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// One Find a time search, and its activity row: how many slots, whose
   /// calendars, how many people, which week, and where it was asked from
-  /// (`pane` or `column`) — counts and enum words only.
+  /// (`column`; the main-pane Find a time that wrote `pane` is retired) —
+  /// counts and enum words only.
   Future<FindTimeResult> _findTimeSearch({
     required List<String> addresses,
     required int durationMinutes,
@@ -6640,6 +6893,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       'people': addresses.length,
       'window': window.wire,
       'surface': surface,
+      'graph_calls': result.graphCalls,
     }));
     return result;
   }
@@ -6655,7 +6909,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         (_stagedBodyFor(target, draft) ?? (edited ? draft.body : null) ?? '')
             .trimRight();
     final body = current.isEmpty ? text : '$current\n\n$text';
-    setState(() => _findTimeFor = null);
     _stage(target, body: body);
     unawaited(ref.read(draftProvider(target).notifier).markEdited(body));
     unawaited(ref
@@ -7436,13 +7689,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // else has no business opening: the ✕ and the ⤢ are the two ways out of
       // the side panel.
       onCompose: inSidePanel ? null : () => unawaited(_composeFrom(selected)),
-      // Only on a thread asking for a time. From the thread BESIDE too — a
-      // Needs You row opens beside — where it moves the thread into the main
-      // column and opens the pane there ([_openFindTime]), as Find a time
-      // always takes the main pane.
-      onFindTime: (ref.watch(schedulingAsksProvider).valueOrNull ?? const {})
-              .containsKey(schedulingAskKey(selected.source, selected.id))
-          ? () => _openFindTime(selected.source, selected.id)
+      // On any thread with somebody to answer ([_canFindTime]), asking
+      // for a time or not: a press makes it one on the owner's word and
+      // opens it in the Day column ([_openFindTime]). From the thread
+      // BESIDE too — a Needs You row opens beside.
+      onFindTime: _canFindTime(selected)
+          ? () => unawaited(_openFindTime(selected))
           : null,
       // Opening a file always lands on the split, never on the full pane the
       // user may have left open for the last one. From the MAIN thread it is a
@@ -9693,6 +9945,37 @@ String needsYouPressSaid(NeedsYouPress press, {required bool remove}) {
   return '$head — and ${press.changed} like it.';
 }
 
+/// The sentence every entry that proposes a time says for a start before
+/// now ([_InboxScreenState._refusePast]), the planner's own words.
+const String pastRefusal = 'That time has passed.';
+
+/// A same-length move of the ghost across midnight: a meeting stays on one
+/// day, and "move it instead" ([DayGrid.resizeLeavesDay], the resize's
+/// sentence) would tell the owner to do what they just did.
+const String moveLeavesDay = 'A meeting stays on one day — pick a time inside it.';
+
+/// How long an ask's search answer stands: reopened later than this, the
+/// row searches again rather than showing slots calendars may have taken.
+const Duration askResultLifetime = Duration(minutes: 30);
+
+/// Whether an ask's answer that landed at [searchedAt] is too old to show
+/// at [now] ([askResultLifetime]). An answer with no stamp is stale.
+@visibleForTesting
+bool askResultStale(DateTime? searchedAt, DateTime now) =>
+    searchedAt == null || now.difference(searchedAt) > askResultLifetime;
+
+/// Whether an ask's words, read for the message [readFor] on the local date
+/// [readOn], must be read again: the asks now name a newer message
+/// ([newest]), or the day moved, so a relative word means another date.
+@visibleForTesting
+bool askHintsStale({
+  String? readFor,
+  String? newest,
+  CalendarDate? readOn,
+  required CalendarDate today,
+}) =>
+    (newest != null && readFor != newest) || readOn != today;
+
 /// One scheduling ask's inline search in the Day column — see
 /// [_InboxScreenState._askSearches].
 class _AskSearch {
@@ -9716,9 +9999,17 @@ class _AskSearch {
   /// another.
   Future<void>? hintsReading;
 
+  /// The local date [hints] were read on: relative words ("tomorrow") mean
+  /// another day once it moves, so the next open reads them again.
+  CalendarDate? hintsDay;
+
   /// The first search has run: it is the one seeded from [hints], and a pill
   /// pressed later is the owner's own choice.
   bool searched = false;
+
+  /// When [result] landed; a reopen after [askResultLifetime] searches
+  /// again instead of showing it ([askResultStale]).
+  DateTime? searchedAt;
 
   /// Bumped per search, so only the newest answer lands.
   int serial = 0;

@@ -166,16 +166,36 @@ class DayGrid extends StatefulWidget {
   static const String resizeLeavesDay =
       'A meeting stays on one day — move it instead.';
 
-  /// Whether [startUtc]–[endUtc] is one local day's span in [zone]: no
-  /// longer than a day, and its last minute on its first day. The grid's
-  /// resize rule, and the host's belt for any span it is handed.
+  /// Whether [startUtc]–[endUtc] is one local day's span in [zone]: its
+  /// last minute on its first day. The host's belt for any span it is
+  /// handed. The dates alone decide: a fall-back day is 25 hours long, and
+  /// all of it is one day.
   static bool staysOnOneDay(
       CalendarZone zone, DateTime startUtc, DateTime endUtc) {
-    if (endUtc.difference(startUtc) > const Duration(hours: 24)) return false;
+    final (first, last) = _daysOf(zone, startUtc, endUtc);
+    return first == last;
+  }
+
+  /// The grid's resize rule: whether a resize of [wasStartUtc]–[wasEndUtc]
+  /// to [startUtc]–[endUtc] keeps to the local day or days the meeting
+  /// already covered. A one-day meeting stays on its day; the owner's own
+  /// overnight meeting may be moved or resized within the days it already
+  /// covered, never dragged past them.
+  static bool resizeKeepsDays(CalendarZone zone, DateTime wasStartUtc,
+      DateTime wasEndUtc, DateTime startUtc, DateTime endUtc) {
+    final (wasFirst, wasLast) = _daysOf(zone, wasStartUtc, wasEndUtc);
+    final (first, last) = _daysOf(zone, startUtc, endUtc);
+    return !first.isBefore(wasFirst) && !last.isAfter(wasLast);
+  }
+
+  /// The local dates of a span's first and last minute in [zone]: a span
+  /// that ends at midnight ends on the day before it.
+  static (CalendarDate, CalendarDate) _daysOf(
+      CalendarZone zone, DateTime startUtc, DateTime endUtc) {
     final last = endUtc.isAfter(startUtc)
         ? endUtc.subtract(const Duration(minutes: 1))
         : endUtc;
-    return zone.dateOf(last.toUtc()) == zone.dateOf(startUtc.toUtc());
+    return (zone.dateOf(startUtc.toUtc()), zone.dateOf(last.toUtc()));
   }
 
   static Key tileKeyFor(String eventId) => ValueKey('day-grid-tile-$eventId');
@@ -533,7 +553,8 @@ class _DayGridState extends State<DayGrid> {
     if (original is! _GridTile) return;
     // kalender reads a resize's end from the pointer's COLUMN as well as its
     // height, so an end handle drifting into Thursday makes a two-day span.
-    // A resize keeps its day; only a move (the same length) changes columns.
+    // A resize keeps to the day (or an overnight meeting's days) it covered;
+    // only a move (the same length) changes columns.
     if (_resizeLeavesDay(original, updated)) {
       widget.onRefused?.call(DayGrid.resizeLeavesDay);
       return;
@@ -591,10 +612,8 @@ class _DayGridState extends State<DayGrid> {
     final was = original.end.difference(original.start);
     final now = updated.end.difference(updated.start);
     if (was == now) return false;
-    final zone = widget.zone;
-    final start = _utc(updated.start);
-    return !DayGrid.staysOnOneDay(zone, start, _utc(updated.end)) ||
-        zone.dateOf(start) != zone.dateOf(_utc(original.start));
+    return !DayGrid.resizeKeepsDays(widget.zone, _utc(original.start),
+        _utc(original.end), _utc(updated.start), _utc(updated.end));
   }
 
   /// A plain UTC [DateTime] at [t]'s instant. The package hands back
@@ -917,11 +936,18 @@ class _HourTimeLine extends TimeLine {
 
 /// The mark on a tile's resize band: a small pill at its end, so the band
 /// LOOKS like the place that resizes.
+///
+/// The band behind it is filled with a transparent colour on purpose:
+/// kalender's resize `Draggable` hit-tests only its child, and a bare
+/// `Center` answers only where the 3-px pill is drawn, which made the 10-px
+/// band a 3-px line in the middle of it.
 class _ResizePill extends StatelessWidget {
   const _ResizePill();
 
   @override
-  Widget build(BuildContext context) => Center(
+  Widget build(BuildContext context) => Container(
+        color: Colors.transparent,
+        alignment: Alignment.center,
         child: Container(
           width: 24,
           height: 3,

@@ -549,6 +549,20 @@ void main() {
   });
 
   group('describe', () {
+    test('a scheduling ask: the owner\'s word on it, by its origin, under '
+        'its own label', () {
+      String said(String origin) => ActivityLogPanel.describe(_event(
+            kind: 'scheduling_ask',
+            detail: {'origin': origin},
+          ));
+      expect(said('invite'), 'Closed an ask after an invite');
+      expect(said('dismiss'), 'Dismissed an ask');
+      expect(said('undo'), 'Brought an ask back');
+      expect(said('owner'), 'Marked a thread as asking for a time');
+      expect(ActivityLogPanel.kindLabel('scheduling_ask'), 'Scheduling ask');
+      expect(said('later'), 'Scheduling ask');
+    });
+
     test('a meeting brief: written from how many threads, skipped with its '
         'reason in words, or failed', () {
       expect(

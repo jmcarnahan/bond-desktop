@@ -10,6 +10,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
+/// A sync that records the bodies it is asked for; nothing else is reached.
+class _RecordingSync extends Fake implements MailSync {
+  final List<String> bodies = [];
+
+  @override
+  Future<void> ensureMessageBody(String sourceMessageId) async =>
+      bodies.add(sourceMessageId);
+}
+
 /// The install-time re-decide through the REAL provider wiring.
 ///
 /// `syncServiceProvider` hands the sync a closure that reads
@@ -86,5 +95,47 @@ void main() {
         reason: 'the switch rebuilds the sync');
     expect(identical(ref.read(triageQueueProvider), queue), isTrue,
         reason: 'the queue reads the sync at call time and need not rebuild');
+  });
+
+  test('after a rebuild the queue fetches its bodies through the NEW sync',
+      () async {
+    final built = <_RecordingSync>[];
+    final ref = ProviderContainer(overrides: [
+      dbProvider.overrideWithValue(db),
+      keepingDecisionClient(),
+      noCommandHeads(),
+      // Rebuilt by the backend switch, as the real provider is.
+      syncServiceProvider.overrideWith((ref) {
+        ref.watch(appPrefsProvider.select((p) => p.backendMode));
+        final sync = _RecordingSync();
+        built.add(sync);
+        return sync;
+      }),
+    ]);
+    addTearDown(ref.dispose);
+    await ref.read(appPrefsProvider.notifier).ready;
+    final queue = ref.read(triageQueueProvider);
+    ref.read(syncServiceProvider);
+    await ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
+    ref.read(syncServiceProvider);
+    expect(built, hasLength(2), reason: 'the switch rebuilt the sync');
+
+    // A mail message straight off a delta page: a preview, no body yet.
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm1',
+      'conversation_key': 'conv-1',
+      'direction': 'inbound',
+      'subject': 'Northwind kickoff',
+      'from_name': 'Dana Reyes',
+      'from_address': 'dana@northwind.example',
+      'received_at': '2026-09-29T10:00:00Z',
+      'body_preview': 'Kickoff next week?',
+      'triage_status': 'pending',
+    });
+    await queue.pump();
+
+    expect(built.last.bodies, ['m1']);
+    expect(built.first.bodies, isEmpty, reason: 'never the sync it replaced');
   });
 }

@@ -706,8 +706,9 @@ enforce the ones that are commands.
   and Dismiss of a suggestion or possible row, add, remove, a charter written
   — Allow again writes none, lifting a veto is not a yes) through
   `writeDecisionLabels`, `question = 'scheduling_ask'` rows (answer `no`,
-  origin `invite`/`dismiss`) by the inbox through `writeSchedulingAskLabel`
-  (undo: `deleteSchedulingAskLabel` by id and stamp), and
+  origin `invite`/`dismiss`, through `writeSchedulingAskLabel`, undo:
+  `deleteSchedulingAskLabel` by id and stamp; answer `yes`, origin `owner`,
+  through `reopenSchedulingAsk`) by the inbox, and
   `question = 'needs_you'` rows by `NeedsYouEdits`
   ("Remove from Needs You" / "Add to Needs You") through `writeNeedsYouLabel`,
   read back by `needsYouLabels()` as `NeedsYouLabel`. The one UPDATE the log
@@ -977,7 +978,16 @@ that bite.
     adjustable, a tap flashes the card); a change on it re-proposes through
     the host (`onProposalChanged` → `_reproposeFromGrid`, through the drop's
     refusals), and nothing is stored — and never while the card writes
-    (`onWritingChanged` → `_cardWriting`).
+    (`onWritingChanged` → `_writingSerial`; `_cardWriting` is true only
+    while the card that reported the write still stands, so a new card's
+    grid is live), when a tap on it is ignored too (`onProposalTapped:
+    null`).
+  - ONE past rule: `_refusePast` ("That time has passed.", `pastRefusal`)
+    is the first check of `_createFromGrid`, `_pickAskSlot` and
+    `_reproposeFromGrid`, and every inbox `propose(...)` passes `now:` so
+    the planner refuses it again as the belt. A grid test taps TOMORROW
+    (or next week), never today: today's visible hours may already be past
+    when the suite runs.
 - **Work rows:**
   - `AiWorker.sources` (`email`, `teams`, `local`, `calendar`) is a CLAIM
     filter. A new kind queued under a new source is silently never claimed,
@@ -1021,7 +1031,8 @@ that bite.
     beside `keepingDecisionClient()` (`test/fixtures/fake_decision_client.dart`).
 - **Find a time:**
   - `MessageStore.schedulingAskConversations` is the ONE scheduling-ask
-    rule. Read it through `schedulingAskKeys`, never re-derive it.
+    rule. Read it through `schedulingAskKeys` or `schedulingAskMessageIds`
+    (what `schedulingAsksProvider` holds), never re-derive it.
   - `findMeetingTimes` REFUSES empty attendees (the server does too). A
     search for the owner alone uses `freeSlotsInRange`.
   - Windows are built from components (`findTimeWindowUtc`).
@@ -1033,18 +1044,36 @@ that bite.
     second confirm. `_proposalAsk` is the slot-pick → card hand-off;
     `_showProposal`, `_forgetCommand` and a typed Enter clear it, and the
     card's onDone marks the ask before its serial guard.
-  - The `scheduling_ask` label is the owner's word on an ask (an invite
-    sent from it, or the ×), pinned to the newest inbound message id, so a
-    later inbound message reopens it. `schedulingAskConversations` is
-    still the one rule; it reads the label.
+  - The `scheduling_ask` label is the owner's word on an ask, pinned to the
+    newest inbound message id (source + id), so a later inbound message is
+    judged afresh: `no` (an invite sent from it, or the ×) closes it; `yes`
+    (the thread bar's Find a time, `reopenSchedulingAsk`, which deletes a
+    `no` on that message first) lists it with or without a decision row.
+    `schedulingAskConversations` is still the one rule; it reads both.
+    `writeSchedulingAskLabel` stamps with the store's own `isoStamp` and
+    returns `(id, createdAt)` for the undo. An invite labels the message
+    read at the slot pick (`_proposalMessageId`), never the newest at Send.
+  - The thread bar's Find a time is on ANY thread with somebody to answer
+    (newest message inbound, `_otherPeople` non-empty) while the calendar
+    can be searched (`calendarShowsMirror` and the zone resolved, the
+    column's own condition); a press goes to the
+    Day stop with the ask open (`_toggleAsk`). The main-pane
+    `FindTimePane` is gone; the column's row is the only Find a time
+    surface.
   - Hints (`readAskHints`) are read from the ask's NEWEST inbound message,
     once per newest message (`_readAskHints`, one read in flight that every
     caller awaits; never started in a build); `theirs` is a window (the
-    named day alone). `activity_domain` follows the hinted hours: Graph's
-    `personal` is working hours plus the weekend, so hours outside the
-    working window are `unrestricted`, a non-working day inside it is
-    `personal`, else `work`. With hours Graph is asked for 20 and the
-    suggestions outside them are dropped before the ranking.
+    named day alone), and the words are read again on a new day too
+    (`hintsDay`). `activity_domain` (Graph's `personal` is working hours
+    plus the weekend): `unrestricted` when the hinted hours leave the
+    working window; `personal` when ANY day the search covers is a
+    non-working day (read from the window's days, never the pill); `work`
+    else. A single hinted day is ONE call for 20 candidates, and the
+    suggestions outside the hours are dropped before the ranking; hours
+    over several days (no day read, or the rest-of-the-week fallback) are
+    ONE CALL PER DAY of the window (at most 7, 5 candidates each, each over
+    that day's hours, a day already over skipped), counted in the
+    `find_time` row's `graph_calls` (`FindTimeResult.graphCalls`).
   - With a weekday read, a week pill means THAT weekday of the week
     (`weekdayWithin`, pills "This Fri" / "Next Fri", or the date they mean
     once this week's has gone), falling back to the
@@ -1052,7 +1081,16 @@ that bite.
     nothing (never after `FindTimeResult.failed`).
   - The pane follows the search window: `_followAsk` moves the Day pane to
     the window's `firstDay` before every ask search, so a grid press lands
-    on the day being searched.
+    on the day being searched. It sets `_selectedDay` ONLY (never
+    `_selectDay`, which closes compose, Settings, the log, Invites and the
+    selection), and only for an ask still open.
+  - Stale rows: a row drops slots that have ended (`_liveResult`), a kept
+    answer older than `askResultLifetime` is searched again on reopen, a
+    search read for an older message than the listed one is folded and
+    cleared in `_askRow`, and `_askRows` prunes searches whose ask left.
+  - The `find_time` activity row carries `graph_calls`
+    (`FindTimeResult.graphCalls`); the `scheduling_ask` row is labelled
+    **Scheduling ask** in the log.
   - An empty Graph answer falls back to the owner's free times unless
     `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
     one rule.

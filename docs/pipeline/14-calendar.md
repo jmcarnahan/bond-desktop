@@ -46,10 +46,11 @@ use. None of them goes to the cloud.
    needle that looks like a calendar request to the bar
    ([Commands](#commands)).
 7. **Find a time.** When the decision model reads a thread as asking for a
-   time, the thread is listed in the Day column's Scheduling asks and gets a
-   pane of real free slots. They can go into the reply or out as an invite,
-   and a slot picked in the column is shown on its day before anything is
-   sent ([Find a time](#find-a-time)).
+   time (or the owner says so from the thread bar), the thread is listed in
+   the Day column's Scheduling asks, where its row opens on real free slots.
+   They can go into the reply or out as an invite, and a slot picked in the
+   column is shown on its day before anything is sent
+   ([Find a time](#find-a-time)).
 
 **The models.**
 
@@ -580,21 +581,32 @@ in-memory.
 - **Resize zones.** A tile's resize bands are 10 px at its ends
   (`KalenderTheme` → `ResizeHandleStyle(length: 10)`, kalender's default
   is 16), shown to a hovering mouse or a selected tile, each marked by a
-  small primary pill (`TileComponents.verticalResizeHandle`): the middle of
-  a 30-minute tile drags and only its last 10 px resize; the start band
-  hides where kalender hides it (on a short tile). kalender reads a
-  resize's end from the pointer's COLUMN as well as its height, so an end
-  handle drifting into the next day would make a two-day span: the grid
-  refuses a resize that leaves its day (`DayGrid.staysOnOneDay`), the tile
-  snaps back and the host toasts "A meeting stays on one day — move it
-  instead." (`onRefused`); a move, the same length, still crosses columns.
-  The host refuses any proposal span longer than a day or crossing one in
-  the same words, whatever handed it in.
-- **The ghost tile.** `DayGrid.proposal` draws an undraggable tile — a solid
-  1.5 px primary outline on an 8 % fill; solid because Flutter's `Border` has
-  no dashed style — for a time that is not on the calendar: the pending
-  drop's "Moving here…", and a command's standing proposal, "Proposed"
-  ([The bar](#the-bar)).
+  small primary pill (`TileComponents.verticalResizeHandle`) drawn on a
+  transparent fill of the whole band — kalender's resize `Draggable`
+  hit-tests only its child, and a bare pill made the band a 3-px line: the
+  middle of a 30-minute tile drags and only its last 10 px resize; the
+  start band hides where kalender hides it (on a short tile). kalender
+  reads a resize's end from the pointer's COLUMN as well as its height, so
+  an end handle drifting into the next day would make a two-day span: the
+  grid refuses a resize whose new span leaves the day or days the meeting
+  already covered (`DayGrid.resizeKeepsDays`; an own overnight meeting may
+  be moved or resized within the days it already covered), the tile snaps
+  back and
+  the host toasts "A meeting stays on one day — move it instead."
+  (`onRefused`); a move, the same length, still crosses columns.
+  `DayGrid.staysOnOneDay` (the host's belt) compares the dates of a span's
+  first and last minute only, so a 25-hour fall-back day is one day.
+  The host's belt (`_reproposeFromGrid`) keeps the grid's rule: a span on
+  one day, or one inside the days the standing proposal already covered
+  (`resizeKeepsDays`, so a shortened overnight proposal re-proposes), and
+  refuses anything else — a resize in the grid's words, a same-length move
+  in its own (below) — whatever handed it in.
+- **The ghost tile.** `DayGrid.proposal` draws a tile — a solid 1.5 px
+  primary outline on an 8 % fill; solid because Flutter's `Border` has no
+  dashed style — for a time that is not on the calendar: the pending drop's
+  "Moving here…", which is undraggable (`adjustable: false`), and a
+  standing proposal, "Proposed" ([The bar](#the-bar)), which moves and
+  resizes (the proposal tile, below).
 - **The proposal tile** (a standing proposal's ghost) is a kalender event of
   its own kind. It is NAMED: the invite's subject ("Re: dinner on friday"),
   the blank event's name as its card's field reads it (the card's
@@ -612,16 +624,46 @@ in-memory.
   redrawn where that answer puts it; nothing is stored, and a proposal that
   does not change leaves the ghost where it was. A move of a meeting the
   owner may not move is never adjustable (the drop's `canMove`); a moved
-  ghost goes through the drop's own refusals (`checkDrop`: "That's when it
-  already is.", "That time has passed.") and a create's is never put in the
-  past. While the card's write is out (`CommandPlanCard.onWritingChanged` →
-  `_cardWriting`) the ghost holds still and an empty-time press proposes
-  nothing, so the write in the air is the one the card shows. A new card
-  never flashes as it appears. In Day view
+  ghost goes through the one past rule (below) and the drop's own refusals
+  (`checkDrop`: "That's when it already is."). A same-length MOVE across
+  midnight is refused in its own sentence, "A meeting stays on one day —
+  pick a time inside it." (`moveLeavesDay`), since "move it instead" is what
+  the owner just did; a resize across it keeps the grid's. A blank event's
+  re-proposal keeps its card and ghost on screen through the dry run
+  (`_reproposeCommand`, as a typed command's), carrying its typed name
+  (`CommandPlanCard.initialSubject` ← `_proposalName`, so the new card —
+  keyed by the moved serial, built while the dry run is out — shows the
+  name as typed, not the old write's "New event") and its guests
+  (`_proposalAttendees`); text half-typed in the With line is not carried.
+  A dragged ask's invite keeps the message its slot was first picked for
+  (`_pickAskSlot(messageId: _proposalMessageId)`). While the card's write is out
+  (`CommandPlanCard.onWritingChanged` → `_writingSerial`, the serial of the
+  card that reported it; `_cardWriting` holds only while THAT card stands,
+  so a typed Enter, a slot pick or a re-proposal during the write leaves
+  the new card's grid live) the ghost holds still, a tap on it is ignored
+  (`onProposalTapped: null`) and an empty-time press proposes nothing, so
+  the write in the air is the one the card shows. A new card never flashes
+  as it appears. In Day view
   a tile cannot leave its one column: to another day, Week view, or the Day
   bar's "move … to …". A TAP on it flashes its card once
   (`CommandPlanCard.flash`, a 600 ms fade, never looping); the card sits
   above the grid and never scrolls out of view, so no scrolling is needed.
+  Only the card's frame flashes: its body is never rebuilt by a tap, so a
+  typed name, a standing confirm strip and a write in the air all survive
+  one, and the write still says when it is done.
+- **The one past rule.** Every entry that proposes a time — a press on
+  empty time (`_createFromGrid`), an ask's slot (`_pickAskSlot`) and a
+  dragged ghost (`_reproposeFromGrid`) — first asks `_refusePast`: a start
+  before now is a toast, "That time has passed." (`pastRefusal`), with
+  nothing dry-run and no card; with an ask open a past press is refused,
+  never turned into a blank event. Every `propose` the inbox calls passes
+  `now:`, so the planner refuses the same start again as the belt (a card
+  held on screen past its start). A refusal's toast carries no Undo and is
+  the one kind of bar that leaves the `z` slot as it was (`_toast(keepUndo:
+  true)`): nothing was done, so the write just done can still be undone.
+  The four calendar refusals keep it — the past rule, the cross-midnight
+  belt, the grid's `onRefused` and a moved ghost's `checkDrop` refusal.
+  Every other bar without an Undo still empties the slot, as before.
 - **A press on empty time is a PROPOSAL too.** The body allows creation
   (`allowEventCreation` while not `locked` and the host passes
   `onCreateRequested`; the all-day header never). kalender 0.32 has two
@@ -632,7 +674,7 @@ in-memory.
   an event from a bare tap, so a bare tap on empty time comes through
   `onTappedWithDetail` (a `DayDetail`; the header's `MultiDayDetail` is
   ignored) and takes `defaultCreateMinutes` from the quarter hour tapped; a
-  drag shorter than a quarter hour does too. The span reaches the host
+  drag of a quarter hour or less does too. The span reaches the host
   through `onEventCreated` → `onCreateRequested(startUtc, endUtc)`, and the
   grid adds NOTHING — kalender leaves adding a created event to the host,
   and this host never does, so the grid stays a mirror of the store, as for
@@ -641,11 +683,39 @@ in-memory.
   `Proposed` ghost, Send) and `defaultCreateMinutes` is the ask's length;
   with none, it is a **blank event**: `CreateEvent.propose(subject: 'New
   event', …)` through `_showProposal`, whose card (`subjectEditable`) draws
-  a name field (`CommandPlanCard.subjectKey`, "Name this event", focused)
-  above the summary, re-words the summary with `writeSummary` as the name
+  a name field (`CommandPlanCard.subjectKey`, focused) above the summary.
+  The field starts EMPTY under its hint, "Name this event" — prefilled, the
+  first keystroke wrote "New eventL" — and the summary says "New event"
+  while it is blank; it re-words the summary with `writeSummary` as the name
   changes, and at the press writes `CreateEvent.withSubject(name)` (empty →
-  "New event") under the proposal's own `transactionId`. With nobody on it
-  the write goes straight on with its Undo, the Writes policy as it stands.
+  "New event") under the proposal's own `transactionId`. Under the name, a
+  **With** line (`CommandPlanCard.withKey`, "With — a name or address")
+  takes people on Enter or a comma: each name goes through `matchPeople`
+  against the card's `people`; one person is a chip (× takes it off), a name
+  several people share is a row of buttons to pick from, an address is that
+  address, and a name the directory lacks — or knows only in part — is
+  looked up through the card's `searchPeople` (`search_people`), else
+  refused in the planner's own sentence ("I don't know who … is — name
+  someone from your mail."). The chips ride the write as
+  `withAttendees(…)` (an online meeting, the same `transactionId`) and go
+  up through `onAttendeesChanged`. With anyone on it the create confirms
+  (`needsConfirm`): the card says "This may email: …" from the chips and
+  Send, and the press shows the strip. With nobody on it the write goes
+  straight on with its Undo, the Writes policy as it stands. Both fields are
+  off while the card's write is out. A name left in the With line without
+  an Enter is taken at the press (`ready`): it goes on the write when it
+  resolves, and otherwise the press stops with the caption or the choices
+  under the field, never a private event in place of an invite. Do it is
+  off while a directory lookup is out, and a lookup answering after the
+  write went adds nobody. The inbox hands the card the bar's own
+  people (`_commandPeople`) and the bar's directory lookup
+  (`_searchCommandPeople`: `PeopleBackend.searchPeople`, five hits, each by
+  `directoryAddress`, as the router's Enter does; a failed search throws on
+  and the card says "Couldn't search the directory.",
+  `CommandPlanCard.directoryFailedText`, never that nobody has the name),
+  and keeps the chips (`onAttendeesChanged` → `_proposalAttendees`,
+  cleared with `_proposalName`), so a drag of the ghost re-proposes with
+  them and the new card starts from them (`initialAttendees`).
 
 ## Events, invite cards and people
 
@@ -1458,17 +1528,30 @@ is involved: the signal is the decision model's, already stored, and the
 slots are the calendar's.
 
 **The signal** (`app/lib/services/calendar/scheduling_ask.dart`). A thread is
-a *scheduling ask* when all four hold:
+a *scheduling ask* when both of these hold:
 
-- its state is `needs_reply`;
 - the owner has not written since its NEWEST inbound message
   (`received_at DESC, source_message_id DESC`, the store's own "newest"):
-  the thread's `last_outbound_at` is absent or not after that message;
-- that message's stored decision (`message_decisions.answers_json`) has
-  `intent` = `scheduling` with the scheduling option's own probability (else
-  the choice's confidence) ≥ `DecisionPolicy.booleanYes` (0.50);
-- the owner has not closed it: no `scheduling_ask` label in
-  `decision_labels` on that same newest inbound message.
+  the thread's `last_outbound_at` is absent or not after that message (a
+  string compare, which holds because both stamps carry the store's one ISO
+  width);
+- the owner has not closed it: no `scheduling_ask` label with `answer =
+  'no'` in `decision_labels` on that same newest inbound message (matched by
+  source and `source_message_id`);
+
+and EITHER the model says so —
+
+- its state is `needs_reply`, and that message's stored decision
+  (`message_decisions.answers_json`) has `intent` = `scheduling` with the
+  scheduling option's own probability (else the choice's confidence) ≥
+  `DecisionPolicy.booleanYes` (0.50);
+
+— OR the owner says so: a `scheduling_ask` label with `answer = 'yes'` on
+that newest message (the thread bar's **Find a time**, below), whether or
+not the model ever read it. Both labels are pinned to the message by id, so
+a later inbound message outranks either: an ask the owner opened stays
+listed past a newer message only if the model reads the new one as an ask
+or the owner presses again.
 
 **Closing and reopening.** An invite is not a message in the thread, so
 after the owner sent one from an ask the first three clauses still held and
@@ -1488,16 +1571,19 @@ and the row leaves at once; the write's own toast already said the invite
 went. Because the label is pinned to a message id, a LATER inbound message
 — the other person saying the time does not work — is a new newest message
 and the ask comes back by itself; a label on an older message does
-nothing. Activity: kind `scheduling_ask`, `detail: {origin: invite |
-dismiss | undo}`.
+nothing. Activity: kind `scheduling_ask`, labelled **Scheduling ask**,
+`detail: {origin: invite | dismiss | undo}` (and `owner`, below) — "Closed
+an ask after an invite", "Dismissed an ask", "Brought an ask back", "Marked
+a thread as asking for a time".
 
 A message the decision model never read (triaged before it, or gated first),
-or whose stored answers are unreadable, is not an ask. The rule has ONE
-spelling, a single SQL query —
+or whose stored answers are unreadable, is an ask only on the owner's yes.
+The rule has ONE spelling, a single SQL query —
 `MessageStore.schedulingAskConversations(limit: 200, threshold:)`: the
-threads joined to their newest inbound message joined to its decision, read
-with `json_extract` under `json_valid` inside a CASE so a bad row is no ask
-rather than a failed read, newest first, capped at 200. `schedulingAskKeys`
+threads joined to their newest inbound message LEFT joined to its decision
+(so the owner's yes lists a thread with none), read with `json_extract`
+under `json_valid` inside a CASE so a bad row is no ask rather than a failed
+read, newest first, capped at 200. `schedulingAskKeys`
 turns it into the `'$source|$id'` keys, the one path the app and the tests
 share; `schedulingAskMessageIds` keys the same rows to their newest inbound
 message id, and `schedulingAsksProvider` (`day_providers.dart`) holds that
@@ -1506,37 +1592,55 @@ re-read when the conversation list reloads (which is what follows a triage
 pass writing new decisions, a reply going out, or a state change). No clock.
 
 **The thread header.** `ThreadActionBar` draws **Find a time** (a worded
-button beside Mark done, icon `schedule_outlined`; its word goes with Mark
-done's at narrow widths) when the host passes `onFindTime`, which the inbox
-does only when the thread's key is in the set — on the main thread AND on a
-thread open beside (a Needs You row opens beside). The pane always takes the
-main column: from the thread beside, the press selects that thread (closing
-the side panel, the thread now in the main pane) and opens the pane over it.
+button beside Mark done, icon `schedule_outlined`, tooltip "Find a time — in
+the Day column, with these people"; its word goes with Mark done's at narrow
+widths) when the host passes `onFindTime`, which the inbox does — while the
+calendar can be searched (`calendarShowsMirror` and the zone resolved, the
+condition the Day column draws its asks under, so a press never lands on a
+Day stop with no asks column) — on ANY thread with somebody to answer
+(`_canFindTime`): its newest message is
+inbound (`last_outbound_at` absent or not after `last_inbound_at`) and it
+has other people with an address (`_otherPeople`) — asking for a time or
+not, on the main thread AND on a thread open beside (a Needs You row opens
+beside). A press (`_openFindTime`) is the owner's word that the thread IS a
+scheduling ask: unless the thread is already listed, it writes a
+`scheduling_ask` label `answer = 'yes'`, `origin = 'owner'`, on the thread's
+newest inbound message (`MessageStore.reopenSchedulingAsk`, which reads that
+message in the rule's own order and, in the same transaction, deletes any
+`no` on it — an earlier dismiss or invite — so the owner's newer word wins),
+invalidates `schedulingAsksProvider` and awaits its read. Then it goes to
+the Day stop with that ask OPEN in the column — the path a press on its row
+takes (`_toggleAsk`: the words read, the default search, the pane following
+to the ask's day). Activity: kind `scheduling_ask`, `{origin: owner}`. One
+press at a time (`_findingTime`: a double press writes one yes); a thread
+with no inbound message to pin the word to says "Nothing to find a time for
+— nobody wrote in this thread." rather than nothing.
 
-**The pane** (`FindTimePane`, `app/lib/widgets/find_time_pane.dart`, a
-`PaneSurface` with Back and Inbox — never a dialog). It is an overlay on the
-thread (`_findTimeFor` in the inbox, a rung of `_main()` under the storyline
-picker): Back and Put in reply return to the thread, and every selection
-clears it (`_clearOverlays`, and wherever `_section` is assigned). Top to
-bottom:
+The main-pane Find a time pane (`FindTimePane`) is retired: everything it
+did — the search, Put in reply, an invite through the write flow — the
+column's row does. A slot's invite labels the message its slot was picked
+for (read at the pick, `_proposalMessageId` beside `_proposalAsk`), not the
+newest one when Send lands, so a request that arrives while the card stands
+keeps its own ask.
 
-- **Before the zone resolves** the pane is "Reading your calendar…" with
-  Back and Inbox (`FindTimePane.waiting`), never a blank column; no search
-  runs without the display zone's clock.
+**The search** (`searchFindTime`, `app/lib/services/calendar/find_time.dart`),
+as the Day column's row runs it (below) — no search runs without the display
+zone's clock:
+
 - **With** — the thread's other participants with an address, lowercased
-  (the owner and repeats left out), each removable with ✕. Removing the last leaves "Just
-  you — your own free times.", a search of the owner's own calendar.
-- **How long** — 30 / 45 / 60 min pills (30 to start).
-- **When** — This week / Next week pills. **This week** is now until Friday
+  (the owner and repeats left out). With nobody, a search of the owner's own
+  calendar.
+- **How long** — 30 / 45 / 60 min pills, plus the ask's own length; the row
+  opens on the ask's own length, else 30 ("The ask's own words", below).
+- **When** — the their-day pill first when a day was read, then This week /
+  Next week (named by the weekday when one was read; below). The row opens
+  on their day, else this week. **This week** is now until Friday
   18:00 local; on a weekend, or once less than the chosen length is left
   before Friday 18:00, the week is over and it means the coming Monday 08:00
   to Friday 18:00. **Next week** is the Monday
   after that one, 08:00 to Friday 18:00. Built from dates with
   `CalendarZone.localDateTime`, never a Duration across midnight
   (`findTimeWindowUtc`).
-- **The search** runs as the pane opens and again 200 ms after the last
-  change of people, length or week, one in flight at a time, the newest
-  winning; "Looking…" while it runs.
 - **Up to three slots**, each "Tue Oct 20 · 10:00–10:30 AM", with the overlap
   line when the owner's own mirror has a hard overlap there, and a caption
   saying whose calendars answered ("when everyone is free" / "from your
@@ -1546,26 +1650,42 @@ bottom:
 `app/lib/services/calendar/ask_hints.dart`, pure). For "could we grab
 dinner on Friday?" the search used to offer Friday at noon — the owner's
 working hours. The ask's NEWEST inbound message (subject, then `body_text`
-else `body_preview` cut at its first quoted-reply header — "On … wrote:",
-"-----Original Message-----", a "From:" line — so the history's dates never
-win; the first 600 characters, cut back to a word boundary) is read ONCE
+else `body_preview` cut at its first quoted-reply header — "On … wrote:"
+over one or two lines that carry a year as a header writes one ("Sep 29,
+2026", "29/09/2026", "2026-09-29"; never a clock time such as "at 1930"), a
+"<" or an "@" (so
+"On second thought, Friday dinner works." stays the ask), "-----Original
+Message-----", or a "From:" line with a "Sent:", "Date:" or "To:" line
+within the two under it, either possibly quoted with ">" (a lone "From:
+tomorrow on…" is a sentence) — so the history's dates never win; the first 600 characters, cut back to a word boundary) is read ONCE
 per newest message by the inbox (`_readAskHints`: on the ask's first search,
-or from `_openFindTime` for the pane, which waits on that one read; a newer
-inbound message is read again on the row's next open; one read in flight,
-which every caller awaits) into `AskHints {day, hours, minutes, said}`:
+or a pill pressed while it is out; a newer inbound message is read again on
+the row's next open; one read in flight, which every caller awaits) into `AskHints {day, hours, minutes, said}`:
 
-- **The day** is `resolveWhen(…, mode: question)`'s; a week ("next week")
-  is not a day. A day at most seven days past (an old message's date) rolls
-  to that weekday's next occurrence — today when it is today's weekday —
-  because the ask may be days old; an older one is dropped. "yesterday" is
-  no day. A day that is today whose hours have already ended rolls a week on
-  ("dinner on Friday" read on Friday at nine is next Friday); with no hours
-  today stands.
+- **The day** is `resolveWhen(…, mode: question)`'s, its relative words
+  read against the message's own time when the host passes it
+  (`readAskHints(sentAt:)`), else now; whether it has gone is judged at now.
+  A week ("next week") is not a day. A weekday or a date at most seven days
+  past (an old message's "Thursday" or date) rolls to that weekday's next
+  occurrence — today when it is today's weekday — because the ask may be
+  days old; an older one is dropped. A relative day that has gone
+  ("tomorrow" in Monday's message read on Wednesday) is dropped: it named
+  one day (`WhenResolution.dayMention`). "yesterday" is no day. A day that
+  is today whose hours have already ended rolls a week on when it was a
+  weekday ("dinner on Friday" read on Friday at nine is next Friday) and is
+  dropped when it was "today"/"tonight"/"tomorrow" or a date ("dinner Oct
+  9?" names that one day; the hours stay); with no hours today stands.
 - **The hours**, most specific first: an explicit clock time (a two-hour
   window from it, cut at 23:59; a range such as "2-3:30pm" ends where it
-  says), with a meal word setting a bare hour's half of the day ("dinner at
-  7" is 19:00, breakfast keeps its morning); else a meal or social word, the
-  earliest in the text —
+  says, and one past midnight ends at 23:59 with the length cut to fit:
+  "drinks 10pm-1am" is 22:00–23:59 for 119 minutes), with a meal word
+  setting a BARE hour's half of the day ("dinner at 7" is 19:00, and a
+  range's bare end moves with it: "dinner from 7 to 9" is 19:00–21:00;
+  breakfast keeps its morning, and an hour with am/pm or on a 24-hour clock
+  is taken as written: "coffee at 4am" is 04:00); a bare or named time
+  more than two hours outside the meal's hours gives way to the meal's
+  ("drinks 10pm to midnight", which reads midnight last, is drinks
+  17:00–19:30); else a meal or social word, the earliest in the text —
   breakfast 07:30–09:30, coffee 09:00–16:00, lunch 11:30–13:30 (wider than
   the command bar's `DayPart.lunch`, whose bounds are not touched), dinner
   17:30–20:30, a drink, drinks or happy hour 17:00–19:30 ("lunchtime" is
@@ -1574,7 +1694,7 @@ which every caller awaits) into `AskHints {day, hours, minutes, said}`:
   coffee's hours.
 - **The length**: a length the ask named, else a range's own, else the
   meal's — breakfast 45, coffee 30, lunch 60, dinner 90, drinks 60 — else
-  none.
+  none; never more than a window cut at 23:59 holds.
 - **`said`**: "Asked for: Fri Oct 9 · dinner" (the day, then the meal, part
   or clock time that set the hours; "Fri Oct 9 · dinner · 7:00 PM" when a
   meal and a time were both named).
@@ -1600,13 +1720,10 @@ next one, as their day rolls, and next week the one after. The pills say so:
 "This Fri" and "Next Fri" (the weekday's three letters; plain "This week" /
 "Next week" with no weekday read) — and once this week's Friday has gone,
 each says the DATE it now means ("Fri Oct 9", "Fri Oct 16"), so a pill never
-reads as a day that has passed: the host (the inbox for the column and the
-pane) builds each pill's words from the day its search would cover
+reads as a day that has passed: the host (the inbox, for the column) builds each pill's words from the day its search would cover
 (`findTimeWindowLabels` → `findTimeWindowLabel(covers:, today:)`; a week
 pill keeps "This Fri" / "Next Fri" only while that day is inside its nominal
-week) and hands them to the row (`SchedulingAskRow.windowLabels`) and the
-pane (`FindTimePane.windowLabelsFor`, at the length the pane has
-selected). When that day offers nothing — no slot of
+week) and hands them to the row (`SchedulingAskRow.windowLabels`). When that day offers nothing — no slot of
 the owner's own, or nothing from Graph inside the hours — the rest of its
 Monday–Friday at the same hours is searched and offered under "Nothing free
 on Friday for dinner that week — the rest of the week:" (the weekday and the
@@ -1615,20 +1732,23 @@ week:" with no hours), with any note of the week's own search — Graph's, or
 "Couldn't read their free time…" — following it. A search that could not
 run at all (`FindTimeResult.failed`: a refusal, a missing permission,
 unreachable) is never retried that way, and neither is a weekend day: a
-Sunday has no Monday–Friday of its own after it. A window that ends where it
+Sunday has no Monday–Friday of its own after it, nor a weekday whose rest
+of the week is the day just searched (Friday searched on a Friday). A window that ends where it
 starts searches nothing and asks nobody.
 
 **The pane follows the search.** Before each search of an ask — its first
 open (once its words are read, so on their day), a pill pressed, and a
 re-open on its standing answer — the inbox moves the Day pane to the first
 day of the window about to be searched (`_followAsk`: `findTimeWindowUtc`'s
-`firstDay` → `_selectDay`, which keeps the Agenda or Grid face as it is). So
-Next week on "dinner on Friday" shows next Friday (the week grid its week),
-and a press on its empty time proposes that Friday. It never takes the owner
-anywhere: off the Day stop (left during the hint read) it does nothing, and
-with a thread, storyline, room or Later day open on the Day stop that stays
-open and only the day underneath moves, so the pane is on the right day when
-they come back.
+`firstDay` → `_selectedDay` alone, which keeps the Agenda or Grid face as it
+is). So Next week on "dinner on Friday" shows next Friday (the week grid its
+week), and a press on its empty time proposes that Friday. It never takes
+the owner anywhere: off the Day stop (left during the hint read) it does
+nothing, and it sets the day and nothing else — never `_selectDay`, so a
+thread, storyline, room or Later day, a New message, Settings, the log or
+Invites open on the Day stop stays open and only the day underneath moves.
+Only an ask still OPEN moves the pane: one folded during its hint read
+(another opened meanwhile) does not pull the pane to its day.
 
 **The search** (`searchFindTime`, `app/lib/services/calendar/find_time.dart`;
 never throws):
@@ -1664,20 +1784,36 @@ never throws):
 - **With hints**: the owner's own walk takes `dailyHours` (the hours replace
   the working window on EVERY day, still clamped by the window bounds) and
   skips no weekend only when the window is the ask's own day (a week
-  searched under hints still skips its weekend). Graph is asked over the
-  same window with `options.activity_domain`: Graph's `personal` is the
-  working hours PLUS the weekend, and only `unrestricted` opens every hour,
-  so `unrestricted` when the hours leave the mailbox's working window
-  (`workingWindowOf`: dinner), `personal` when the named day is not a
-  working day (`isWorkingDay`) and the hours sit inside the window
-  (Saturday morning), and `work` (the server's default, so not sent)
-  otherwise. `findMeetingTimes(activityDomain:)` puts the key in `options`
-  only when it is not `work`. Graph still answers across the whole window,
-  so with hours it is asked for twenty candidates and every suggestion whose
-  local start or end leaves those hours on its own day is DROPPED before the
-  ranking keeps three; none left falls back to the owner's own openings in
-  those hours under "No time inside those hours from their calendar —
-  showing your own free times." (`findTimeOutsideHoursNote`).
+  searched under hints still skips its weekend). Graph is asked with
+  `options.activity_domain`: Graph's `personal` is the working hours PLUS
+  the weekend, and only `unrestricted` opens every hour, so `unrestricted`
+  when the hours leave the mailbox's working window (`workingWindowOf`:
+  dinner), `personal` when the search is the ONE day the ask named and
+  that day is not a working day (`isWorkingDay`; read from the window's
+  day, never the pill, so a Saturday morning is `personal` under This week
+  and Next week too), and `work` (the server's default, so not sent)
+  otherwise — a window of several days (no day named, or the rest of a
+  week) stays `work`, since the owner's own walk skips its non-working
+  days.
+  `findMeetingTimes(activityDomain:)` puts the key in `options` only when
+  it is not `work`. Over ONE day Graph is asked once, for twenty
+  candidates, over the window; over several days (hours with no day read,
+  or the rest-of-the-week fallback) it is asked ONE CALL PER DAY (at most
+  seven, five candidates each, each over that day's hours from now at the
+  earliest; a day with no room left is skipped), asked together
+  (`Future.wait`), because one call over a week of evenings starting now
+  came back with daytime candidates only. The answers merge in day order
+  (each suggestion once; "nobody is free" only when every day said so); a
+  day whose call fails costs that day, and with nothing found the answer is
+  the unreadable fallback, never "nobody is free"; every day failing, or a
+  missing permission or `unsupported_account` on any day, is the search's
+  failure as one call's would be.
+  `FindTimeResult.graphCalls` counts the calls for the `find_time` row's
+  `graph_calls`. Every suggestion whose local start or end leaves those
+  hours on its own day is DROPPED before the ranking keeps three; none left
+  falls back to the owner's own openings in those hours under "No time
+  inside those hours from their calendar — showing your own free times."
+  (`findTimeOutsideHoursNote`).
 - Nobody → the mirror's own openings, `freeSlotsInRange` over the window with
   the mailbox's working hours (source `local`; `find_meeting_times` refuses an
   empty list — gotcha 28).
@@ -1692,22 +1828,22 @@ Nothing found says "No time when everyone is free this week. Try next week."
 (or "No free time …" for a search of only the owner); a failed search shows
 only its sentence, never a false all-clear.
 
-**The two actions.**
+**The two actions** (from the column's row, below).
 
-- **Put these in the reply** writes ONE line naming every slot shown, with
-  the zone's abbreviation — "Would any of these work? · Tue 20 Oct 10:00–10:30
-  AM PDT · Tue 20 Oct 2:00–2:30 PM PDT" (`findTimeReplyLine`) — so the other
-  person picks. It goes AFTER whatever the box already holds (a blank line
+- **Put in reply** writes ONE line naming every slot shown, with the zone's
+  abbreviation — "Would any of these work? · Tue 20 Oct 10:00–10:30 AM PDT ·
+  Tue 20 Oct 2:00–2:30 PM PDT" (`findTimeReplyLine`) — so the other person
+  picks. It goes AFTER whatever the box already holds (a blank line
   between), through the box's explicit stage (`_stage`, the path a tapped
   suggestion takes, which rebuilds the field with those words) and
   `DraftNotifier.markEdited` (recorded as the owner's words when a draft row
-  exists); the pane closes and the cursor is in the thread's reply box.
-- **Send invite** on one slot is a `CreateEvent` — subject "Re: <thread
-  subject>" (or "Meeting"), the chip addresses as attendees, online when
-  anyone is invited — through `CalendarWriteFlow`, so an invite that emails
-  people waits on the inline confirm strip naming them ("This emails: …"),
-  and one with nobody on it (**Add to calendar**) goes straight on with its
-  Undo (the Writes policy). A sent invite toasts and returns to the thread.
+  exists); the thread opens with the cursor in its reply box.
+- **An invite** is a slot picked: a `CreateEvent` — subject "Re: <thread
+  subject>" (or "Meeting"), the other people as attendees, online when
+  anyone is invited — standing as the command card's proposal, so an invite
+  that emails people waits on the inline confirm strip naming them ("This
+  emails: …"), and one with nobody on it goes straight on with its Undo (the
+  Writes policy).
 
 **The Day column.** The Day stop's list column (`AppRail`, 260 px) draws
 **SCHEDULING ASKS · N** above the Day section (Invites, the day rows), one
@@ -1728,7 +1864,23 @@ callbacks.
   and its day when one was read, else 30 minutes this week; tapping again
   folds it and keeps the answer. A pill pressed while the ask's words are
   still being read stays: the first search is seeded only if no pill has
-  been pressed.
+  been pressed. A kept answer older than 30 minutes (`askResultLifetime`,
+  `_AskSearch.searchedAt`, `askResultStale`) is searched again on the next
+  open rather than shown, and the words are read again on a new day as on a
+  newer message (`hintsDay`, `askHintsStale`: "tomorrow" read yesterday is
+  another date now).
+- **Stale rows.** A row never offers a slot that has ENDED (`_liveResult`,
+  for the row and for Put in reply); a slot under way still shows, and
+  picking it is the past rule's refusal. Only `_closeAsk` removes a search
+  on purpose, so an ask that leaves the list another way (the owner
+  replied) has its search pruned when the column is next built; and a
+  search read for an older message than the one now listed (a newer
+  message on an open row, or an ask that left and came back) is folded,
+  its slots and words dropped and any answer in flight ignored, so a grid
+  press is then a blank event, not an invite on the old search
+  (`_openAsk` checks the same). A slot's dry run that lands after its ask
+  was dismissed (or closed elsewhere) puts up no card (`_showProposal`
+  re-reads the asks).
 - **Open**, it says what the ask asked for ("Asked for: Fri Oct 9 · dinner",
   when its words named anything), then two pill rows, `min 30 · 45 · 60`
   (plus the ask's own length) and `<their day> · This Fri · Next Fri` (their
@@ -1745,10 +1897,10 @@ callbacks.
   and **Open thread**, then the caption "when everyone is free" / "from your
   calendar".
 - **A slot picked** shows it in context: `_selectDay` moves the pane to the
-  slot's day (today is the agenda of today), and `_showProposal` dry-runs a
+  slot's day (today's agenda or grid), and `_showProposal` dry-runs a
   `CreateEvent.propose` (subject "Re: <thread subject>", the thread's other
-  addresses as attendees — `_otherPeople`, the same list the pane's With row
-  shows — online when anyone is invited) through
+  addresses as attendees — `_otherPeople`, the same list the search's With
+  reads — online when anyone is invited) through
   `commandPlannerProvider.propose` and stands it as `_commandOutcome`. So the
   command bar's `CommandPlanCard` draws it at the top of that day — the
   summary, "This emails: …", **Send** and Cancel — and the grid draws the
@@ -1763,19 +1915,52 @@ callbacks.
   (`SchedulingAskTile.proposedKeyFor`), from `_proposalAsk` and the
   standing proposal's instants; it goes when the card goes.
 - **Put in reply** opens the thread and stages every slot shown as one line
-  through `_putInReply`, as the pane's button does. **Open thread** opens the
+  through `_putInReply` (above). **Open thread** opens the
   thread (`_select`).
 
 **Activity.** Kind `find_time`, labelled **Find a time**: one row per search,
-`detail: {source: graph|local, slots, people, window: this_week|next_week,
-surface: column|pane}` (where the search was asked from) —
+`detail: {source: graph|local, slots, people, window:
+theirs|this_week|next_week, surface: column, graph_calls}` (where the search
+was asked from; `pane`, the retired main-pane Find a time's word, is no
+longer written; `graph_calls` is `FindTimeResult.graphCalls`, zero for a
+search of the owner alone, one per day when the hours had no day) —
 "Find a time — 3 slots (graph)" — and one per action, `{action: put_in_reply |
-send_invite | add_to_calendar}` — "Find a time — put in reply", "Find a time —
-invite sent", "Find a time — added to calendar" (a slot with nobody on it; the
-invite's own `calendar_write` row is the writer's, as for every write).
+send_invite}` — "Find a time — put in reply", "Find a time — invite sent" (a
+slot's invite gone through with people on it, from the card's `onDone`; a
+slot with nobody on it writes no action row, and the invite's own
+`calendar_write` row is the writer's, as for every write).
 Counts and enum words only.
 
 ## Owner checks and follow-ups
+
+**Phase 11–13 (2026-10-02).** Owed by the owner before the PR merges; tests
+cannot settle these.
+
+- Live checks:
+  - the column flow on a real ask, end to end: the row opened, its slots, a
+    slot picked, the card, Send, the ask closing;
+  - hints on real Graph: dinner → unrestricted evening slots; Saturday →
+    personal; the per-day calls (`graph_calls` on the `find_time` row);
+  - the cross-tenant `empty_reason` fallback, re-checked;
+  - the grid on a real trackpad: the drag feedback, the 10-px band and its
+    pill (the band was really 3 px until Phase 13), the next-day toast, the
+    Monday caveat;
+  - a blank event created, named, with people, and undone, live;
+  - the thread bar's Find a time on a thread the model did not flag;
+  - the items already owed: the handoff's §7 live items (gotcha 12, below),
+    the Phase 5 writes, `make calendar-heads` and its ledger row, and the
+    manual route pass.
+- Open calls:
+  - `decisionLabels()` is unscoped (it reads every question's labels);
+  - "soft drinks" matches drinks;
+  - "move it instead" (a resize across midnight) beside the new
+    "pick a time inside it" (a move across it);
+  - the `html_text` 10-s bound;
+  - hot reload versus restart;
+  - `make background` half-done check;
+  - a calendar refusal's toast (past time, a span leaving its day) no longer
+    clears Undo; every other no-Undo bar still does — the owner may veto;
+  - the PR is not yet opened, and the worktree stays until the merge.
 
 **Live checks still owed.** Tests cannot settle these. Each needs the real
 server or the real calendar.

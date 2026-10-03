@@ -19,6 +19,13 @@ class _Backend extends Fake implements CalendarBackend {
   final List<String> domains = [];
   Object answer = const <MeetingTimeSuggestion>[];
 
+  /// When set, answers each call by its window instead of [answer].
+  Object Function(DateTime start, DateTime end)? answerFor;
+
+  /// Calls in flight now, and the most at once.
+  int inFlight = 0;
+  int maxInFlight = 0;
+
   @override
   Future<MeetingTimes> findMeetingTimes({
     required List<String> attendees,
@@ -32,7 +39,12 @@ class _Backend extends Fake implements CalendarBackend {
     candidates.add(maxCandidates);
     windows.add((windowStartUtc, windowEndUtc));
     domains.add(activityDomain);
-    final a = answer;
+    inFlight += 1;
+    if (inFlight > maxInFlight) maxInFlight = inFlight;
+    // A turn of the event loop, so calls made together overlap.
+    await Future<void>.delayed(Duration.zero);
+    inFlight -= 1;
+    final a = answerFor?.call(windowStartUtc, windowEndUtc) ?? answer;
     if (a is List<MeetingTimeSuggestion>) return MeetingTimes(suggestions: a);
     // An empty answer with Graph's reason.
     if (a is MeetingTimes) return a;
@@ -339,25 +351,157 @@ void main() {
       expect(backend.domains.single, 'unrestricted');
     });
 
-    test('with hours, Graph is asked for twenty and only those inside the '
-        'hours are kept', () async {
-      const tue = CalendarDate(2026, 10, 20);
-      const wed = CalendarDate(2026, 10, 21);
+    test('with hours on one day, Graph is asked once for twenty and only '
+        'those inside the hours are kept', () async {
       backend.answer = [
         MeetingTimeSuggestion(
-            startUtc: local(tue, 10), endUtc: local(tue, 11, 30),
+            startUtc: local(fri, 16), endUtc: local(fri, 17, 30),
             confidence: 100),
         MeetingTimeSuggestion(
-            startUtc: local(wed, 18), endUtc: local(wed, 19, 30),
+            startUtc: local(fri, 18), endUtc: local(fri, 19, 30),
             confidence: 50),
       ];
+      final r = await hinted(const AskHints(day: fri, hours: dinner),
+          addresses: ['dana@fabrikam.example'], minutes: 90);
+      expect(backend.candidates.single, 20);
+      expect(r.graphCalls, 1);
+      expect(r.source, 'graph');
+      expect(r.slots, [FreeSlot(local(fri, 18), local(fri, 19, 30))]);
+    });
+
+    test('hours over several days ask Graph one day at a time, inside the '
+        'hours', () async {
+      const days = [
+        CalendarDate(2026, 10, 19),
+        CalendarDate(2026, 10, 20),
+        CalendarDate(2026, 10, 21),
+        CalendarDate(2026, 10, 22),
+        CalendarDate(2026, 10, 23),
+      ];
+      const wed = CalendarDate(2026, 10, 21);
+      backend.answerFor = (start, end) => start == local(wed, 17, 30)
+          ? [
+              MeetingTimeSuggestion(
+                  startUtc: local(wed, 18), endUtc: local(wed, 19, 30)),
+            ]
+          : const MeetingTimes(emptyReason: 'unknown');
       final r = await hinted(const AskHints(hours: dinner),
           addresses: ['dana@fabrikam.example'],
           window: FindTimeWindow.nextWeek,
           minutes: 90);
-      expect(backend.candidates.single, 20);
+      expect(backend.windows,
+          [for (final d in days) (local(d, 17, 30), local(d, 20, 30))]);
+      expect(backend.candidates, [5, 5, 5, 5, 5]);
+      expect(backend.domains.toSet(), {'unrestricted'});
       expect(r.source, 'graph');
       expect(r.slots, [FreeSlot(local(wed, 18), local(wed, 19, 30))]);
+      expect(r.graphCalls, 5);
+      expect(backend.maxInFlight, 5, reason: 'the days are asked together');
+    });
+
+    group('several days, merged', () {
+      const fri = CalendarDate(2026, 10, 23);
+      Future<FindTimeResult> week() => hinted(const AskHints(hours: dinner),
+          addresses: ['dana@fabrikam.example'],
+          window: FindTimeWindow.nextWeek,
+          minutes: 90);
+
+      test('every day nobody free is the nobody-free note', () async {
+        backend.answer = const MeetingTimes(emptyReason: 'attendeesunavailable');
+        final r = await week();
+        expect(r.source, 'graph');
+        expect(r.slots, isEmpty);
+        expect(r.note, 'Nobody is free next week — try this week.');
+      });
+
+      test('one day unreadable is the unreadable fallback', () async {
+        backend.answerFor = (start, _) => start == local(fri, 17, 30)
+            ? const MeetingTimes(emptyReason: 'unknown')
+            : const MeetingTimes(emptyReason: 'attendeesunavailable');
+        final r = await week();
+        expect(r.source, 'local');
+        expect(r.note, findTimeUnreadableNote);
+        expect(r.slots, isNotEmpty);
+      });
+
+      test('a day whose call failed is never read as nobody free', () async {
+        backend.answerFor = (start, _) => start == local(fri, 17, 30)
+            ? const CalendarUnavailable('Graph is busy.')
+            : const MeetingTimes(emptyReason: 'attendeesunavailable');
+        final r = await week();
+        expect(r.failed, isFalse);
+        expect(r.source, 'local');
+        expect(r.note, findTimeUnreadableNote);
+        expect(r.slots, isNotEmpty);
+      });
+
+      test('a missing permission on any day is the search\'s own failure',
+          () async {
+        backend.answerFor = (start, _) => start == local(fri, 17, 30)
+            ? const CalendarScopeMissing()
+            : [
+                MeetingTimeSuggestion(
+                    startUtc: local(const CalendarDate(2026, 10, 21), 18),
+                    endUtc: local(const CalendarDate(2026, 10, 21), 19, 30)),
+              ];
+        final r = await week();
+        expect(r.failed, isTrue);
+        expect(r.slots, isEmpty);
+        expect(r.note, 'Calendar permission missing — reconnect in Settings.');
+        expect(r.graphCalls, 5);
+      });
+
+      test('an account that cannot look others up falls back as one call '
+          'would', () async {
+        backend.answerFor = (start, _) => start == local(fri, 17, 30)
+            ? const CalendarRefused('unsupported_account', 'Personal account.')
+            : const MeetingTimes(emptyReason: 'attendeesunavailable');
+        final r = await week();
+        expect(r.source, 'local');
+        expect(r.note, findTimeLocalNote);
+      });
+    });
+
+    test('a day already over is not asked, and one day failing costs that '
+        'day alone', () async {
+      // This week from Wednesday 9:00 AM: Wednesday's dinner is still ahead.
+      const thu = CalendarDate(2026, 10, 15);
+      backend.answerFor = (start, end) => start == local(thu, 17, 30)
+          ? [
+              MeetingTimeSuggestion(
+                  startUtc: local(thu, 18), endUtc: local(thu, 19, 30)),
+            ]
+          : const CalendarUnavailable('Graph is busy.');
+      final r = await hinted(const AskHints(hours: dinner),
+          addresses: ['dana@fabrikam.example'],
+          window: FindTimeWindow.thisWeek,
+          minutes: 90);
+      expect(backend.windows.first,
+          (local(const CalendarDate(2026, 10, 14), 17, 30),
+              local(const CalendarDate(2026, 10, 14), 20, 30)));
+      expect(r.graphCalls, 3, reason: 'Wednesday, Thursday and Friday');
+      expect(r.failed, isFalse);
+      expect(r.slots, [FreeSlot(local(thu, 18), local(thu, 19, 30))]);
+
+      // Wednesday 8:00 PM: today's dinner has no room for an hour and a
+      // half, and every day failing is the search failing.
+      backend.windows.clear();
+      backend.answerFor = (_, _) => const CalendarUnavailable('Graph is busy.');
+      final late = await searchFindTime(
+        backend: backend,
+        calendar: calendar,
+        hours: null,
+        addresses: const ['dana@fabrikam.example'],
+        durationMinutes: 90,
+        window: FindTimeWindow.thisWeek,
+        now: DateTime.utc(2026, 10, 15, 3),
+        zone: la,
+        hints: const AskHints(hours: dinner),
+      );
+      expect(backend.windows.first.$1, local(thu, 17, 30));
+      expect(late.graphCalls, 2);
+      expect(late.failed, isTrue);
+      expect(late.note, 'Graph is busy.');
     });
 
     test('nothing inside the hours falls back to your own, said', () async {
@@ -416,6 +560,51 @@ void main() {
       await hinted(const AskHints(day: sat, hours: morning),
           addresses: ['dana@fabrikam.example']);
       expect(backend.domains.single, 'personal');
+    });
+
+    test('a week with no day named stays work on a Sunday–Thursday mailbox',
+        () async {
+      const sunToThu = MailboxSettings(workingDays: [
+        'sunday',
+        'monday',
+        'tuesday',
+        'wednesday',
+        'thursday',
+      ]);
+      await searchFindTime(
+        backend: backend,
+        calendar: calendar,
+        hours: sunToThu,
+        addresses: const ['dana@fabrikam.example'],
+        durationMinutes: 30,
+        window: FindTimeWindow.thisWeek,
+        now: now,
+        zone: la,
+      );
+      // The owner's own walk skips Friday; Graph must not offer it either.
+      expect(backend.domains.single, 'work');
+    });
+
+    test('the domain follows the days searched, whichever pill asked',
+        () async {
+      for (final window in [FindTimeWindow.thisWeek, FindTimeWindow.nextWeek]) {
+        backend.domains.clear();
+        await hinted(const AskHints(day: sat, hours: morning),
+            addresses: ['dana@fabrikam.example'], window: window);
+        expect(backend.domains.single, 'personal', reason: window.wire);
+      }
+      backend.domains.clear();
+      await hinted(
+          const AskHints(day: CalendarDate(2026, 10, 14), hours: dinner),
+          addresses: ['dana@fabrikam.example'],
+          window: FindTimeWindow.thisWeek,
+          minutes: 90);
+      expect(backend.domains.single, 'unrestricted');
+      backend.domains.clear();
+      await hinted(const AskHints(day: fri, hours: morning),
+          addresses: ['dana@fabrikam.example'],
+          window: FindTimeWindow.thisWeek);
+      expect(backend.domains.single, 'work');
     });
 
     test('the pill says their day', () {
@@ -538,6 +727,35 @@ void main() {
             minutes: 60);
         expect(r.slots, isEmpty, reason: 'no Mon–Fri before the Sunday');
         expect(backend.asked, hasLength(1));
+      });
+
+      test('today\'s weekday with the days before it gone is not retried as '
+          'a week', () async {
+        // Friday Oct 16, 10:00 AM: the rest of the week is today alone.
+        await calendar.upsertEvents([
+          CalendarEvent(
+            id: 'fri-busy',
+            subject: 'Northwind offsite',
+            startUtc: local(fri, 17),
+            endUtc: local(fri, 21),
+            showAs: 'busy',
+          ),
+        ], syncRun: 'run-1');
+        backend.answer = const MeetingTimes(emptyReason: 'unknown');
+        final r = await searchFindTime(
+          backend: backend,
+          calendar: calendar,
+          hours: null,
+          addresses: const ['dana@fabrikam.example'],
+          durationMinutes: 90,
+          window: FindTimeWindow.thisWeek,
+          now: DateTime.utc(2026, 10, 16, 17),
+          zone: la,
+          hints: fridayDinner,
+        );
+        expect(r.slots, isEmpty);
+        expect(backend.asked, hasLength(1));
+        expect(r.graphCalls, 1);
       });
 
       test('a search that could not run is not retried as a week', () async {

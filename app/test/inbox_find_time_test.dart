@@ -12,11 +12,15 @@ import 'package:bond_inbox/providers/day_providers.dart'
     show schedulingAsksProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/screens/new_message_screen.dart'
+    show NewMessageScreen;
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/scheduling_ask.dart'
+    show schedulingAskMessageIds;
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -26,7 +30,7 @@ import 'package:bond_inbox/models/calendar_models.dart'
 import 'package:bond_inbox/services/calendar/day_items.dart'
     show dayTitle, formatEventRange, shortDate;
 import 'package:bond_inbox/services/calendar/find_time.dart'
-    show findTimeUnreadableNote, findTimeWindowUtc;
+    show FindTimeWindow, findTimeUnreadableNote, findTimeWindowUtc;
 import 'package:bond_inbox/theme/tokens.dart' show BondColors;
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/command_plan_card.dart'
@@ -34,12 +38,12 @@ import 'package:bond_inbox/widgets/command_plan_card.dart'
 import 'package:bond_inbox/widgets/day_command_bar.dart' show DayCommandBar;
 import 'package:bond_inbox/widgets/day_grid.dart' show DayGrid;
 import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
-import 'package:bond_inbox/widgets/find_time_pane.dart';
 import 'package:bond_inbox/widgets/scheduling_ask_rows.dart';
 import 'package:bond_inbox/widgets/side_panel.dart' show SidePanelHost;
 import 'package:bond_inbox/widgets/thread_action_bar.dart';
 import 'package:bond_inbox/widgets/write_confirm_strip.dart'
     show WriteConfirmStrip;
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
@@ -155,13 +159,18 @@ class _HoldingStore extends MessageStore {
   Completer<void>? hold;
   int askReads = 0;
 
+  /// When set, only this message's read waits on [hold].
+  String? holdOnly;
+
   @override
   Future<Map<String, Object?>?> getMessageRow(
       String source, String sourceMessageId) async {
     if (sourceMessageId.startsWith('ask-')) {
       askReads += 1;
       final h = hold;
-      if (h != null) await h.future;
+      if (h != null && (holdOnly == null || holdOnly == sourceMessageId)) {
+        await h.future;
+      }
     }
     return super.getMessageRow(source, sourceMessageId);
   }
@@ -178,9 +187,14 @@ class _RecordingWriter implements CalendarWriter {
   /// When set, a commit waits for it. Made inside the test body.
   Completer<void>? hold;
 
+  /// When set, a dry run waits for it. Made inside the test body.
+  Completer<void>? previewHold;
+
   @override
   Future<PreviewResult> preview(CalendarWrite write) async {
     previewed.add(write);
+    final held = previewHold;
+    if (held != null) await held.future;
     final p = WritePreview(method: 'POST', path: '/x', notifies: notifies);
     return PreviewReady(p, needsConfirm: needsConfirm(write, p));
   }
@@ -355,12 +369,13 @@ void main() {
     await pumps(tester);
   }
 
-  Future<void> openPane(WidgetTester tester) async {
-    await openThreadFromDay(tester);
+  /// The thread bar's Find a time pressed, and the Day stop it lands on
+  /// given its write, its read and its search.
+  Future<void> pressFindTime(WidgetTester tester) async {
     expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
     await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
     await pumps(tester);
-    expect(find.byType(FindTimePane), findsOneWidget);
+    await pumps(tester);
     await pumps(tester);
   }
 
@@ -369,6 +384,28 @@ void main() {
     await openAsk(tester);
     await tester
         .tap(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)));
+    await pumps(tester);
+    await pumps(tester);
+  }
+
+  /// The ask opened and its Next week pressed (outside the grid group).
+  Future<void> openAskNextWeekTop(WidgetTester tester) async {
+    await openAsk(tester);
+    await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+        'email', 'c-ask', FindTimeWindow.nextWeek)));
+    await pumps(tester);
+    await pumps(tester);
+  }
+
+  /// Grid face on the day the pane is on, and a tap high on it.
+  Future<void> tapEmptyGridTop(WidgetTester tester) async {
+    if (find.byType(DayGrid).evaluate().isEmpty) {
+      await tester.tap(find.byKey(DayPane.gridKey));
+      await pumps(tester);
+      await pumps(tester);
+    }
+    final grid = tester.getRect(find.byType(DayGrid));
+    await tester.tapAt(grid.center);
     await pumps(tester);
     await pumps(tester);
   }
@@ -485,13 +522,52 @@ void main() {
     expect(labels.single['question'], 'scheduling_ask');
     expect(labels.single['origin'], 'invite');
     expect(labels.single['source_message_id'], 'ask-m1');
+    final rows = await store.recentActivity(limit: 20);
+    expect(
+        rows.where((r) =>
+            r['kind'] == 'find_time' &&
+            (r['detail_json'] as String? ?? '')
+                .contains('"action":"send_invite"')),
+        hasLength(1),
+        reason: 'the invite\'s own Find a time row, an enum word only');
 
-    // The thread no longer offers Find a time.
+    // Not an ask any more, but Dana's message is still unanswered, so the
+    // thread still offers Find a time — a press would be the owner's word.
     await tester.tap(find.text('Needs You').first);
     await pumps(tester);
     await tester.tap(find.text(_subject).first);
     await pumps(tester);
-    expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+    expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
+  });
+
+  testWidgets('the invite labels the message its slot was picked for: a '
+      'newer request that lands before Send keeps its ask', (tester) async {
+    await seedAsk();
+    await pumpScreen(tester);
+    await pickFirstSlot(tester);
+
+    // Dana writes again while the card stands, and the asks are re-read.
+    await seedAsk(
+        messageId: 'ask-m2',
+        body: 'Or could we do Thursday instead?',
+        minutesAgo: 10);
+    final container =
+        ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+    container.invalidate(schedulingAsksProvider);
+    await pumps(tester);
+
+    await tester.tap(find.byKey(CommandPlanCard.doKey));
+    await pumps(tester);
+    await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+    await pumps(tester);
+    await pumps(tester);
+    expect(writer.committed.single, isA<CreateEvent>());
+    final labels = await store.decisionLabels();
+    expect(labels.single['source_message_id'], 'ask-m1');
+    expect(labels.single['answer'], 'no');
+    expect(await schedulingAskMessageIds(store), {'email|c-ask': 'ask-m2'});
+    expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget,
+        reason: 'the newer request stands');
   });
 
   testWidgets('a slot added to your own calendar with nobody on it leaves '
@@ -834,22 +910,306 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('the pane opens on the same day and length', (tester) async {
+    testWidgets('the thread bar\'s Find a time opens the ask on the same '
+        'day and length', (tester) async {
       await seedAsk(
           subject: 'dinner on $weekday',
           body: 'could we grab dinner on $weekday?');
       await pumpScreen(tester);
-      await openPane(tester);
+      await tester.tap(find.text('dinner on $weekday').first);
       await pumps(tester);
+      await pressFindTime(tester);
       expect(
           find.descendant(
-              of: find.byKey(
-                  FindTimePane.windowKeyFor(FindTimeWindow.theirs)),
+              of: find.byKey(SchedulingAskTile.windowKeyFor(
+                  'email', 'c-ask', FindTimeWindow.theirs)),
               matching: find.text(shortDate(day))),
           findsOneWidget);
-      expect(find.byKey(FindTimePane.durationKeyFor(90)), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c-ask', 90)),
+          findsOneWidget);
       expect(backend.minutes.last, 90);
       expect(backend.windows.last, (local(17, 30), local(20, 30)));
+    });
+
+    testWidgets('one ask open at a time: an ask folded during its hint read '
+        'does not pull the pane to its day', (tester) async {
+      await seedAsk(
+          subject: 'dinner on $weekday',
+          body: 'could we grab dinner on $weekday?');
+      await seedAsk(
+          key: 'c-ask2', messageId: 'ask-m2', subject: 'Northwind sync slot?');
+      final holding = _HoldingStore(db)
+        ..hold = Completer<void>()
+        ..holdOnly = 'ask-m1';
+      await pumpScreen(tester, storeOverride: holding);
+      // The plain ask's window: this week from today, or Monday once the
+      // week is over (a Friday evening run).
+      final plainDay = findTimeWindowUtc(FindTimeWindow.thisWeek,
+              now: DateTime.now(), zone: la, durationMinutes: 30)
+          .firstDay;
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byKey(SchedulingAskTile.rowKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      // The other ask, opened while the dinner's read is out.
+      await tester
+          .tap(find.byKey(SchedulingAskTile.rowKeyFor('email', 'c-ask2')));
+      await pumps(tester);
+      await pumps(tester);
+      expect(tester.widget<DayPane>(find.byType(DayPane)).day, plainDay);
+
+      holding.hold!.complete();
+      await pumps(tester);
+      await pumps(tester);
+      expect(tester.widget<DayPane>(find.byType(DayPane)).day, plainDay,
+          reason: 'the folded dinner ask did not move the pane to $day');
+      expect(
+          find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c-ask2', 45)),
+          findsOneWidget,
+          reason: 'the open ask stays open');
+    });
+
+    testWidgets('a pill pressed while New message is open leaves it open',
+        (tester) async {
+      await seedAsk(
+          subject: 'dinner on $weekday',
+          body: 'could we grab dinner on $weekday?');
+      await pumpScreen(tester);
+      await openAsk(tester);
+      await tester.tap(find.byTooltip('New message'));
+      await pumps(tester);
+      expect(find.byType(NewMessageScreen), findsOneWidget);
+
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c-ask', FindTimeWindow.nextWeek)));
+      await pumps(tester);
+      await pumps(tester);
+      expect(backend.windows, hasLength(2), reason: 'it searched again');
+      expect(find.byType(NewMessageScreen), findsOneWidget,
+          reason: 'following the search only moved the day underneath');
+    });
+
+    testWidgets('"tomorrow" is read against the day it was sent: sent two '
+        'days ago, it names no day', (tester) async {
+      await seedAsk(
+          subject: 'dinner tomorrow?',
+          body: 'could we grab dinner tomorrow?',
+          minutesAgo: 2 * 24 * 60);
+      await pumpScreen(tester);
+      await openAsk(tester);
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c-ask', FindTimeWindow.theirs)),
+          findsNothing,
+          reason: 'the day it named has gone');
+      expect(backend.minutes.single, 90, reason: 'still a dinner');
+    });
+  });
+
+  group('the one past rule and stale rows', () {
+    MeetingTimeSuggestion slot(Duration from, Duration length) {
+      final start = DateTime.now().toUtc().add(from);
+      return MeetingTimeSuggestion(
+          startUtc: start,
+          endUtc: start.add(length),
+          confidence: 50,
+          organizerAvailability: 'free',
+          attendeeAvailability: const {_dana: 'free'});
+    }
+
+    testWidgets('a slot under way is shown but refused as past: no card, '
+        'nothing dry-run', (tester) async {
+      backend = _Backend([
+        slot(const Duration(minutes: -10), const Duration(minutes: 30)),
+      ]);
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAsk(tester);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)));
+      await pumps(tester);
+      expect(find.text('That time has passed.'), findsOneWidget);
+      expect(find.byType(CommandPlanCard), findsNothing);
+      expect(writer.previewed, isEmpty);
+    });
+
+    testWidgets('a row draws no slot that has ended', (tester) async {
+      backend = _Backend([
+        slot(const Duration(hours: -2), const Duration(minutes: 30)),
+        slot(const Duration(days: 7), const Duration(minutes: 30)),
+      ]);
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAsk(tester);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 1)),
+          findsNothing,
+          reason: 'the slot two hours ago is not offered');
+      await tester
+          .tap(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)));
+      await pumps(tester);
+      await pumps(tester);
+      final proposed = writer.previewed.single as CreateEvent;
+      expect(proposed.startUtc.isAfter(DateTime.now().toUtc()), isTrue);
+    });
+
+    test('an answer older than its lifetime is searched again', () {
+      final at = DateTime.utc(2026, 10, 5, 9);
+      expect(askResultStale(at, at.add(const Duration(minutes: 29))), isFalse);
+      expect(askResultStale(at, at.add(askResultLifetime)), isFalse);
+      expect(askResultStale(at, at.add(const Duration(minutes: 31))), isTrue);
+      expect(askResultStale(null, at), isTrue);
+    });
+
+    test('the ask\'s words are read again for a newer message or a new day',
+        () {
+      final monday = CalendarDate(2026, 10, 5);
+      expect(
+          askHintsStale(
+              readFor: 'm1', newest: 'm1', readOn: monday, today: monday),
+          isFalse);
+      expect(
+          askHintsStale(
+              readFor: 'm1', newest: 'm2', readOn: monday, today: monday),
+          isTrue);
+      expect(
+          askHintsStale(
+              readFor: 'm1',
+              newest: 'm1',
+              readOn: monday,
+              today: monday.addDays(1)),
+          isTrue,
+          reason: '"tomorrow" read on Monday is today on Tuesday');
+      expect(
+          askHintsStale(readFor: 'm1', newest: null, readOn: monday,
+              today: monday),
+          isFalse);
+    });
+
+    testWidgets('the search\'s activity row counts its Graph calls',
+        (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAsk(tester);
+      final rows = await store.recentActivity(limit: 20);
+      final search = rows.firstWhere((r) =>
+          r['kind'] == 'find_time' &&
+          (r['detail_json'] as String? ?? '').contains('"source"'));
+      expect(search['detail_json'], contains('"graph_calls":1'));
+    });
+
+    testWidgets('an ask dismissed while its slot is dry-run lands no card',
+        (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAsk(tester);
+      writer.previewHold = Completer<void>();
+      await tester
+          .tap(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)));
+      await pumps(tester);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+
+      writer.previewHold!.complete();
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byType(CommandPlanCard), findsNothing,
+          reason: 'no invite for an ask nobody owes');
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
+    });
+
+    testWidgets('an ask that left and came back is folded, with no stale '
+        'slots, and a press meanwhile is a blank event', (tester) async {
+      await seedAsk();
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await openAskNextWeekTop(tester);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
+
+      // The owner replies: the ask leaves the column.
+      final replied = DateTime.now()
+          .toUtc()
+          .subtract(const Duration(minutes: 30))
+          .toIso8601String();
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'out-1',
+        'conversation_key': 'c-ask',
+        'direction': 'outbound',
+        'subject': 'Re: $_subject',
+        'from_address': 'owner@contoso.com',
+        'received_at': replied,
+        'body_text': 'Let me check.',
+      });
+      await db.customStatement(
+          "UPDATE conversations SET last_outbound_at = ?, last_message_at = ? "
+          "WHERE conversation_key = 'c-ask'",
+          [replied, replied]);
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+      container.invalidate(schedulingAsksProvider);
+      await container.read(conversationsProvider.notifier).load();
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+
+      // A press meanwhile: nobody's ask is open, so a blank event.
+      await tapEmptyGridTop(tester);
+      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
+      expect((writer.previewed.last as CreateEvent).attendees, isEmpty);
+      await tester.tap(find.byKey(CommandPlanCard.cancelKey));
+      await pumps(tester);
+
+      // Dana writes again: the ask is back, folded, its old slots gone.
+      await seedAsk(messageId: 'ask-m2', minutesAgo: 10);
+      container.invalidate(schedulingAsksProvider);
+      await container.read(conversationsProvider.notifier).load();
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsNothing);
+      expect(
+          find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c-ask', 45)),
+          findsNothing,
+          reason: 'folded');
+      final before = writer.previewed.length;
+      await tapEmptyGridTop(tester);
+      expect(writer.previewed, hasLength(before + 1));
+      expect((writer.previewed.last as CreateEvent).attendees, isEmpty,
+          reason: 'a blank event, not an invite on the old search');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a newer message on an open ask folds its row: no slots '
+        'of the old search, and a press is a blank event', (tester) async {
+      await seedAsk();
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await openAskNextWeekTop(tester);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
+
+      // Dana writes again while the row is open; the ask never left.
+      await seedAsk(messageId: 'ask-m2', minutesAgo: 10);
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+      container.invalidate(schedulingAsksProvider);
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsNothing);
+      await tapEmptyGridTop(tester);
+      expect((writer.previewed.last as CreateEvent).attendees, isEmpty);
+      await tester.pumpWidget(const SizedBox());
     });
   });
 
@@ -949,7 +1309,11 @@ void main() {
       expect(find.byType(DayPane), findsNothing);
     });
 
-    testWidgets('a length pressed while the read is out stays', (tester) async {
+    // The pressed length winning is the rule; the one read is what the
+    // shared in-flight read ([_readAskHints]'s `??=`) gives, pinned so a
+    // pill press can never start a second read of its own.
+    testWidgets('a length pressed while the read is out stays, and both wait '
+        'on the one read', (tester) async {
       await seedAsk(subject: 'dinner friday?', body: 'dinner friday?');
       final holding = _HoldingStore(db)..hold = Completer<void>();
       await pumpScreen(tester, storeOverride: holding);
@@ -970,24 +1334,25 @@ void main() {
       expect(holding.askReads, 1);
     });
 
-    testWidgets('the pane waits on one read, however often it is built',
-        (tester) async {
+    testWidgets('a press on the thread bar reads the ask once, and searches '
+        'when the read lands', (tester) async {
       await seedAsk();
       final holding = _HoldingStore(db)..hold = Completer<void>();
       await pumpScreen(tester, storeOverride: holding);
       // Needs You → the row opens the thread beside, wearing the chip.
       await tester.tap(find.text(_subject).first);
       await pumps(tester);
-      await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
-      await pumps(tester);
-      await pumps(tester);
-      expect(find.byKey(FindTimePane.waitingKey), findsOneWidget);
+      await pressFindTime(tester);
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(backend.asked, isEmpty, reason: 'the search waits on the read');
       expect(holding.askReads, 1);
 
       holding.hold!.complete();
       await pumps(tester);
       await pumps(tester);
-      expect(find.byKey(FindTimePane.waitingKey), findsNothing);
+      expect(
+          find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
       expect(holding.askReads, 1);
     });
   });
@@ -1045,6 +1410,11 @@ void main() {
         'with nobody on it and offered back', (tester) async {
       writer = _RecordingWriter();
       await pumpScreen(tester);
+      // Tomorrow: today's grid may already be behind the clock.
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
       await tapEmptyGrid(tester);
 
       expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
@@ -1087,11 +1457,15 @@ void main() {
         source: 'email',
         conversationKey: 'c-ask',
         sourceMessageId: 'ask-m1',
+        answer: 'no',
         origin: 'invite',
       );
       final container =
           ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
       container.invalidate(schedulingAsksProvider);
+      await pumps(tester);
+      // Tomorrow: today's grid may already be behind the clock.
+      await tester.tap(find.byTooltip('Next day'));
       await pumps(tester);
       await tapEmptyGrid(tester);
 
@@ -1300,7 +1674,8 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a ghost dragged into the past is refused, said', (tester) async {
+    testWidgets('a press on yesterday is refused, said: no card, nothing '
+        'dry-run', (tester) async {
       writer = _RecordingWriter();
       await pumpScreen(tester);
       await tester.tap(find.text('Day'));
@@ -1308,13 +1683,372 @@ void main() {
       await tester.tap(find.byTooltip('Previous day'));
       await pumps(tester);
       await tapEmptyGrid(tester, at: 0);
-      await settle(tester);
-      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
+      expect(find.text('That time has passed.'), findsOneWidget);
+      expect(find.byType(CommandPlanCard), findsNothing);
+      expect(writer.previewed, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('with an ask open, a press on yesterday is refused too, '
+        'never a blank event in its place', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAsk(tester);
+      // Back to yesterday from wherever the search moved the pane.
+      final yesterday = la.dateOf(DateTime.now().toUtc()).addDays(-1);
+      for (var i = 0;
+          i < 10 &&
+              tester.widget<DayPane>(find.byType(DayPane)).day != yesterday;
+          i++) {
+        await tester.tap(find.byTooltip('Previous day'));
+        await pumps(tester);
+      }
+      await tapEmptyGrid(tester, at: 0);
+      expect(find.text('That time has passed.'), findsOneWidget);
+      expect(find.byType(CommandPlanCard), findsNothing);
+      expect(writer.previewed, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a ghost moved across midnight says to pick a time inside '
+        'the day; one stretched across it says to move it', (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      final before = writer.previewed.length;
+      final tomorrow = la.dateOf(DateTime.now().toUtc()).addDays(1);
+      // The grid hands a cross-midnight span up as it is (only a resize is
+      // refused there); handed straight in, as kalender would.
+      final grid = tester.widget<DayGrid>(find.byType(DayGrid));
+      final late = la.localDateTime(tomorrow, 23, 45).toUtc();
+      grid.onProposalChanged!(late, late.add(const Duration(minutes: 30)));
+      await pumps(tester);
+      expect(find.text(moveLeavesDay), findsOneWidget);
+      expect(writer.previewed, hasLength(before));
+
+      grid.onProposalChanged!(late, late.add(const Duration(minutes: 90)));
+      await pumps(tester);
+      expect(find.text(DayGrid.resizeLeavesDay), findsOneWidget);
+      expect(writer.previewed, hasLength(before));
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an overnight proposal shortened inside its days re-proposes; '
+        'stretched past them it is refused', (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      final tomorrow = la.dateOf(DateTime.now().toUtc()).addDays(1);
+      final eleven = la.localDateTime(tomorrow, 23, 0).toUtc();
+      // An overnight blank event, 23:00–01:00, handed in as kalender would.
+      tester.widget<DayGrid>(find.byType(DayGrid)).onCreateRequested!(
+          eleven, eleven.add(const Duration(hours: 2)));
+      await pumps(tester);
+      await pumps(tester);
+      final overnight = writer.previewed.last as CreateEvent;
+      expect(overnight.endUtc.difference(overnight.startUtc),
+          const Duration(hours: 2));
       final before = writer.previewed.length;
 
-      await dragGhost(tester, const Offset(0, -42));
+      // Its end pulled back to 00:30: still inside the days it covered.
+      tester.widget<DayGrid>(find.byType(DayGrid)).onProposalChanged!(
+          eleven, eleven.add(const Duration(minutes: 90)));
+      await pumps(tester);
+      await pumps(tester);
+      expect(writer.previewed, hasLength(before + 1));
+      expect((writer.previewed.last as CreateEvent).endUtc,
+          eleven.add(const Duration(minutes: 90)));
+      expect(find.text(DayGrid.resizeLeavesDay), findsNothing);
+
+      // Its end pushed into the day after: out of its days, refused.
+      tester.widget<DayGrid>(find.byType(DayGrid)).onProposalChanged!(
+          eleven, eleven.add(const Duration(hours: 26)));
+      await pumps(tester);
+      expect(find.text(DayGrid.resizeLeavesDay), findsOneWidget);
+      expect(writer.previewed, hasLength(before + 1));
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a refusal leaves the Undo of the write just done on z',
+        (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      expect(writer.committed.single, isA<CreateEvent>());
+      expect(find.text('Undo'), findsOneWidget);
+
+      // Refused: yesterday.
+      await tester.tap(find.byTooltip('Previous day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Previous day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
       expect(find.text('That time has passed.'), findsOneWidget);
-      expect(writer.previewed, hasLength(before));
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await pumps(tester);
+      await pumps(tester);
+      expect(writer.committed.last, isA<DeleteEvent>(),
+          reason: 'z still undid the event just written');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an Enter while the card writes: the new card\'s grid is '
+        'live, and a press proposes again', (tester) async {
+      writer = _RecordingWriter();
+      writer.hold = Completer<void>();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      // Nobody on it: the press writes at once, and the write is held.
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      expect(writer.committed, hasLength(1));
+
+      await tester.enterText(
+          find.byKey(DayCommandBar.fieldKey), 'add focus time tomorrow 3pm');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+      expect(find.byType(CommandPlanCard), findsOneWidget);
+      final before = writer.previewed.length;
+
+      await tapEmptyGrid(tester, at: -0.35);
+      expect(writer.previewed, hasLength(before + 1),
+          reason: 'the grid is not held by the old card\'s write');
+      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
+
+      writer.hold!.complete();
+      await pumps(tester);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a typed Enter after a blank event is the typed command\'s '
+        'card: no name field, no carried name', (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await tester.enterText(
+          find.byKey(CommandPlanCard.subjectKey), 'Dentist');
+      await pumps(tester);
+
+      await tester.enterText(
+          find.byKey(DayCommandBar.fieldKey), 'add focus time tomorrow 3pm');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+      expect(find.byType(CommandPlanCard), findsOneWidget);
+      expect(find.byKey(CommandPlanCard.subjectKey), findsNothing);
+      expect(
+          find.descendant(
+              of: find.byKey(DayGrid.proposalKey),
+              matching: find.textContaining('Dentist', findRichText: true)),
+          findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a dragged invite still labels the message its slot was '
+        'picked for', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      // Dana writes again while the card stands.
+      await seedAsk(
+          messageId: 'ask-m2',
+          body: 'Or could we do Thursday instead?',
+          minutesAgo: 10);
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+      container.invalidate(schedulingAsksProvider);
+      await pumps(tester);
+
+      await dragGhost(tester, const Offset(0, 42));
+      expect(writer.previewed, hasLength(2), reason: 'it re-proposed');
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await pumps(tester);
+      await pumps(tester);
+      final labels = await store.decisionLabels();
+      expect(labels.single['source_message_id'], 'ask-m1');
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget,
+          reason: 'the newer request keeps its ask');
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a second invite for the same ask, put up while the first '
+        'is in the air, goes when the first closes the ask', (tester) async {
+      await seedAsk();
+      writer.hold = Completer<void>();
+      await pumpScreen(tester);
+      await openAskNextWeek(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await pumps(tester);
+      expect(writer.committed, hasLength(1));
+
+      // A typed Enter frees the grid; a press then is the ask's invite again.
+      await tester.enterText(
+          find.byKey(DayCommandBar.fieldKey), 'add focus time tomorrow 3pm');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+      await tapEmptyGrid(tester, at: -0.35);
+      expect((writer.previewed.last as CreateEvent).attendees, [_dana]);
+      expect(find.byType(CommandPlanCard), findsOneWidget);
+
+      writer.hold!.complete();
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byType(CommandPlanCard), findsNothing,
+          reason: 'the ask it invites for has just been answered');
+      expect(find.byKey(DayGrid.proposalKey), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a tap on the ghost while the card writes flashes nothing',
+        (tester) async {
+      writer = _RecordingWriter();
+      writer.hold = Completer<void>();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      expect(writer.committed, hasLength(1));
+
+      await tester.tap(find.byKey(DayGrid.proposalKey));
+      await tester.pump();
+      expect(
+          tester.widget<CommandPlanCard>(find.byType(CommandPlanCard)).flash,
+          0);
+      writer.hold!.complete();
+      await pumps(tester);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a blank ghost dragged keeps its card on screen through the '
+        'dry run', (tester) async {
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.enterText(
+          find.byKey(CommandPlanCard.subjectKey), 'Dentist');
+      await pumps(tester);
+
+      writer.previewHold = Completer<void>();
+      await dragGhost(tester, const Offset(0, 42));
+      expect(find.byType(CommandPlanCard), findsOneWidget,
+          reason: 'the old card stands while the new span is dry-run');
+      expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
+      expect(
+          tester
+              .widget<TextField>(find.byKey(CommandPlanCard.subjectKey))
+              .controller!
+              .text,
+          'Dentist',
+          reason: 'the name as typed, not the old write\'s "New event"');
+      writer.previewHold!.complete();
+      writer.previewHold = null;
+      await pumps(tester);
+      expect((writer.previewed.last as CreateEvent).subject, 'Dentist');
+      expect(find.byKey(CommandPlanCard.subjectKey), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a blank event with a known name on it: the press shows the '
+        'strip, Send invites them, and no Undo is offered', (tester) async {
+      await seedAsk();
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.enterText(
+          find.byKey(CommandPlanCard.subjectKey), 'Review');
+      await tester.enterText(find.byKey(CommandPlanCard.withKey), 'Dana');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await pumps(tester);
+      expect(find.byKey(CommandPlanCard.chipKeyFor(_dana)), findsOneWidget);
+
+      await tester.tap(find.byKey(CommandPlanCard.doKey));
+      await pumps(tester);
+      expect(find.byType(WriteConfirmStrip), findsOneWidget);
+      expect(writer.committed, isEmpty);
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await pumps(tester);
+      final written = writer.committed.single as CreateEvent;
+      expect(written.subject, 'Review');
+      expect(written.attendees, [_dana]);
+      expect(written.isOnlineMeeting, isTrue);
+      expect(find.text('Undo'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a blank ghost dragged after naming people re-proposes with '
+        'them', (tester) async {
+      await seedAsk();
+      writer = _RecordingWriter();
+      await pumpScreen(tester);
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      await tester.tap(find.byTooltip('Next day'));
+      await pumps(tester);
+      await tapEmptyGrid(tester, at: 0);
+      await settle(tester);
+      await tester.enterText(find.byKey(CommandPlanCard.withKey), 'Dana');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await pumps(tester);
+      expect(find.byKey(CommandPlanCard.chipKeyFor(_dana)), findsOneWidget);
+
+      await dragGhost(tester, const Offset(0, 42));
+      final again = writer.previewed.last as CreateEvent;
+      expect(again.attendees, [_dana]);
+      expect(again.isOnlineMeeting, isTrue);
+      expect(find.byKey(CommandPlanCard.chipKeyFor(_dana)), findsOneWidget,
+          reason: 'the new card starts from the chips');
       await tester.pumpWidget(const SizedBox());
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
@@ -1370,7 +2104,8 @@ void main() {
         (tester) async {
       await seedAsk();
       await pumpScreen(tester);
-      await openAsk(tester);
+      // Next week: today's grid may already be behind the clock.
+      await openAskNextWeek(tester);
       await tapEmptyGrid(tester);
 
       expect(find.byKey(CommandPlanCard.subjectKey), findsNothing);
@@ -1390,50 +2125,6 @@ void main() {
     await pumpScreen(tester);
     await openThreadFromDay(tester);
     expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
-  });
-
-  testWidgets('the header chip opens the pane, and Put these in the reply '
-      'lands in the thread\'s reply box', (tester) async {
-    await seedAsk();
-    await pumpScreen(tester);
-    await openPane(tester);
-    // The pane's own search says it came from the pane.
-    final rows = await store.recentActivity(limit: 20);
-    expect(
-      [for (final r in rows) r['detail_json'] as String? ?? ''],
-      contains(contains('"surface":"pane"')),
-    );
-
-    await tester.tap(find.byKey(FindTimePane.putAllKey));
-    await pumps(tester);
-    expect(find.byType(FindTimePane), findsNothing);
-    final text = composerText(tester);
-    expect(text, startsWith('Would any of these work? · '));
-    expect(' · '.allMatches(text), hasLength(2),
-        reason: 'both slots, one line');
-    expect(text, contains(RegExp(r'P[DS]T')));
-  });
-
-  testWidgets('Send invite previews, waits on the strip naming Dana, and '
-      'sends to her', (tester) async {
-    await seedAsk();
-    await pumpScreen(tester);
-    await openPane(tester);
-
-    await tester.tap(find.byKey(FindTimePane.inviteKeyFor(0)));
-    await pumps(tester);
-    expect(writer.previewed.single, isA<CreateEvent>());
-    expect(find.byType(WriteConfirmStrip), findsOneWidget);
-    expect(find.text('This emails: $_dana'), findsOneWidget);
-    expect(writer.committed, isEmpty);
-
-    await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
-    await pumps(tester);
-    final write = writer.committed.single as CreateEvent;
-    expect(write.attendees, [_dana]);
-    expect(write.subject, 'Re: $_subject');
-    expect(find.byType(FindTimePane), findsNothing,
-        reason: 'a sent invite returns to the thread');
   });
 
   testWidgets('a thread that is not asking is not a scheduling ask',
@@ -1460,43 +2151,151 @@ void main() {
         reason: 'the thread is open beside');
   }
 
-  testWidgets('a thread opened beside wears the chip too, and it opens the '
-      'pane in the main column', (tester) async {
-    await seedAsk();
-    await pumpScreen(tester);
-    await openThreadBeside(tester);
+  /// The ask's decision overwritten: the model reads it as a question.
+  Future<void> notScheduling() => store.writeDecision(
+        'email',
+        'ask-m1',
+        fakeDecision(fakeAnswers(intent: 'question', choiceP: 0.9)),
+        qhash: DecisionHeads.expectedQhash,
+        ownerKnown: true,
+      );
 
-    expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
-    await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
-    await pumps(tester);
-    await pumps(tester);
-    expect(find.byType(FindTimePane), findsOneWidget);
-    expect(find.byKey(SidePanelHost.closeKey), findsNothing,
-        reason: 'the thread moved into the main column under the pane');
-    expect(backend.asked.single, [_dana]);
+  group('Find a time on the thread bar', () {
+    testWidgets('a listed ask opened beside: the press writes nothing and '
+        'lands on the Day stop with the ask open and searched',
+        (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openThreadBeside(tester);
+      await pressFindTime(tester);
 
-    // Back lands on the thread, now in the main pane.
-    await tester.tap(find.byKey(FindTimePane.backKey));
-    await pumps(tester);
-    expect(find.byType(FindTimePane), findsNothing);
-    expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
+      expect(await store.decisionLabels(), isEmpty);
+      expect(find.byKey(SidePanelHost.closeKey), findsNothing,
+          reason: 'the thread beside went with the trip to the Day stop');
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(
+          find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget,
+          reason: 'the row is open and its search ran');
+      expect(backend.asked.single, [_dana]);
+      final rows = await store.recentActivity(limit: 20);
+      expect(
+        [for (final r in rows) r['detail_json'] as String? ?? ''],
+        contains(contains('"surface":"column"')),
+      );
+    });
+
+    testWidgets('on a thread the model did not flag: the owner\'s yes makes '
+        'it an ask, open in the column', (tester) async {
+      await seedAsk();
+      await notScheduling();
+      await pumpScreen(tester);
+      await openThreadBeside(tester);
+      await pressFindTime(tester);
+
+      final label = (await store.decisionLabels()).single;
+      expect(label['question'], 'scheduling_ask');
+      expect(label['answer'], 'yes');
+      expect(label['origin'], 'owner');
+      expect(label['source_message_id'], 'ask-m1');
+      expect(label['created_at'] as String,
+          matches(RegExp(r'\.\d{6}Z$')));
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(
+          find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
+      expect(backend.asked.single, [_dana]);
+    });
+
+    testWidgets('after a dismiss, the press brings the ask back: the '
+        'owner\'s newer word wins', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      await openAsk(tester);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c-ask')));
+      await pumps(tester);
+      await pumps(tester);
+      expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+
+      await tester.tap(find.text('Needs You').first);
+      await pumps(tester);
+      await openThreadBeside(tester);
+      await pressFindTime(tester);
+      expect([for (final r in await store.decisionLabels()) r['answer']],
+          ['yes']);
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(
+          find.byKey(SchedulingAskTile.slotKeyFor('email', 'c-ask', 0)),
+          findsOneWidget);
+    });
+
+    testWidgets('not offered when the owner wrote last', (tester) async {
+      await seedAsk();
+      await notScheduling();
+      await pumpScreen(tester);
+      await openThreadBeside(tester);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
+
+      // The owner replies; the thread stays open beside as the list reloads.
+      await db.customUpdate(
+        'UPDATE conversations SET last_outbound_at = ? '
+        "WHERE conversation_key = 'c-ask'",
+        variables: [Variable(MessageStore.isoStamp(DateTime.now()))],
+      );
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+      await container.read(conversationsProvider.notifier).load();
+      await pumps(tester);
+      expect(find.byKey(SidePanelHost.closeKey), findsOneWidget);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+    });
+
+    testWidgets('not offered with nobody to answer', (tester) async {
+      await seedAsk(participantsJson: '[]');
+      await notScheduling();
+      await pumpScreen(tester);
+      await openThreadBeside(tester);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+    });
+
+    testWidgets('a double press writes one yes', (tester) async {
+      await seedAsk();
+      await notScheduling();
+      await pumpScreen(tester);
+      await openThreadBeside(tester);
+      await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
+      await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
+      await pumps(tester);
+      await pumps(tester);
+      final yes = [
+        for (final l in await store.decisionLabels())
+          if (l['answer'] == 'yes') l,
+      ];
+      expect(yes, hasLength(1));
+    });
+
+    testWidgets('not offered before the zone resolves: no asks column to '
+        'land on', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester, zoneResolves: false);
+      await openThreadBeside(tester);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+      expect(backend.asked, isEmpty, reason: 'no search without a clock');
+    });
+
+    testWidgets('not offered when the calendar has no mirror to show (scope '
+        'missing)', (tester) async {
+      await seedAsk();
+      await pumpScreen(tester);
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+      container.read(calendarAvailabilityProvider.notifier).state =
+          CalendarAvailability.scopeMissing;
+      await pumps(tester);
+      await openThreadBeside(tester);
+      expect(find.byKey(ThreadActionBar.findTimeKey), findsNothing);
+    });
   });
 
-  testWidgets('before the zone resolves the pane says so and keeps Back, '
-      'never a blank column', (tester) async {
-    await seedAsk();
-    await pumpScreen(tester, zoneResolves: false);
-    await openThreadBeside(tester);
-
-    await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
-    await pumps(tester);
-    expect(find.byKey(FindTimePane.waitingKey), findsOneWidget);
-    expect(find.text('Reading your calendar…'), findsOneWidget);
-    expect(backend.asked, isEmpty, reason: 'no search without a clock');
-
-    await tester.tap(find.byKey(FindTimePane.backKey));
-    await pumps(tester);
-    expect(find.byKey(FindTimePane.waitingKey), findsNothing);
-    expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget);
-  });
 }

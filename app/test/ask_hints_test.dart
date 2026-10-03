@@ -224,4 +224,118 @@ void main() {
     expect(read('dinner at 7 friday?').timeWords, 'for dinner at 7:00 PM');
     expect(read('friday?').timeWords, isNull);
   });
+
+  group('read closer', () {
+    // Wed Oct 7 2026, 9:00 PM in Los Angeles.
+    final nine = DateTime.utc(2026, 10, 8, 4);
+    // Mon Oct 5 and Tue Oct 6 2026, 10:00 AM and 6:00 PM in Los Angeles.
+    final monday = DateTime.utc(2026, 10, 5, 17);
+    final tuesdayEvening = DateTime.utc(2026, 10, 7, 1);
+
+    test('a meal moves a range\'s bare end with its start', () {
+      final dinner = read('dinner from 7 to 9');
+      expect(dinner.hours,
+          const AskHours(startHour: 19, startMinute: 0, endHour: 21, endMinute: 0));
+      expect(dinner.minutes, 120);
+      final lunch = read('lunch from 11 to 1');
+      expect(lunch.hours,
+          const AskHours(startHour: 11, startMinute: 0, endHour: 13, endMinute: 0));
+      expect(lunch.minutes, 120);
+    });
+
+    test('a relative day whose hours are over is dropped, a weekday rolls',
+        () {
+      final tonight = readAskHints(
+          subject: 'Today dinner?', body: '', now: nine, zone: la);
+      expect(tonight.day, isNull);
+      expect(tonight.hours,
+          const AskHours(startHour: 17, startMinute: 30, endHour: 20, endMinute: 30));
+      expect(tonight.minutes, 90);
+      expect(tonight.said, 'Asked for: dinner');
+      final weekday = readAskHints(
+          subject: 'Wednesday dinner?', body: '', now: nine, zone: la);
+      expect(weekday.day, const CalendarDate(2026, 10, 14));
+    });
+
+    test('a From: that starts a sentence is no header', () {
+      final h = read('Catch up', 'Hi,\nFrom: tomorrow on I am free for dinner.');
+      expect(h.day, const CalendarDate(2026, 10, 8));
+      expect(h.hours?.startHour, 17);
+      // A real header pair, quoted, still cuts.
+      final quoted = read('Dinner Friday?',
+          'Dinner Friday?\n> From: Dana Reyes\n> Sent: Monday 3pm\n'
+          '> lunch on Tuesday?');
+      expect(quoted.day, friday);
+      expect(quoted.hours?.startHour, 17);
+    });
+
+    test('"On second thought" is the ask, not a reply header', () {
+      final h = read('Plans',
+          'On second thought, Friday dinner works.\nAs Sam wrote:\n'
+          'the place on Main is good.');
+      expect(h.day, friday);
+      expect(h.hours?.startHour, 17);
+      final real = read('Dinner Friday?',
+          'Dinner Friday?\n\nOn Mon, Sep 29, 2026 at 3:15 PM Dana Reyes '
+          '<dana@example.com> wrote:\n> lunch on Tuesday at noon?');
+      expect(real.day, friday);
+      expect(real.hours?.startHour, 17);
+    });
+
+    test('relative words read against when the message was sent', () {
+      AskHints sent(String subject, DateTime at) => readAskHints(
+          subject: subject, body: '', now: now, zone: la, sentAt: at);
+      // Monday's "tomorrow" was Tuesday, gone by Wednesday: dropped.
+      expect(sent('tomorrow dinner?', monday).day, isNull);
+      // Monday's "Tuesday" is a weekday: it rolls to next Tuesday.
+      expect(sent('Tuesday dinner?', monday).day,
+          const CalendarDate(2026, 10, 13));
+      // Tuesday evening's "tomorrow" is today, and dinner is still ahead.
+      expect(sent('tomorrow dinner?', tuesdayEvening).day,
+          const CalendarDate(2026, 10, 7));
+      // Without sentAt, "tomorrow" is tomorrow.
+      expect(read('tomorrow dinner?').day, const CalendarDate(2026, 10, 8));
+    });
+
+    test('a range past midnight ends at the day\'s last minute, and its '
+        'length fits it', () {
+      final h = read('drinks 10pm-1am');
+      expect(h.hours,
+          const AskHours(startHour: 22, startMinute: 0, endHour: 23, endMinute: 59));
+      expect(h.minutes, 119);
+    });
+
+    test('a named time far outside the meal\'s hours gives the meal\'s', () {
+      final h = read('drinks 10pm to midnight');
+      expect(h.hours,
+          const AskHours(startHour: 17, startMinute: 0, endHour: 19, endMinute: 30));
+      expect(h.minutes, 60);
+      expect(h.timeWords, 'for drinks');
+    });
+
+    test('a date whose hours are over is dropped, not rolled a week', () {
+      // Fri Oct 9 2026 at 9:00 PM in Los Angeles.
+      final h = readAskHints(
+          subject: 'Dinner Oct 9?',
+          body: '',
+          now: DateTime.utc(2026, 10, 10, 4),
+          zone: la);
+      expect(h.day, isNull);
+      expect(h.hours?.startHour, 17);
+    });
+
+    test('a four-digit clock time is no year in a reply header', () {
+      final h = read('Plans',
+          'On Friday dinner at 1930 works.\nAs Sam wrote:\n'
+          'the place on Main is good.');
+      expect(h.day, friday);
+    });
+
+    test('a meal never overrides an explicit am', () {
+      final h = read('coffee at 4am');
+      expect(h.hours,
+          const AskHours(startHour: 4, startMinute: 0, endHour: 6, endMinute: 0));
+      expect(h.minutes, 30);
+    });
+  });
 }

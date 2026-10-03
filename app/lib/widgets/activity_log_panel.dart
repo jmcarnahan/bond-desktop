@@ -81,6 +81,7 @@ class ActivityLogPanel extends StatefulWidget {
     'calendar_write': 'Calendar',
     'calendar_command': 'Calendar command',
     'find_time': 'Find a time',
+    'scheduling_ask': 'Scheduling ask',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -543,6 +544,16 @@ class ActivityLogPanel extends StatefulWidget {
         final from = detail['source'];
         final where = from is String && from.isNotEmpty ? ' ($from)' : '';
         return '$label — $n ${n == 1 ? 'slot' : 'slots'}$where';
+      // The owner's word on a scheduling ask, one row per label written or
+      // taken back, by its origin — an enum word, never the thread.
+      case 'scheduling_ask':
+        return switch (detail['origin']) {
+          'invite' => 'Closed an ask after an invite',
+          'dismiss' => 'Dismissed an ask',
+          'undo' => 'Brought an ask back',
+          'owner' => 'Marked a thread as asking for a time',
+          _ => label,
+        };
       // The switch at the top of the rail. Its STATUS is the whole row — `on`
       // or `off`, neither of which any of the status cases above claims — so
       // the sentence is written here rather than left to the bare label.

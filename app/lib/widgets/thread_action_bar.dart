@@ -69,10 +69,11 @@ class ThreadActionBar extends StatefulWidget {
 
   final VoidCallback? onCompose;
 
-  /// Find a time: drawn only when the host says this thread is asking for
-  /// one (the decision model read its newest inbound message as scheduling).
-  /// A worded button like Mark done, since it appears on few threads and an
-  /// icon alone would not say why it is suddenly there.
+  /// Find a time: drawn when the host says the thread has somebody to
+  /// answer (its newest message inbound, other people on it). A press is
+  /// the owner's word that the thread asks for a time, and opens that ask in
+  /// the Day column. A worded button like Mark done, since an icon alone
+  /// would not say where it goes.
   final VoidCallback? onFindTime;
 
   /// The thread's labels, most-used first (the store's order).
@@ -319,7 +320,7 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
           name: 'Find a time',
           label: compact ? null : 'Find a time',
           icon: Icons.schedule_outlined,
-          tooltip: 'Find a time — free slots with these people',
+          tooltip: 'Find a time — in the Day column, with these people',
           onDone: widget.onFindTime!,
         ),
       if (widget.inLater && widget.onKeepInInbox != null)

@@ -310,6 +310,33 @@ void main() {
     expect(named.body, 'Agenda to follow.');
   });
 
+  test('withAttendees puts people on a create, bare and lowercase, online '
+      'when anybody is, and keeps everything else', () {
+    final blank = CreateEvent.propose(
+      subject: 'Dinner',
+      startUtc: DateTime.utc(2026, 10, 9, 0, 30),
+      endUtc: DateTime.utc(2026, 10, 9, 2),
+      body: 'Agenda to follow.',
+    );
+    final invite = blank.withAttendees(
+        const [' Dana@Fabrikam.example ', '', 'sam@contoso.com']);
+    expect(invite.attendees, ['dana@fabrikam.example', 'sam@contoso.com']);
+    expect(invite.isOnlineMeeting, isTrue);
+    expect(invite.subject, 'Dinner');
+    expect(invite.startUtc, blank.startUtc);
+    expect(invite.endUtc, blank.endUtc);
+    expect(invite.body, 'Agenda to follow.');
+    expect(invite.transactionId, blank.transactionId);
+    // An invite now waits on a confirm; with nobody it is a blank event
+    // again, and not online.
+    const quiet = WritePreview(method: 'POST', path: '/me/events');
+    expect(needsConfirm(invite, quiet), isTrue);
+    final alone = invite.withAttendees(const []);
+    expect(alone.attendees, isEmpty);
+    expect(alone.isOnlineMeeting, isFalse);
+    expect(needsConfirm(alone, quiet), isFalse);
+  });
+
   group('the confirm policy', () {
     test('anyone emailed, a delete and a cancel confirm; a private move does '
         'not', () async {

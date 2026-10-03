@@ -56,6 +56,26 @@ void main() {
     });
   });
 
+  test('the resolution says how the day was said and the time written', () {
+    expect(ask('friday').dayMention, DayMention.weekday);
+    expect(ask('next friday').dayMention, DayMention.weekday);
+    expect(ask('tuesday next week').dayMention, DayMention.weekday);
+    expect(ask('tomorrow').dayMention, DayMention.relative);
+    expect(ask('tonight').dayMention, DayMention.relative);
+    expect(ask('this afternoon').dayMention, DayMention.relative);
+    expect(ask('Oct 20').dayMention, DayMention.date);
+    expect(ask('2026-10-20').dayMention, DayMention.date);
+    expect(ask('next week').dayMention, isNull,
+        reason: 'a week is no day mention');
+    expect(ask('at 3').dayMention, isNull);
+    expect(ask('at 7').timeForm, TimeForm.bare);
+    expect(ask('from 7 to 9').timeForm, TimeForm.bare);
+    expect(ask('at 4am').timeForm, TimeForm.marked);
+    expect(ask('at 15:00').timeForm, TimeForm.marked);
+    expect(ask('at noon').timeForm, TimeForm.named);
+    expect(ask('friday').timeForm, isNull);
+  });
+
   group('weekdays', () {
     test('booking: a bare weekday is strictly after today', () {
       expect(book('Wednesday').day, d(10, 21));

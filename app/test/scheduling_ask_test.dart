@@ -199,14 +199,14 @@ void main() {
       );
     }
 
-    Future<int> label(String key, String messageId,
-            {String origin = 'dismiss', String? createdAt}) =>
+    Future<({int id, String createdAt})> label(String key, String messageId,
+            {String origin = 'dismiss', String source = 'email'}) =>
         store.writeSchedulingAskLabel(
-          source: 'email',
+          source: source,
           conversationKey: key,
           sourceMessageId: messageId,
+          answer: 'no',
           origin: origin,
-          createdAt: createdAt,
         );
 
     test('the rows carry the newest inbound message id', () async {
@@ -238,17 +238,32 @@ void main() {
       expect(await keys(), {'email|c-1'});
     });
 
-    test('the label is deleted by id AND stamp, and the ask is back',
+    test('the store stamps the label at its one width, and the stamp it '
+        'returns deletes the row (by id AND stamp); the ask is back',
         () async {
       await thread('c-1');
-      const stamp = '2026-10-02T12:00:00.000000Z';
-      final id = await label('c-1', 'in-c-1', createdAt: stamp);
+      final closed = await label('c-1', 'in-c-1');
+      expect(closed.createdAt,
+          matches(RegExp(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$')));
+      final rows = await store.decisionLabels();
+      expect(rows.single['created_at'], closed.createdAt);
+      expect(rows.single['answer'], 'no');
       expect(await keys(), isEmpty);
-      expect(await store.deleteSchedulingAskLabel(id, createdAt: 'other'),
+      expect(
+          await store.deleteSchedulingAskLabel(closed.id, createdAt: 'other'),
           isFalse);
       expect(await keys(), isEmpty);
-      expect(await store.deleteSchedulingAskLabel(id, createdAt: stamp),
+      expect(
+          await store.deleteSchedulingAskLabel(closed.id,
+              createdAt: closed.createdAt),
           isTrue);
+      expect(await keys(), {'email|c-1'});
+    });
+
+    test('a no in ANOTHER source on the same message id leaves the email '
+        'ask open', () async {
+      await thread('c-1');
+      await label('c-1', 'in-c-1', source: 'teams');
       expect(await keys(), {'email|c-1'});
     });
 
@@ -260,6 +275,163 @@ void main() {
       expect(await store.needsYouPressCounts(), (removed: 0, added: 0));
       expect(await store.deleteAllNeedsYouLabels(), 0);
       expect(await store.decisionLabels(), hasLength(1));
+    });
+  });
+
+  group("the owner's yes (Find a time on the thread bar)", () {
+    test('a yes on the newest inbound message lists a thread the decision '
+        'model never read', () async {
+      await thread('c-1', decided: false);
+      expect(await keys(), isEmpty);
+      final yes = await store.reopenSchedulingAsk(
+          source: 'email', conversationKey: 'c-1');
+      expect(yes?.sourceMessageId, 'in-c-1');
+      expect(await schedulingAskMessageIds(store), {'email|c-1': 'in-c-1'});
+      final row = (await store.decisionLabels()).single;
+      expect(row['question'], 'scheduling_ask');
+      expect(row['answer'], 'yes');
+      expect(row['origin'], 'owner');
+      expect(row['created_at'], yes?.createdAt);
+    });
+
+    test('a yes lists a thread the model said nothing about even when it is '
+        'not needs_reply', () async {
+      await thread('c-1', state: 'waiting', intent: 'fyi');
+      await store.reopenSchedulingAsk(source: 'email', conversationKey: 'c-1');
+      expect(await keys(), {'email|c-1'});
+    });
+
+    test('a yes on an OLDER message does not', () async {
+      await thread('c-1', decided: false, age: const Duration(hours: 3));
+      await store.writeSchedulingAskLabel(
+        source: 'email',
+        conversationKey: 'c-1',
+        sourceMessageId: 'in-c-1',
+        answer: 'yes',
+        origin: 'owner',
+      );
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'in-c-1-later',
+        'conversation_key': 'c-1',
+        'direction': 'inbound',
+        'subject': 'Thread c-1',
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at': ago(const Duration(hours: 1)),
+        'body_text': 'Thanks!',
+        'triage_status': 'done',
+      });
+      expect(await keys(), isEmpty);
+    });
+
+    test('a yes then a newer inbound message the model reads as something '
+        'else: not an ask any more', () async {
+      await thread('c-1', age: const Duration(hours: 3));
+      await store.reopenSchedulingAsk(source: 'email', conversationKey: 'c-1');
+      expect(await keys(), {'email|c-1'});
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'in-c-1-later',
+        'conversation_key': 'c-1',
+        'direction': 'inbound',
+        'subject': 'Thread c-1',
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at': ago(const Duration(hours: 1)),
+        'body_text': 'Also, the numbers are attached.',
+        'triage_status': 'done',
+      });
+      await store.writeDecision(
+        'email',
+        'in-c-1-later',
+        fakeDecision(fakeAnswers(intent: 'fyi', choiceP: 0.9)),
+        qhash: DecisionHeads.expectedQhash,
+        ownerKnown: true,
+      );
+      expect(await keys(), isEmpty);
+    });
+
+    test('a dismiss and then a press: the newer yes wins, the no is gone',
+        () async {
+      await thread('c-1');
+      await store.writeSchedulingAskLabel(
+        source: 'email',
+        conversationKey: 'c-1',
+        sourceMessageId: 'in-c-1',
+        answer: 'no',
+        origin: 'dismiss',
+      );
+      expect(await keys(), isEmpty);
+      await store.reopenSchedulingAsk(source: 'email', conversationKey: 'c-1');
+      expect(await keys(), {'email|c-1'});
+      expect([for (final r in await store.decisionLabels()) r['answer']],
+          ['yes']);
+    });
+
+    test('a press on a thread with no inbound message writes nothing',
+        () async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-out',
+        'subject': 'Thread c-out',
+        'state': 'waiting',
+        'message_count': 0,
+      });
+      expect(
+          await store.reopenSchedulingAsk(
+              source: 'email', conversationKey: 'c-out'),
+          isNull);
+      expect(await store.decisionLabels(), isEmpty);
+    });
+
+    test('a yes then an invite or dismiss no on the SAME message is not '
+        'listed', () async {
+      for (final origin in ['invite', 'dismiss']) {
+        await thread('c-$origin', decided: false);
+        final yes = await store.reopenSchedulingAsk(
+            source: 'email', conversationKey: 'c-$origin');
+        await store.writeSchedulingAskLabel(
+          source: 'email',
+          conversationKey: 'c-$origin',
+          sourceMessageId: yes!.sourceMessageId,
+          answer: 'no',
+          origin: origin,
+        );
+      }
+      expect(await keys(), isEmpty);
+    });
+
+    test('a no written under another conversation key (a re-keyed thread) '
+        'still closes the ask: the label is pinned to the message', () async {
+      await thread('c-1');
+      await store.writeSchedulingAskLabel(
+        source: 'email',
+        conversationKey: 'c-1-old-key',
+        sourceMessageId: 'in-c-1',
+        answer: 'no',
+        origin: 'dismiss',
+      );
+      expect(await keys(), isEmpty);
+    });
+
+    test('an answer other than yes or no is refused, in release too', () {
+      expect(
+          () => store.writeSchedulingAskLabel(
+                source: 'email',
+                conversationKey: 'c-1',
+                sourceMessageId: 'in-c-1',
+                answer: 'maybe',
+                origin: 'owner',
+              ),
+          throwsArgumentError);
+    });
+
+    test('the owner writing after the yes answers it', () async {
+      await thread('c-1', decided: false,
+          outboundAfter: const Duration(minutes: 5));
+      await store.reopenSchedulingAsk(source: 'email', conversationKey: 'c-1');
+      expect(await keys(), isEmpty);
     });
   });
 }

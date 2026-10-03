@@ -402,6 +402,50 @@ void main() {
     });
   });
 
+  group('propose with now', () {
+    test('a create or a move already started is refused before the dry run',
+        () async {
+      final past = CreateEvent.propose(
+          subject: 'Dinner', startUtc: at(today, 9), endUtc: at(today, 10));
+      final r = await planner.propose(past, zone: la, today: today, now: now);
+      expect((r as CannotDo).reason, 'That time has passed.');
+      final move = MoveEvent.timed('three',
+          startUtc: at(today, 10), endUtc: at(today, 10, 30));
+      final m = await planner.propose(move, zone: la, today: today, now: now);
+      expect((m as CannotDo).reason, 'That time has passed.');
+      expect(writer.previews, isEmpty, reason: 'no dry run was asked');
+    });
+
+    test('a meeting under way, re-proposed by its end only, is not refused; '
+        'its start moved into the past is', () async {
+      final under = timed('under', today, 10, startMinute: 30, minutes: 60);
+      await store([under]);
+      final longer = MoveEvent.timed('under',
+          startUtc: at(today, 10, 30), endUtc: at(today, 12));
+      final r = await planner.propose(longer,
+          target: under, zone: la, today: today, now: now);
+      expect(r, isA<CalendarProposal>());
+      final earlier = MoveEvent.timed('under',
+          startUtc: at(today, 10), endUtc: at(today, 11, 30));
+      final e = await planner.propose(earlier,
+          target: under, zone: la, today: today, now: now);
+      expect((e as CannotDo).reason, 'That time has passed.');
+    });
+
+    test('a time still ahead is proposed, and without now nothing is '
+        'checked', () async {
+      final ahead = CreateEvent.propose(
+          subject: 'Dinner', startUtc: at(thu, 18), endUtc: at(thu, 19));
+      final r = await planner.propose(ahead, zone: la, today: today, now: now);
+      expect(r, isA<CalendarProposal>());
+      final past = CreateEvent.propose(
+          subject: 'Dinner', startUtc: at(today, 9), endUtc: at(today, 10));
+      final old = await planner.propose(past, zone: la, today: today);
+      expect(old, isA<CalendarProposal>());
+      expect(writer.previews, hasLength(2));
+    });
+  });
+
   group('cancel, by role', () {
     test("tomorrow's standup with no standup tomorrow is no meeting, never "
         "tomorrow's other one", () async {

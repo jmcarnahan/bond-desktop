@@ -676,6 +676,9 @@ void main() {
       expect(await optionsWith('work'), {'max_candidates': 5});
       expect(await optionsWith('personal'),
           {'max_candidates': 5, 'activity_domain': 'personal'});
+      // Dinner: the only domain that opens the evening.
+      expect(await optionsWith('unrestricted'),
+          {'max_candidates': 5, 'activity_domain': 'unrestricted'});
     });
 
     test('empty_reason is read, lowercased, and empty when absent', () async {

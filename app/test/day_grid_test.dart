@@ -598,6 +598,47 @@ void main() {
       await unmount(tester);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+    testWidgets('13 px above the bottom of a half-hour tile moves it: the '
+        'resize band is 10 px, not kalender\'s 16', (tester) async {
+      final moves = <(DateTime, DateTime)>[];
+      await pumpGrid(tester,
+          events: [own('m1', 'Contoso planning', ten,
+              length: const Duration(minutes: 30))],
+          onMoveRequested: (_, s, e) => moves.add((s, e)));
+      final r = tester.getRect(tile);
+      expect(r.height, lessThan(26), reason: 'a half-hour tile is short');
+      await plainDrag(
+          tester, Offset(r.center.dx, r.bottom - 13), const Offset(0, 42));
+      expect(moves.single, (
+        ten.add(const Duration(hours: 1)),
+        ten.add(const Duration(hours: 1, minutes: 30)),
+      ), reason: 'the whole tile moved, its length kept');
+      await unmount(tester);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('the whole 10-px band resizes, not only the pill drawn in it',
+        (tester) async {
+      // The pill is 3 px at the band's middle (4–6 px above the bottom); 2
+      // and 8 px above the bottom are band but not pill.
+      for (final up in [2.0, 8.0]) {
+        final moves = <(DateTime, DateTime)>[];
+        await pumpGrid(tester,
+            events: [own('m1', 'Contoso planning', ten,
+                length: const Duration(minutes: 30))],
+            onMoveRequested: (_, s, e) => moves.add((s, e)));
+        final r = tester.getRect(tile);
+        await plainDrag(
+            tester, Offset(r.center.dx, r.bottom - up), const Offset(0, 42));
+        // The end follows the pointer, so where it lands depends on where
+        // the band was grabbed; the start staying is what says "resize".
+        expect(moves.single.$1, ten,
+            reason: '$up px above the bottom: the start stayed');
+        expect(moves.single.$2.isAfter(ten.add(const Duration(minutes: 30))),
+            isTrue, reason: '$up px above the bottom: the end moved');
+        await unmount(tester);
+      }
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
     testWidgets('a resize dragged into the next day\'s column is refused, '
         'said; the proposal\'s too', (tester) async {
       const sat = CalendarDate(2026, 3, 7);
@@ -647,6 +688,47 @@ void main() {
       final nine = la.localDateTime(day, 9, 0).toUtc();
       expect(DayGrid.staysOnOneDay(la, nine,
           nine.add(const Duration(hours: 25))), isFalse);
+      // Sun Nov 1 2026, the fall-back day in Los Angeles, is 25 hours long
+      // and all of it is one day.
+      const fallBack = CalendarDate(2026, 11, 1);
+      expect(
+          DayGrid.staysOnOneDay(la, la.localDateTime(fallBack, 0, 0).toUtc(),
+              la.localDateTime(fallBack.addDays(1), 0, 0).toUtc()),
+          isTrue);
+    });
+
+    test('a resize keeps to the days the meeting covered', () {
+      DateTime at(CalendarDate d, int h, [int m = 0]) =>
+          la.localDateTime(d, h, m).toUtc();
+      final thu = day.addDays(1);
+      // An overnight meeting, Wed 22:00 to Thu 01:00, shortened from either
+      // end stays inside its own two days.
+      expect(
+          DayGrid.resizeKeepsDays(la, at(day, 22), at(thu, 1), at(day, 22),
+              at(thu, 0, 30)),
+          isTrue);
+      expect(
+          DayGrid.resizeKeepsDays(la, at(day, 22), at(thu, 1), at(day, 22, 30),
+              at(thu, 1)),
+          isTrue);
+      // ...and dragged past them it leaves.
+      expect(
+          DayGrid.resizeKeepsDays(la, at(day, 22), at(thu, 1), at(day, 22),
+              at(thu.addDays(1), 0, 30)),
+          isFalse);
+      // A one-day meeting stays on its day, from either end.
+      expect(
+          DayGrid.resizeKeepsDays(la, at(day, 10), at(day, 11), at(day, 10),
+              at(thu, 10)),
+          isFalse);
+      expect(
+          DayGrid.resizeKeepsDays(la, at(day, 10), at(day, 11),
+              at(day.addDays(-1), 10), at(day, 11)),
+          isFalse);
+      expect(
+          DayGrid.resizeKeepsDays(la, at(day, 10), at(day, 11), at(day, 10),
+              at(day.addDays(1), 0)),
+          isTrue, reason: 'to midnight');
     });
 
     testWidgets('a proposal on Monday moves to Tuesday\'s column',

@@ -114,6 +114,17 @@ class WhenSpan {
   String toString() => 'WhenSpan($start, $end, ${kind.name})';
 }
 
+/// How the day in a [WhenResolution] was said, for a reader that treats
+/// them differently: a weekday names a day that recurs every week, a
+/// relative day ("today", "tonight", "tomorrow", "this morning") names one
+/// day counted from when the text was written, and a date names itself.
+enum DayMention { weekday, relative, date }
+
+/// How [WhenResolution.time] was written: a bare hour ("at 7", "from 7 to
+/// 9") read daytime-first or by a part, a named time ("noon", "midnight"),
+/// or a time marked with am/pm or written on a 24-hour clock.
+enum TimeForm { bare, named, marked }
+
 /// Everything [resolveWhen] could read. Every field is independently
 /// optional; an input with no when-words is [isEmpty].
 ///
@@ -165,6 +176,13 @@ class WhenResolution {
   /// The zone [day] and [time] are wall-clock values in.
   final CalendarZone zone;
 
+  /// How [day] was said; null with no day, or for a resolution built by hand.
+  final DayMention? dayMention;
+
+  /// How [time]'s start was written; null with no time, or for a resolution
+  /// built by hand.
+  final TimeForm? timeForm;
+
   const WhenResolution({
     required this.today,
     required this.zone,
@@ -177,6 +195,8 @@ class WhenResolution {
     this.duration,
     this.explicitTime = false,
     this.unresolvedReason,
+    this.dayMention,
+    this.timeForm,
   });
 
   /// Nothing in the text was a when or duration phrase.
@@ -501,6 +521,9 @@ class _DayMention {
   /// "tonight": a midnight named with it is the NEXT date's 00:00.
   final bool tonight;
 
+  /// How the day was said ([WhenResolution.dayMention]).
+  final DayMention? kind;
+
   const _DayMention(
     this.pos, {
     this.day,
@@ -510,6 +533,7 @@ class _DayMention {
     this.week,
     this.bareWeekday,
     this.tonight = false,
+    this.kind,
   });
 }
 
@@ -550,7 +574,7 @@ _DayMention _thisWeekday(int pos, CalendarDate today, int weekday) {
     return _DayMention(pos,
         reason: 'this ${_weekdayNames[weekday - 1]} has passed');
   }
-  return _DayMention(pos, day: target);
+  return _DayMention(pos, day: target, kind: DayMention.weekday);
 }
 
 List<(WhenSpan, _DayMention)> _days(
@@ -580,13 +604,17 @@ List<(WhenSpan, _DayMention)> _days(
 
   _DayMention? dated(int pos, int m, int d, int? y) {
     final day = y == null ? _yearless(m, d, today, mode) : _civil(y, m, d);
-    return day == null ? null : _DayMention(pos, day: day);
+    return day == null
+        ? null
+        : _DayMention(pos, day: day, kind: DayMention.date);
   }
 
   take(_isoDate, (m) {
     final day = _civil(int.parse(m.group(1)!), int.parse(m.group(2)!),
         int.parse(m.group(3)!));
-    return day == null ? null : _DayMention(m.start, day: day);
+    return day == null
+        ? null
+        : _DayMention(m.start, day: day, kind: DayMention.date);
   });
   take(_dayFirst, (m) {
     final month = _monthOf(m.group(2)!);
@@ -604,12 +632,15 @@ List<(WhenSpan, _DayMention)> _days(
   take(_relativeDay, (m) {
     final word = m.group(0)!.toLowerCase();
     if (word.contains('after')) {
-      return _DayMention(m.start, day: today.addDays(2));
+      return _DayMention(m.start,
+          day: today.addDays(2), kind: DayMention.relative);
     }
     if (word == 'today' || word == 'tonight') {
-      return _DayMention(m.start, day: today, tonight: word == 'tonight');
+      return _DayMention(m.start,
+          day: today, tonight: word == 'tonight', kind: DayMention.relative);
     }
-    return _DayMention(m.start, day: today.addDays(1));
+    return _DayMention(m.start,
+        day: today.addDays(1), kind: DayMention.relative);
   });
   take(_weekPhrase, (m) {
     final which = m.group(1)!.toLowerCase();
@@ -639,12 +670,15 @@ List<(WhenSpan, _DayMention)> _days(
     if (qualifier == 'this') return _thisWeekday(m.start, today, wd);
     if (qualifier == 'next' || mode == WhenMode.booking) {
       return _DayMention(m.start,
-          day: _nextStrict(today, wd), bareWeekday: qualifier == null ? wd : null);
+          day: _nextStrict(today, wd),
+          bareWeekday: qualifier == null ? wd : null,
+          kind: DayMention.weekday);
     }
     // Question mode, bare: "am I free Wednesday?" asked on a Wednesday means
     // today.
     final day = today.weekday == wd ? today : _nextStrict(today, wd);
-    return _DayMention(m.start, day: day, bareWeekday: wd);
+    return _DayMention(m.start,
+        day: day, bareWeekday: wd, kind: DayMention.weekday);
   });
   return out;
 }
@@ -1015,7 +1049,8 @@ WhenResolution resolveWhen(
   final mentions = [for (final (_, d) in days) d];
   for (final (span, _, impliesToday) in parts) {
     if (impliesToday) {
-      mentions.add(_DayMention(span.start, day: today, weak: true));
+      mentions.add(_DayMention(span.start,
+          day: today, weak: true, kind: DayMention.relative));
     }
   }
   // "Tuesday next week": a bare weekday NEXT TO a week phrase is that
@@ -1039,7 +1074,9 @@ WhenResolution resolveWhen(
       final pos = ws.start > ds.start ? ws.start : ds.start;
       final wd = dm.bareWeekday!;
       mentions.add(wm.week == 'next'
-          ? _DayMention(pos, day: _mondayOf(today).addDays(7 + wd - 1))
+          ? _DayMention(pos,
+              day: _mondayOf(today).addDays(7 + wd - 1),
+              kind: DayMention.weekday)
           : _thisWeekday(pos, today, wd));
       break;
     }
@@ -1136,5 +1173,13 @@ WhenResolution resolveWhen(
     duration: duration,
     explicitTime: time != null,
     unresolvedReason: day == null ? reason : null,
+    dayMention: day == null ? null : winner?.kind,
+    timeForm: time == null
+        ? null
+        : chosen?.fixed != null
+            ? TimeForm.named
+            : chosen?.start?.bare ?? false
+                ? TimeForm.bare
+                : TimeForm.marked,
   );
 }

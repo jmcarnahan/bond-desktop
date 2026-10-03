@@ -2,9 +2,12 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:intl/intl.dart' show DateFormat;
 
 import '../../models/calendar_models.dart';
+import 'ask_hours.dart';
 import 'calendar_zone.dart';
 import 'day_items.dart' show shortDate;
 import 'when_resolver.dart';
+
+export 'ask_hours.dart' show AskHours;
 
 /// What a scheduling ask's own words say about the time it wants
 /// (docs/pipeline/14-calendar.md "Find a time"): "could we grab dinner on
@@ -15,48 +18,6 @@ import 'when_resolver.dart';
 /// length come from [resolveWhen] (the command bar's grammar, read as a
 /// question), and the meal and social words are a closed list here. Nothing
 /// read here changes [DayPart]'s bounds, which are the command bar's.
-
-/// A wall-clock window on whatever day it is applied to: a meal's hours, a
-/// part of the day's, or two hours from a time the ask named.
-@immutable
-class AskHours {
-  final int startHour;
-  final int startMinute;
-  final int endHour;
-  final int endMinute;
-
-  const AskHours({
-    required this.startHour,
-    required this.startMinute,
-    required this.endHour,
-    required this.endMinute,
-  });
-
-  /// [part]'s own bounds ([DayPartBounds]).
-  factory AskHours.fromDayPart(DayPart part) => AskHours(
-        startHour: part.start.$1,
-        startMinute: part.start.$2,
-        endHour: part.end.$1,
-        endMinute: part.end.$2,
-      );
-
-  int get startInMinutes => startHour * 60 + startMinute;
-  int get endInMinutes => endHour * 60 + endMinute;
-
-  @override
-  bool operator ==(Object other) =>
-      other is AskHours &&
-      other.startHour == startHour &&
-      other.startMinute == startMinute &&
-      other.endHour == endHour &&
-      other.endMinute == endMinute;
-
-  @override
-  int get hashCode => Object.hash(startHour, startMinute, endHour, endMinute);
-
-  @override
-  String toString() => 'AskHours($startHour:$startMinute–$endHour:$endMinute)';
-}
 
 /// What [readAskHints] found. Every field may be null; [any] says whether
 /// anything was.
@@ -147,12 +108,29 @@ String _partWord(DayPart p) => switch (p) {
       DayPart.lunch => 'lunch',
     };
 
+/// A year as a reply header writes it: after a comma or a slash ("Sep 29,
+/// 2026", "29/09/2026"), or opening an ISO date ("2026-09-29") — never a
+/// clock time such as "at 1930".
+const String _year = r'(?:(?:,\s*|/)(?:19|20)\d\d\b|\b(?:19|20)\d\d-\d\d)';
+
 /// Where a quoted reply starts: "On Mon, Sep 28, 2026 at 3:15 PM Dana
-/// wrote:" (which a client may wrap over two lines), an Outlook
-/// "-----Original Message-----", or a "From:" header line. Everything after
-/// it is the thread's history, whose dates are not this ask's.
+/// (dana@…) wrote:" (which a client may wrap over two lines), an Outlook
+/// "-----Original Message-----", or a header block — a "From:" line with a
+/// "Sent:", "Date:" or "To:" line within the two under it, either possibly
+/// quoted with ">". Everything after it is the thread's history, whose
+/// dates are not this ask's.
+///
+/// Each form is held to what only a header has, because the cut drops
+/// everything below it: an "On … wrote:" needs a [_year], a "<" or an "@"
+/// in its line or two ("On second thought, Friday dinner works." above
+/// somebody's "… wrote:" is the ask, not its history), and a lone "From:
+/// tomorrow on I am free" line is a sentence.
 final RegExp _quoteStart = RegExp(
-    r'(^|\n)\s*(?:On\s[^\n]*(?:\n[^\n]*)?wrote:|-{2,}\s*Original Message\s*-{2,}|From:)',
+    r'(^|\n)[ \t]*>?[ \t]*(?:'
+    'On\\s[^\\n]*(?:$_year|<|@)[^\\n]*(?:\\n[^\\n]*)?wrote:'
+    '|On\\s[^\\n]*\\n[^\\n]*(?:$_year|<|@)[^\\n]*wrote:'
+    r'|-{2,}\s*Original Message\s*-{2,}'
+    r'|From:[^\n]*\n(?:[^\n]*\n)?[ \t]*>?[ \t]*(?:Sent|Date|To):)',
     caseSensitive: false);
 
 /// [body] up to its first quoted-reply header ([_quoteStart]).
@@ -165,46 +143,72 @@ String _ownWords(String body) {
 /// week saying "Thursday" means a Thursday. Older dates are another meeting.
 const int _rollDays = 7;
 
+/// How far outside a meal's hours a time it names may sit and still be
+/// that meal's: "dinner at 4" is a reach, "drinks at midnight" is not drinks
+/// hours at all.
+const int _mealReachMinutes = 120;
+
 /// Reads [subject] and [body] (the ask's NEWEST inbound message) for a day,
 /// hours and a length, at [now] in [zone].
 ///
 /// - **Only the ask's own words**: the body is cut at its first quoted-reply
-///   header, so a date in the history ("On Mon … at 3:15 PM Dana wrote:")
-///   never wins.
+///   header ([_quoteStart]), so a date in the history ("On Mon … at 3:15 PM
+///   Dana wrote:") never wins.
+/// - **When it was said**: relative words ("tomorrow", a bare weekday) are
+///   read against [sentAt], the message's own time, when the host has it,
+///   else [now]; whether that day is gone is judged at [now].
 /// - **Day**: the resolver's, read as a question (a bare weekday on its own
-///   day is today). A week ("next week") is not a day. A day at most seven
-///   days past (an old message's "Oct 2") rolls forward to that weekday's
-///   next occurrence — today, when it is today's weekday — because the ask
-///   may be days old and the weekday is what the person meant; an older one
-///   is dropped. "yesterday" is no day (the resolver does not read it).
+///   day is today). A week ("next week") is not a day. A WEEKDAY or a date
+///   at most seven days past (an old message's "Thursday", "Oct 2") rolls
+///   forward to that weekday's next occurrence — today, when it is today's
+///   weekday — because the ask may be days old and the weekday is what the
+///   person meant; an older one is dropped. A relative day that has gone
+///   ("tomorrow" in Monday's message, read on Wednesday) is dropped: it
+///   named one day, not a weekday. "yesterday" is no day (the resolver does
+///   not read it).
 /// - **Hours**, most specific first: an explicit clock time (two hours from
 ///   it, or the range it names), else a meal or social word (the earliest
 ///   in the text: breakfast, coffee, lunch, dinner, drinks or happy hour),
 ///   else a part of the day. A meal beats a part: "coffee tuesday morning"
-///   is coffee's hours. A meal also says which half of the day a bare hour
-///   is: "dinner at 7" is 19:00 (the resolver alone reads 7:00 AM).
+///   is coffee's hours. A meal also says which half of the day a BARE hour
+///   is: "dinner at 7" is 19:00 (the resolver alone reads 7:00 AM), and a
+///   range's bare end moves with its start ("dinner from 7 to 9" is
+///   19:00–21:00); an hour with am/pm or on a 24-hour clock is taken as
+///   written. A bare or named time ("midnight") more than two hours outside
+///   the meal's hours is not that meal's: the meal's hours stand.
+/// - **Past midnight**: a window is cut at the day's last minute (the search
+///   walks one local day at a time), and the length is cut to what is left
+///   of it, so "drinks 10pm-1am" is 22:00–23:59 for 119 minutes.
 /// - **Today, too late**: a day that is today whose hours have already
-///   ended rolls a week on ("dinner on Friday" read on Friday at nine is
-///   next Friday); with no hours, today stands.
+///   ended rolls a week on when it was a weekday ("dinner on Friday" read
+///   on Friday at nine is next Friday), and is dropped when it was a
+///   relative day or a date ("dinner tonight?" or "dinner Oct 9?" read at
+///   nine names no other day); with no hours, today stands.
 /// - **Minutes**: a length the ask named, else a range's own length, else
-///   the meal's usual length, else none.
+///   the meal's usual length, else none — never more than the window holds
+///   once it was cut at midnight.
 AskHints readAskHints({
   required String subject,
   required String body,
   required DateTime now,
   required CalendarZone zone,
+  DateTime? sentAt,
 }) {
   final text =
       _cap('${subject.trim()}. ${_ownWords(body).trim()}', askHintsCap);
-  final w = resolveWhen(text, now: now, zone: zone, mode: WhenMode.question);
+  final w = resolveWhen(text,
+      now: sentAt ?? now, zone: zone, mode: WhenMode.question);
+  final today = zone.dateOf(now.toUtc());
+  final relative = w.dayMention == DayMention.relative;
+  final weekday = w.dayMention == DayMention.weekday;
 
   CalendarDate? day = w.rangeEnd == null ? w.day : null;
-  if (day != null && day.isBefore(w.today)) {
-    if (day.isBefore(w.today.addDays(-_rollDays))) {
+  if (day != null && day.isBefore(today)) {
+    if (relative || day.isBefore(today.addDays(-_rollDays))) {
       day = null;
     } else {
-      final delta = (day.weekday - w.today.weekday + 7) % 7;
-      day = w.today.addDays(delta);
+      final delta = (day.weekday - today.weekday + 7) % 7;
+      day = today.addDays(delta);
     }
   }
 
@@ -223,24 +227,41 @@ AskHints readAskHints({
   String? what;
   String? timeWords;
   int? rangeMinutes;
+  // What is left of a window cut at midnight; null when it was not cut.
+  int? cutWindow;
   var t = w.time;
-  final part = w.part;
-  if (t != null) {
-    // A meal says which half of the day a bare hour means: 7 next to
-    // "dinner" is 19:00. Breakfast keeps its morning — 8 + 12 is no
-    // breakfast hour.
-    final m = meal;
-    if (m != null && t.$1 < 12) {
-      final pm = (t.$1 + 12) * 60 + t.$2;
-      if (pm >= m.hours.startInMinutes - 60 && pm <= m.hours.endInMinutes + 60) {
-        t = (t.$1 + 12, t.$2);
-      }
+  final m = meal;
+  var shifted = false;
+  // A meal says which half of the day a bare hour means: 7 next to
+  // "dinner" is 19:00. Breakfast keeps its morning — 8 + 12 is no
+  // breakfast hour — and "coffee at 4am" keeps the am it was given.
+  if (t != null && m != null && w.timeForm == TimeForm.bare && t.$1 < 12) {
+    final pm = (t.$1 + 12) * 60 + t.$2;
+    if (pm >= m.hours.startInMinutes - 60 && pm <= m.hours.endInMinutes + 60) {
+      t = (t.$1 + 12, t.$2);
+      shifted = true;
     }
+  }
+  // A bare or named time far outside the meal's hours is not the meal's
+  // ("drinks 10pm to midnight" reads midnight last): the meal's hours stand.
+  // A time with am/pm or on a 24-hour clock is the person's own word.
+  if (t != null && m != null && w.timeForm != TimeForm.marked) {
+    final at = t.$1 * 60 + t.$2;
+    if (at < m.hours.startInMinutes - _mealReachMinutes ||
+        at > m.hours.endInMinutes + _mealReachMinutes) {
+      t = null;
+    }
+  }
+  if (t != null) {
     final start = t.$1 * 60 + t.$2;
     final et = w.endTime;
     var end = start + 120;
     if (et != null) {
-      final e = et.$1 * 60 + et.$2;
+      var e = et.$1 * 60 + et.$2;
+      // The meal moved the start into the afternoon; a bare end the range
+      // put before it moves with it ("dinner from 7 to 9" is 19:00–21:00,
+      // not 19:00 to midnight).
+      if (shifted && et.$1 < 12 && e <= start) e += 12 * 60;
       // A range ends where it says; one past midnight ends at midnight.
       end = e > start ? e : 24 * 60;
       rangeMinutes = end - start;
@@ -248,6 +269,7 @@ AskHints readAskHints({
     // A window past midnight is cut at the day's last minute: the search
     // looks in one local day at a time.
     final capped = end > 24 * 60 - 1 ? 24 * 60 - 1 : end;
+    if (capped < end) cutWindow = capped - start;
     hours = AskHours(
       startHour: t.$1,
       startMinute: t.$2,
@@ -258,32 +280,38 @@ AskHints readAskHints({
         DateFormat('h:mm a').format(DateTime.utc(2000, 1, 1, t.$1, t.$2));
     what = m == null ? clock : '${m.word} · $clock';
     timeWords = m == null ? 'at $clock' : 'for ${m.word} at $clock';
-  } else if (meal != null) {
-    hours = meal.hours;
-    what = meal.word;
-    timeWords = 'for ${meal.word}';
-  } else if (part != null) {
+  } else if (m != null) {
+    hours = m.hours;
+    what = m.word;
+    timeWords = 'for ${m.word}';
+  } else if (w.part case final part?) {
     hours = AskHours.fromDayPart(part);
     what = _partWord(part);
     timeWords = part == DayPart.endOfDay ? 'at end of day' : 'in the $what';
   }
 
   final named = w.duration?.inMinutes;
-  final minutes = named != null && named > 0
+  var minutes = named != null && named > 0
       ? named
       : rangeMinutes ?? meal?.minutes;
+  final cut = cutWindow;
+  if (minutes != null && cut != null && minutes > cut) minutes = cut;
 
   // Today's hours already gone: "dinner on Friday" read on Friday at nine
   // means next Friday. Gone means no room left for the meeting before they
   // close — now plus its length past the close — the arithmetic
-  // `findTimeWindowUtc` judges a week by. With no hours, today stands.
+  // `findTimeWindowUtc` judges a week by. Only a weekday recurs: "tonight"
+  // and "Oct 9" each named that one day, so they are dropped rather than
+  // rolled. With no hours, today stands.
   final h = hours;
   final length = Duration(
       minutes: (minutes ?? 1) < 1 ? 1 : (minutes ?? 1));
-  if (day != null && day == w.today && h != null) {
+  if (day != null && day == today && h != null) {
     final close =
         zone.localDateTime(day, h.endHour, h.endMinute).toUtc();
-    if (now.toUtc().add(length).isAfter(close)) day = day.addDays(7);
+    if (now.toUtc().add(length).isAfter(close)) {
+      day = weekday ? day.addDays(7) : null;
+    }
   }
 
   final bits = [
