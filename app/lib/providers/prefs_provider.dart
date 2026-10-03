@@ -774,6 +774,13 @@ const String homeSortKey = 'home_sort';
 const String mailLookbackDaysKey = 'mail_lookback_days';
 const String teamsLookbackDaysKey = 'teams_lookback_days';
 
+/// The Day stop's face (`agenda` | `grid`) and the grid's span (`day` |
+/// `week`). Read and written by the inbox itself, once at startup and on
+/// each press, rather than carried on [AppPrefs]: nothing else reads them,
+/// and the enums they name live with the widgets that draw them.
+const String dayViewKey = 'day_view';
+const String dayGridSpanKey = 'day_grid_span';
+
 /// The managed server's two remaining keys. Not in `wipeAll`'s list,
 /// deliberately: which server this machine runs is a fact about the machine.
 /// Whether the app runs one at all is no longer stored — see

@@ -549,6 +549,96 @@ void main() {
   });
 
   group('describe', () {
+    test('a scheduling ask: the owner\'s word on it, by its origin, under '
+        'its own label', () {
+      String said(String origin) => ActivityLogPanel.describe(_event(
+            kind: 'scheduling_ask',
+            detail: {'origin': origin},
+          ));
+      expect(said('invite'), 'Closed an ask after an invite');
+      expect(said('dismiss'), 'Dismissed an ask');
+      expect(said('undo'), 'Brought an ask back');
+      expect(said('owner'), 'Marked a thread as asking for a time');
+      expect(ActivityLogPanel.kindLabel('scheduling_ask'), 'Scheduling ask');
+      expect(said('later'), 'Scheduling ask');
+    });
+
+    test('a meeting brief: written from how many threads, skipped with its '
+        'reason in words, or failed', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 3, 'asks': 1},
+        )),
+        'Meeting brief — written from 3 threads',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 1},
+        )),
+        'Meeting brief — written from 1 thread',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'no_mail'},
+        )),
+        'Meeting brief — skipped (no recent mail with these people)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'unchanged'},
+        )),
+        'Meeting brief — skipped (nothing new since the last one)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'error',
+          detail: const {'error': 'not JSON'},
+        )),
+        'Meeting brief — failed',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'too_many'},
+        )),
+        'Meeting brief — skipped (too many people)',
+      );
+      // Over a ready brief the old one stands, and the sentence says so.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'past', 'kept': 'ready'},
+        )),
+        'Meeting brief — skipped (already started); the last brief stands',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'error',
+          detail: const {'error': 'not JSON', 'kept': 'ready'},
+        )),
+        'Meeting brief — failed; the last brief stands',
+      );
+      // A park is the pipeline's news, in the general sentence.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'parked',
+          detail: const {'reason': 'model_unavailable'},
+        )),
+        'Meeting brief parked — model server off',
+      );
+    });
+
     test('a mail sync reports what it brought in', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_mail', count: 4)),
@@ -709,6 +799,86 @@ void main() {
         ActivityLogPanel.describe(_event(kind: 'sync_reconcile', count: 3)),
         'Mail reconcile — 3 messages the delta feed skipped',
       );
+    });
+
+    test('a calendar command says what was asked, who read it and what came '
+        'back, in enum words', () {
+      String command(String action, String path, String outcome) =>
+          ActivityLogPanel.describe(_event(
+            kind: 'calendar_command',
+            detail: {'action': action, 'path': path, 'outcome': outcome},
+          ));
+      expect(command('move', 'lexicon', 'proposal'),
+          'Calendar command — Move · lexicon · proposal');
+      expect(command('ask_agenda', 'lexicon', 'answer'),
+          'Calendar command — Agenda · lexicon · answer');
+      expect(command('create', 'generative', 'slots'),
+          'Calendar command — Create · generative · slots');
+      expect(command('unknown', 'generative', 'cannot'),
+          'Calendar command — Not understood · generative · cannot');
+      expect(ActivityLogPanel.kindLabel('calendar_command'),
+          'Calendar command');
+    });
+
+    test('find a time says how many slots and whose calendars, then what '
+        'was done with them, in counts and enum words', () {
+      String row(Map<String, Object?> detail) =>
+          ActivityLogPanel.describe(_event(kind: 'find_time', detail: detail));
+      expect(
+          row({'source': 'graph', 'slots': 3, 'people': 2,
+              'window': 'this_week'}),
+          'Find a time — 3 slots (graph)');
+      expect(row({'source': 'local', 'slots': 1, 'people': 0,
+              'window': 'next_week'}),
+          'Find a time — 1 slot (local)');
+      expect(row({'action': 'put_in_reply'}), 'Find a time — put in reply');
+      expect(row({'action': 'send_invite'}), 'Find a time — invite sent');
+      expect(row({'action': 'add_to_calendar'}),
+          'Find a time — added to calendar');
+      expect(ActivityLogPanel.kindLabel('find_time'), 'Find a time');
+    });
+
+    test('a calendar write says what it did and how many it emailed', () {
+      String write(String action,
+              {String status = 'ok',
+              String outcome = 'ok',
+              int notified = 0,
+              bool undo = false}) =>
+          ActivityLogPanel.describe(_event(
+            kind: 'calendar_write',
+            status: status,
+            detail: {
+              'action': action,
+              'outcome': outcome,
+              'notified': notified,
+              if (undo) 'undo': true,
+            },
+          ));
+      expect(write('accept', notified: 1),
+          'Calendar — Accepted a meeting · emailed 1');
+      expect(write('tentative', notified: 1),
+          'Calendar — Said maybe to a meeting · emailed 1');
+      expect(write('decline', notified: 1),
+          'Calendar — Declined a meeting · emailed 1');
+      expect(write('propose', notified: 1),
+          'Calendar — Proposed a new time · emailed 1');
+      expect(write('move'), 'Calendar — Moved an event');
+      expect(write('cancel', notified: 4),
+          'Calendar — Cancelled a meeting · emailed 4');
+      expect(write('delete'), 'Calendar — Deleted an event');
+      expect(write('create'), 'Calendar — Created an event');
+      expect(write('move', undo: true), 'Calendar — Undid a change');
+      expect(write('move', status: 'failed', outcome: 'changed'),
+          "Calendar — couldn't move an event (changed)");
+      // Every answer fails as an answer, whichever it was going to be.
+      expect(write('accept', status: 'failed', outcome: 'transient'),
+          "Calendar — couldn't answer a meeting (transient)");
+      expect(write('tentative', status: 'failed', outcome: 'refused'),
+          "Calendar — couldn't answer a meeting (refused)");
+      expect(write('decline', status: 'failed', outcome: 'transient'),
+          "Calendar — couldn't answer a meeting (transient)");
+      expect(write('create', status: 'failed', outcome: 'scope_missing'),
+          "Calendar — couldn't create an event (scope_missing)");
     });
 
     test('one changed file reads as one file', () {

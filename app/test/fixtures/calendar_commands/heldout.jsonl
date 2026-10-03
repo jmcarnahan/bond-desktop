@@ -1,0 +1,100 @@
+{"text": "grab 30 minutes on Priya Northwind's calendar thursday at 10 and send an invite", "action": "create"}
+{"text": "arrange a meeting with lee@example.net for monday at 2", "action": "create"}
+{"text": "Create a call with Jordan Litware tomorrow 4-4:30", "action": "create"}
+{"text": "pencil in a catch-up with Kim Wingtip next friday at 9", "action": "create"}
+{"text": "book a review with Morgan Adatum and Alex Proseware on the 14th at 3pm", "action": "create"}
+{"text": "set a meeting for the budget kickoff wednesday 10am with Dana", "action": "create"}
+{"text": "schedule an hour tmrw w/ sam fabrikam to talk hiring", "action": "create"}
+{"text": "please add a team lunch next thursday at noon", "action": "create"}
+{"text": "block 9-10 every morning next week for email", "action": "create"}
+{"text": "send an invite to dana@contoso.com for friday 11am, subject vendor sync", "action": "create"}
+{"text": "change my 2pm to 3pm", "action": "move"}
+{"text": "can the design review with Priya go to thursday instead", "action": "move"}
+{"text": "move the 11:30 with Sam Fabrikam to tomorrow", "action": "move"}
+{"text": "push back my call with Morgan Adatum by an hour", "action": "move"}
+{"text": "reschedule wednesday's standup to 9:45", "action": "move"}
+{"text": "Move The Kickoff To Next Monday At 2", "action": "move"}
+{"text": "shift tomorrow's lunch with Lee Tailspin to 1", "action": "move"}
+{"text": "postpone the retro with kim@fabrikam.net to friday", "action": "move"}
+{"text": "maybe push the budget meeting to next week", "action": "move"}
+{"text": "rescheduel my 4pm to thursday morning", "action": "move"}
+{"text": "cancel the budget kickoff on wednesday", "action": "cancel"}
+{"text": "scrap the 3:30 I have with Sam Fabrikam, it's not needed anymore", "action": "cancel"}
+{"text": "delete the retro on thursday", "action": "cancel"}
+{"text": "please cancel lunch with Priya Northwind tomorrow", "action": "cancel"}
+{"text": "cancel my next meeting with lee@example.net", "action": "cancel"}
+{"text": "scrap tomorrow's standup", "action": "cancel"}
+{"text": "remove the team lunch from friday", "action": "cancel"}
+{"text": "cancel the 1:1 with Jordan Litware next week", "action": "cancel"}
+{"text": "cancell my 2pm", "action": "cancel"}
+{"text": "drop the hiring sync with Kim Wingtip", "action": "cancel"}
+{"text": "count me in for the design review", "action": "rsvp_yes"}
+{"text": "accept the budget meeting from Dana Contoso", "action": "rsvp_yes"}
+{"text": "Yes to Sam Fabrikam's sync on friday", "action": "rsvp_yes"}
+{"text": "accept the invite for tomorrow at 2", "action": "rsvp_yes"}
+{"text": "i'll be there for lunch with Priya Northwind", "action": "rsvp_yes"}
+{"text": "accept lee@example.net's retro", "action": "rsvp_yes"}
+{"text": "accept the all-hands on monday", "action": "rsvp_yes"}
+{"text": "say yes to the kickoff invite", "action": "rsvp_yes"}
+{"text": "accept the 1:1 Kim Wingtip sent", "action": "rsvp_yes"}
+{"text": "confirm i'm attending the offsite planning, accept it", "action": "rsvp_yes"}
+{"text": "decline the budget meeting from Dana Contoso", "action": "rsvp_no"}
+{"text": "No to Sam Fabrikam's sync on friday, decline it", "action": "rsvp_no"}
+{"text": "decline the invite for tomorrow at 2", "action": "rsvp_no"}
+{"text": "i can't make lunch with Priya Northwind", "action": "rsvp_no"}
+{"text": "decline lee@example.net's retro", "action": "rsvp_no"}
+{"text": "decline the all-hands on monday", "action": "rsvp_no"}
+{"text": "turn down the kickoff invite", "action": "rsvp_no"}
+{"text": "decline the 1:1 Kim Wingtip sent", "action": "rsvp_no"}
+{"text": "send regrets for the offsite planning, decline it", "action": "rsvp_no"}
+{"text": "cant make the design review thursday", "action": "rsvp_no"}
+{"text": "tentatively accept the budget meeting from Dana Contoso", "action": "rsvp_maybe"}
+{"text": "Maybe to Sam Fabrikam's sync on friday", "action": "rsvp_maybe"}
+{"text": "mark tomorrow's 2pm as tentative", "action": "rsvp_maybe"}
+{"text": "say maybe to lunch with Priya Northwind", "action": "rsvp_maybe"}
+{"text": "tentative on lee@example.net's retro", "action": "rsvp_maybe"}
+{"text": "tentatively accept the all-hands on monday", "action": "rsvp_maybe"}
+{"text": "respond maybe to the kickoff invite", "action": "rsvp_maybe"}
+{"text": "tentative for the 1:1 Kim Wingtip sent", "action": "rsvp_maybe"}
+{"text": "put me down as tentative for the offsite planning", "action": "rsvp_maybe"}
+{"text": "tentitively accept the design review thursday", "action": "rsvp_maybe"}
+{"text": "find a 45 minute slot with Kim Wingtip and Lee Tailspin", "action": "find_time"}
+{"text": "when can Dana Contoso and I get together next week", "action": "find_time"}
+{"text": "Find Time With Sam Fabrikam On Thursday", "action": "find_time"}
+{"text": "find an hour for Priya Northwind and me before friday", "action": "find_time"}
+{"text": "find a slot with morgan@example.com tomorrow", "action": "find_time"}
+{"text": "find 20 minutes with Alex Proseware this afternoon", "action": "find_time"}
+{"text": "whats a good time to meet with Jordan next week", "action": "find_time"}
+{"text": "find a time for a retro with the fabrikam folks", "action": "find_time"}
+{"text": "fnd a time with Lee for coffee", "action": "find_time"}
+{"text": "find half an hour with Dana and Priya on monday", "action": "find_time"}
+{"text": "is my Friday 1pm slot open?", "action": "ask_free"}
+{"text": "do I have time on monday afternoon", "action": "ask_free"}
+{"text": "what's free tomorrow", "action": "ask_free"}
+{"text": "is my morning free on the 22nd", "action": "ask_free"}
+{"text": "Am I Free Next Wednesday", "action": "ask_free"}
+{"text": "any open gaps in my thursday?", "action": "ask_free"}
+{"text": "do i have time for lunch tomorrow", "action": "ask_free"}
+{"text": "is 4:30 today clear for me", "action": "ask_free"}
+{"text": "any openings on my calendar friday morning?", "action": "ask_free"}
+{"text": "is tuesday at 10 open for me", "action": "ask_free"}
+{"text": "give me the rundown of Thursday", "action": "ask_agenda"}
+{"text": "which meetings are sitting in my morning tomorrow", "action": "ask_agenda"}
+{"text": "show me today's agenda", "action": "ask_agenda"}
+{"text": "What Is On My Calendar Next Tuesday", "action": "ask_agenda"}
+{"text": "what meetings do I have on friday", "action": "ask_agenda"}
+{"text": "what's my schedule tomorrow", "action": "ask_agenda"}
+{"text": "anything on this afternoon?", "action": "ask_agenda"}
+{"text": "what do i have on the 30th", "action": "ask_agenda"}
+{"text": "monday's lineup please", "action": "ask_agenda"}
+{"text": "list what's on for wednesday", "action": "ask_agenda"}
+{"text": "has it been a while since Sam Fabrikam and I got together?", "action": "ask_person"}
+{"text": "When Do I Next Have Something With Dana Contoso", "action": "ask_person"}
+{"text": "is Lee Tailspin on any of my upcoming meetings", "action": "ask_person"}
+{"text": "last met with Priya Northwind when?", "action": "ask_person"}
+{"text": "when's the next time I'm meeting Kim Wingtip", "action": "ask_person"}
+{"text": "how long since my last meeting with jordan@example.org", "action": "ask_person"}
+{"text": "Morgan Adatum - what's the next thing we're both in", "action": "ask_person"}
+{"text": "last time Alex and I had a meeting?", "action": "ask_person"}
+{"text": "when am I meeting Dana next week", "action": "ask_person"}
+{"text": "when did I last have a meeting with the northwind team", "action": "ask_person"}

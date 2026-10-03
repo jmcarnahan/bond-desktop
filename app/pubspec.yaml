@@ -94,6 +94,17 @@ dependencies:
   # than pins: neither is near the toolchain, and both are stable.
   glob: ^2.1.2
   yaml: ^3.1.2
+  # The calendar's time rules. `timezone` was already resolved transitively
+  # (flutter_local_notifications), promoted to direct at a caret on that
+  # resolved version so the two cannot disagree; it carries the IANA database
+  # the display zone and DST-safe local dates are built from. `flutter_timezone`
+  # asks the OS for its IANA zone name. `lib/services/calendar/calendar_zone.dart`
+  # is the only file allowed to import `flutter_timezone`.
+  timezone: ^0.11.1
+  flutter_timezone: ^5.1.0
+  # The Day stop's grid (day and week columns, drag to move). Pre-1.0, so
+  # pinned EXACTLY: a minor bump renames its controllers and callbacks.
+  kalender: 0.32.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -123,6 +134,11 @@ flutter:
   # (docs/distribution.md, "Bumping a model").
   assets:
     - assets/models/manifest.json
+    # The calendar command head (`command_heads.json`), registered as a
+    # DIRECTORY: the file exists only once the owner has fitted it
+    # (`make calendar-heads`), and a build fails on a registered FILE that is
+    # absent. The README keeps the directory from being empty.
+    - assets/calendar/
 
   # Family names must stay exactly these three — BondType references them
   # by string (lib/theme/bond_typography.dart).

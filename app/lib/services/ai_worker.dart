@@ -158,7 +158,13 @@ class AiWorker {
   /// prefetch cap in `ExtractHandler` counts work rows over exactly the sources
   /// that will drain them, and a second literal of this list would be a cap
   /// that stopped seeing a connector the day one was added.
-  static const List<String> sources = ['email', 'teams', 'local'];
+  ///
+  /// `calendar` is not a connector's mail either: a work row's source is the
+  /// ROW's origin, and a meeting brief's origin is the calendar, so its
+  /// `meeting_brief` rows sit under it. Every other reader of this list counts
+  /// by kind (`draft`, `extract`, `embed`, `triage`), which no calendar row
+  /// carries, so widening it changed none of their numbers.
+  static const List<String> sources = ['email', 'teams', 'local', 'calendar'];
 
   /// How many urgent refs one pass carries at most.
   ///
@@ -1034,7 +1040,7 @@ class AiWorker {
       source,
       id,
       status: fatal ? 'error' : 'pending',
-      error: redactEndpoints('$error'),
+      error: rowErrorFor(error),
       attempts: attempts,
     );
     // `error` only once the retries are gone: an item that will be tried again
@@ -1083,8 +1089,9 @@ class AiWorker {
         // Redacted, not raw. An unreachable server never reaches this write
         // (`_park` takes it first), but a 4xx body snippet or a handler's own
         // sentence can still echo an address, and an address is a setting,
-        // not a row.
-        'error': redactEndpoints('$error'),
+        // not a row. An unusable answer is its category alone: its sentence
+        // quotes the model's output ([rowErrorFor]).
+        'error': rowErrorFor(error),
         'attempts': attempts,
         'status_code': ?statusCode,
       },

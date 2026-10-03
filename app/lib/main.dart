@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/date_symbol_data_local.dart';
 
 import 'data/app_paths.dart';
 import 'data/db.dart';
@@ -13,6 +14,7 @@ import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/setup/setup_gate.dart';
 import 'screens/sign_in_screen.dart';
+import 'services/calendar/calendar_zone.dart';
 import 'services/models/model_manifest.dart';
 import 'services/triage_queue.dart';
 import 'widgets/preview/pdf_preview.dart';
@@ -23,6 +25,17 @@ Future<void> main() async {
   // Required before path_provider's platform channel can be called, which
   // openAppDb does.
   WidgetsFlutterBinding.ensureInitialized();
+
+  // The IANA zone database, loaded once before anything can ask the calendar
+  // what day it is. Synchronous work over embedded data: no platform channel,
+  // nothing to fail on a fresh machine.
+  await initCalendarZones();
+  // Every locale's day and month names. Not needed today: the app formats in
+  // en_US (no flutter_localizations, no Intl.defaultLocale), which intl
+  // compiles in. It is forward-proofing — the day the app takes a locale,
+  // the Day grid's headers would throw in any other one without it — and it
+  // is cheap: in-memory data, no platform channel.
+  await initializeDateFormatting();
 
   // pdfium is loaded here so the first PDF anybody opens does not pay the
   // init on the UI thread. Called through the wrapper next to the renderer so

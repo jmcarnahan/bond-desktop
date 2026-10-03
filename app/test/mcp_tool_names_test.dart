@@ -38,9 +38,10 @@ void main() {
     'send_draft',
   ];
 
-  /// Every name the desktop is allowed to send: the sixteen published tools it
-  /// calls, and nothing else. The migration is finished, so a name that is not
-  /// on this list is either a typo or a new dependency on the server.
+  /// Every name the desktop is allowed to send: the twenty-two published tools
+  /// it calls (the last six are the calendar's), and nothing else. The
+  /// migration is finished, so a name that is not on this list is either a
+  /// typo or a new dependency on the server.
   const publishedToolNames = {
     'connection_status',
     'get_profile',
@@ -58,6 +59,12 @@ void main() {
     'inspect_file',
     'get_mail_attachment',
     'get_teams_attachment',
+    'sync_calendar',
+    'get_calendar_event',
+    'get_mailbox_settings',
+    'manage_event',
+    'create_calendar_event',
+    'find_meeting_times',
   };
 
   /// The package root: `flutter test` runs from it, so lib/ is right here. The
@@ -124,7 +131,7 @@ void main() {
 
     expect(
       publishedToolNames.length,
-      16,
+      22,
       reason: 'a name added here is a new server dependency and belongs in a '
           'review',
     );

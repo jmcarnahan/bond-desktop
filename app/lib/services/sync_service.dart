@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/context_store.dart';
 import '../data/message_store.dart';
@@ -197,6 +197,11 @@ class SyncService implements MailSync {
   /// it should be greppable.
   static const String _source = 'email';
 
+  /// Failed passes `meeting_detail_backfill` gets before it closes anyway.
+  /// Three rides out a server restart or a bad minute; a message that fails
+  /// every time would otherwise cost every sync its fetches forever.
+  static const int _meetingBackfillAttempts = 3;
+
   final MailBackend _mail;
   final MessageStore _store;
   final ActivityLog _log;
@@ -306,7 +311,12 @@ class SyncService implements MailSync {
   /// the processing switch leaves it open and the next pass resumes, because
   /// what was re-decided has dropped out of the list. A throw is logged and
   /// leaves it open too — a re-decide is never a failed sync.
-  void _startRedecide() {
+  ///
+  /// Visible for `redecide_wiring_test`, which drives the real provider
+  /// wiring through here without a mail backend; the app reaches it only
+  /// from the pass.
+  @visibleForTesting
+  void startRedecide() {
     final redecide = _redecide;
     if (redecide == null || _redeciding != null) return;
     late final Future<void> run;
@@ -600,7 +610,7 @@ class SyncService implements MailSync {
 
       // The install-time re-decide: once per question-set hash, see
       // [redecideQhashKey]. Started, not awaited — see [_redeciding].
-      _startRedecide();
+      startRedecide();
 
       // Every pass, not once: the triage pass writes an ownerless decision's
       // probability when the keychain has not answered yet, and it is untrusted
@@ -715,18 +725,74 @@ class SyncService implements MailSync {
       // edited, saved or sent is theirs and stays.
       int? regatedMeetingResponses;
       if (await _store.getPref('meeting_regate_crlf') == null) {
-        final regated = await _store.regateMeetingResponseIds();
-        regatedMeetingResponses = regated.length;
-        if (regated.isNotEmpty) {
-          await _store.refoldAllThreadStates();
-          for (final id in regated) {
-            final draft = await _store.getDraftForMessage(_source, id);
-            if (draft?['status'] == 'suggested') {
-              await _store.updateDraftStatus(_source, id, status: 'dismissed');
+        regatedMeetingResponses = await _regateMeetingResponsesAndTidy();
+        await _store.setPref('meeting_regate_crlf', '1');
+      }
+
+      // The meeting fields for MCP rows fetched before `read_email` sent them.
+      // Those rows carry no `meeting` key, so the meeting-response gate can
+      // only use its subject-and-empty-body fallback on them, and no row
+      // knows its calendar event. This re-fetches the likely meeting mail
+      // once: a calendar response's subject prefix, or a subject equal to a
+      // meeting in the calendar mirror (an invite carries the meeting's own
+      // subject, unprefixed).
+      //
+      // Bounded — newest first, 30 days, at most 200 — because each
+      // candidate is one `read_email` call on the sync's own path, and older
+      // meeting mail is history nobody acts on. It runs inside this one mail
+      // pass, so the pass that takes it can be held up by up to 200
+      // sequential detail fetches — once, by design. Gated on the mirror's
+      // first full read having completed and been swept: the SDK backend
+      // never mirrors, so this is MCP-only by construction, and before the
+      // whole window is read the subject join would see only part of the
+      // calendar and spend the shot. Any throw stops the loop and records
+      // `attempt:<n>`, so a failed pass is owed again next sync, up to
+      // [_meetingBackfillAttempts] passes; then the one-shot closes, so a
+      // message that fails every time cannot cost every sync forever. The
+      // sync around it is healthy either way, so a failure is a console line.
+      // A pass that hit the cap still closes the one-shot: the rows past it
+      // are older than the ones fetched, and the gate's fallback covers them.
+      //
+      // After a clean loop the responses are re-gated the way the one-shot
+      // above does it, because the fields just stored are what that rule
+      // reads first.
+      int? backfilledMeetings;
+      final backfillPref = await _store.getPref('meeting_detail_backfill');
+      if ((backfillPref == null || backfillPref.startsWith('attempt:')) &&
+          await _store.calendarMirrored()) {
+        try {
+          final candidates = await _store.meetingBackfillCandidates(
+            sinceIso: _isoAgo(const Duration(days: 30)),
+          );
+          for (final id in candidates) {
+            await _fetchDetailInto(id);
+          }
+          backfilledMeetings = candidates.length;
+          regatedMeetingResponses = (regatedMeetingResponses ?? 0) +
+              await _regateMeetingResponsesAndTidy();
+          await _store.setPref('meeting_detail_backfill', '1');
+        } catch (e) {
+          debugPrint('sync: the meeting detail backfill stopped: '
+              '${e.runtimeType}');
+          final attempts = (int.tryParse(
+                    backfillPref?.substring('attempt:'.length) ?? '',
+                  ) ??
+                  0) +
+              1;
+          try {
+            if (attempts >= _meetingBackfillAttempts) {
+              debugPrint('sync: the meeting detail backfill gave up after '
+                  '$attempts passes: ${e.runtimeType}');
+              await _store.setPref('meeting_detail_backfill', '1');
+            } else {
+              await _store.setPref(
+                  'meeting_detail_backfill', 'attempt:$attempts');
             }
+          } catch (_) {
+            // The count is bookkeeping; a store that cannot write it leaves
+            // the shot owed, which is where a failed pass already stands.
           }
         }
-        await _store.setPref('meeting_regate_crlf', '1');
       }
 
       // The ask banners triage wrote before it learned that "Day 1" is not a
@@ -1071,6 +1137,7 @@ class SyncService implements MailSync {
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
           'regated_meeting_responses': ?regatedMeetingResponses,
+          'backfilled_meetings': ?backfilledMeetings,
           'repended_label_rule_gates': ?rependedLabelRuleGates,
           'stripped_plan_relative_banners': ?strippedPlanRelative,
           'repaired_gated_conversations': ?repairedGated,
@@ -1104,6 +1171,28 @@ class SyncService implements MailSync {
       );
       rethrow;
     }
+  }
+
+  /// Gates the meeting responses already stored, refolds the threads that
+  /// moved, and dismisses the `suggested` drafts of the messages it gated;
+  /// answers how many it gated.
+  ///
+  /// The body both meeting one-shots share: `meeting_regate_crlf`, and
+  /// `meeting_detail_backfill` after it has stored the fields this rule reads
+  /// first. Only `suggested` drafts go, the status Dismiss writes; a draft the
+  /// owner edited, saved or sent is theirs and stays.
+  Future<int> _regateMeetingResponsesAndTidy() async {
+    final regated = await _store.regateMeetingResponseIds();
+    if (regated.isNotEmpty) {
+      await _store.refoldAllThreadStates();
+      for (final id in regated) {
+        final draft = await _store.getDraftForMessage(_source, id);
+        if (draft?['status'] == 'suggested') {
+          await _store.updateDraftStatus(_source, id, status: 'dismissed');
+        }
+      }
+    }
+    return regated.length;
   }
 
   /// Queues one slice of the conversations still embedded under [oldTag], and
@@ -1916,9 +2005,19 @@ class SyncService implements MailSync {
     final bodyText =
         converted == null ? null : stripSenderIdentification(converted);
     final headers = _headers(detail['internetMessageHeaders']);
-    // Graph's word for what kind of invitation this is, and absent on
-    // ordinary mail and on every MCP message.
+    // Graph's word for what kind of invitation this is, absent on ordinary
+    // mail. Both backends now send it under Graph's key: the MCP backend maps
+    // `read_email`'s `meeting_message_type` onto it and drops its `none`.
     final meeting = (detail['meetingMessageType'] as String?)?.trim();
+    // The calendar event the meeting message is linked to — MCP only (the SDK
+    // detail never carries it), and absent when the server knows no event.
+    // Stored so a later phase can join a message to its `calendar_events` row.
+    final eventId = (detail['calendarEventId'] as String?)?.trim();
+    final hasMeeting = meeting != null && meeting.isNotEmpty;
+    final hasEventId = eventId != null && eventId.isNotEmpty;
+    // `read_email`'s `is_auto_reply`, MCP only. Stored as a fact and only
+    // when true, so an ordinary row carries no key; nothing gates on it yet.
+    final autoReply = detail['isAutoReply'] == true;
 
     final rawAttachments = detail['attachments'];
     final rawCount = rawAttachments is List ? rawAttachments.length : 0;
@@ -1963,15 +2062,21 @@ class SyncService implements MailSync {
       // Under named keys rather than at the top level: source_meta_json is the
       // whole connector-specific blob, and headers are one thing in it. Each
       // key is OMITTED when it has nothing to say, and the whole blob stays
-      // null when neither does — `updateMessageDetail` COALESCEs, so a thin
+      // null when none does — `updateMessageDetail` COALESCEs, so a thin
       // detail must not overwrite a fat blob a previous fetch wrote. Every
       // reader looks its own key up and tolerates its absence, which is what
-      // lets a row written before `meeting` existed keep reading correctly.
-      sourceMetaJson: headers.isEmpty && (meeting == null || meeting.isEmpty)
+      // lets a row written before `meeting` or `event_id` existed keep
+      // reading correctly.
+      sourceMetaJson: headers.isEmpty &&
+              !hasMeeting &&
+              !hasEventId &&
+              !autoReply
           ? null
           : jsonEncode({
               if (headers.isNotEmpty) 'headers': headers,
-              if (meeting != null && meeting.isNotEmpty) 'meeting': meeting,
+              if (hasMeeting) 'meeting': meeting,
+              if (hasEventId) 'event_id': eventId,
+              if (autoReply) 'auto_reply': true,
             }),
     );
 

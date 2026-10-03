@@ -20507,6 +20507,2048 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
   }
 }
 
+class CalendarEvents extends Table
+    with TableInfo<CalendarEvents, CalendarEventRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  CalendarEvents(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL PRIMARY KEY',
+  );
+  static const VerificationMeta _seriesMasterIdMeta = const VerificationMeta(
+    'seriesMasterId',
+  );
+  late final GeneratedColumn<String> seriesMasterId = GeneratedColumn<String>(
+    'series_master_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _icalUidMeta = const VerificationMeta(
+    'icalUid',
+  );
+  late final GeneratedColumn<String> icalUid = GeneratedColumn<String>(
+    'ical_uid',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _eventTypeMeta = const VerificationMeta(
+    'eventType',
+  );
+  late final GeneratedColumn<String> eventType = GeneratedColumn<String>(
+    'event_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _subjectMeta = const VerificationMeta(
+    'subject',
+  );
+  late final GeneratedColumn<String> subject = GeneratedColumn<String>(
+    'subject',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _locationMeta = const VerificationMeta(
+    'location',
+  );
+  late final GeneratedColumn<String> location = GeneratedColumn<String>(
+    'location',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _organizerNameMeta = const VerificationMeta(
+    'organizerName',
+  );
+  late final GeneratedColumn<String> organizerName = GeneratedColumn<String>(
+    'organizer_name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _organizerAddressMeta = const VerificationMeta(
+    'organizerAddress',
+  );
+  late final GeneratedColumn<String> organizerAddress = GeneratedColumn<String>(
+    'organizer_address',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _isOrganizerMeta = const VerificationMeta(
+    'isOrganizer',
+  );
+  late final GeneratedColumn<int> isOrganizer = GeneratedColumn<int>(
+    'is_organizer',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _isAllDayMeta = const VerificationMeta(
+    'isAllDay',
+  );
+  late final GeneratedColumn<int> isAllDay = GeneratedColumn<int>(
+    'is_all_day',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _isCancelledMeta = const VerificationMeta(
+    'isCancelled',
+  );
+  late final GeneratedColumn<int> isCancelled = GeneratedColumn<int>(
+    'is_cancelled',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _startUtcMeta = const VerificationMeta(
+    'startUtc',
+  );
+  late final GeneratedColumn<String> startUtc = GeneratedColumn<String>(
+    'start_utc',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _endUtcMeta = const VerificationMeta('endUtc');
+  late final GeneratedColumn<String> endUtc = GeneratedColumn<String>(
+    'end_utc',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _startDateMeta = const VerificationMeta(
+    'startDate',
+  );
+  late final GeneratedColumn<String> startDate = GeneratedColumn<String>(
+    'start_date',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _endDateMeta = const VerificationMeta(
+    'endDate',
+  );
+  late final GeneratedColumn<String> endDate = GeneratedColumn<String>(
+    'end_date',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _showAsMeta = const VerificationMeta('showAs');
+  late final GeneratedColumn<String> showAs = GeneratedColumn<String>(
+    'show_as',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _responseStatusMeta = const VerificationMeta(
+    'responseStatus',
+  );
+  late final GeneratedColumn<String> responseStatus = GeneratedColumn<String>(
+    'response_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'none\'',
+    defaultValue: const CustomExpression('\'none\''),
+  );
+  static const VerificationMeta _responseRequestedMeta = const VerificationMeta(
+    'responseRequested',
+  );
+  late final GeneratedColumn<int> responseRequested = GeneratedColumn<int>(
+    'response_requested',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _allowNewTimeProposalsMeta =
+      const VerificationMeta('allowNewTimeProposals');
+  late final GeneratedColumn<int> allowNewTimeProposals = GeneratedColumn<int>(
+    'allow_new_time_proposals',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _sensitivityMeta = const VerificationMeta(
+    'sensitivity',
+  );
+  late final GeneratedColumn<String> sensitivity = GeneratedColumn<String>(
+    'sensitivity',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _joinUrlMeta = const VerificationMeta(
+    'joinUrl',
+  );
+  late final GeneratedColumn<String> joinUrl = GeneratedColumn<String>(
+    'join_url',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _webLinkMeta = const VerificationMeta(
+    'webLink',
+  );
+  late final GeneratedColumn<String> webLink = GeneratedColumn<String>(
+    'web_link',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _changeKeyMeta = const VerificationMeta(
+    'changeKey',
+  );
+  late final GeneratedColumn<String> changeKey = GeneratedColumn<String>(
+    'change_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _attendeesJsonMeta = const VerificationMeta(
+    'attendeesJson',
+  );
+  late final GeneratedColumn<String> attendeesJson = GeneratedColumn<String>(
+    'attendees_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'[]\'',
+    defaultValue: const CustomExpression('\'[]\''),
+  );
+  static const VerificationMeta _categoriesJsonMeta = const VerificationMeta(
+    'categoriesJson',
+  );
+  late final GeneratedColumn<String> categoriesJson = GeneratedColumn<String>(
+    'categories_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'[]\'',
+    defaultValue: const CustomExpression('\'[]\''),
+  );
+  static const VerificationMeta _isReminderOnMeta = const VerificationMeta(
+    'isReminderOn',
+  );
+  late final GeneratedColumn<int> isReminderOn = GeneratedColumn<int>(
+    'is_reminder_on',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _reminderMinutesMeta = const VerificationMeta(
+    'reminderMinutes',
+  );
+  late final GeneratedColumn<int> reminderMinutes = GeneratedColumn<int>(
+    'reminder_minutes',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _bodyPreviewMeta = const VerificationMeta(
+    'bodyPreview',
+  );
+  late final GeneratedColumn<String> bodyPreview = GeneratedColumn<String>(
+    'body_preview',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _syncRunMeta = const VerificationMeta(
+    'syncRun',
+  );
+  late final GeneratedColumn<String> syncRun = GeneratedColumn<String>(
+    'sync_run',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _syncedAtMeta = const VerificationMeta(
+    'syncedAt',
+  );
+  late final GeneratedColumn<String> syncedAt = GeneratedColumn<String>(
+    'synced_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    seriesMasterId,
+    icalUid,
+    eventType,
+    subject,
+    location,
+    organizerName,
+    organizerAddress,
+    isOrganizer,
+    isAllDay,
+    isCancelled,
+    startUtc,
+    endUtc,
+    startDate,
+    endDate,
+    showAs,
+    responseStatus,
+    responseRequested,
+    allowNewTimeProposals,
+    sensitivity,
+    joinUrl,
+    webLink,
+    changeKey,
+    attendeesJson,
+    categoriesJson,
+    isReminderOn,
+    reminderMinutes,
+    bodyPreview,
+    syncRun,
+    syncedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'calendar_events';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CalendarEventRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('series_master_id')) {
+      context.handle(
+        _seriesMasterIdMeta,
+        seriesMasterId.isAcceptableOrUnknown(
+          data['series_master_id']!,
+          _seriesMasterIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('ical_uid')) {
+      context.handle(
+        _icalUidMeta,
+        icalUid.isAcceptableOrUnknown(data['ical_uid']!, _icalUidMeta),
+      );
+    }
+    if (data.containsKey('event_type')) {
+      context.handle(
+        _eventTypeMeta,
+        eventType.isAcceptableOrUnknown(data['event_type']!, _eventTypeMeta),
+      );
+    }
+    if (data.containsKey('subject')) {
+      context.handle(
+        _subjectMeta,
+        subject.isAcceptableOrUnknown(data['subject']!, _subjectMeta),
+      );
+    }
+    if (data.containsKey('location')) {
+      context.handle(
+        _locationMeta,
+        location.isAcceptableOrUnknown(data['location']!, _locationMeta),
+      );
+    }
+    if (data.containsKey('organizer_name')) {
+      context.handle(
+        _organizerNameMeta,
+        organizerName.isAcceptableOrUnknown(
+          data['organizer_name']!,
+          _organizerNameMeta,
+        ),
+      );
+    }
+    if (data.containsKey('organizer_address')) {
+      context.handle(
+        _organizerAddressMeta,
+        organizerAddress.isAcceptableOrUnknown(
+          data['organizer_address']!,
+          _organizerAddressMeta,
+        ),
+      );
+    }
+    if (data.containsKey('is_organizer')) {
+      context.handle(
+        _isOrganizerMeta,
+        isOrganizer.isAcceptableOrUnknown(
+          data['is_organizer']!,
+          _isOrganizerMeta,
+        ),
+      );
+    }
+    if (data.containsKey('is_all_day')) {
+      context.handle(
+        _isAllDayMeta,
+        isAllDay.isAcceptableOrUnknown(data['is_all_day']!, _isAllDayMeta),
+      );
+    }
+    if (data.containsKey('is_cancelled')) {
+      context.handle(
+        _isCancelledMeta,
+        isCancelled.isAcceptableOrUnknown(
+          data['is_cancelled']!,
+          _isCancelledMeta,
+        ),
+      );
+    }
+    if (data.containsKey('start_utc')) {
+      context.handle(
+        _startUtcMeta,
+        startUtc.isAcceptableOrUnknown(data['start_utc']!, _startUtcMeta),
+      );
+    }
+    if (data.containsKey('end_utc')) {
+      context.handle(
+        _endUtcMeta,
+        endUtc.isAcceptableOrUnknown(data['end_utc']!, _endUtcMeta),
+      );
+    }
+    if (data.containsKey('start_date')) {
+      context.handle(
+        _startDateMeta,
+        startDate.isAcceptableOrUnknown(data['start_date']!, _startDateMeta),
+      );
+    }
+    if (data.containsKey('end_date')) {
+      context.handle(
+        _endDateMeta,
+        endDate.isAcceptableOrUnknown(data['end_date']!, _endDateMeta),
+      );
+    }
+    if (data.containsKey('show_as')) {
+      context.handle(
+        _showAsMeta,
+        showAs.isAcceptableOrUnknown(data['show_as']!, _showAsMeta),
+      );
+    }
+    if (data.containsKey('response_status')) {
+      context.handle(
+        _responseStatusMeta,
+        responseStatus.isAcceptableOrUnknown(
+          data['response_status']!,
+          _responseStatusMeta,
+        ),
+      );
+    }
+    if (data.containsKey('response_requested')) {
+      context.handle(
+        _responseRequestedMeta,
+        responseRequested.isAcceptableOrUnknown(
+          data['response_requested']!,
+          _responseRequestedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('allow_new_time_proposals')) {
+      context.handle(
+        _allowNewTimeProposalsMeta,
+        allowNewTimeProposals.isAcceptableOrUnknown(
+          data['allow_new_time_proposals']!,
+          _allowNewTimeProposalsMeta,
+        ),
+      );
+    }
+    if (data.containsKey('sensitivity')) {
+      context.handle(
+        _sensitivityMeta,
+        sensitivity.isAcceptableOrUnknown(
+          data['sensitivity']!,
+          _sensitivityMeta,
+        ),
+      );
+    }
+    if (data.containsKey('join_url')) {
+      context.handle(
+        _joinUrlMeta,
+        joinUrl.isAcceptableOrUnknown(data['join_url']!, _joinUrlMeta),
+      );
+    }
+    if (data.containsKey('web_link')) {
+      context.handle(
+        _webLinkMeta,
+        webLink.isAcceptableOrUnknown(data['web_link']!, _webLinkMeta),
+      );
+    }
+    if (data.containsKey('change_key')) {
+      context.handle(
+        _changeKeyMeta,
+        changeKey.isAcceptableOrUnknown(data['change_key']!, _changeKeyMeta),
+      );
+    }
+    if (data.containsKey('attendees_json')) {
+      context.handle(
+        _attendeesJsonMeta,
+        attendeesJson.isAcceptableOrUnknown(
+          data['attendees_json']!,
+          _attendeesJsonMeta,
+        ),
+      );
+    }
+    if (data.containsKey('categories_json')) {
+      context.handle(
+        _categoriesJsonMeta,
+        categoriesJson.isAcceptableOrUnknown(
+          data['categories_json']!,
+          _categoriesJsonMeta,
+        ),
+      );
+    }
+    if (data.containsKey('is_reminder_on')) {
+      context.handle(
+        _isReminderOnMeta,
+        isReminderOn.isAcceptableOrUnknown(
+          data['is_reminder_on']!,
+          _isReminderOnMeta,
+        ),
+      );
+    }
+    if (data.containsKey('reminder_minutes')) {
+      context.handle(
+        _reminderMinutesMeta,
+        reminderMinutes.isAcceptableOrUnknown(
+          data['reminder_minutes']!,
+          _reminderMinutesMeta,
+        ),
+      );
+    }
+    if (data.containsKey('body_preview')) {
+      context.handle(
+        _bodyPreviewMeta,
+        bodyPreview.isAcceptableOrUnknown(
+          data['body_preview']!,
+          _bodyPreviewMeta,
+        ),
+      );
+    }
+    if (data.containsKey('sync_run')) {
+      context.handle(
+        _syncRunMeta,
+        syncRun.isAcceptableOrUnknown(data['sync_run']!, _syncRunMeta),
+      );
+    }
+    if (data.containsKey('synced_at')) {
+      context.handle(
+        _syncedAtMeta,
+        syncedAt.isAcceptableOrUnknown(data['synced_at']!, _syncedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_syncedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  CalendarEventRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CalendarEventRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      seriesMasterId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}series_master_id'],
+      )!,
+      icalUid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}ical_uid'],
+      )!,
+      eventType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}event_type'],
+      )!,
+      subject: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}subject'],
+      )!,
+      location: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}location'],
+      )!,
+      organizerName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}organizer_name'],
+      )!,
+      organizerAddress: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}organizer_address'],
+      )!,
+      isOrganizer: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}is_organizer'],
+      )!,
+      isAllDay: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}is_all_day'],
+      )!,
+      isCancelled: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}is_cancelled'],
+      )!,
+      startUtc: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}start_utc'],
+      ),
+      endUtc: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}end_utc'],
+      ),
+      startDate: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}start_date'],
+      ),
+      endDate: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}end_date'],
+      ),
+      showAs: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}show_as'],
+      )!,
+      responseStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}response_status'],
+      )!,
+      responseRequested: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}response_requested'],
+      ),
+      allowNewTimeProposals: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}allow_new_time_proposals'],
+      ),
+      sensitivity: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}sensitivity'],
+      )!,
+      joinUrl: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}join_url'],
+      )!,
+      webLink: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}web_link'],
+      )!,
+      changeKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}change_key'],
+      )!,
+      attendeesJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}attendees_json'],
+      )!,
+      categoriesJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}categories_json'],
+      )!,
+      isReminderOn: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}is_reminder_on'],
+      ),
+      reminderMinutes: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}reminder_minutes'],
+      ),
+      bodyPreview: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}body_preview'],
+      )!,
+      syncRun: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}sync_run'],
+      )!,
+      syncedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}synced_at'],
+      )!,
+    );
+  }
+
+  @override
+  CalendarEvents createAlias(String alias) {
+    return CalendarEvents(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class CalendarEventRow extends DataClass
+    implements Insertable<CalendarEventRow> {
+  final String id;
+  final String seriesMasterId;
+  final String icalUid;
+  final String eventType;
+  final String subject;
+  final String location;
+  final String organizerName;
+  final String organizerAddress;
+  final int isOrganizer;
+  final int isAllDay;
+  final int isCancelled;
+  final String? startUtc;
+  final String? endUtc;
+  final String? startDate;
+  final String? endDate;
+  final String showAs;
+  final String responseStatus;
+  final int? responseRequested;
+  final int? allowNewTimeProposals;
+  final String sensitivity;
+  final String joinUrl;
+  final String webLink;
+  final String changeKey;
+  final String attendeesJson;
+  final String categoriesJson;
+  final int? isReminderOn;
+  final int? reminderMinutes;
+  final String bodyPreview;
+  final String syncRun;
+  final String syncedAt;
+  const CalendarEventRow({
+    required this.id,
+    required this.seriesMasterId,
+    required this.icalUid,
+    required this.eventType,
+    required this.subject,
+    required this.location,
+    required this.organizerName,
+    required this.organizerAddress,
+    required this.isOrganizer,
+    required this.isAllDay,
+    required this.isCancelled,
+    this.startUtc,
+    this.endUtc,
+    this.startDate,
+    this.endDate,
+    required this.showAs,
+    required this.responseStatus,
+    this.responseRequested,
+    this.allowNewTimeProposals,
+    required this.sensitivity,
+    required this.joinUrl,
+    required this.webLink,
+    required this.changeKey,
+    required this.attendeesJson,
+    required this.categoriesJson,
+    this.isReminderOn,
+    this.reminderMinutes,
+    required this.bodyPreview,
+    required this.syncRun,
+    required this.syncedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['series_master_id'] = Variable<String>(seriesMasterId);
+    map['ical_uid'] = Variable<String>(icalUid);
+    map['event_type'] = Variable<String>(eventType);
+    map['subject'] = Variable<String>(subject);
+    map['location'] = Variable<String>(location);
+    map['organizer_name'] = Variable<String>(organizerName);
+    map['organizer_address'] = Variable<String>(organizerAddress);
+    map['is_organizer'] = Variable<int>(isOrganizer);
+    map['is_all_day'] = Variable<int>(isAllDay);
+    map['is_cancelled'] = Variable<int>(isCancelled);
+    if (!nullToAbsent || startUtc != null) {
+      map['start_utc'] = Variable<String>(startUtc);
+    }
+    if (!nullToAbsent || endUtc != null) {
+      map['end_utc'] = Variable<String>(endUtc);
+    }
+    if (!nullToAbsent || startDate != null) {
+      map['start_date'] = Variable<String>(startDate);
+    }
+    if (!nullToAbsent || endDate != null) {
+      map['end_date'] = Variable<String>(endDate);
+    }
+    map['show_as'] = Variable<String>(showAs);
+    map['response_status'] = Variable<String>(responseStatus);
+    if (!nullToAbsent || responseRequested != null) {
+      map['response_requested'] = Variable<int>(responseRequested);
+    }
+    if (!nullToAbsent || allowNewTimeProposals != null) {
+      map['allow_new_time_proposals'] = Variable<int>(allowNewTimeProposals);
+    }
+    map['sensitivity'] = Variable<String>(sensitivity);
+    map['join_url'] = Variable<String>(joinUrl);
+    map['web_link'] = Variable<String>(webLink);
+    map['change_key'] = Variable<String>(changeKey);
+    map['attendees_json'] = Variable<String>(attendeesJson);
+    map['categories_json'] = Variable<String>(categoriesJson);
+    if (!nullToAbsent || isReminderOn != null) {
+      map['is_reminder_on'] = Variable<int>(isReminderOn);
+    }
+    if (!nullToAbsent || reminderMinutes != null) {
+      map['reminder_minutes'] = Variable<int>(reminderMinutes);
+    }
+    map['body_preview'] = Variable<String>(bodyPreview);
+    map['sync_run'] = Variable<String>(syncRun);
+    map['synced_at'] = Variable<String>(syncedAt);
+    return map;
+  }
+
+  CalendarEventsCompanion toCompanion(bool nullToAbsent) {
+    return CalendarEventsCompanion(
+      id: Value(id),
+      seriesMasterId: Value(seriesMasterId),
+      icalUid: Value(icalUid),
+      eventType: Value(eventType),
+      subject: Value(subject),
+      location: Value(location),
+      organizerName: Value(organizerName),
+      organizerAddress: Value(organizerAddress),
+      isOrganizer: Value(isOrganizer),
+      isAllDay: Value(isAllDay),
+      isCancelled: Value(isCancelled),
+      startUtc: startUtc == null && nullToAbsent
+          ? const Value.absent()
+          : Value(startUtc),
+      endUtc: endUtc == null && nullToAbsent
+          ? const Value.absent()
+          : Value(endUtc),
+      startDate: startDate == null && nullToAbsent
+          ? const Value.absent()
+          : Value(startDate),
+      endDate: endDate == null && nullToAbsent
+          ? const Value.absent()
+          : Value(endDate),
+      showAs: Value(showAs),
+      responseStatus: Value(responseStatus),
+      responseRequested: responseRequested == null && nullToAbsent
+          ? const Value.absent()
+          : Value(responseRequested),
+      allowNewTimeProposals: allowNewTimeProposals == null && nullToAbsent
+          ? const Value.absent()
+          : Value(allowNewTimeProposals),
+      sensitivity: Value(sensitivity),
+      joinUrl: Value(joinUrl),
+      webLink: Value(webLink),
+      changeKey: Value(changeKey),
+      attendeesJson: Value(attendeesJson),
+      categoriesJson: Value(categoriesJson),
+      isReminderOn: isReminderOn == null && nullToAbsent
+          ? const Value.absent()
+          : Value(isReminderOn),
+      reminderMinutes: reminderMinutes == null && nullToAbsent
+          ? const Value.absent()
+          : Value(reminderMinutes),
+      bodyPreview: Value(bodyPreview),
+      syncRun: Value(syncRun),
+      syncedAt: Value(syncedAt),
+    );
+  }
+
+  factory CalendarEventRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CalendarEventRow(
+      id: serializer.fromJson<String>(json['id']),
+      seriesMasterId: serializer.fromJson<String>(json['series_master_id']),
+      icalUid: serializer.fromJson<String>(json['ical_uid']),
+      eventType: serializer.fromJson<String>(json['event_type']),
+      subject: serializer.fromJson<String>(json['subject']),
+      location: serializer.fromJson<String>(json['location']),
+      organizerName: serializer.fromJson<String>(json['organizer_name']),
+      organizerAddress: serializer.fromJson<String>(json['organizer_address']),
+      isOrganizer: serializer.fromJson<int>(json['is_organizer']),
+      isAllDay: serializer.fromJson<int>(json['is_all_day']),
+      isCancelled: serializer.fromJson<int>(json['is_cancelled']),
+      startUtc: serializer.fromJson<String?>(json['start_utc']),
+      endUtc: serializer.fromJson<String?>(json['end_utc']),
+      startDate: serializer.fromJson<String?>(json['start_date']),
+      endDate: serializer.fromJson<String?>(json['end_date']),
+      showAs: serializer.fromJson<String>(json['show_as']),
+      responseStatus: serializer.fromJson<String>(json['response_status']),
+      responseRequested: serializer.fromJson<int?>(json['response_requested']),
+      allowNewTimeProposals: serializer.fromJson<int?>(
+        json['allow_new_time_proposals'],
+      ),
+      sensitivity: serializer.fromJson<String>(json['sensitivity']),
+      joinUrl: serializer.fromJson<String>(json['join_url']),
+      webLink: serializer.fromJson<String>(json['web_link']),
+      changeKey: serializer.fromJson<String>(json['change_key']),
+      attendeesJson: serializer.fromJson<String>(json['attendees_json']),
+      categoriesJson: serializer.fromJson<String>(json['categories_json']),
+      isReminderOn: serializer.fromJson<int?>(json['is_reminder_on']),
+      reminderMinutes: serializer.fromJson<int?>(json['reminder_minutes']),
+      bodyPreview: serializer.fromJson<String>(json['body_preview']),
+      syncRun: serializer.fromJson<String>(json['sync_run']),
+      syncedAt: serializer.fromJson<String>(json['synced_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'series_master_id': serializer.toJson<String>(seriesMasterId),
+      'ical_uid': serializer.toJson<String>(icalUid),
+      'event_type': serializer.toJson<String>(eventType),
+      'subject': serializer.toJson<String>(subject),
+      'location': serializer.toJson<String>(location),
+      'organizer_name': serializer.toJson<String>(organizerName),
+      'organizer_address': serializer.toJson<String>(organizerAddress),
+      'is_organizer': serializer.toJson<int>(isOrganizer),
+      'is_all_day': serializer.toJson<int>(isAllDay),
+      'is_cancelled': serializer.toJson<int>(isCancelled),
+      'start_utc': serializer.toJson<String?>(startUtc),
+      'end_utc': serializer.toJson<String?>(endUtc),
+      'start_date': serializer.toJson<String?>(startDate),
+      'end_date': serializer.toJson<String?>(endDate),
+      'show_as': serializer.toJson<String>(showAs),
+      'response_status': serializer.toJson<String>(responseStatus),
+      'response_requested': serializer.toJson<int?>(responseRequested),
+      'allow_new_time_proposals': serializer.toJson<int?>(
+        allowNewTimeProposals,
+      ),
+      'sensitivity': serializer.toJson<String>(sensitivity),
+      'join_url': serializer.toJson<String>(joinUrl),
+      'web_link': serializer.toJson<String>(webLink),
+      'change_key': serializer.toJson<String>(changeKey),
+      'attendees_json': serializer.toJson<String>(attendeesJson),
+      'categories_json': serializer.toJson<String>(categoriesJson),
+      'is_reminder_on': serializer.toJson<int?>(isReminderOn),
+      'reminder_minutes': serializer.toJson<int?>(reminderMinutes),
+      'body_preview': serializer.toJson<String>(bodyPreview),
+      'sync_run': serializer.toJson<String>(syncRun),
+      'synced_at': serializer.toJson<String>(syncedAt),
+    };
+  }
+
+  CalendarEventRow copyWith({
+    String? id,
+    String? seriesMasterId,
+    String? icalUid,
+    String? eventType,
+    String? subject,
+    String? location,
+    String? organizerName,
+    String? organizerAddress,
+    int? isOrganizer,
+    int? isAllDay,
+    int? isCancelled,
+    Value<String?> startUtc = const Value.absent(),
+    Value<String?> endUtc = const Value.absent(),
+    Value<String?> startDate = const Value.absent(),
+    Value<String?> endDate = const Value.absent(),
+    String? showAs,
+    String? responseStatus,
+    Value<int?> responseRequested = const Value.absent(),
+    Value<int?> allowNewTimeProposals = const Value.absent(),
+    String? sensitivity,
+    String? joinUrl,
+    String? webLink,
+    String? changeKey,
+    String? attendeesJson,
+    String? categoriesJson,
+    Value<int?> isReminderOn = const Value.absent(),
+    Value<int?> reminderMinutes = const Value.absent(),
+    String? bodyPreview,
+    String? syncRun,
+    String? syncedAt,
+  }) => CalendarEventRow(
+    id: id ?? this.id,
+    seriesMasterId: seriesMasterId ?? this.seriesMasterId,
+    icalUid: icalUid ?? this.icalUid,
+    eventType: eventType ?? this.eventType,
+    subject: subject ?? this.subject,
+    location: location ?? this.location,
+    organizerName: organizerName ?? this.organizerName,
+    organizerAddress: organizerAddress ?? this.organizerAddress,
+    isOrganizer: isOrganizer ?? this.isOrganizer,
+    isAllDay: isAllDay ?? this.isAllDay,
+    isCancelled: isCancelled ?? this.isCancelled,
+    startUtc: startUtc.present ? startUtc.value : this.startUtc,
+    endUtc: endUtc.present ? endUtc.value : this.endUtc,
+    startDate: startDate.present ? startDate.value : this.startDate,
+    endDate: endDate.present ? endDate.value : this.endDate,
+    showAs: showAs ?? this.showAs,
+    responseStatus: responseStatus ?? this.responseStatus,
+    responseRequested: responseRequested.present
+        ? responseRequested.value
+        : this.responseRequested,
+    allowNewTimeProposals: allowNewTimeProposals.present
+        ? allowNewTimeProposals.value
+        : this.allowNewTimeProposals,
+    sensitivity: sensitivity ?? this.sensitivity,
+    joinUrl: joinUrl ?? this.joinUrl,
+    webLink: webLink ?? this.webLink,
+    changeKey: changeKey ?? this.changeKey,
+    attendeesJson: attendeesJson ?? this.attendeesJson,
+    categoriesJson: categoriesJson ?? this.categoriesJson,
+    isReminderOn: isReminderOn.present ? isReminderOn.value : this.isReminderOn,
+    reminderMinutes: reminderMinutes.present
+        ? reminderMinutes.value
+        : this.reminderMinutes,
+    bodyPreview: bodyPreview ?? this.bodyPreview,
+    syncRun: syncRun ?? this.syncRun,
+    syncedAt: syncedAt ?? this.syncedAt,
+  );
+  CalendarEventRow copyWithCompanion(CalendarEventsCompanion data) {
+    return CalendarEventRow(
+      id: data.id.present ? data.id.value : this.id,
+      seriesMasterId: data.seriesMasterId.present
+          ? data.seriesMasterId.value
+          : this.seriesMasterId,
+      icalUid: data.icalUid.present ? data.icalUid.value : this.icalUid,
+      eventType: data.eventType.present ? data.eventType.value : this.eventType,
+      subject: data.subject.present ? data.subject.value : this.subject,
+      location: data.location.present ? data.location.value : this.location,
+      organizerName: data.organizerName.present
+          ? data.organizerName.value
+          : this.organizerName,
+      organizerAddress: data.organizerAddress.present
+          ? data.organizerAddress.value
+          : this.organizerAddress,
+      isOrganizer: data.isOrganizer.present
+          ? data.isOrganizer.value
+          : this.isOrganizer,
+      isAllDay: data.isAllDay.present ? data.isAllDay.value : this.isAllDay,
+      isCancelled: data.isCancelled.present
+          ? data.isCancelled.value
+          : this.isCancelled,
+      startUtc: data.startUtc.present ? data.startUtc.value : this.startUtc,
+      endUtc: data.endUtc.present ? data.endUtc.value : this.endUtc,
+      startDate: data.startDate.present ? data.startDate.value : this.startDate,
+      endDate: data.endDate.present ? data.endDate.value : this.endDate,
+      showAs: data.showAs.present ? data.showAs.value : this.showAs,
+      responseStatus: data.responseStatus.present
+          ? data.responseStatus.value
+          : this.responseStatus,
+      responseRequested: data.responseRequested.present
+          ? data.responseRequested.value
+          : this.responseRequested,
+      allowNewTimeProposals: data.allowNewTimeProposals.present
+          ? data.allowNewTimeProposals.value
+          : this.allowNewTimeProposals,
+      sensitivity: data.sensitivity.present
+          ? data.sensitivity.value
+          : this.sensitivity,
+      joinUrl: data.joinUrl.present ? data.joinUrl.value : this.joinUrl,
+      webLink: data.webLink.present ? data.webLink.value : this.webLink,
+      changeKey: data.changeKey.present ? data.changeKey.value : this.changeKey,
+      attendeesJson: data.attendeesJson.present
+          ? data.attendeesJson.value
+          : this.attendeesJson,
+      categoriesJson: data.categoriesJson.present
+          ? data.categoriesJson.value
+          : this.categoriesJson,
+      isReminderOn: data.isReminderOn.present
+          ? data.isReminderOn.value
+          : this.isReminderOn,
+      reminderMinutes: data.reminderMinutes.present
+          ? data.reminderMinutes.value
+          : this.reminderMinutes,
+      bodyPreview: data.bodyPreview.present
+          ? data.bodyPreview.value
+          : this.bodyPreview,
+      syncRun: data.syncRun.present ? data.syncRun.value : this.syncRun,
+      syncedAt: data.syncedAt.present ? data.syncedAt.value : this.syncedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CalendarEventRow(')
+          ..write('id: $id, ')
+          ..write('seriesMasterId: $seriesMasterId, ')
+          ..write('icalUid: $icalUid, ')
+          ..write('eventType: $eventType, ')
+          ..write('subject: $subject, ')
+          ..write('location: $location, ')
+          ..write('organizerName: $organizerName, ')
+          ..write('organizerAddress: $organizerAddress, ')
+          ..write('isOrganizer: $isOrganizer, ')
+          ..write('isAllDay: $isAllDay, ')
+          ..write('isCancelled: $isCancelled, ')
+          ..write('startUtc: $startUtc, ')
+          ..write('endUtc: $endUtc, ')
+          ..write('startDate: $startDate, ')
+          ..write('endDate: $endDate, ')
+          ..write('showAs: $showAs, ')
+          ..write('responseStatus: $responseStatus, ')
+          ..write('responseRequested: $responseRequested, ')
+          ..write('allowNewTimeProposals: $allowNewTimeProposals, ')
+          ..write('sensitivity: $sensitivity, ')
+          ..write('joinUrl: $joinUrl, ')
+          ..write('webLink: $webLink, ')
+          ..write('changeKey: $changeKey, ')
+          ..write('attendeesJson: $attendeesJson, ')
+          ..write('categoriesJson: $categoriesJson, ')
+          ..write('isReminderOn: $isReminderOn, ')
+          ..write('reminderMinutes: $reminderMinutes, ')
+          ..write('bodyPreview: $bodyPreview, ')
+          ..write('syncRun: $syncRun, ')
+          ..write('syncedAt: $syncedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hashAll([
+    id,
+    seriesMasterId,
+    icalUid,
+    eventType,
+    subject,
+    location,
+    organizerName,
+    organizerAddress,
+    isOrganizer,
+    isAllDay,
+    isCancelled,
+    startUtc,
+    endUtc,
+    startDate,
+    endDate,
+    showAs,
+    responseStatus,
+    responseRequested,
+    allowNewTimeProposals,
+    sensitivity,
+    joinUrl,
+    webLink,
+    changeKey,
+    attendeesJson,
+    categoriesJson,
+    isReminderOn,
+    reminderMinutes,
+    bodyPreview,
+    syncRun,
+    syncedAt,
+  ]);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CalendarEventRow &&
+          other.id == this.id &&
+          other.seriesMasterId == this.seriesMasterId &&
+          other.icalUid == this.icalUid &&
+          other.eventType == this.eventType &&
+          other.subject == this.subject &&
+          other.location == this.location &&
+          other.organizerName == this.organizerName &&
+          other.organizerAddress == this.organizerAddress &&
+          other.isOrganizer == this.isOrganizer &&
+          other.isAllDay == this.isAllDay &&
+          other.isCancelled == this.isCancelled &&
+          other.startUtc == this.startUtc &&
+          other.endUtc == this.endUtc &&
+          other.startDate == this.startDate &&
+          other.endDate == this.endDate &&
+          other.showAs == this.showAs &&
+          other.responseStatus == this.responseStatus &&
+          other.responseRequested == this.responseRequested &&
+          other.allowNewTimeProposals == this.allowNewTimeProposals &&
+          other.sensitivity == this.sensitivity &&
+          other.joinUrl == this.joinUrl &&
+          other.webLink == this.webLink &&
+          other.changeKey == this.changeKey &&
+          other.attendeesJson == this.attendeesJson &&
+          other.categoriesJson == this.categoriesJson &&
+          other.isReminderOn == this.isReminderOn &&
+          other.reminderMinutes == this.reminderMinutes &&
+          other.bodyPreview == this.bodyPreview &&
+          other.syncRun == this.syncRun &&
+          other.syncedAt == this.syncedAt);
+}
+
+class CalendarEventsCompanion extends UpdateCompanion<CalendarEventRow> {
+  final Value<String> id;
+  final Value<String> seriesMasterId;
+  final Value<String> icalUid;
+  final Value<String> eventType;
+  final Value<String> subject;
+  final Value<String> location;
+  final Value<String> organizerName;
+  final Value<String> organizerAddress;
+  final Value<int> isOrganizer;
+  final Value<int> isAllDay;
+  final Value<int> isCancelled;
+  final Value<String?> startUtc;
+  final Value<String?> endUtc;
+  final Value<String?> startDate;
+  final Value<String?> endDate;
+  final Value<String> showAs;
+  final Value<String> responseStatus;
+  final Value<int?> responseRequested;
+  final Value<int?> allowNewTimeProposals;
+  final Value<String> sensitivity;
+  final Value<String> joinUrl;
+  final Value<String> webLink;
+  final Value<String> changeKey;
+  final Value<String> attendeesJson;
+  final Value<String> categoriesJson;
+  final Value<int?> isReminderOn;
+  final Value<int?> reminderMinutes;
+  final Value<String> bodyPreview;
+  final Value<String> syncRun;
+  final Value<String> syncedAt;
+  final Value<int> rowid;
+  const CalendarEventsCompanion({
+    this.id = const Value.absent(),
+    this.seriesMasterId = const Value.absent(),
+    this.icalUid = const Value.absent(),
+    this.eventType = const Value.absent(),
+    this.subject = const Value.absent(),
+    this.location = const Value.absent(),
+    this.organizerName = const Value.absent(),
+    this.organizerAddress = const Value.absent(),
+    this.isOrganizer = const Value.absent(),
+    this.isAllDay = const Value.absent(),
+    this.isCancelled = const Value.absent(),
+    this.startUtc = const Value.absent(),
+    this.endUtc = const Value.absent(),
+    this.startDate = const Value.absent(),
+    this.endDate = const Value.absent(),
+    this.showAs = const Value.absent(),
+    this.responseStatus = const Value.absent(),
+    this.responseRequested = const Value.absent(),
+    this.allowNewTimeProposals = const Value.absent(),
+    this.sensitivity = const Value.absent(),
+    this.joinUrl = const Value.absent(),
+    this.webLink = const Value.absent(),
+    this.changeKey = const Value.absent(),
+    this.attendeesJson = const Value.absent(),
+    this.categoriesJson = const Value.absent(),
+    this.isReminderOn = const Value.absent(),
+    this.reminderMinutes = const Value.absent(),
+    this.bodyPreview = const Value.absent(),
+    this.syncRun = const Value.absent(),
+    this.syncedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CalendarEventsCompanion.insert({
+    required String id,
+    this.seriesMasterId = const Value.absent(),
+    this.icalUid = const Value.absent(),
+    this.eventType = const Value.absent(),
+    this.subject = const Value.absent(),
+    this.location = const Value.absent(),
+    this.organizerName = const Value.absent(),
+    this.organizerAddress = const Value.absent(),
+    this.isOrganizer = const Value.absent(),
+    this.isAllDay = const Value.absent(),
+    this.isCancelled = const Value.absent(),
+    this.startUtc = const Value.absent(),
+    this.endUtc = const Value.absent(),
+    this.startDate = const Value.absent(),
+    this.endDate = const Value.absent(),
+    this.showAs = const Value.absent(),
+    this.responseStatus = const Value.absent(),
+    this.responseRequested = const Value.absent(),
+    this.allowNewTimeProposals = const Value.absent(),
+    this.sensitivity = const Value.absent(),
+    this.joinUrl = const Value.absent(),
+    this.webLink = const Value.absent(),
+    this.changeKey = const Value.absent(),
+    this.attendeesJson = const Value.absent(),
+    this.categoriesJson = const Value.absent(),
+    this.isReminderOn = const Value.absent(),
+    this.reminderMinutes = const Value.absent(),
+    this.bodyPreview = const Value.absent(),
+    this.syncRun = const Value.absent(),
+    required String syncedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       syncedAt = Value(syncedAt);
+  static Insertable<CalendarEventRow> custom({
+    Expression<String>? id,
+    Expression<String>? seriesMasterId,
+    Expression<String>? icalUid,
+    Expression<String>? eventType,
+    Expression<String>? subject,
+    Expression<String>? location,
+    Expression<String>? organizerName,
+    Expression<String>? organizerAddress,
+    Expression<int>? isOrganizer,
+    Expression<int>? isAllDay,
+    Expression<int>? isCancelled,
+    Expression<String>? startUtc,
+    Expression<String>? endUtc,
+    Expression<String>? startDate,
+    Expression<String>? endDate,
+    Expression<String>? showAs,
+    Expression<String>? responseStatus,
+    Expression<int>? responseRequested,
+    Expression<int>? allowNewTimeProposals,
+    Expression<String>? sensitivity,
+    Expression<String>? joinUrl,
+    Expression<String>? webLink,
+    Expression<String>? changeKey,
+    Expression<String>? attendeesJson,
+    Expression<String>? categoriesJson,
+    Expression<int>? isReminderOn,
+    Expression<int>? reminderMinutes,
+    Expression<String>? bodyPreview,
+    Expression<String>? syncRun,
+    Expression<String>? syncedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (seriesMasterId != null) 'series_master_id': seriesMasterId,
+      if (icalUid != null) 'ical_uid': icalUid,
+      if (eventType != null) 'event_type': eventType,
+      if (subject != null) 'subject': subject,
+      if (location != null) 'location': location,
+      if (organizerName != null) 'organizer_name': organizerName,
+      if (organizerAddress != null) 'organizer_address': organizerAddress,
+      if (isOrganizer != null) 'is_organizer': isOrganizer,
+      if (isAllDay != null) 'is_all_day': isAllDay,
+      if (isCancelled != null) 'is_cancelled': isCancelled,
+      if (startUtc != null) 'start_utc': startUtc,
+      if (endUtc != null) 'end_utc': endUtc,
+      if (startDate != null) 'start_date': startDate,
+      if (endDate != null) 'end_date': endDate,
+      if (showAs != null) 'show_as': showAs,
+      if (responseStatus != null) 'response_status': responseStatus,
+      if (responseRequested != null) 'response_requested': responseRequested,
+      if (allowNewTimeProposals != null)
+        'allow_new_time_proposals': allowNewTimeProposals,
+      if (sensitivity != null) 'sensitivity': sensitivity,
+      if (joinUrl != null) 'join_url': joinUrl,
+      if (webLink != null) 'web_link': webLink,
+      if (changeKey != null) 'change_key': changeKey,
+      if (attendeesJson != null) 'attendees_json': attendeesJson,
+      if (categoriesJson != null) 'categories_json': categoriesJson,
+      if (isReminderOn != null) 'is_reminder_on': isReminderOn,
+      if (reminderMinutes != null) 'reminder_minutes': reminderMinutes,
+      if (bodyPreview != null) 'body_preview': bodyPreview,
+      if (syncRun != null) 'sync_run': syncRun,
+      if (syncedAt != null) 'synced_at': syncedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CalendarEventsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? seriesMasterId,
+    Value<String>? icalUid,
+    Value<String>? eventType,
+    Value<String>? subject,
+    Value<String>? location,
+    Value<String>? organizerName,
+    Value<String>? organizerAddress,
+    Value<int>? isOrganizer,
+    Value<int>? isAllDay,
+    Value<int>? isCancelled,
+    Value<String?>? startUtc,
+    Value<String?>? endUtc,
+    Value<String?>? startDate,
+    Value<String?>? endDate,
+    Value<String>? showAs,
+    Value<String>? responseStatus,
+    Value<int?>? responseRequested,
+    Value<int?>? allowNewTimeProposals,
+    Value<String>? sensitivity,
+    Value<String>? joinUrl,
+    Value<String>? webLink,
+    Value<String>? changeKey,
+    Value<String>? attendeesJson,
+    Value<String>? categoriesJson,
+    Value<int?>? isReminderOn,
+    Value<int?>? reminderMinutes,
+    Value<String>? bodyPreview,
+    Value<String>? syncRun,
+    Value<String>? syncedAt,
+    Value<int>? rowid,
+  }) {
+    return CalendarEventsCompanion(
+      id: id ?? this.id,
+      seriesMasterId: seriesMasterId ?? this.seriesMasterId,
+      icalUid: icalUid ?? this.icalUid,
+      eventType: eventType ?? this.eventType,
+      subject: subject ?? this.subject,
+      location: location ?? this.location,
+      organizerName: organizerName ?? this.organizerName,
+      organizerAddress: organizerAddress ?? this.organizerAddress,
+      isOrganizer: isOrganizer ?? this.isOrganizer,
+      isAllDay: isAllDay ?? this.isAllDay,
+      isCancelled: isCancelled ?? this.isCancelled,
+      startUtc: startUtc ?? this.startUtc,
+      endUtc: endUtc ?? this.endUtc,
+      startDate: startDate ?? this.startDate,
+      endDate: endDate ?? this.endDate,
+      showAs: showAs ?? this.showAs,
+      responseStatus: responseStatus ?? this.responseStatus,
+      responseRequested: responseRequested ?? this.responseRequested,
+      allowNewTimeProposals:
+          allowNewTimeProposals ?? this.allowNewTimeProposals,
+      sensitivity: sensitivity ?? this.sensitivity,
+      joinUrl: joinUrl ?? this.joinUrl,
+      webLink: webLink ?? this.webLink,
+      changeKey: changeKey ?? this.changeKey,
+      attendeesJson: attendeesJson ?? this.attendeesJson,
+      categoriesJson: categoriesJson ?? this.categoriesJson,
+      isReminderOn: isReminderOn ?? this.isReminderOn,
+      reminderMinutes: reminderMinutes ?? this.reminderMinutes,
+      bodyPreview: bodyPreview ?? this.bodyPreview,
+      syncRun: syncRun ?? this.syncRun,
+      syncedAt: syncedAt ?? this.syncedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (seriesMasterId.present) {
+      map['series_master_id'] = Variable<String>(seriesMasterId.value);
+    }
+    if (icalUid.present) {
+      map['ical_uid'] = Variable<String>(icalUid.value);
+    }
+    if (eventType.present) {
+      map['event_type'] = Variable<String>(eventType.value);
+    }
+    if (subject.present) {
+      map['subject'] = Variable<String>(subject.value);
+    }
+    if (location.present) {
+      map['location'] = Variable<String>(location.value);
+    }
+    if (organizerName.present) {
+      map['organizer_name'] = Variable<String>(organizerName.value);
+    }
+    if (organizerAddress.present) {
+      map['organizer_address'] = Variable<String>(organizerAddress.value);
+    }
+    if (isOrganizer.present) {
+      map['is_organizer'] = Variable<int>(isOrganizer.value);
+    }
+    if (isAllDay.present) {
+      map['is_all_day'] = Variable<int>(isAllDay.value);
+    }
+    if (isCancelled.present) {
+      map['is_cancelled'] = Variable<int>(isCancelled.value);
+    }
+    if (startUtc.present) {
+      map['start_utc'] = Variable<String>(startUtc.value);
+    }
+    if (endUtc.present) {
+      map['end_utc'] = Variable<String>(endUtc.value);
+    }
+    if (startDate.present) {
+      map['start_date'] = Variable<String>(startDate.value);
+    }
+    if (endDate.present) {
+      map['end_date'] = Variable<String>(endDate.value);
+    }
+    if (showAs.present) {
+      map['show_as'] = Variable<String>(showAs.value);
+    }
+    if (responseStatus.present) {
+      map['response_status'] = Variable<String>(responseStatus.value);
+    }
+    if (responseRequested.present) {
+      map['response_requested'] = Variable<int>(responseRequested.value);
+    }
+    if (allowNewTimeProposals.present) {
+      map['allow_new_time_proposals'] = Variable<int>(
+        allowNewTimeProposals.value,
+      );
+    }
+    if (sensitivity.present) {
+      map['sensitivity'] = Variable<String>(sensitivity.value);
+    }
+    if (joinUrl.present) {
+      map['join_url'] = Variable<String>(joinUrl.value);
+    }
+    if (webLink.present) {
+      map['web_link'] = Variable<String>(webLink.value);
+    }
+    if (changeKey.present) {
+      map['change_key'] = Variable<String>(changeKey.value);
+    }
+    if (attendeesJson.present) {
+      map['attendees_json'] = Variable<String>(attendeesJson.value);
+    }
+    if (categoriesJson.present) {
+      map['categories_json'] = Variable<String>(categoriesJson.value);
+    }
+    if (isReminderOn.present) {
+      map['is_reminder_on'] = Variable<int>(isReminderOn.value);
+    }
+    if (reminderMinutes.present) {
+      map['reminder_minutes'] = Variable<int>(reminderMinutes.value);
+    }
+    if (bodyPreview.present) {
+      map['body_preview'] = Variable<String>(bodyPreview.value);
+    }
+    if (syncRun.present) {
+      map['sync_run'] = Variable<String>(syncRun.value);
+    }
+    if (syncedAt.present) {
+      map['synced_at'] = Variable<String>(syncedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CalendarEventsCompanion(')
+          ..write('id: $id, ')
+          ..write('seriesMasterId: $seriesMasterId, ')
+          ..write('icalUid: $icalUid, ')
+          ..write('eventType: $eventType, ')
+          ..write('subject: $subject, ')
+          ..write('location: $location, ')
+          ..write('organizerName: $organizerName, ')
+          ..write('organizerAddress: $organizerAddress, ')
+          ..write('isOrganizer: $isOrganizer, ')
+          ..write('isAllDay: $isAllDay, ')
+          ..write('isCancelled: $isCancelled, ')
+          ..write('startUtc: $startUtc, ')
+          ..write('endUtc: $endUtc, ')
+          ..write('startDate: $startDate, ')
+          ..write('endDate: $endDate, ')
+          ..write('showAs: $showAs, ')
+          ..write('responseStatus: $responseStatus, ')
+          ..write('responseRequested: $responseRequested, ')
+          ..write('allowNewTimeProposals: $allowNewTimeProposals, ')
+          ..write('sensitivity: $sensitivity, ')
+          ..write('joinUrl: $joinUrl, ')
+          ..write('webLink: $webLink, ')
+          ..write('changeKey: $changeKey, ')
+          ..write('attendeesJson: $attendeesJson, ')
+          ..write('categoriesJson: $categoriesJson, ')
+          ..write('isReminderOn: $isReminderOn, ')
+          ..write('reminderMinutes: $reminderMinutes, ')
+          ..write('bodyPreview: $bodyPreview, ')
+          ..write('syncRun: $syncRun, ')
+          ..write('syncedAt: $syncedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class EventBriefs extends Table with TableInfo<EventBriefs, EventBriefRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  EventBriefs(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _eventIdMeta = const VerificationMeta(
+    'eventId',
+  );
+  late final GeneratedColumn<String> eventId = GeneratedColumn<String>(
+    'event_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL PRIMARY KEY',
+  );
+  static const VerificationMeta _inputsHashMeta = const VerificationMeta(
+    'inputsHash',
+  );
+  late final GeneratedColumn<String> inputsHash = GeneratedColumn<String>(
+    'inputs_hash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _briefJsonMeta = const VerificationMeta(
+    'briefJson',
+  );
+  late final GeneratedColumn<String> briefJson = GeneratedColumn<String>(
+    'brief_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _modelMeta = const VerificationMeta('model');
+  late final GeneratedColumn<String> model = GeneratedColumn<String>(
+    'model',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _generatedAtMeta = const VerificationMeta(
+    'generatedAt',
+  );
+  late final GeneratedColumn<String> generatedAt = GeneratedColumn<String>(
+    'generated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    eventId,
+    inputsHash,
+    status,
+    briefJson,
+    model,
+    generatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'event_briefs';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<EventBriefRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('event_id')) {
+      context.handle(
+        _eventIdMeta,
+        eventId.isAcceptableOrUnknown(data['event_id']!, _eventIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_eventIdMeta);
+    }
+    if (data.containsKey('inputs_hash')) {
+      context.handle(
+        _inputsHashMeta,
+        inputsHash.isAcceptableOrUnknown(data['inputs_hash']!, _inputsHashMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_inputsHashMeta);
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_statusMeta);
+    }
+    if (data.containsKey('brief_json')) {
+      context.handle(
+        _briefJsonMeta,
+        briefJson.isAcceptableOrUnknown(data['brief_json']!, _briefJsonMeta),
+      );
+    }
+    if (data.containsKey('model')) {
+      context.handle(
+        _modelMeta,
+        model.isAcceptableOrUnknown(data['model']!, _modelMeta),
+      );
+    }
+    if (data.containsKey('generated_at')) {
+      context.handle(
+        _generatedAtMeta,
+        generatedAt.isAcceptableOrUnknown(
+          data['generated_at']!,
+          _generatedAtMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_generatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {eventId};
+  @override
+  EventBriefRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return EventBriefRow(
+      eventId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}event_id'],
+      )!,
+      inputsHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}inputs_hash'],
+      )!,
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      briefJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}brief_json'],
+      ),
+      model: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}model'],
+      )!,
+      generatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}generated_at'],
+      )!,
+    );
+  }
+
+  @override
+  EventBriefs createAlias(String alias) {
+    return EventBriefs(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class EventBriefRow extends DataClass implements Insertable<EventBriefRow> {
+  final String eventId;
+  final String inputsHash;
+  final String status;
+  final String? briefJson;
+  final String model;
+  final String generatedAt;
+  const EventBriefRow({
+    required this.eventId,
+    required this.inputsHash,
+    required this.status,
+    this.briefJson,
+    required this.model,
+    required this.generatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['event_id'] = Variable<String>(eventId);
+    map['inputs_hash'] = Variable<String>(inputsHash);
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || briefJson != null) {
+      map['brief_json'] = Variable<String>(briefJson);
+    }
+    map['model'] = Variable<String>(model);
+    map['generated_at'] = Variable<String>(generatedAt);
+    return map;
+  }
+
+  EventBriefsCompanion toCompanion(bool nullToAbsent) {
+    return EventBriefsCompanion(
+      eventId: Value(eventId),
+      inputsHash: Value(inputsHash),
+      status: Value(status),
+      briefJson: briefJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(briefJson),
+      model: Value(model),
+      generatedAt: Value(generatedAt),
+    );
+  }
+
+  factory EventBriefRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return EventBriefRow(
+      eventId: serializer.fromJson<String>(json['event_id']),
+      inputsHash: serializer.fromJson<String>(json['inputs_hash']),
+      status: serializer.fromJson<String>(json['status']),
+      briefJson: serializer.fromJson<String?>(json['brief_json']),
+      model: serializer.fromJson<String>(json['model']),
+      generatedAt: serializer.fromJson<String>(json['generated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'event_id': serializer.toJson<String>(eventId),
+      'inputs_hash': serializer.toJson<String>(inputsHash),
+      'status': serializer.toJson<String>(status),
+      'brief_json': serializer.toJson<String?>(briefJson),
+      'model': serializer.toJson<String>(model),
+      'generated_at': serializer.toJson<String>(generatedAt),
+    };
+  }
+
+  EventBriefRow copyWith({
+    String? eventId,
+    String? inputsHash,
+    String? status,
+    Value<String?> briefJson = const Value.absent(),
+    String? model,
+    String? generatedAt,
+  }) => EventBriefRow(
+    eventId: eventId ?? this.eventId,
+    inputsHash: inputsHash ?? this.inputsHash,
+    status: status ?? this.status,
+    briefJson: briefJson.present ? briefJson.value : this.briefJson,
+    model: model ?? this.model,
+    generatedAt: generatedAt ?? this.generatedAt,
+  );
+  EventBriefRow copyWithCompanion(EventBriefsCompanion data) {
+    return EventBriefRow(
+      eventId: data.eventId.present ? data.eventId.value : this.eventId,
+      inputsHash: data.inputsHash.present
+          ? data.inputsHash.value
+          : this.inputsHash,
+      status: data.status.present ? data.status.value : this.status,
+      briefJson: data.briefJson.present ? data.briefJson.value : this.briefJson,
+      model: data.model.present ? data.model.value : this.model,
+      generatedAt: data.generatedAt.present
+          ? data.generatedAt.value
+          : this.generatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('EventBriefRow(')
+          ..write('eventId: $eventId, ')
+          ..write('inputsHash: $inputsHash, ')
+          ..write('status: $status, ')
+          ..write('briefJson: $briefJson, ')
+          ..write('model: $model, ')
+          ..write('generatedAt: $generatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(eventId, inputsHash, status, briefJson, model, generatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is EventBriefRow &&
+          other.eventId == this.eventId &&
+          other.inputsHash == this.inputsHash &&
+          other.status == this.status &&
+          other.briefJson == this.briefJson &&
+          other.model == this.model &&
+          other.generatedAt == this.generatedAt);
+}
+
+class EventBriefsCompanion extends UpdateCompanion<EventBriefRow> {
+  final Value<String> eventId;
+  final Value<String> inputsHash;
+  final Value<String> status;
+  final Value<String?> briefJson;
+  final Value<String> model;
+  final Value<String> generatedAt;
+  final Value<int> rowid;
+  const EventBriefsCompanion({
+    this.eventId = const Value.absent(),
+    this.inputsHash = const Value.absent(),
+    this.status = const Value.absent(),
+    this.briefJson = const Value.absent(),
+    this.model = const Value.absent(),
+    this.generatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  EventBriefsCompanion.insert({
+    required String eventId,
+    required String inputsHash,
+    required String status,
+    this.briefJson = const Value.absent(),
+    this.model = const Value.absent(),
+    required String generatedAt,
+    this.rowid = const Value.absent(),
+  }) : eventId = Value(eventId),
+       inputsHash = Value(inputsHash),
+       status = Value(status),
+       generatedAt = Value(generatedAt);
+  static Insertable<EventBriefRow> custom({
+    Expression<String>? eventId,
+    Expression<String>? inputsHash,
+    Expression<String>? status,
+    Expression<String>? briefJson,
+    Expression<String>? model,
+    Expression<String>? generatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (eventId != null) 'event_id': eventId,
+      if (inputsHash != null) 'inputs_hash': inputsHash,
+      if (status != null) 'status': status,
+      if (briefJson != null) 'brief_json': briefJson,
+      if (model != null) 'model': model,
+      if (generatedAt != null) 'generated_at': generatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  EventBriefsCompanion copyWith({
+    Value<String>? eventId,
+    Value<String>? inputsHash,
+    Value<String>? status,
+    Value<String?>? briefJson,
+    Value<String>? model,
+    Value<String>? generatedAt,
+    Value<int>? rowid,
+  }) {
+    return EventBriefsCompanion(
+      eventId: eventId ?? this.eventId,
+      inputsHash: inputsHash ?? this.inputsHash,
+      status: status ?? this.status,
+      briefJson: briefJson ?? this.briefJson,
+      model: model ?? this.model,
+      generatedAt: generatedAt ?? this.generatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (eventId.present) {
+      map['event_id'] = Variable<String>(eventId.value);
+    }
+    if (inputsHash.present) {
+      map['inputs_hash'] = Variable<String>(inputsHash.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (briefJson.present) {
+      map['brief_json'] = Variable<String>(briefJson.value);
+    }
+    if (model.present) {
+      map['model'] = Variable<String>(model.value);
+    }
+    if (generatedAt.present) {
+      map['generated_at'] = Variable<String>(generatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('EventBriefsCompanion(')
+          ..write('eventId: $eventId, ')
+          ..write('inputsHash: $inputsHash, ')
+          ..write('status: $status, ')
+          ..write('briefJson: $briefJson, ')
+          ..write('model: $model, ')
+          ..write('generatedAt: $generatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -20653,6 +22695,16 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   );
   late final MessageDecisions messageDecisions = MessageDecisions(this);
   late final DecisionLabels decisionLabels = DecisionLabels(this);
+  late final CalendarEvents calendarEvents = CalendarEvents(this);
+  late final Index ixCalendarEventsStartUtc = Index(
+    'ix_calendar_events_start_utc',
+    'CREATE INDEX ix_calendar_events_start_utc ON calendar_events (start_utc)',
+  );
+  late final Index ixCalendarEventsStartDate = Index(
+    'ix_calendar_events_start_date',
+    'CREATE INDEX ix_calendar_events_start_date ON calendar_events (start_date)',
+  );
+  late final EventBriefs eventBriefs = EventBriefs(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -20716,6 +22768,10 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixConvLabelsLabel,
     messageDecisions,
     decisionLabels,
+    calendarEvents,
+    ixCalendarEventsStartUtc,
+    ixCalendarEventsStartDate,
+    eventBriefs,
   ];
 }
 
@@ -30304,6 +32360,931 @@ typedef $DecisionLabelsProcessedTableManager =
       DecisionLabel,
       PrefetchHooks Function()
     >;
+typedef $CalendarEventsCreateCompanionBuilder =
+    CalendarEventsCompanion Function({
+      required String id,
+      Value<String> seriesMasterId,
+      Value<String> icalUid,
+      Value<String> eventType,
+      Value<String> subject,
+      Value<String> location,
+      Value<String> organizerName,
+      Value<String> organizerAddress,
+      Value<int> isOrganizer,
+      Value<int> isAllDay,
+      Value<int> isCancelled,
+      Value<String?> startUtc,
+      Value<String?> endUtc,
+      Value<String?> startDate,
+      Value<String?> endDate,
+      Value<String> showAs,
+      Value<String> responseStatus,
+      Value<int?> responseRequested,
+      Value<int?> allowNewTimeProposals,
+      Value<String> sensitivity,
+      Value<String> joinUrl,
+      Value<String> webLink,
+      Value<String> changeKey,
+      Value<String> attendeesJson,
+      Value<String> categoriesJson,
+      Value<int?> isReminderOn,
+      Value<int?> reminderMinutes,
+      Value<String> bodyPreview,
+      Value<String> syncRun,
+      required String syncedAt,
+      Value<int> rowid,
+    });
+typedef $CalendarEventsUpdateCompanionBuilder =
+    CalendarEventsCompanion Function({
+      Value<String> id,
+      Value<String> seriesMasterId,
+      Value<String> icalUid,
+      Value<String> eventType,
+      Value<String> subject,
+      Value<String> location,
+      Value<String> organizerName,
+      Value<String> organizerAddress,
+      Value<int> isOrganizer,
+      Value<int> isAllDay,
+      Value<int> isCancelled,
+      Value<String?> startUtc,
+      Value<String?> endUtc,
+      Value<String?> startDate,
+      Value<String?> endDate,
+      Value<String> showAs,
+      Value<String> responseStatus,
+      Value<int?> responseRequested,
+      Value<int?> allowNewTimeProposals,
+      Value<String> sensitivity,
+      Value<String> joinUrl,
+      Value<String> webLink,
+      Value<String> changeKey,
+      Value<String> attendeesJson,
+      Value<String> categoriesJson,
+      Value<int?> isReminderOn,
+      Value<int?> reminderMinutes,
+      Value<String> bodyPreview,
+      Value<String> syncRun,
+      Value<String> syncedAt,
+      Value<int> rowid,
+    });
+
+class $CalendarEventsFilterComposer
+    extends Composer<_$BondDatabase, CalendarEvents> {
+  $CalendarEventsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get seriesMasterId => $composableBuilder(
+    column: $table.seriesMasterId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get icalUid => $composableBuilder(
+    column: $table.icalUid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get eventType => $composableBuilder(
+    column: $table.eventType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get subject => $composableBuilder(
+    column: $table.subject,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get location => $composableBuilder(
+    column: $table.location,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get organizerName => $composableBuilder(
+    column: $table.organizerName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get organizerAddress => $composableBuilder(
+    column: $table.organizerAddress,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get isOrganizer => $composableBuilder(
+    column: $table.isOrganizer,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get isAllDay => $composableBuilder(
+    column: $table.isAllDay,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get isCancelled => $composableBuilder(
+    column: $table.isCancelled,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get startUtc => $composableBuilder(
+    column: $table.startUtc,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get endUtc => $composableBuilder(
+    column: $table.endUtc,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get startDate => $composableBuilder(
+    column: $table.startDate,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get endDate => $composableBuilder(
+    column: $table.endDate,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get showAs => $composableBuilder(
+    column: $table.showAs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get responseStatus => $composableBuilder(
+    column: $table.responseStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get responseRequested => $composableBuilder(
+    column: $table.responseRequested,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get allowNewTimeProposals => $composableBuilder(
+    column: $table.allowNewTimeProposals,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sensitivity => $composableBuilder(
+    column: $table.sensitivity,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get joinUrl => $composableBuilder(
+    column: $table.joinUrl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get webLink => $composableBuilder(
+    column: $table.webLink,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get changeKey => $composableBuilder(
+    column: $table.changeKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get attendeesJson => $composableBuilder(
+    column: $table.attendeesJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get categoriesJson => $composableBuilder(
+    column: $table.categoriesJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get isReminderOn => $composableBuilder(
+    column: $table.isReminderOn,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get reminderMinutes => $composableBuilder(
+    column: $table.reminderMinutes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get bodyPreview => $composableBuilder(
+    column: $table.bodyPreview,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get syncRun => $composableBuilder(
+    column: $table.syncRun,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get syncedAt => $composableBuilder(
+    column: $table.syncedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $CalendarEventsOrderingComposer
+    extends Composer<_$BondDatabase, CalendarEvents> {
+  $CalendarEventsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get seriesMasterId => $composableBuilder(
+    column: $table.seriesMasterId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get icalUid => $composableBuilder(
+    column: $table.icalUid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get eventType => $composableBuilder(
+    column: $table.eventType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get subject => $composableBuilder(
+    column: $table.subject,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get location => $composableBuilder(
+    column: $table.location,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get organizerName => $composableBuilder(
+    column: $table.organizerName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get organizerAddress => $composableBuilder(
+    column: $table.organizerAddress,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get isOrganizer => $composableBuilder(
+    column: $table.isOrganizer,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get isAllDay => $composableBuilder(
+    column: $table.isAllDay,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get isCancelled => $composableBuilder(
+    column: $table.isCancelled,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get startUtc => $composableBuilder(
+    column: $table.startUtc,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get endUtc => $composableBuilder(
+    column: $table.endUtc,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get startDate => $composableBuilder(
+    column: $table.startDate,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get endDate => $composableBuilder(
+    column: $table.endDate,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get showAs => $composableBuilder(
+    column: $table.showAs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get responseStatus => $composableBuilder(
+    column: $table.responseStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get responseRequested => $composableBuilder(
+    column: $table.responseRequested,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get allowNewTimeProposals => $composableBuilder(
+    column: $table.allowNewTimeProposals,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sensitivity => $composableBuilder(
+    column: $table.sensitivity,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get joinUrl => $composableBuilder(
+    column: $table.joinUrl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get webLink => $composableBuilder(
+    column: $table.webLink,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get changeKey => $composableBuilder(
+    column: $table.changeKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get attendeesJson => $composableBuilder(
+    column: $table.attendeesJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get categoriesJson => $composableBuilder(
+    column: $table.categoriesJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get isReminderOn => $composableBuilder(
+    column: $table.isReminderOn,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get reminderMinutes => $composableBuilder(
+    column: $table.reminderMinutes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get bodyPreview => $composableBuilder(
+    column: $table.bodyPreview,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get syncRun => $composableBuilder(
+    column: $table.syncRun,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get syncedAt => $composableBuilder(
+    column: $table.syncedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $CalendarEventsAnnotationComposer
+    extends Composer<_$BondDatabase, CalendarEvents> {
+  $CalendarEventsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get seriesMasterId => $composableBuilder(
+    column: $table.seriesMasterId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get icalUid =>
+      $composableBuilder(column: $table.icalUid, builder: (column) => column);
+
+  GeneratedColumn<String> get eventType =>
+      $composableBuilder(column: $table.eventType, builder: (column) => column);
+
+  GeneratedColumn<String> get subject =>
+      $composableBuilder(column: $table.subject, builder: (column) => column);
+
+  GeneratedColumn<String> get location =>
+      $composableBuilder(column: $table.location, builder: (column) => column);
+
+  GeneratedColumn<String> get organizerName => $composableBuilder(
+    column: $table.organizerName,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get organizerAddress => $composableBuilder(
+    column: $table.organizerAddress,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get isOrganizer => $composableBuilder(
+    column: $table.isOrganizer,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get isAllDay =>
+      $composableBuilder(column: $table.isAllDay, builder: (column) => column);
+
+  GeneratedColumn<int> get isCancelled => $composableBuilder(
+    column: $table.isCancelled,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get startUtc =>
+      $composableBuilder(column: $table.startUtc, builder: (column) => column);
+
+  GeneratedColumn<String> get endUtc =>
+      $composableBuilder(column: $table.endUtc, builder: (column) => column);
+
+  GeneratedColumn<String> get startDate =>
+      $composableBuilder(column: $table.startDate, builder: (column) => column);
+
+  GeneratedColumn<String> get endDate =>
+      $composableBuilder(column: $table.endDate, builder: (column) => column);
+
+  GeneratedColumn<String> get showAs =>
+      $composableBuilder(column: $table.showAs, builder: (column) => column);
+
+  GeneratedColumn<String> get responseStatus => $composableBuilder(
+    column: $table.responseStatus,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get responseRequested => $composableBuilder(
+    column: $table.responseRequested,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get allowNewTimeProposals => $composableBuilder(
+    column: $table.allowNewTimeProposals,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get sensitivity => $composableBuilder(
+    column: $table.sensitivity,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get joinUrl =>
+      $composableBuilder(column: $table.joinUrl, builder: (column) => column);
+
+  GeneratedColumn<String> get webLink =>
+      $composableBuilder(column: $table.webLink, builder: (column) => column);
+
+  GeneratedColumn<String> get changeKey =>
+      $composableBuilder(column: $table.changeKey, builder: (column) => column);
+
+  GeneratedColumn<String> get attendeesJson => $composableBuilder(
+    column: $table.attendeesJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get categoriesJson => $composableBuilder(
+    column: $table.categoriesJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get isReminderOn => $composableBuilder(
+    column: $table.isReminderOn,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get reminderMinutes => $composableBuilder(
+    column: $table.reminderMinutes,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get bodyPreview => $composableBuilder(
+    column: $table.bodyPreview,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get syncRun =>
+      $composableBuilder(column: $table.syncRun, builder: (column) => column);
+
+  GeneratedColumn<String> get syncedAt =>
+      $composableBuilder(column: $table.syncedAt, builder: (column) => column);
+}
+
+class $CalendarEventsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          CalendarEvents,
+          CalendarEventRow,
+          $CalendarEventsFilterComposer,
+          $CalendarEventsOrderingComposer,
+          $CalendarEventsAnnotationComposer,
+          $CalendarEventsCreateCompanionBuilder,
+          $CalendarEventsUpdateCompanionBuilder,
+          (
+            CalendarEventRow,
+            BaseReferences<_$BondDatabase, CalendarEvents, CalendarEventRow>,
+          ),
+          CalendarEventRow,
+          PrefetchHooks Function()
+        > {
+  $CalendarEventsTableManager(_$BondDatabase db, CalendarEvents table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $CalendarEventsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $CalendarEventsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $CalendarEventsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> seriesMasterId = const Value.absent(),
+                Value<String> icalUid = const Value.absent(),
+                Value<String> eventType = const Value.absent(),
+                Value<String> subject = const Value.absent(),
+                Value<String> location = const Value.absent(),
+                Value<String> organizerName = const Value.absent(),
+                Value<String> organizerAddress = const Value.absent(),
+                Value<int> isOrganizer = const Value.absent(),
+                Value<int> isAllDay = const Value.absent(),
+                Value<int> isCancelled = const Value.absent(),
+                Value<String?> startUtc = const Value.absent(),
+                Value<String?> endUtc = const Value.absent(),
+                Value<String?> startDate = const Value.absent(),
+                Value<String?> endDate = const Value.absent(),
+                Value<String> showAs = const Value.absent(),
+                Value<String> responseStatus = const Value.absent(),
+                Value<int?> responseRequested = const Value.absent(),
+                Value<int?> allowNewTimeProposals = const Value.absent(),
+                Value<String> sensitivity = const Value.absent(),
+                Value<String> joinUrl = const Value.absent(),
+                Value<String> webLink = const Value.absent(),
+                Value<String> changeKey = const Value.absent(),
+                Value<String> attendeesJson = const Value.absent(),
+                Value<String> categoriesJson = const Value.absent(),
+                Value<int?> isReminderOn = const Value.absent(),
+                Value<int?> reminderMinutes = const Value.absent(),
+                Value<String> bodyPreview = const Value.absent(),
+                Value<String> syncRun = const Value.absent(),
+                Value<String> syncedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CalendarEventsCompanion(
+                id: id,
+                seriesMasterId: seriesMasterId,
+                icalUid: icalUid,
+                eventType: eventType,
+                subject: subject,
+                location: location,
+                organizerName: organizerName,
+                organizerAddress: organizerAddress,
+                isOrganizer: isOrganizer,
+                isAllDay: isAllDay,
+                isCancelled: isCancelled,
+                startUtc: startUtc,
+                endUtc: endUtc,
+                startDate: startDate,
+                endDate: endDate,
+                showAs: showAs,
+                responseStatus: responseStatus,
+                responseRequested: responseRequested,
+                allowNewTimeProposals: allowNewTimeProposals,
+                sensitivity: sensitivity,
+                joinUrl: joinUrl,
+                webLink: webLink,
+                changeKey: changeKey,
+                attendeesJson: attendeesJson,
+                categoriesJson: categoriesJson,
+                isReminderOn: isReminderOn,
+                reminderMinutes: reminderMinutes,
+                bodyPreview: bodyPreview,
+                syncRun: syncRun,
+                syncedAt: syncedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                Value<String> seriesMasterId = const Value.absent(),
+                Value<String> icalUid = const Value.absent(),
+                Value<String> eventType = const Value.absent(),
+                Value<String> subject = const Value.absent(),
+                Value<String> location = const Value.absent(),
+                Value<String> organizerName = const Value.absent(),
+                Value<String> organizerAddress = const Value.absent(),
+                Value<int> isOrganizer = const Value.absent(),
+                Value<int> isAllDay = const Value.absent(),
+                Value<int> isCancelled = const Value.absent(),
+                Value<String?> startUtc = const Value.absent(),
+                Value<String?> endUtc = const Value.absent(),
+                Value<String?> startDate = const Value.absent(),
+                Value<String?> endDate = const Value.absent(),
+                Value<String> showAs = const Value.absent(),
+                Value<String> responseStatus = const Value.absent(),
+                Value<int?> responseRequested = const Value.absent(),
+                Value<int?> allowNewTimeProposals = const Value.absent(),
+                Value<String> sensitivity = const Value.absent(),
+                Value<String> joinUrl = const Value.absent(),
+                Value<String> webLink = const Value.absent(),
+                Value<String> changeKey = const Value.absent(),
+                Value<String> attendeesJson = const Value.absent(),
+                Value<String> categoriesJson = const Value.absent(),
+                Value<int?> isReminderOn = const Value.absent(),
+                Value<int?> reminderMinutes = const Value.absent(),
+                Value<String> bodyPreview = const Value.absent(),
+                Value<String> syncRun = const Value.absent(),
+                required String syncedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => CalendarEventsCompanion.insert(
+                id: id,
+                seriesMasterId: seriesMasterId,
+                icalUid: icalUid,
+                eventType: eventType,
+                subject: subject,
+                location: location,
+                organizerName: organizerName,
+                organizerAddress: organizerAddress,
+                isOrganizer: isOrganizer,
+                isAllDay: isAllDay,
+                isCancelled: isCancelled,
+                startUtc: startUtc,
+                endUtc: endUtc,
+                startDate: startDate,
+                endDate: endDate,
+                showAs: showAs,
+                responseStatus: responseStatus,
+                responseRequested: responseRequested,
+                allowNewTimeProposals: allowNewTimeProposals,
+                sensitivity: sensitivity,
+                joinUrl: joinUrl,
+                webLink: webLink,
+                changeKey: changeKey,
+                attendeesJson: attendeesJson,
+                categoriesJson: categoriesJson,
+                isReminderOn: isReminderOn,
+                reminderMinutes: reminderMinutes,
+                bodyPreview: bodyPreview,
+                syncRun: syncRun,
+                syncedAt: syncedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $CalendarEventsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      CalendarEvents,
+      CalendarEventRow,
+      $CalendarEventsFilterComposer,
+      $CalendarEventsOrderingComposer,
+      $CalendarEventsAnnotationComposer,
+      $CalendarEventsCreateCompanionBuilder,
+      $CalendarEventsUpdateCompanionBuilder,
+      (
+        CalendarEventRow,
+        BaseReferences<_$BondDatabase, CalendarEvents, CalendarEventRow>,
+      ),
+      CalendarEventRow,
+      PrefetchHooks Function()
+    >;
+typedef $EventBriefsCreateCompanionBuilder =
+    EventBriefsCompanion Function({
+      required String eventId,
+      required String inputsHash,
+      required String status,
+      Value<String?> briefJson,
+      Value<String> model,
+      required String generatedAt,
+      Value<int> rowid,
+    });
+typedef $EventBriefsUpdateCompanionBuilder =
+    EventBriefsCompanion Function({
+      Value<String> eventId,
+      Value<String> inputsHash,
+      Value<String> status,
+      Value<String?> briefJson,
+      Value<String> model,
+      Value<String> generatedAt,
+      Value<int> rowid,
+    });
+
+class $EventBriefsFilterComposer extends Composer<_$BondDatabase, EventBriefs> {
+  $EventBriefsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get eventId => $composableBuilder(
+    column: $table.eventId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get inputsHash => $composableBuilder(
+    column: $table.inputsHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get briefJson => $composableBuilder(
+    column: $table.briefJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get generatedAt => $composableBuilder(
+    column: $table.generatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $EventBriefsOrderingComposer
+    extends Composer<_$BondDatabase, EventBriefs> {
+  $EventBriefsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get eventId => $composableBuilder(
+    column: $table.eventId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get inputsHash => $composableBuilder(
+    column: $table.inputsHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get briefJson => $composableBuilder(
+    column: $table.briefJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get generatedAt => $composableBuilder(
+    column: $table.generatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $EventBriefsAnnotationComposer
+    extends Composer<_$BondDatabase, EventBriefs> {
+  $EventBriefsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get eventId =>
+      $composableBuilder(column: $table.eventId, builder: (column) => column);
+
+  GeneratedColumn<String> get inputsHash => $composableBuilder(
+    column: $table.inputsHash,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get briefJson =>
+      $composableBuilder(column: $table.briefJson, builder: (column) => column);
+
+  GeneratedColumn<String> get model =>
+      $composableBuilder(column: $table.model, builder: (column) => column);
+
+  GeneratedColumn<String> get generatedAt => $composableBuilder(
+    column: $table.generatedAt,
+    builder: (column) => column,
+  );
+}
+
+class $EventBriefsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          EventBriefs,
+          EventBriefRow,
+          $EventBriefsFilterComposer,
+          $EventBriefsOrderingComposer,
+          $EventBriefsAnnotationComposer,
+          $EventBriefsCreateCompanionBuilder,
+          $EventBriefsUpdateCompanionBuilder,
+          (
+            EventBriefRow,
+            BaseReferences<_$BondDatabase, EventBriefs, EventBriefRow>,
+          ),
+          EventBriefRow,
+          PrefetchHooks Function()
+        > {
+  $EventBriefsTableManager(_$BondDatabase db, EventBriefs table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $EventBriefsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $EventBriefsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $EventBriefsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> eventId = const Value.absent(),
+                Value<String> inputsHash = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> briefJson = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                Value<String> generatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => EventBriefsCompanion(
+                eventId: eventId,
+                inputsHash: inputsHash,
+                status: status,
+                briefJson: briefJson,
+                model: model,
+                generatedAt: generatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String eventId,
+                required String inputsHash,
+                required String status,
+                Value<String?> briefJson = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                required String generatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => EventBriefsCompanion.insert(
+                eventId: eventId,
+                inputsHash: inputsHash,
+                status: status,
+                briefJson: briefJson,
+                model: model,
+                generatedAt: generatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $EventBriefsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      EventBriefs,
+      EventBriefRow,
+      $EventBriefsFilterComposer,
+      $EventBriefsOrderingComposer,
+      $EventBriefsAnnotationComposer,
+      $EventBriefsCreateCompanionBuilder,
+      $EventBriefsUpdateCompanionBuilder,
+      (
+        EventBriefRow,
+        BaseReferences<_$BondDatabase, EventBriefs, EventBriefRow>,
+      ),
+      EventBriefRow,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -30366,4 +33347,8 @@ class $BondDatabaseManager {
       $MessageDecisionsTableManager(_db, _db.messageDecisions);
   $DecisionLabelsTableManager get decisionLabels =>
       $DecisionLabelsTableManager(_db, _db.decisionLabels);
+  $CalendarEventsTableManager get calendarEvents =>
+      $CalendarEventsTableManager(_db, _db.calendarEvents);
+  $EventBriefsTableManager get eventBriefs =>
+      $EventBriefsTableManager(_db, _db.eventBriefs);
 }

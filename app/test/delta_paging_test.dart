@@ -839,6 +839,82 @@ void main() {
       );
     });
 
+    test('a linked calendar event is stored beside the meeting kind', () async {
+      // Graph's own detail never carries `calendarEventId` — the MCP backend
+      // adds it — but the reader is one method for both, so a detail that
+      // carries it is enough to pin what gets stored. m1 has nothing else in
+      // the blob: an event id alone must still write it.
+      graph.details['m1'] = () => jsonOk({
+            'id': 'm1',
+            'uniqueBody': {'contentType': 'text', 'content': 'Please join.'},
+            'calendarEventId': ' evt-fabrikam-7 ',
+          });
+      graph.details['m2'] = () => jsonOk({
+            'id': 'm2',
+            'uniqueBody': {'contentType': 'text', 'content': 'Not a meeting.'},
+            'internetMessageHeaders': [
+              {'name': 'X-Mailer', 'value': 'Outlook'},
+            ],
+          });
+
+      await sync.ensureBodies('conv-1');
+
+      final invite = Message.fromRow(await messageRow('m1'));
+      expect(invite.meetingEventId, 'evt-fabrikam-7');
+      expect(invite.meetingMessageType, isNull,
+          reason: 'an event id says which event, never what kind');
+
+      final plain = await messageRow('m2');
+      final blob =
+          jsonDecode(plain['source_meta_json'] as String) as Map<String, dynamic>;
+      expect(blob.containsKey('event_id'), isFalse);
+      expect(Message.fromRow(plain).meetingEventId, isNull);
+      expect(
+        Message(id: 'bad', outbound: false, sourceMetaJson: '{not json')
+            .meetingEventId,
+        isNull,
+      );
+    });
+
+    test('an auto-reply is stored as a fact; a plain message has no key',
+        () async {
+      // The MCP backend maps `read_email`'s `is_auto_reply` onto this key;
+      // m1 has nothing else in the blob, so the flag alone must write it.
+      graph.details['m1'] = () => jsonOk({
+            'id': 'm1',
+            'uniqueBody': {'contentType': 'text', 'content': 'I am away.'},
+            'isAutoReply': true,
+          });
+      graph.details['m2'] = () => jsonOk({
+            'id': 'm2',
+            'uniqueBody': {'contentType': 'text', 'content': 'Not away.'},
+            'internetMessageHeaders': [
+              {'name': 'X-Mailer', 'value': 'Outlook'},
+            ],
+            'isAutoReply': false,
+          });
+
+      await sync.ensureBodies('conv-1');
+
+      final away = await messageRow('m1');
+      expect(
+        (jsonDecode(away['source_meta_json'] as String) as Map)['auto_reply'],
+        isTrue,
+      );
+      expect(Message.fromRow(away).isAutoReply, isTrue);
+
+      final plain = await messageRow('m2');
+      final blob =
+          jsonDecode(plain['source_meta_json'] as String) as Map<String, dynamic>;
+      expect(blob.containsKey('auto_reply'), isFalse);
+      expect(Message.fromRow(plain).isAutoReply, isFalse);
+      expect(
+        Message(id: 'bad', outbound: false, sourceMetaJson: '{not json')
+            .isAutoReply,
+        isFalse,
+      );
+    });
+
     /// An M365 notification whose entire content is one linked banner. Every
     /// anchor here has no label but the image, and an image that is not `cid:`
     /// is dropped, so the honest conversion of this message is no text at all.

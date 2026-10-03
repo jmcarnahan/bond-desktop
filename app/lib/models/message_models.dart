@@ -563,14 +563,14 @@ class Message {
   final String? gateOverride;
 
   /// The connector-specific blob stored alongside the message — for email,
-  /// `{"headers": {...}, "meeting": "…"}` from the per-message detail fetch,
-  /// each key present only when that fetch had something to put in it. Held as
-  /// raw JSON rather than decoded eagerly: the inbox renders thousands of
-  /// messages and reads this on none of them.
+  /// `{"headers": {...}, "meeting": "…", "event_id": "…"}` from the
+  /// per-message detail fetch, each key present only when that fetch had
+  /// something to put in it. Held as raw JSON rather than decoded eagerly: the
+  /// inbox renders thousands of messages and reads this on none of them.
   ///
-  /// Read through [headers] and [meetingMessageType], never by hand: both
-  /// answer for a blob that never carried their key, which is every row a
-  /// build before theirs wrote.
+  /// Read through [headers], [meetingMessageType] and [meetingEventId], never
+  /// by hand: each answers for a blob that never carried its key, which is
+  /// every row a build before it wrote.
   final String? sourceMetaJson;
 
   // ── Triage output ────────────────────────────────────────────────────
@@ -761,9 +761,10 @@ class Message {
   /// What kind of invitation this message is, in Graph's own words —
   /// `meetingRequest`, `meetingCancelled`, `meetingAccepted` and the rest.
   ///
-  /// Null on ordinary mail, on every Teams and MCP message, and on any row
-  /// whose detail was fetched before the sync asked for the field: a reader
-  /// must treat null as "nobody said", never as "not a meeting".
+  /// Null on ordinary mail, on every Teams message, and on any row whose
+  /// detail was fetched before its connector sent the field (MCP rows before
+  /// the `meeting_detail_backfill` one-shot reached them): a reader must treat
+  /// null as "nobody said", never as "not a meeting".
   String? get meetingMessageType {
     final raw = sourceMetaJson;
     if (raw == null || raw.isEmpty) return null;
@@ -775,6 +776,43 @@ class Message {
       return meeting;
     } on FormatException {
       return null;
+    }
+  }
+
+  /// The id of the calendar event this meeting message is about — the
+  /// `event_id` key the detail fetch stores beside `meeting`, so a later
+  /// phase can join a message to its row in `calendar_events`.
+  ///
+  /// Only the MCP connector sends it (the SDK backend's detail never does),
+  /// and the server sends null for an event that is gone. So null means "no
+  /// linked event known", never "not a meeting": [meetingMessageType] is the
+  /// one that says what kind of message this is. Null too for a blob that is
+  /// null, invalid, or silent or empty about the key.
+  String? get meetingEventId {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final eventId = decoded['event_id'];
+      if (eventId is! String || eventId.isEmpty) return null;
+      return eventId;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// Whether the server said this is an automatic reply — `read_email`'s
+  /// `is_auto_reply`, stored as `auto_reply` only when true. MCP only, so
+  /// false means "nobody said", never "a person wrote it".
+  bool get isAutoReply {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map && decoded['auto_reply'] == true;
+    } on FormatException {
+      return false;
     }
   }
 

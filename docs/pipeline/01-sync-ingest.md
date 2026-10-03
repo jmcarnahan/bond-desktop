@@ -225,7 +225,13 @@ already in the mailbox (`regateMeetingResponses`, then a refold when it gated
 any), because a gate only speaks about a message on its way past. The key is
 the second one: the first pass read Exchange's `\r\n` empty body as somebody
 talking and gated none of the fallback-shape rows. It reports
-`regated_meeting_responses`. `plan_relative_banner_strip` takes a trailing
+`regated_meeting_responses`. `meeting_detail_backfill` (MCP only, once the
+calendar mirror's first full read has been swept) re-fetches the detail of up
+to 200 likely meeting messages from the last 30 days that were stored before
+`read_email` sent the meeting fields, then re-gates the same way; a failed
+pass stays owed (`attempt:<n>`) and the third failure closes it.
+It reports `backfilled_meetings` ([14-calendar.md](14-calendar.md)).
+`plan_relative_banner_strip` takes a trailing
 plan-relative "— by Day 1" off the stored ask banners through
 `showableDeadline` (`stripPlanRelativeBanners`), reported as
 `stripped_plan_relative_banners` (see [08-attention.md](08-attention.md)).
@@ -452,7 +458,12 @@ exception: that is a stale body (below) whose refetch came back empty, and
 The detail's `$select` also asks for `meetingMessageType`, Graph's word for
 the kind of invitation. It is stored under `meeting` in `source_meta_json`
 beside `headers`, each key omitted when it has nothing to say; the
-meeting-response gate reads it ([02-gates.md](02-gates.md)).
+meeting-response gate reads it ([02-gates.md](02-gates.md)). In MCP mode the
+backend maps `read_email`'s `meeting_message_type` onto the same key and adds
+`calendarEventId`, stored as `event_id` — the link from a message to its
+calendar event ([14-calendar.md](14-calendar.md)). It also maps `is_auto_reply`
+to `isAutoReply`, stored as `auto_reply: true` only when true and read by
+`Message.isAutoReply`; nothing gates on it yet.
 
 Two one-shots repair what earlier builds stored, and neither stamps
 `messages.updated_at`, so the keyword index keeps the old text until a

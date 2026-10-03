@@ -744,6 +744,24 @@ const List<PipelineStageInfo> pipelineStages = [
     description: 'A second pass over a suggested reply',
     slot: ModelSlot.generative,
   ),
+  // Not in [draftStageIds]: a brief is written FOR the owner, never in their
+  // name, so Cloud drafts never sees it (the calendar round's D9).
+  PipelineStageInfo(
+    id: 'meeting_brief',
+    label: 'Meeting brief',
+    description: "A brief before a meeting with people you've been writing to",
+    slot: ModelSlot.generative,
+  ),
+  // On demand, not a lane: called from the Day command bar on Enter, and
+  // only when the lexicon and the resolvers could not finish the request.
+  // Not in [draftStageIds]: it reads the owner's own command and writes
+  // nothing in their name, so Cloud drafts never sees it.
+  PipelineStageInfo(
+    id: 'calendar_intent',
+    label: 'Calendar command',
+    description: 'Reads a calendar command the rules could not finish',
+    slot: ModelSlot.generative,
+  ),
   PipelineStageInfo(
     id: 'embeddings',
     label: 'Embeddings and search',

@@ -582,7 +582,14 @@ void main() {
           htmlToText(shaped, profile: profile);
           clock.stop();
 
-          expect(clock.elapsed, lessThan(const Duration(seconds: 3)));
+          // What this catches is a scan that runs to the END of the body for
+          // each opener — quadratic over twenty thousand of them, minutes
+          // rather than seconds. Ten seconds is an order of magnitude under
+          // that and well over the ~3 s the slowest linear shape
+          // (`<head>x`) takes on a laptop with the app and its model servers
+          // running beside the suite, where a 3 s bound failed on load alone
+          // (2026-10-01).
+          expect(clock.elapsed, lessThan(const Duration(seconds: 10)));
         });
       }
     }

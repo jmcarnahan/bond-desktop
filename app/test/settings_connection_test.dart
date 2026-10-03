@@ -452,10 +452,12 @@ void main() {
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
+      expect(find.text('Calendar (read and write)'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(2));
-      // Chat.Read was not granted; there is nothing on this screen that can
-      // change that, so there is no offer beside it either.
-      expect(find.byIcon(Icons.close), findsOneWidget);
+      // Chat.Read and Calendars.ReadWrite were not granted; there is nothing
+      // on this screen that can change that, so there is no offer beside
+      // either of them.
+      expect(find.byIcon(Icons.close), findsNWidgets(2));
       expect(find.text('Sign in again to enable'), findsNothing);
     });
 
@@ -470,13 +472,18 @@ void main() {
         onBackendModeChanged: (_) {},
         connectionStatus: status({
           'connected': true,
-          'scopes': ['Mail.Send', 'Mail.ReadWrite', 'Chat.ReadWrite'],
+          'scopes': [
+            'Mail.Send',
+            'Mail.ReadWrite',
+            'Chat.ReadWrite',
+            'Calendars.ReadWrite',
+          ],
         }),
         onConnectMicrosoft: () {},
       );
       await expand(tester, 'Microsoft connection');
 
-      expect(find.byIcon(Icons.check), findsNWidgets(3));
+      expect(find.byIcon(Icons.check), findsNWidgets(4));
       expect(find.byIcon(Icons.close), findsNothing);
     });
 
@@ -492,7 +499,7 @@ void main() {
       await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.check), findsNWidgets(2));
-      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.byIcon(Icons.close), findsNWidgets(2));
     });
 
     testWidgets('nothing connected offers the connect step', (tester) async {
@@ -564,8 +571,13 @@ void main() {
       );
       await expand(tester, 'Microsoft connection');
 
-      expect(asked, ['mail.send', 'mail.readwrite', 'chat.read']);
-      expect(find.byIcon(Icons.check), findsNWidgets(3));
+      expect(asked, [
+        'mail.send',
+        'mail.readwrite',
+        'chat.read',
+        'calendars.readwrite',
+      ]);
+      expect(find.byIcon(Icons.check), findsNWidgets(4));
       expect(find.text('Connect Microsoft'), findsNothing);
     });
   });
@@ -768,7 +780,7 @@ void main() {
       );
       await expand(tester, 'Microsoft connection');
 
-      expect(find.byIcon(Icons.close), findsNWidgets(3));
+      expect(find.byIcon(Icons.close), findsNWidgets(4));
       expect(find.text('Sign in again to enable'), findsNothing);
       expect(find.text('Sign out of this server'), findsOneWidget);
     });

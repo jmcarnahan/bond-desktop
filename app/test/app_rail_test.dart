@@ -1,16 +1,24 @@
+import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/files_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/needs_you_sort.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/services/calendar/ask_hints.dart' show AskHints;
+import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/calendar/day_items.dart';
+import 'package:bond_inbox/services/calendar/find_time.dart';
+import 'package:bond_inbox/services/calendar/overlaps.dart' show FreeSlot;
 import 'package:bond_inbox/services/llm/storyline_tasks.dart'
     show NameStorylineTask;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
+import 'package:bond_inbox/widgets/command_plan_card.dart' show CommandPlanCard;
 import 'package:bond_inbox/widgets/dismissed_storylines_fold.dart';
 import 'package:bond_inbox/widgets/find_filter.dart';
 import 'package:bond_inbox/widgets/people_rooms.dart';
 import 'package:bond_inbox/widgets/possible_storylines_fold.dart';
+import 'package:bond_inbox/widgets/scheduling_ask_rows.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -2010,4 +2018,633 @@ void main() {
       }
     });
   });
+  group('the calendar rows', () {
+    setUpAll(initCalendarZones);
+
+    // A fixed clock in a named zone: Tuesday Sep 29 2026, 9:00 AM in
+    // Los Angeles (16:00 UTC).
+    final now = DateTime.utc(2026, 9, 29, 16);
+    const today = CalendarDate(2026, 9, 29);
+
+    CalendarEvent meeting(String id, String subject, int startHourUtc) =>
+        CalendarEvent(
+          id: id,
+          subject: subject,
+          startUtc: DateTime.utc(2026, 9, 29, startHourUtc),
+          endUtc: DateTime.utc(2026, 9, 29, startHourUtc, 30),
+        );
+
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      RailSection scope = RailSection.home,
+      bool calendarShown = true,
+      bool todayShown = true,
+      List<CalendarEvent> todayMeetings = const [],
+      int invitesCount = 0,
+      List<(CalendarDate, DaySummary)> dayRows = const [],
+      CalendarDate? selectedDay,
+      bool showingInvites = false,
+      void Function(CalendarDate)? onSelectDay,
+      VoidCallback? onOpenInvites,
+      void Function(RailSection)? onSelectSection,
+      void Function(String)? onOpenEvent,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: const [],
+        onSelectRoom: (_) {},
+        conversations: const [],
+        selectedId: null,
+        selectedSection: scope,
+        onSelectConversation: (_, _) {},
+        onSelectSection: onSelectSection ?? (_) {},
+        calendarShown: calendarShown,
+        todayShown: todayShown,
+        todayMeetings: todayMeetings,
+        calendarZone: CalendarZone.tryNamed('America/Los_Angeles')!,
+        now: now,
+        invitesCount: invitesCount,
+        dayRows: dayRows,
+        today: today,
+        selectedDay: selectedDay,
+        showingInvites: showingInvites,
+        onSelectDay: onSelectDay,
+        onOpenInvites: onOpenInvites,
+        onOpenEvent: onOpenEvent,
+      )));
+    }
+
+    testWidgets('a Today meeting row opens the event beside', (tester) async {
+      final opened = <String>[];
+      final sections = <RailSection>[];
+      await pumpRail(
+        tester,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        onOpenEvent: opened.add,
+        onSelectSection: sections.add,
+      );
+      await tester.tap(find.text('10:00 AM · Standup with Fabrikam'));
+      await tester.pump();
+      expect(opened, ['m1']);
+      expect(sections, isNot(contains(RailSection.day)));
+    });
+
+    testWidgets('without an event handler the row goes to the Day stop',
+        (tester) async {
+      final sections = <RailSection>[];
+      await pumpRail(
+        tester,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        onSelectSection: sections.add,
+      );
+      await tester.tap(find.text('10:00 AM · Standup with Fabrikam'));
+      await tester.pump();
+      expect(sections, [RailSection.day]);
+    });
+
+    testWidgets('the Inbox stack carries a Today section with up to three '
+        'meetings and the invites owed', (tester) async {
+      await pumpRail(
+        tester,
+        todayMeetings: [
+          meeting('m1', 'Standup with Fabrikam', 17),
+          meeting('m2', 'Design review', 18),
+          meeting('m3', 'Vendor call', 19),
+          meeting('m4', 'Late sync', 20),
+        ],
+        invitesCount: 2,
+      );
+
+      expect(find.text('TODAY'), findsOneWidget);
+      expect(find.text('10:00 AM · Standup with Fabrikam'), findsOneWidget);
+      expect(find.text('11:00 AM · Design review'), findsOneWidget);
+      expect(find.text('12:00 PM · Vendor call'), findsOneWidget);
+      expect(find.text('1:00 PM · Late sync'), findsNothing);
+      expect(find.text('Invites · 2'), findsOneWidget);
+      // The countdown reads the injected clock: an hour out is not "in".
+      expect(find.text('in 60m'), findsNothing);
+      // It sits between Needs You and Drafts & sent.
+      final todayY = tester.getTopLeft(find.text('TODAY')).dy;
+      expect(tester.getTopLeft(find.text('NEEDS YOU')).dy, lessThan(todayY));
+      expect(
+          tester.getTopLeft(find.text('DRAFTS & SENT')).dy, greaterThan(todayY));
+    });
+
+    testWidgets('the countdown shows inside the hour', (tester) async {
+      await pumpRail(tester, todayMeetings: [
+        CalendarEvent(
+          id: 'soon',
+          subject: 'Budget check-in',
+          startUtc: now.add(const Duration(minutes: 18)),
+          endUtc: now.add(const Duration(minutes: 48)),
+        ),
+      ]);
+
+      expect(find.text('in 18m'), findsOneWidget);
+    });
+
+    testWidgets('no Today section until the calendar has answered',
+        (tester) async {
+      await pumpRail(
+        tester,
+        todayShown: false,
+        todayMeetings: [meeting('m1', 'Standup with Fabrikam', 17)],
+        invitesCount: 2,
+      );
+
+      expect(find.text('TODAY'), findsNothing);
+      expect(find.text('Invites · 2'), findsNothing);
+    });
+
+    testWidgets('an empty Today says so', (tester) async {
+      await pumpRail(tester);
+
+      expect(find.text('TODAY'), findsOneWidget);
+      expect(find.text('Nothing else today'), findsOneWidget);
+    });
+
+    testWidgets("the Today section's invites row opens the Invites view",
+        (tester) async {
+      var invitesOpened = 0;
+      await pumpRail(
+        tester,
+        invitesCount: 2,
+        onOpenInvites: () => invitesOpened++,
+      );
+
+      await tester.tap(find.text('Invites · 2'));
+      await tester.pump();
+      expect(invitesOpened, 1);
+    });
+
+    testWidgets('the Day column lists the invites and the days',
+        (tester) async {
+      final summaries = [
+        (today, const DaySummary(meetings: 2, due: 1)),
+        (today.addDays(1), const DaySummary()),
+        (const CalendarDate(2026, 10, 2), const DaySummary(invites: 1)),
+      ];
+      final picked = <CalendarDate>[];
+      var invitesOpened = 0;
+      await pumpRail(
+        tester,
+        scope: RailSection.day,
+        invitesCount: 3,
+        dayRows: summaries,
+        onSelectDay: picked.add,
+        onOpenInvites: () => invitesOpened++,
+      );
+
+      expect(find.text('DAY'), findsOneWidget);
+      expect(find.text('Invites · 3'), findsOneWidget);
+      for (final (day, summary) in summaries) {
+        expect(find.text(dayRowLabel(day, today, summary)), findsOneWidget);
+      }
+      expect(find.text('Today · 2 meetings · 1 due'), findsOneWidget);
+      expect(find.text('Tomorrow · clear'), findsOneWidget);
+      expect(find.text('Fri Oct 2 · 1 invite'), findsOneWidget);
+      // The Today section belongs to the Inbox stack, not this column.
+      expect(find.text('TODAY'), findsNothing);
+
+      await tester.tap(find.text('Tomorrow · clear'));
+      expect(picked, [today.addDays(1)]);
+      await tester.tap(find.text('Invites · 3'));
+      expect(invitesOpened, 1);
+    });
+
+    testWidgets('the Day column says when there is no calendar',
+        (tester) async {
+      await pumpRail(
+        tester,
+        scope: RailSection.day,
+        calendarShown: false,
+        invitesCount: 3,
+        dayRows: [(today, const DaySummary())],
+      );
+
+      expect(find.text('Calendar not connected'), findsOneWidget);
+      expect(find.text('Invites · 3'), findsNothing);
+      expect(find.text('Today · clear'), findsNothing);
+    });
+  });
+
+  group('AppRail Day column — Scheduling asks', () {
+    late CalendarZone la;
+    setUpAll(() async {
+      await initCalendarZones();
+      la = CalendarZone.tryNamed('America/Los_Angeles')!;
+    });
+
+    const today = CalendarDate(2026, 9, 29);
+    // Tue Sep 29 2026: 10:00, 11:00 and 1:00 PM in Los Angeles.
+    final slots = [
+      FreeSlot(DateTime.utc(2026, 9, 29, 17), DateTime.utc(2026, 9, 29, 17, 30)),
+      FreeSlot(DateTime.utc(2026, 9, 29, 18), DateTime.utc(2026, 9, 29, 18, 30)),
+      FreeSlot(DateTime.utc(2026, 9, 29, 20), DateTime.utc(2026, 9, 29, 20, 30)),
+    ];
+    final graphResult = FindTimeResult(
+      slots: slots,
+      source: 'graph',
+      availability: {
+        slots[0]: const SlotAvailability(free: 2, of: 2),
+        slots[1]: const SlotAvailability(free: 1, of: 2),
+        slots[2]: const SlotAvailability(free: 1, of: 2),
+      },
+    );
+
+    SchedulingAskRow ask(
+      String key, {
+      String subject = 'Kickoff with Northwind',
+      String askedBy = 'Dana Ortiz',
+      bool expanded = false,
+      bool busy = false,
+      FindTimeResult? result,
+    }) =>
+        SchedulingAskRow(
+          source: 'email',
+          key: key,
+          subject: subject,
+          askedBy: askedBy,
+          expanded: expanded,
+          busy: busy,
+          result: result,
+        );
+
+    late List<String> calls;
+    late List<RailSection> sections;
+
+    SchedulingAskCallbacks callbacks() => SchedulingAskCallbacks(
+          onToggle: (s, k) => calls.add('toggle $s|$k'),
+          onMinutes: (s, k, m) => calls.add('minutes $s|$k $m'),
+          onWindow: (s, k, w) => calls.add('window $s|$k ${w.name}'),
+          onPickSlot: (s, k, slot) =>
+              calls.add('pick $s|$k ${slots.indexOf(slot)}'),
+          onPutInReply: (s, k) => calls.add('reply $s|$k'),
+          onOpen: (s, k) => calls.add('open $s|$k'),
+          onDismiss: (s, k) => calls.add('dismiss $s|$k'),
+        );
+
+    setUp(() {
+      calls = [];
+      sections = [];
+    });
+
+    Future<void> pumpRail(
+      WidgetTester tester,
+      List<SchedulingAskRow> asks, {
+      bool calendarShown = true,
+      Size size = const Size(1200, 900),
+    }) async {
+      await tester.binding.setSurfaceSize(size);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: RailSection.day,
+        rooms: const [],
+        onSelectRoom: (_) {},
+        conversations: const [],
+        selectedId: null,
+        selectedSection: RailSection.day,
+        onSelectConversation: (_, _) {},
+        onSelectSection: sections.add,
+        calendarShown: calendarShown,
+        calendarZone: la,
+        today: today,
+        dayRows: [(today, const DaySummary())],
+        schedulingAsks: asks,
+        askCallbacks: callbacks(),
+      )));
+    }
+
+    testWidgets('the header counts the asks, above the Day section',
+        (tester) async {
+      await pumpRail(tester, [ask('c1'), ask('c2', subject: 'Budget sync')]);
+      expect(find.text('SCHEDULING ASKS · 2'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('SCHEDULING ASKS · 2')).dy,
+        lessThan(tester.getTopLeft(find.text('DAY')).dy),
+      );
+    });
+
+    testWidgets('no asks, or no calendar, draws no section', (tester) async {
+      await pumpRail(tester, const []);
+      expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+      await pumpRail(tester, [ask('c1')], calendarShown: false);
+      expect(find.byKey(AppRail.asksHeaderKey), findsNothing);
+    });
+
+    testWidgets('a folded row is the subject over who asked, and a tap opens '
+        'it', (tester) async {
+      await pumpRail(tester, [ask('c1')]);
+      expect(find.text('Kickoff with Northwind'), findsOneWidget);
+      expect(find.text('Dana Ortiz'), findsOneWidget);
+      expect(find.text('This week'), findsNothing);
+
+      await tester.tap(find.byKey(SchedulingAskTile.rowKeyFor('email', 'c1')));
+      expect(calls, ['toggle email|c1']);
+    });
+
+    testWidgets('an open row searching says so', (tester) async {
+      await pumpRail(tester, [ask('c1', expanded: true, busy: true)]);
+      expect(find.text('Finding…'), findsOneWidget);
+    });
+
+    testWidgets('an open row draws three slots with who is free, and each '
+        'press goes to its callback', (tester) async {
+      await pumpRail(tester, [ask('c1', expanded: true, result: graphResult)]);
+      for (var i = 0; i < 3; i++) {
+        expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c1', i)),
+            findsOneWidget);
+      }
+      expect(find.text('Tue Sep 29 · 10:00–10:30 AM'), findsOneWidget);
+      expect(find.text('Everyone free'), findsOneWidget);
+      expect(find.text('1 of 2 free'), findsNWidgets(2));
+      expect(find.text(CommandPlanCard.graphCaption), findsOneWidget);
+
+      await tester
+          .tap(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c1', 1)));
+      await tester
+          .tap(find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c1', 45)));
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.nextWeek)));
+      await tester
+          .tap(find.byKey(SchedulingAskTile.putInReplyKeyFor('email', 'c1')));
+      await tester.tap(find.byKey(SchedulingAskTile.openKeyFor('email', 'c1')));
+      expect(calls, [
+        'pick email|c1 1',
+        'minutes email|c1 45',
+        'window email|c1 nextWeek',
+        'reply email|c1',
+        'open email|c1',
+      ]);
+    });
+
+    testWidgets('an ask with hints says what it asked for, and its day is '
+        'the first pill', (tester) async {
+      await pumpRail(tester, [
+        SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          expanded: true,
+          minutes: 90,
+          window: FindTimeWindow.theirs,
+          hints: const AskHints(
+            day: CalendarDate(2026, 10, 9),
+            minutes: 90,
+            said: 'Asked for: Fri Oct 9 · dinner',
+          ),
+        ),
+      ]);
+      expect(find.text('Asked for: Fri Oct 9 · dinner'), findsOneWidget);
+      // The ask's own length joins the three.
+      expect(find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c1', 90)),
+          findsOneWidget);
+      final theirs = find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.theirs));
+      expect(
+          find.descendant(of: theirs, matching: find.text('Fri Oct 9')),
+          findsOneWidget);
+      // First in reading order (the pills wrap at this width).
+      final a = tester.getTopLeft(theirs);
+      final b = tester.getTopLeft(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.thisWeek)));
+      expect(a.dy < b.dy || (a.dy == b.dy && a.dx < b.dx), isTrue);
+      // Selected, so it takes no tap; this week does.
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.thisWeek)));
+      expect(calls, ['window email|c1 thisWeek']);
+    });
+
+    testWidgets('an ask whose proposal stands says so under its head',
+        (tester) async {
+      await pumpRail(tester, [
+        const SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          proposed: 'Proposed: Fri Oct 2 · 7:15–8:45 PM',
+        ),
+        ask('c2'),
+      ]);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c1')),
+          findsOneWidget);
+      expect(find.text('Proposed: Fri Oct 2 · 7:15–8:45 PM'), findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c2')),
+          findsNothing);
+    });
+
+    testWidgets('the window labels the row carries are drawn', (tester) async {
+      await pumpRail(tester, [
+        SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          expanded: true,
+          hints: const AskHints(day: CalendarDate(2026, 10, 9)),
+          windowLabels: const {
+            FindTimeWindow.theirs: 'Fri Oct 9',
+            FindTimeWindow.thisWeek: 'Fri Oct 9',
+            FindTimeWindow.nextWeek: 'Fri Oct 16',
+          },
+        ),
+      ]);
+      expect(
+          find.descendant(
+              of: find.byKey(SchedulingAskTile.windowKeyFor(
+                  'email', 'c1', FindTimeWindow.nextWeek)),
+              matching: find.text('Fri Oct 16')),
+          findsOneWidget);
+      expect(find.text('This Fri'), findsNothing);
+    });
+
+    testWidgets('the their-day pill calls back with theirs', (tester) async {
+      await pumpRail(tester, [
+        SchedulingAskRow(
+          source: 'email',
+          key: 'c1',
+          subject: 'Dinner?',
+          askedBy: 'Dana Ortiz',
+          expanded: true,
+          hints: const AskHints(day: CalendarDate(2026, 10, 9)),
+        ),
+      ]);
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c1', FindTimeWindow.theirs)));
+      expect(calls, ['window email|c1 theirs']);
+    });
+
+    testWidgets('no hints, no their-day pill', (tester) async {
+      await pumpRail(tester, [ask('c1', expanded: true)]);
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c1', FindTimeWindow.theirs)),
+          findsNothing);
+    });
+
+    testWidgets('no slots says the note, or which week to try', (tester) async {
+      await pumpRail(tester, [
+        ask('c1', expanded: true, result: const FindTimeResult(source: 'graph')),
+      ]);
+      expect(find.text('No free time found this week — try next week.'),
+          findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.putInReplyKeyFor('email', 'c1')),
+          findsNothing);
+      expect(find.byKey(SchedulingAskTile.openKeyFor('email', 'c1')),
+          findsOneWidget);
+    });
+
+    testWidgets('the × dismisses, folded or open, and is not an open',
+        (tester) async {
+      await pumpRail(tester, [ask('c1'), ask('c2', expanded: true)]);
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c1')));
+      await tester
+          .tap(find.byKey(SchedulingAskTile.dismissKeyFor('email', 'c2')));
+      expect(calls, ['dismiss email|c1', 'dismiss email|c2']);
+      expect(find.text('Invite sent'), findsNothing);
+    });
+
+    testWidgets('the chevron folds the rows and brings them back, selecting '
+        'nothing', (tester) async {
+      await pumpRail(tester, [ask('c1')]);
+      await tester.tap(find.byKey(AppRail.asksChevronKey));
+      await tester.pump();
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(find.text('Kickoff with Northwind'), findsNothing);
+      // The Day section under it stays.
+      expect(find.text('Today · clear'), findsOneWidget);
+
+      await tester.tap(find.byKey(AppRail.asksChevronKey));
+      await tester.pump();
+      expect(find.text('Kickoff with Northwind'), findsOneWidget);
+      expect(sections, isEmpty);
+    });
+
+    testWidgets('the header label folds and unfolds too, selecting nothing',
+        (tester) async {
+      await pumpRail(tester, [ask('c1')]);
+      await tester.tap(find.byKey(AppRail.asksHeaderKey));
+      await tester.pump();
+      expect(find.text('Kickoff with Northwind'), findsNothing);
+      await tester.tap(find.byKey(AppRail.asksHeaderKey));
+      await tester.pump();
+      expect(find.text('Kickoff with Northwind'), findsOneWidget);
+      expect(sections, isEmpty);
+    });
+
+    testWidgets('slots with a note say the note above them', (tester) async {
+      await pumpRail(tester, [
+        ask('c1',
+            expanded: true,
+            result: FindTimeResult(
+              slots: slots,
+              note: findTimeLocalNote,
+            )),
+      ]);
+      expect(find.text(findTimeLocalNote), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text(findTimeLocalNote)).dy,
+        lessThan(tester
+            .getTopLeft(
+                find.byKey(SchedulingAskTile.slotKeyFor('email', 'c1', 0)))
+            .dy),
+      );
+      expect(find.text('your free time'), findsNWidgets(3));
+    });
+
+    testWidgets('an open row fits the 260 px column at 1.5x text',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(AppRail.width, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await tester.pumpWidget(_host(AppRail(
+          header: const SizedBox(),
+          scope: RailSection.day,
+          rooms: const [],
+          onSelectRoom: (_) {},
+          conversations: const [],
+          selectedId: null,
+          selectedSection: RailSection.day,
+          onSelectConversation: (_, _) {},
+          onSelectSection: sections.add,
+          calendarShown: true,
+          calendarZone: la,
+          today: today,
+          // Every line an open row can draw: the Asked for line, the
+          // their-day pill beside the weeks, and the Proposed line.
+          schedulingAsks: [
+            SchedulingAskRow(
+              source: 'email',
+              key: 'c1',
+              subject: 'Quarterly planning for the Fabrikam and Northwind '
+                  'integration programme',
+              askedBy: 'Dana Ortiz',
+              expanded: true,
+              result: graphResult,
+              minutes: 90,
+              window: FindTimeWindow.theirs,
+              hints: const AskHints(
+                day: CalendarDate(2026, 10, 9),
+                minutes: 90,
+                said: 'Asked for: Fri Oct 9 · dinner',
+              ),
+              windowLabels: const {
+                FindTimeWindow.theirs: 'Fri Oct 9',
+                FindTimeWindow.thisWeek: 'This Fri',
+                FindTimeWindow.nextWeek: 'Next Fri',
+              },
+              proposed: 'Proposed: Fri Oct 9 · 7:15–8:45 PM',
+            ),
+          ],
+          askCallbacks: callbacks(),
+      )));
+      expect(
+          MediaQuery.textScalerOf(tester.element(find.byType(AppRail)))
+              .scale(10),
+          15);
+      expect(tester.takeException(), isNull);
+      expect(find.text('SCHEDULING ASKS · 1'), findsOneWidget);
+      expect(find.text('Asked for: Fri Oct 9 · dinner'), findsOneWidget);
+      expect(
+          find.byKey(SchedulingAskTile.windowKeyFor(
+              'email', 'c1', FindTimeWindow.theirs)),
+          findsOneWidget);
+      expect(find.byKey(SchedulingAskTile.proposedKeyFor('email', 'c1')),
+          findsOneWidget);
+      for (var i = 0; i < 3; i++) {
+        expect(find.byKey(SchedulingAskTile.slotKeyFor('email', 'c1', i)),
+            findsOneWidget);
+      }
+    });
+
+    testWidgets('an open row with long words fits the 260 px column',
+        (tester) async {
+      await pumpRail(
+        tester,
+        [
+          ask(
+            'c1',
+            subject: 'Quarterly planning for the Fabrikam and Northwind '
+                'integration programme, second phase',
+            askedBy: 'a.very.long.address@northwind.example',
+            expanded: true,
+            result: graphResult,
+          ),
+          ask('c2'),
+        ],
+        size: const Size(AppRail.width, 900),
+      );
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(find.byType(AppRail)).width, AppRail.width);
+    });
+  });
 }
+

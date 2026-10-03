@@ -69,6 +69,13 @@ class ThreadActionBar extends StatefulWidget {
 
   final VoidCallback? onCompose;
 
+  /// Find a time: drawn when the host says the thread has somebody to
+  /// answer (its newest message inbound, other people on it). A press is
+  /// the owner's word that the thread asks for a time, and opens that ask in
+  /// the Day column. A worded button like Mark done, since an icon alone
+  /// would not say where it goes.
+  final VoidCallback? onFindTime;
+
   /// The thread's labels, most-used first (the store's order).
   final List<Label> labels;
   final VoidCallback? onAddLabel;
@@ -92,6 +99,7 @@ class ThreadActionBar extends StatefulWidget {
     this.onContext,
     this.contextLinked = 0,
     this.onCompose,
+    this.onFindTime,
     this.labels = const [],
     this.onAddLabel,
     this.onRemoveLabel,
@@ -111,6 +119,7 @@ class ThreadActionBar extends StatefulWidget {
   static const Key storylineKey = ValueKey('thread-action-storyline');
   static const Key contextKey = ValueKey('thread-context');
   static const Key composeKey = ValueKey('thread-compose');
+  static const Key findTimeKey = ValueKey('thread-action-find-time');
   static const Key addLabelKey = ValueKey('thread-label');
   static const Key labelRowKey = ValueKey('thread-action-labels');
 
@@ -209,9 +218,30 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
     final lineHeight = word.height + 14 > 34 ? word.height + 14 : 34.0;
     word.dispose();
     double doneWidth(double? w) => hasDone ? _doneWidth(w, chevron) : 0;
+    // Find a time is measured the same way, and gives up its word at the same
+    // moment Mark done does, so the row never shows one worded and one not.
+    final hasFind = widget.onFindTime != null;
+    var findWord = 0.0;
+    if (hasFind) {
+      final find = TextPainter(
+        text: TextSpan(
+          text: 'Find a time',
+          style: (Theme.of(context).textTheme.bodyMedium ??
+                  DefaultTextStyle.of(context).style)
+              .merge(_doneStyle),
+        ),
+        textDirection: TextDirection.ltr,
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout();
+      findWord = find.width;
+      find.dispose();
+    }
+    double findWidth(double? w) =>
+        hasFind ? _doneWidth(w, false) + BondSpacing.s4 : 0;
     // The Needs You button is labelled too, and measured the same way. Its
-    // word goes first when room runs short, Mark done's only after it: the
-    // bar's one decision keeps its word longest.
+    // word goes first when room runs short, Mark done's (and Find a time's)
+    // only after it: the bar's one decision keeps its word longest.
     final needsYou = _needsYouButton;
     double? needsYouWord;
     if (needsYou != null) {
@@ -236,10 +266,18 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
     final inner = box.maxWidth - 2 * BondSpacing.s12;
     final tail = showLabels ? _ruleWidth + _iconWidth : 0.0;
     final rest = icons * _iconWidth + tail;
-    final needsYouCompact =
-        doneWidth(wordWidth) + needsYouWidth(needsYouWord) + rest > inner;
-    final compact = doneWidth(wordWidth) + needsYouWidth(null) + rest > inner;
+    final needsYouCompact = doneWidth(wordWidth) +
+            findWidth(findWord) +
+            needsYouWidth(needsYouWord) +
+            rest >
+        inner;
+    final compact = doneWidth(wordWidth) +
+            findWidth(findWord) +
+            needsYouWidth(null) +
+            rest >
+        inner;
     final verbs = doneWidth(compact ? null : wordWidth) +
+        findWidth(compact ? null : findWord) +
         needsYouWidth(needsYouCompact ? null : needsYouWord) +
         icons * _iconWidth;
     // Still no room for the rule and the add button beside even the compact
@@ -275,6 +313,15 @@ class _ThreadActionBarState extends State<ThreadActionBar> {
               ? widget.onDone!
               : () => _choosing ? _close() : _open(),
           open: chevron ? _choosing : null,
+        ),
+      if (widget.onFindTime != null)
+        _DoneButton(
+          buttonKey: ThreadActionBar.findTimeKey,
+          name: 'Find a time',
+          label: compact ? null : 'Find a time',
+          icon: Icons.schedule_outlined,
+          tooltip: 'Find a time — in the Day column, with these people',
+          onDone: widget.onFindTime!,
         ),
       if (widget.inLater && widget.onKeepInInbox != null)
         _ActionIcon(

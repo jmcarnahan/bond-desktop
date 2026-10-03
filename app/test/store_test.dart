@@ -1471,6 +1471,8 @@ void main() {
       await store.setPref(dbOwnerKey, 'ada@example.test');
       await store.setPref(mailBootstrapFloorKey, '2026-08-23T00:00:00Z');
       await store.setPref(teamsBootstrapFloorKey, '2026-08-23T00:00:00Z');
+      await store.setPref(calendarRunKey, '{"run": "r"}');
+      await store.setPref(calendarMailboxKey, '{"settings": null}');
 
       await store.wipeAll();
 
@@ -1484,6 +1486,9 @@ void main() {
       // its window had already been drained, and suppress it.
       expect(await store.getPref(mailBootstrapFloorKey), isNull);
       expect(await store.getPref(teamsBootstrapFloorKey), isNull);
+      // The calendar's run and cached mailbox settings describe this mailbox.
+      expect(await store.getPref(calendarRunKey), isNull);
+      expect(await store.getPref(calendarMailboxKey), isNull);
     });
   });
 

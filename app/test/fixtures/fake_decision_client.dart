@@ -1,6 +1,6 @@
 import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/providers/app_providers.dart'
-    show decisionClientProvider;
+    show commandHeadsProvider, decisionClientProvider;
 import 'package:bond_inbox/services/decision/decision_client.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/decision/decision_input.dart';
@@ -266,6 +266,14 @@ Override keepingDecisionClient() =>
     decisionClientProvider.overrideWithValue(
       FakeDecisionClient.fixed(fakeAnswers(needsYou: 0.5)),
     );
+
+/// No calendar command head, whatever `assets/calendar/command_heads.json`
+/// holds: the Day bar reads commands with the lexicon alone. Beside every
+/// [keepingDecisionClient] in a screen test, so a head the owner adopted
+/// cannot turn a screen test onto the head path (or a request to a decision
+/// server that is not there).
+Override noCommandHeads() =>
+    commandHeadsProvider.overrideWith((ref) async => null);
 
 /// A [FakeDecisionClient] driven by a [ScriptedLlm] script under the schema
 /// name `decision` — how a queue test HOLDS, THROWS or COUNTS decision calls

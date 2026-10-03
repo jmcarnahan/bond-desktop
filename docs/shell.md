@@ -15,7 +15,7 @@ router and no `Navigator`; every move is a `setState`), plus
 
 | Slot | Width | Widget | What it is |
 |---|---|---|---|
-| Icon rail | 56 | `IconRail` | Seven stops and the account's face. Never scrolls, never changes. |
+| Icon rail | 56 | `IconRail` | Eight stops and the account's face. Never scrolls, never changes. |
 | List column | 260 | `AppRail` | What is inside the stop that is lit. Scrolls. |
 | Main | the rest | `_main()`'s ladder | The one thing being read. |
 | Side panel | 45 %, 360–640 for a file, 420–640 for a thread | `SidePanelHost` | A thread or a file read BESIDE the main pane. |
@@ -47,8 +47,9 @@ transcript's own 420 minimum, with nothing to catch it.
 
 | Stop | Icon | The list column shows | Main shows |
 |---|---|---|---|
-| Inbox (`RailSection.home`) | `bolt` | the whole stack: Needs You · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row | `HomePane` — the pipeline as a table |
+| Inbox (`RailSection.home`) | `bolt` | the whole stack: Needs You · Today · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row; Today only once the calendar has answered | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
+| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda or its time grid (Day or Week, remembered), or the invites owed; over the agenda and the grid, the command bar (`DayCommandBar`) and the card for its last Enter (`docs/pipeline/14-calendar.md`, Commands) |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person | the directory of everyone, or the open room |
 | Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
@@ -57,7 +58,7 @@ transcript's own 420 minimum, with nothing to catch it.
 
 **Drafts & sent is a row in the Inbox stack, not a stop.** It sits between Needs
 You and Storylines with a badge counting the suggestions waiting. What it holds
-is the model's unsent work rather than a pile of mail, and a seventh icon for a
+is the model's unsent work rather than a pile of mail, and a ninth icon for a
 list that is usually empty would cost a permanent stop for an occasional one.
 While its pane is up the icon rail lights **Inbox** — the stack the row belongs
 to — and the list column keeps that whole stack with the row highlighted: the
@@ -66,13 +67,24 @@ already offering. The row has nothing under it, because the pane IS the list and
 a column repeating it would be a second copy always a beat behind.
 
 `RailSection` is the vocabulary for all of this
-(`{ home, needsYou, drafts, storylines, people, files, archive, ai }`).
+(`{ home, needsYou, day, drafts, storylines, people, files, archive, ai }`).
 `archive` keeps its enum name and is **labelled 'Later'**, and `home` keeps its
 own and is **labelled 'Inbox'**: the column the store reads is `bucket =
 'later'`, `home` is spelled in providers, intents and tests from one end of the
 app to the other, and renaming either constant would rename it everywhere.
-`IconRail.stops` is an explicit ordered list: it DOES contain `files`, between
-People and Later, and does NOT contain `drafts`.
+`IconRail.stops` is an explicit ordered list of eight: it DOES contain `day`,
+right after Needs You — "what's next" is the question after "what do I owe" —
+and `files`, between People and Later, and does NOT contain `drafts`.
+
+**The Day column is days, not threads.** Neither Find nor the unread toggle
+touches it, and Enter on Find opens nothing there (`firstFindTarget` answers
+null). Without the calendar — SDK mode, or a grant missing the calendar scope —
+the column says `Calendar not connected` and has no rows. The Inbox stack's
+**Today** section is the Day stop's slice: up to three meetings still ahead
+today with a countdown, and `Invites · N`. It appears only once a sync tick has
+said the calendar is there, so a launch does not grow a section and lose it
+again. The rules for what a day holds are in
+[pipeline/14-calendar.md](pipeline/14-calendar.md#the-day-stop).
 
 **The Files column is a list of shelves, not of rows.** The four kinds are the
 whole column, with the one that is up highlighted, and there are no counts on
@@ -120,7 +132,7 @@ would be an affordance that lied.
 > open. A thread reached from INSIDE a room (a storyline
 > episode card, a person room's card) → side panel. A file → side panel.
 > ⤢ on a thread panel opens it in main; ⤢ on a file opens the full viewer.
-> Opening a file from a side thread REPLACES the side panel.
+> Opening a file from a side thread STACKS on it; ✕ returns to the thread.
 
 That is Slack's rule, and it is what keeps the room on screen while one
 conversation in it is being read.
@@ -143,7 +155,8 @@ one line — From · Subject · Ask · When, an ask keeping its tone as a dot �
 no bar and no Result cell: the thread beside carries both, and its Why panel's
 `What happened ›` is the door to the history.
 
-`SidePanel` has seven kinds, and the panel shows exactly one of them:
+`SidePanel` has nine kinds, and the panel shows one of them at a time — the
+innermost of a stack:
 
 | Kind | What it holds | Opened by |
 |---|---|---|
@@ -154,11 +167,20 @@ no bar and no Result cell: the thread beside carries both, and its Why panel's
 | `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, an Inbox row's stage bar or Result cell, an Archive row |
 | `ContextPanel` | which directories a room reads when a reply is drafted | the room header's **Context** on a thread and on a storyline |
 | `ContextFilePanel` | one file out of one of those directories — its words, the passage a citation named, its `AI` summary, and **Consult for the reply** | a provenance chip under the composer's caption, a `Files ›` row on the Context panel, a tile in the search's **In your directories** list |
+| `CheatSheetPanel` | the keyboard shortcuts | `?` |
+| `EventPanel` | one calendar event — when, where, who organised it, your answer, Join and **Open in Outlook**, the attendees with their answers and a tally, the overlap line, the conversations that carried the invite (and the Teams meeting chat), the invite's own text as plain words, and the calendar writes the owner's role allows (answer, propose, move, cancel, delete — `docs/pipeline/14-calendar.md`, Writes) | a Day agenda, all-day or invite row; a Today-section meeting row; **Open event** on an invite card in a thread (pushed when the thread is the one beside); a person room's next / last meeting line |
 
-Why, Person, History, Context and the context file follow the file rule: opened from a thread
-that is itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
-`What happened ›` swaps the history into the same slot, and its ✕ returns to
-the transcript, not to Why. None of Why, History, Context or the context file
+The side is a STACK (`_sideStack`; `_side` is the innermost panel). A panel
+opened from INSIDE the one beside — a file, a Why or a history asked for from
+the thread beside, a directory file from the Context panel, the key sheet —
+is pushed on it (`_openBeside(panel, push: true)`), and its ✕ (`_closeSide`)
+pops back to what it was opened from, closing the side only when nothing is
+left underneath. A panel opened from OUTSIDE the side replaces the whole
+stack's top, because nobody navigated into it and there is nothing to return
+to. Pushing the panel already on top replaces it, so a second tap on the same
+chip cannot stack a panel on itself; pushing one that already sits deeper
+unwinds back to it, so a meeting and its thread opened from each other in
+turn cannot grow the stack without end. None of Why, History, Context or the context file
 carries ⤢: each is prose or a short list about one thing, and neither improves
 by being given the whole window.
 The history takes the thread's minimum width (`threadMinWidth`) rather than the
@@ -172,11 +194,38 @@ screen — what it reads, what each lever writes — is in
 [pipeline/README.md](pipeline/README.md#finding-out-what-happened-to-a-message).
 
 `_main()`'s ladder is the priority order, top rung first: compose → Settings →
-activity log → add-thread picker → pick-storyline picker → full file viewer →
-thread → storyline → **room** → **Drafts & sent** → Inbox → AI → section
-overview. A pane outranks what it was opened from because it is the newer thing
-the user asked for. Drafts & sent sits directly above the Inbox because its row
-lives in the Inbox stack.
+activity log → add-thread picker → declare-storyline pane → pick-storyline
+picker → **Find a time** → full file viewer → thread → storyline → **room** → **Drafts & sent** →
+Inbox → **Day** → AI → section overview. A pane outranks what it was opened
+from because it is the newer thing the user asked for. Drafts & sent sits
+directly above the Inbox because its row lives in the Inbox stack. Day sits
+below every selection, so a thread opened from a Day row shows the thread,
+and closing it lands back on the same day: `_select` leaves `_selectedDay`
+alone, and only the setters that move `_section` clear it.
+
+**The Day stop, what opens where:**
+
+| From | Opens |
+|---|---|
+| the Day stop, or a day row in its column | `DayPane`'s agenda or grid for that day (`_selectDay`; paging the grid lands here too); the stop's arrival forces a calendar sync tick |
+| `Invites · N` (in the Day column or the Inbox stack's Today section) | `DayPane` in invites mode (`_openInvites`); `‹ Day` returns to the day it left |
+| a Due or Back-from-Later row on the agenda | that thread, in main (`_select`) |
+| a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
+| a Today-section meeting row | the event, beside, over whatever main is showing |
+| a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
+| a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time), and the pane underneath moves to the day it searches (`_followAsk` sets `_selectedDay` alone, so a thread, New message, Settings, the log or Invites open there stays open); the header and its chevron fold the section and bring it back |
+| a tap or drag on empty grid time | with an ask open, that ask's invite on the span (its proposal card, `Proposed` ghost, Send); else a blank event's card with a name field and a With line (`_createFromGrid`) — never a tile until written; a time already past is a toast, "That time has passed.", and nothing opens |
+| an ask's **×** | the ask leaves the column (a `scheduling_ask` label), with Undo on the toast and `z`; a newer message from them brings it back |
+| a slot in an open ask | the slot's day (`_selectDay`) with the invite standing as the command card's proposal and the grid's `Proposed` tile (`_showProposal`) |
+| an ask's **Put in reply** / **Open thread** | that thread, in main (`_select`), with the slots staged in its reply box / as it is |
+
+**Find a time** (`docs/pipeline/14-calendar.md` "Find a time") is the
+thread action bar's worded button beside Mark done, drawn on any thread with
+somebody to answer — its newest message inbound and other people on it — on
+the main thread and on a thread beside. A press is the owner's word that the
+thread asks for a time (a `scheduling_ask` label `yes`, unless it is already
+listed) and goes to the Day stop with that ask open in the column, its
+search running; there is no main-pane Find a time any more.
 
 ---
 
@@ -233,6 +282,15 @@ search box the reader clicks into still gets its keystrokes. At narrow widths
 ⌘K opens the rail overlay first, then requests focus in a post-frame callback —
 the field may only exist once that overlay has been laid out. Escape clears, and
 is bound inside `FindField` so it only fires while the box holds focus.
+
+**A calendar question in Find asks the Day stop.** A plain needle (not `>`, four
+characters or more) that `looksLikeCalendarCommand` accepts — "what's on
+tomorrow", "move my 3pm to Thursday" — gets ONE dynamic row in the strip,
+`Ask Day: <text> ↵`, and Enter takes it instead of opening the top row: Find
+clears, the Day stop opens, and the text is submitted to its command bar. The
+row carries the words (`AskDayIntent`), so it is not a `findCommands` entry;
+that list stays the eleven payload-free commands the palette and the cheat
+sheet pin.
 
 **Unread only** is a toggle in the caption row (`Key('unread-toggle')`), not a
 pill under the source chips: a fourth pill on that line would wrap onto a line
@@ -507,6 +565,12 @@ Tapping a room opens `_room()`: a `RoomHeader` titled by the person, subtitled
 - A done card reads `Done · N messages…` and a deferred one `Later · …`. The
   room holds both, and an unmarked closed thread in a list of live ones is a
   thread the reader answers twice.
+- **The meeting line**, first in the pane when the calendar knows either
+  answer: `Next meeting: Design review · Tomorrow 10:00 AM · Last met 12 days
+  ago`, read from the mirror over every address in the room
+  (`personMeetingsProvider`). Each half opens that event beside. Absent while
+  the calendar is not shown (no permission, SDK mode) and when neither
+  answer exists.
 - Above the list: a `FilterField` (`Filter threads…`), the pills
   `All · Direct · Groups`, and a `SortMenu` offering
   `Newest first · Oldest first`. The needle reaches the subject (reply prefix

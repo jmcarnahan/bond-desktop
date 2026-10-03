@@ -382,7 +382,9 @@ void main() {
 
       expect(seen.single.label, 'storyline_name');
       expect(seen.single.outcome, 'format');
-      expect(seen.single.error, contains('did not answer with JSON'));
+      // The category, never the sentence: it quotes the answer, and the
+      // record becomes a stored row (rowErrorFor).
+      expect(seen.single.error, 'format: not JSON');
     });
 
     test('the observer fires once per round trip, never twice', () async {

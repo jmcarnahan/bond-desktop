@@ -2080,6 +2080,29 @@ the storyline lane being woken per queued assign rather than at the end of the w
 Run files `golden-vector-embed-local-{text,excerpt}-prefix-86-20260930-2241*.json` and
 `golden-sweep-decision-20260930-224520/224804/224912/225110/225221/225409/225511.json`.
 
+**The calendar command head** (Phase 9 of the calendar round; `make calendar-heads`, owner-run
+against `make decide`). A second linear head on the same encoder, fitted by
+`tools/calendar_heads/fit.py` on the raw pooled vector of a typed Day-bar command, over the
+fictional labelled set in `app/test/fixtures/calendar_commands/` (400 train, 100 held out and 50
+hard, 40, 10 and 5 per action, no `unknown`; no held-out or hard line is a train line with its
+slots swapped). The fit writes under the git-ignored `tmp/calendar_heads/` and prints the head's
+held-out and hard-set accuracy; the Dart leg (`test/calendar_command_heldout_test.dart`) prints
+the lexicon's on the same sets and the adoption line. Adoption bar (the calendar plan §1.1): the
+head ships only at ≥ 0.90 AND ≥ the lexicon + 0.05 on the HELD-OUT set — the hard set is read
+beside it and decides nothing; on `adoption: go` the owner runs `make calendar-heads-adopt`,
+otherwise nothing ships and the lexicon reads commands alone. Read the head's number against the
+lexicon's from the same day and tree, never against 1.0. `encoder_model` is the installed
+`decide-heads.json`'s own `model` name, which the fit copies into the head and the app checks
+against the installed heads at every call; the qhash names only the question set.
+
+| date | encoder_model (qhash) | head held-out acc (n) | lexicon held-out acc (n) | head hard acc (n) | lexicon hard acc (n) | above the 0.80 bar | l2 / T | adopted | note |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-30 | pending owner run (copied from the installed `decide-heads.json` at fit time — the v3 question set `f495a7dc48aa34d5` since the decision-questions round) | pending owner run | pending owner run | pending owner run | pending owner run | pending owner run | pending | pending | serverless, the lexicon reads 0.710 (n=100) held-out and 0.140 (n=50) hard on this set; it read 0.830 held-out before fifteen template-sharing held-out and hard lines were rephrased |
+
+To fill the pending cells, run `make calendar-heads` with the decision server live. Copy its
+four accuracies and its `adoption: go | no-go (…)` line into a new dated row, and run
+`make calendar-heads-adopt` only when that line says `go`.
+
 ### Recommendations (decision-model round, 2026-09-28)
 
 What the round ships, and the rows that justify each. All numbers are keep-only

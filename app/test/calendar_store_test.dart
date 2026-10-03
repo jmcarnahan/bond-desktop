@@ -1,0 +1,641 @@
+import 'dart:convert';
+
+import 'package:bond_inbox/data/calendar_store.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
+import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/test_db.dart';
+
+void main() {
+  late BondDatabase db;
+  late CalendarStore calendar;
+  late MessageStore store;
+
+  setUpAll(initCalendarZones);
+
+  setUp(() {
+    db = testDb();
+    calendar = CalendarStore(db);
+    store = MessageStore(db);
+  });
+
+  tearDown(() async {
+    await db.close();
+  });
+
+  final now = DateTime.now().toUtc();
+  DateTime inHours(num h) =>
+      now.add(Duration(minutes: (h * 60).round()));
+
+  CalendarEvent timed(
+    String id, {
+    required DateTime start,
+    DateTime? end,
+    String eventType = 'singleInstance',
+    bool isCancelled = false,
+    bool isOrganizer = false,
+    String responseStatus = 'none',
+    bool? responseRequested,
+    String organizerAddress = 'dana@contoso.com',
+    List<Attendee> attendees = const [],
+    String changeKey = 'ck-1',
+  }) =>
+      CalendarEvent(
+        id: id,
+        subject: 'Meeting $id',
+        eventType: eventType,
+        startUtc: start,
+        endUtc: end ?? start.add(const Duration(minutes: 30)),
+        isCancelled: isCancelled,
+        isOrganizer: isOrganizer,
+        responseStatus: responseStatus,
+        responseRequested: responseRequested,
+        organizerAddress: organizerAddress,
+        attendees: attendees,
+        changeKey: changeKey,
+      );
+
+  CalendarEvent allDay(
+    String id,
+    CalendarDate start, {
+    CalendarDate? end,
+    String responseStatus = 'none',
+  }) =>
+      CalendarEvent(
+        id: id,
+        subject: 'Day $id',
+        isAllDay: true,
+        startDate: start,
+        endDate: end ?? start.addDays(1),
+        responseStatus: responseStatus,
+      );
+
+  Future<int> count() async => (await db
+          .customSelect('SELECT COUNT(*) AS n FROM calendar_events')
+          .getSingle())
+      .data['n'] as int;
+
+  group('writes', () {
+    test('an upsert of a known id replaces its fields and its run', () async {
+      final start = inHours(3);
+      expect(
+        await calendar.upsertEvents([timed('evt-1', start: start)],
+            syncRun: 'run-a'),
+        1,
+      );
+      await calendar.upsertEvents(
+        [timed('evt-1', start: start, changeKey: 'ck-2')],
+        syncRun: 'run-b',
+      );
+
+      final stored = await calendar.event('evt-1');
+      expect(stored!.changeKey, 'ck-2');
+      expect(stored.startUtc, DateTime.parse(calendarStamp(start)));
+      expect(await count(), 1);
+      final run = await db
+          .customSelect("SELECT sync_run FROM calendar_events WHERE id = 'evt-1'")
+          .getSingle();
+      expect(run.data['sync_run'], 'run-b');
+    });
+
+    test('ids in skipIds are not written', () async {
+      await calendar.upsertEvents([timed('evt-1', start: inHours(3))],
+          syncRun: 'run-a');
+      final written = await calendar.upsertEvents(
+        [
+          timed('evt-1', start: inHours(3), changeKey: 'stale'),
+          timed('evt-2', start: inHours(4)),
+        ],
+        syncRun: 'run-a',
+        skipIds: {'evt-1'},
+      );
+      expect(written, 1);
+      expect((await calendar.event('evt-1'))!.changeKey, 'ck-1');
+      expect(await calendar.event('evt-2'), isNotNull);
+    });
+
+    test('deleteEvents ignores ids it never stored', () async {
+      await calendar.upsertEvents([
+        timed('evt-1', start: inHours(1)),
+        timed('evt-2', start: inHours(2)),
+      ], syncRun: 'run-a');
+      expect(await calendar.deleteEvents(['evt-1', 'never-seen']), 1);
+      expect(await calendar.deleteEvents(const []), 0);
+      expect(await count(), 1);
+    });
+
+    test('sweepRun deletes other runs except the kept ids', () async {
+      await calendar.upsertEvents([
+        timed('old-1', start: inHours(1)),
+        timed('old-2', start: inHours(2)),
+      ], syncRun: 'run-a');
+      await calendar.upsertEvents([timed('new-1', start: inHours(3))],
+          syncRun: 'run-b');
+
+      expect(await calendar.sweepRun('run-b', keepIds: {'old-2'}), 1);
+      expect(await calendar.event('old-1'), isNull);
+      expect(await calendar.event('old-2'), isNotNull);
+      expect(await calendar.event('new-1'), isNotNull);
+    });
+
+    test('retagRun moves only the named rows into the run, and nothing else',
+        () async {
+      await calendar.upsertEvents([
+        timed('mine', start: inHours(1), changeKey: 'after-write'),
+        timed('theirs', start: inHours(2)),
+      ], syncRun: 'run-a');
+
+      expect(await calendar.retagRun(['mine', 'never-seen'], 'run-b'), 1);
+      expect(await calendar.retagRun(const [], 'run-b'), 0);
+      expect((await calendar.event('mine'))!.changeKey, 'after-write');
+
+      expect(await calendar.sweepRun('run-b'), 1);
+      expect(await calendar.event('mine'), isNotNull);
+      expect(await calendar.event('theirs'), isNull);
+    });
+
+    CalendarEvent occurrence(String id, String master) => CalendarEvent(
+          id: id,
+          seriesMasterId: master,
+          eventType: 'occurrence',
+          startUtc: inHours(24),
+          endUtc: inHours(25),
+        );
+
+    test('an answer to a master answers its occurrences', () async {
+      await calendar.upsertEvents([
+        occurrence('occ-1', 'master'),
+        occurrence('occ-2', 'master'),
+        timed('single', start: inHours(3)),
+        timed('other', start: inHours(4)),
+      ], syncRun: 'run-a');
+
+      final series = await calendar.setResponseStatus('master', 'accepted');
+      expect(series..sort(), ['occ-1', 'occ-2']);
+      final one = await calendar.setResponseStatus('single', 'declined');
+      expect(one, ['single']);
+      expect(await calendar.setResponseStatus('never-seen', 'declined'),
+          isEmpty);
+      expect(await calendar.setResponseStatus('', 'declined'), isEmpty);
+
+      expect((await calendar.event('occ-1'))!.responseStatus, 'accepted');
+      expect((await calendar.event('occ-2'))!.responseStatus, 'accepted');
+      expect((await calendar.event('single'))!.responseStatus, 'declined');
+      expect((await calendar.event('other'))!.responseStatus, 'none');
+    });
+
+    test('a delete takes a master\'s occurrences with it', () async {
+      await calendar.upsertEvents([
+        occurrence('occ-1', 'master'),
+        occurrence('occ-2', 'master'),
+        timed('single', start: inHours(3)),
+      ], syncRun: 'run-a');
+
+      // An empty id names nothing — not every row whose master is unset.
+      expect(await calendar.deleteWithOccurrences(''), isEmpty);
+      expect(await count(), 3);
+      final gone = await calendar.deleteWithOccurrences('master');
+      expect(gone..sort(), ['occ-1', 'occ-2']);
+      expect(await calendar.deleteWithOccurrences('single'), ['single']);
+      expect(await count(), 0);
+    });
+  });
+
+  group('eventsBetween', () {
+    // The first Sunday of November 2026: Los Angeles leaves daylight time
+    // that morning, so its day is 25 hours long.
+    const day = CalendarDate(2026, 11, 1);
+
+    Future<List<String>> idsOnDay(CalendarZone zone, CalendarDate d) async {
+      final events = await calendar.eventsBetween(
+        startUtc: zone.localDateTime(d, 0, 0).toUtc(),
+        endUtc: zone.localDateTime(d.addDays(1), 0, 0).toUtc(),
+        fromDate: d,
+        toDateExclusive: d.addDays(1),
+      );
+      return [for (final e in events) e.id];
+    }
+
+    for (final name in [
+      'America/Los_Angeles',
+      'UTC',
+      'Pacific/Auckland',
+    ]) {
+      test('a 23:30 meeting and an all-day event land on their day in $name',
+          () async {
+        final zone = CalendarZone.tryNamed(name)!;
+        final lateStart = zone.localDateTime(day, 23, 30).toUtc();
+        await calendar.upsertEvents([
+          timed('late', start: lateStart),
+          allDay('holiday', day),
+        ], syncRun: 'r');
+
+        expect(await idsOnDay(zone, day), ['holiday', 'late']);
+        expect(await idsOnDay(zone, day.addDays(1)), isEmpty);
+        expect(await idsOnDay(zone, day.addDays(-1)), isEmpty);
+      });
+    }
+
+    test('a meeting across midnight shows on both days', () async {
+      final zone = CalendarZone.utc();
+      await calendar.upsertEvents([
+        timed(
+          'overnight',
+          start: DateTime.utc(2026, 11, 1, 23),
+          end: DateTime.utc(2026, 11, 2, 1),
+        ),
+      ], syncRun: 'r');
+      expect(await idsOnDay(zone, day), ['overnight']);
+      expect(await idsOnDay(zone, day.addDays(1)), ['overnight']);
+    });
+
+    test('a meeting ending at midnight is not on the next day', () async {
+      final zone = CalendarZone.utc();
+      await calendar.upsertEvents([
+        timed(
+          'to-midnight',
+          start: DateTime.utc(2026, 11, 1, 23),
+          end: DateTime.utc(2026, 11, 2),
+        ),
+      ], syncRun: 'r');
+      expect(await idsOnDay(zone, day.addDays(1)), isEmpty);
+    });
+
+    test('series masters are left out, cancelled events kept', () async {
+      final zone = CalendarZone.utc();
+      await calendar.upsertEvents([
+        timed('master',
+            start: DateTime.utc(2026, 11, 1, 9), eventType: 'seriesMaster'),
+        timed('occurrence',
+            start: DateTime.utc(2026, 11, 1, 9), eventType: 'occurrence'),
+        timed('cancelled', start: DateTime.utc(2026, 11, 1, 10),
+            isCancelled: true),
+      ], syncRun: 'r');
+      expect(await idsOnDay(zone, day), ['occurrence', 'cancelled']);
+    });
+
+    test('a zero-length event counts when it starts inside the span',
+        () async {
+      final zone = CalendarZone.utc();
+      final at = DateTime.utc(2026, 11, 1, 12);
+      await calendar.upsertEvents([
+        timed('instant', start: at, end: at),
+        timed('at-midnight',
+            start: DateTime.utc(2026, 11, 2), end: DateTime.utc(2026, 11, 2)),
+      ], syncRun: 'r');
+      expect(await idsOnDay(zone, day), ['instant']);
+      expect(await idsOnDay(zone, day.addDays(1)), ['at-midnight']);
+    });
+
+    test('all-day first, then by start', () async {
+      final zone = CalendarZone.utc();
+      await calendar.upsertEvents([
+        timed('b', start: DateTime.utc(2026, 11, 1, 14)),
+        timed('a', start: DateTime.utc(2026, 11, 1, 9)),
+        allDay('multi', day.addDays(-1), end: day.addDays(2)),
+      ], syncRun: 'r');
+      expect(await idsOnDay(zone, day), ['multi', 'a', 'b']);
+    });
+  });
+
+  group('invitesOwed', () {
+    test('keeps only future invites still owed an answer', () async {
+      final today = CalendarDate.ofDateTime(now);
+      await calendar.upsertEvents([
+        timed('owed', start: inHours(5)),
+        timed('owed-soon', start: inHours(1), responseStatus: 'notResponded'),
+        timed('asked-explicitly', start: inHours(6), responseRequested: true),
+        timed('no-reply-wanted', start: inHours(5), responseRequested: false),
+        timed('accepted', start: inHours(5), responseStatus: 'accepted'),
+        timed('mine', start: inHours(5), isOrganizer: true),
+        timed('cancelled', start: inHours(5), isCancelled: true),
+        timed('past', start: inHours(-2)),
+        timed('master', start: inHours(5), eventType: 'seriesMaster'),
+        allDay('all-day-today', today),
+        allDay('all-day-yesterday', today.addDays(-1)),
+      ], syncRun: 'r');
+
+      final owed = await calendar.invitesOwed(nowUtc: now, today: today);
+      final ids = [for (final e in owed) e.id];
+      expect(ids.toSet(),
+          {'owed', 'owed-soon', 'asked-explicitly', 'all-day-today'});
+      // Soonest first: today's all-day event sorts at its UTC midnight.
+      expect(ids.first, 'all-day-today');
+      expect(ids.indexOf('owed-soon'), lessThan(ids.indexOf('owed')));
+      expect(ids.indexOf('owed'), lessThan(ids.indexOf('asked-explicitly')));
+      for (final e in owed) {
+        expect(e.needsResponse, isTrue, reason: e.id);
+      }
+    });
+  });
+
+  group('meetings with a person', () {
+    const dana = Attendee(name: 'Dana', address: 'dana@contoso.com');
+    const sam = Attendee(name: 'Sam', address: 'sam@fabrikam.com');
+
+    setUp(() async {
+      await calendar.upsertEvents([
+        timed('past-with-sam',
+            start: inHours(-5), attendees: const [sam], organizerAddress: ''),
+        timed('recent-with-sam',
+            start: inHours(-2), attendees: const [sam], organizerAddress: ''),
+        timed('running-now',
+            start: inHours(-0.25), attendees: const [sam], organizerAddress: ''),
+        timed('next-with-sam',
+            start: inHours(2), attendees: const [sam], organizerAddress: ''),
+        timed('later-with-sam',
+            start: inHours(5), attendees: const [sam], organizerAddress: ''),
+        timed('declined-with-sam',
+            start: inHours(1),
+            attendees: const [sam],
+            organizerAddress: '',
+            responseStatus: 'declined'),
+        timed('cancelled-with-sam',
+            start: inHours(1.5),
+            attendees: const [sam],
+            organizerAddress: '',
+            isCancelled: true),
+        timed('dana-organises',
+            start: inHours(3),
+            attendees: const [dana],
+            organizerAddress: 'DANA@contoso.com'),
+      ], syncRun: 'r');
+    });
+
+    test('nextMeetingWith matches attendees case-insensitively', () async {
+      final next = await calendar.nextMeetingWith(
+        [' Sam@Fabrikam.com '],
+        nowUtc: now,
+      );
+      expect(next?.id, 'next-with-sam');
+    });
+
+    test('nextMeetingWith matches the organiser', () async {
+      final next = await calendar
+          .nextMeetingWith(['nobody@example.com', 'dana@contoso.com'], nowUtc: now);
+      expect(next?.id, 'dana-organises');
+    });
+
+    test('lastMetWith is the latest meeting that has ended', () async {
+      final last =
+          await calendar.lastMetWith(['sam@fabrikam.com'], nowUtc: now);
+      expect(last?.id, 'recent-with-sam');
+    });
+
+    test('no addresses means no answer', () async {
+      expect(await calendar.nextMeetingWith(const [], nowUtc: now), isNull);
+      expect(await calendar.lastMetWith(['  '], nowUtc: now), isNull);
+      expect(
+        await calendar.nextMeetingWith(['stranger@example.com'], nowUtc: now),
+        isNull,
+      );
+    });
+  });
+
+  group('messagesForEvent', () {
+    Future<void> seed(String id, String? meta, DateTime receivedAt) =>
+        store.upsertMessage({
+          'source': 'email',
+          'source_message_id': id,
+          'conversation_key': 'conv-$id',
+          'direction': 'inbound',
+          'subject': 'Invitation: Planning',
+          'from_name': 'Dana',
+          'from_address': 'dana@contoso.com',
+          'received_at': MessageStore.isoStamp(receivedAt),
+          'body_text': 'Body of $id',
+          'triage_status': 'pending',
+          'source_meta_json': meta,
+        });
+
+    test('finds the linked messages newest first, past malformed meta',
+        () async {
+      final link = jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-1'});
+      await seed('m-old', link, now.subtract(const Duration(hours: 5)));
+      await seed('m-new', link, now.subtract(const Duration(hours: 1)));
+      await seed('m-other',
+          jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-2'}),
+          now.subtract(const Duration(hours: 2)));
+      await seed('m-broken', '{not json', now.subtract(const Duration(hours: 3)));
+      await seed('m-none', null, now.subtract(const Duration(hours: 4)));
+
+      final refs = await calendar.messagesForEvent('evt-1');
+      expect([for (final r in refs) r.sourceMessageId], ['m-new', 'm-old']);
+      expect(refs.first.source, 'email');
+      expect(refs.first.conversationKey, 'conv-m-new');
+      expect(await calendar.messagesForEvent('evt-missing'), isEmpty);
+    });
+  });
+
+  group('occurrencesOf', () {
+    test('a series in start order, without its master or other series',
+        () async {
+      CalendarEvent occ(String id, DateTime start, {String master = 'm-1'}) =>
+          CalendarEvent(
+            id: id,
+            subject: 'Weekly',
+            eventType: 'occurrence',
+            seriesMasterId: master,
+            startUtc: start,
+            endUtc: start.add(const Duration(minutes: 30)),
+          );
+      await calendar.upsertEvents([
+        timed('m-1', start: inHours(-200), eventType: 'seriesMaster'),
+        occ('o-3', inHours(48)),
+        occ('o-1', inHours(-24)),
+        occ('o-2', inHours(24)),
+        occ('x-1', inHours(1), master: 'm-2'),
+      ], syncRun: 'run-a');
+
+      final list = await calendar.occurrencesOf('m-1');
+      expect([for (final e in list) e.id], ['o-1', 'o-2', 'o-3']);
+      expect(await calendar.occurrencesOf(''), isEmpty);
+      expect(await calendar.occurrencesOf('m-missing'), isEmpty);
+    });
+
+    test('an all-day series comes out by date', () async {
+      final day = CalendarDate.ofDateTime(now);
+      CalendarEvent occ(String id, CalendarDate d) => CalendarEvent(
+            id: id,
+            subject: 'Offsite',
+            eventType: 'occurrence',
+            seriesMasterId: 'm-ad',
+            isAllDay: true,
+            startDate: d,
+            endDate: d.addDays(1),
+          );
+      await calendar.upsertEvents([
+        occ('b', day.addDays(7)),
+        occ('a', day),
+      ], syncRun: 'run-a');
+      final list = await calendar.occurrencesOf('m-ad');
+      expect([for (final e in list) e.id], ['a', 'b']);
+    });
+  });
+
+  group('briefs', () {
+    test('put, read back, replace, and decode a ready brief', () async {
+      expect(await calendar.brief('evt-1'), isNull);
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h1',
+        status: EventBrief.failed,
+        generatedAt: calendarStamp(now),
+      );
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.failed);
+      expect((await calendar.brief('evt-1'))!.brief, isNull);
+
+      const brief = MeetingBrief(
+        headline: 'Dana is waiting on the quote.',
+        points: [BriefPoint(text: 'Quote owed.', thread: 0)],
+        threads: [
+          BriefThreadRef(
+            source: 'email',
+            conversationKey: 'c-1',
+            subject: 'Fabrikam renewal',
+          ),
+        ],
+      );
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h2',
+        status: EventBrief.ready,
+        briefJson: jsonEncode(brief.toJson()),
+        model: 'bond-prose',
+        generatedAt: calendarStamp(now),
+      );
+      final row = (await calendar.brief('evt-1'))!;
+      expect(row.inputsHash, 'h2');
+      expect(row.model, 'bond-prose');
+      expect(row.generatedAtUtc!.difference(now).inSeconds.abs(), lessThan(1));
+      expect(row.brief!.headline, 'Dana is waiting on the quote.');
+      expect(row.brief!.threadAt(0)!.subject, 'Fabrikam renewal');
+    });
+
+    test('a skipped row says which rule kept the meeting out', () async {
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: '${EventBrief.ineligiblePrefix}no_mail',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+      expect((await calendar.brief('evt-1'))!.skipReason, 'no_mail');
+    });
+
+    test('touchBrief moves the stamp (and a given hash) and nothing else',
+        () async {
+      expect(
+          await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now)),
+          isFalse,
+          reason: 'no row, nothing written');
+      final old = calendarStamp(now.subtract(const Duration(hours: 3)));
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h1',
+        status: EventBrief.ready,
+        briefJson: '{"headline":"Kept."}',
+        model: 'm',
+        generatedAt: old,
+      );
+      expect(
+          await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now)),
+          isTrue);
+      var row = (await calendar.brief('evt-1'))!;
+      expect((row.status, row.briefJson, row.inputsHash, row.model),
+          (EventBrief.ready, '{"headline":"Kept."}', 'h1', 'm'));
+      expect(row.generatedAt, calendarStamp(now));
+
+      await calendar.touchBrief('evt-1',
+          generatedAt: calendarStamp(now), inputsHash: 'h2');
+      row = (await calendar.brief('evt-1'))!;
+      expect((row.status, row.inputsHash), (EventBrief.ready, 'h2'));
+    });
+
+    test('briefsFor reads many; deleteBriefsExcept keeps only the named',
+        () async {
+      for (final id in ['a', 'b', 'c']) {
+        await calendar.putBrief(
+          eventId: id,
+          inputsHash: 'h',
+          status: EventBrief.skipped,
+          generatedAt: calendarStamp(now),
+        );
+      }
+      expect((await calendar.briefsFor(['a', 'c', 'nope'])).keys.toSet(),
+          {'a', 'c'});
+      expect(await calendar.deleteBriefsExcept(['b']), 2);
+      expect((await calendar.briefsFor(['a', 'b', 'c'])).keys, ['b']);
+      expect(await calendar.deleteBriefsExcept(const []), 1);
+    });
+  });
+
+  group('conversationsWithAddresses', () {
+    Future<void> conversation(
+      String key,
+      Object participants, {
+      required DateTime last,
+      String source = 'email',
+    }) =>
+        store.upsertConversation({
+          'source': source,
+          'conversation_key': key,
+          'subject': 'Thread $key',
+          'participants_json':
+              participants is String ? participants : jsonEncode(participants),
+          'state': 'waiting',
+          'last_message_at': MessageStore.isoStamp(last),
+        });
+
+    test('matches a participant address case-insensitively, inside the '
+        'window, newest first', () async {
+      await conversation('c-old', [
+        {'name': 'Dana', 'email': 'dana@fabrikam.com'},
+      ], last: inHours(-24 * 40));
+      await conversation('c-mid', [
+        {'name': 'Dana', 'email': 'Dana@Fabrikam.com'},
+      ], last: inHours(-48));
+      await conversation('c-new', [
+        {'name': 'Dana', 'email': 'dana@fabrikam.com'},
+      ], last: inHours(-1));
+      // A Teams chat stores its people as `teams:<id>`, never an address, so
+      // Dana's chat is NOT matched by her address: briefs are mail only
+      // until the people directory maps the two.
+      await conversation('c-chat', [
+        {'name': 'Dana', 'email': 'teams:3f1c-dana'},
+      ], last: inHours(-1), source: 'teams');
+      await conversation('c-other', [
+        {'name': 'Sam', 'email': 'sam@fabrikam.com'},
+      ], last: inHours(-1));
+      // A malformed blob and a bare string element cannot fail the query.
+      await conversation('c-bad', 'not json', last: inHours(-1));
+      await conversation('c-str', ['dana@fabrikam.com'], last: inHours(-1));
+
+      final found = await store.conversationsWithAddresses(
+        {'DANA@fabrikam.com'},
+        sinceIso: MessageStore.isoStamp(inHours(-24 * 30)),
+      );
+      expect([for (final c in found) c.id], ['c-new', 'c-mid']);
+      expect([for (final c in found) c.source], everyElement('email'));
+    });
+
+    test('an empty address set reads nothing; the limit holds', () async {
+      for (var i = 0; i < 5; i++) {
+        await conversation('c-$i', [
+          {'name': 'Dana', 'email': 'dana@fabrikam.com'},
+        ], last: inHours(-i - 1));
+      }
+      final since = MessageStore.isoStamp(inHours(-24 * 30));
+      expect(await store.conversationsWithAddresses({}, sinceIso: since),
+          isEmpty);
+      final two = await store.conversationsWithAddresses(
+        {'dana@fabrikam.com'},
+        sinceIso: since,
+        limit: 2,
+      );
+      expect([for (final c in two) c.id], ['c-0', 'c-1']);
+    });
+  });
+}

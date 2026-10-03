@@ -7,6 +7,7 @@ import '../models/attachment_models.dart';
 import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
+import '../services/calendar/event_view.dart' show isCancellationCard;
 import '../services/decision/needs_you_predicate.dart';
 import '../services/external_sender.dart';
 import '../services/mention_index.dart';
@@ -199,6 +200,14 @@ class ThreadDetailPanel extends StatefulWidget {
   /// asks the host per message and places whatever comes back.
   final Widget? Function(Message message)? suggestionFor;
 
+  /// The meeting card for one message — the invite or cancellation it
+  /// carries — drawn under it. Null, for a message or altogether, draws none.
+  ///
+  /// A builder for [suggestionFor]'s reason: the panel renders a transcript
+  /// and knows nothing about calendars. The host decides which messages are
+  /// invites and builds the card; the panel asks per message and places it.
+  final Widget? Function(Message message)? meetingCardFor;
+
   /// Brings the composer forward. The box is always docked under a thread that
   /// can be answered, so this is a focus rather than an opening — but every ask
   /// on this pane, the banner and each message's own line, is still a call to
@@ -228,6 +237,11 @@ class ThreadDetailPanel extends StatefulWidget {
   /// participants — and the panel neither knows nor asks. Null hides the
   /// button, for a host with no compose to open.
   final VoidCallback? onCompose;
+
+  /// Find a time for this thread: the host decides whether it has somebody
+  /// to answer, and a press opens it as an ask in the Day column; null draws
+  /// no button.
+  final VoidCallback? onFindTime;
 
   /// What opening one of the thread's files does. Null leaves every chip and
   /// picture in the transcript a statement — the panel has nowhere of its own
@@ -367,12 +381,14 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onFindLabel,
     this.afterTranscript,
     this.suggestionFor,
+    this.meetingCardFor,
     this.onOpenReply,
     this.onReplyTo,
     this.onSuggestFor,
     this.onWhy,
     this.onPeople,
     this.onCompose,
+    this.onFindTime,
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
@@ -835,6 +851,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         conversationClosed: closed,
       );
       final suggestion = widget.suggestionFor?.call(message);
+      final card = widget.meetingCardFor?.call(message);
       final header = previous == null || !sameRun(previous, message);
       final next = i + 1 < widget.messages.length ? widget.messages[i + 1] : null;
       // A bot run's line sits between this row and the next, so the next one
@@ -860,6 +877,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         // Only a line that is actually on screen gets a tap.
         onAskTap: open ? widget.onOpenReply : null,
         suggestion: suggestion,
+        meetingCard: card,
         collapsible: collapsible,
         // Folded by default only where there is nothing left to do: history the
         // thread has moved past. An open ask or a live suggestion is the whole
@@ -876,10 +894,16 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
         // A pending jump counts too: a far row the list has not built yet only
         // sees `unfoldRequest` move via didUpdateWidget, so a row FIRST built
         // mid-jump must read the request here or the jump lands on a fold.
+        //
+        // An invite is never folded away either, for the suggestion's reason:
+        // a meeting still to answer or join is something left to do. A
+        // cancellation is not: its card is one line of history with nothing
+        // left to do, so it folds like any other.
         initiallyCollapsed: collapsible &&
             !open &&
             !namesOwner &&
             suggestion == null &&
+            (card == null || isCancellationCard(message)) &&
             !widget.unfolded.contains(message.id) &&
             !_unfoldRequests.containsKey(message.id),
         onFoldChanged: widget.onFoldChanged == null
@@ -1350,6 +1374,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       onContext: widget.onContext,
       contextLinked: widget.contextLinked,
       onCompose: widget.onCompose,
+      onFindTime: widget.onFindTime,
       labels: c.labels,
       onAddLabel: open == null ? null : () => open(LabelPickerMode.label),
       onRemoveLabel: widget.onRemoveLabel,

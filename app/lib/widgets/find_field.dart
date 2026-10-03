@@ -73,6 +73,17 @@ class FindField extends StatefulWidget {
   /// frame would be refused by the gate, silently.
   final ValueChanged<Intent>? onCommand;
 
+  /// Whether a plain needle reads as a question or a request for the
+  /// calendar ("what's on tomorrow", "move my 3pm to Thursday"). When it
+  /// does, the strip offers ONE dynamic row, `Ask Day: <text> ↵`, whose
+  /// intent is an [AskDayIntent] handed to [onCommand] like any other
+  /// command — so Enter asks the Day stop instead of opening the top row.
+  ///
+  /// Not a [findCommands] entry: that list is fixed, payload-free and pinned,
+  /// and this row carries the words. Null — the default — never offers it,
+  /// and neither does a host with no [onCommand].
+  final bool Function(String text)? asksDay;
+
   /// What every finder in the suite reaches this box by.
   static const Key fieldKey = ValueKey('find-field');
 
@@ -99,6 +110,7 @@ class FindField extends StatefulWidget {
     required this.onClear,
     this.labelNames = const [],
     this.onCommand,
+    this.asksDay,
   });
 
   @override
@@ -350,9 +362,22 @@ class _FindFieldState extends State<FindField> {
   }
 
   /// The commands worth offering for what has been typed, or none at all while
-  /// no host is listening for one.
-  List<FindCommand> _commandsFor(String text) =>
-      widget.onCommand == null ? const [] : commandsFor(text);
+  /// no host is listening for one. A plain needle the host reads as a
+  /// calendar command gets the one "Ask Day" row ([FindField.asksDay]); four
+  /// characters at least, so the row does not flicker in under a half-typed
+  /// word.
+  List<FindCommand> _commandsFor(String text) {
+    if (widget.onCommand == null) return const [];
+    final asksDay = widget.asksDay;
+    final trimmed = text.trim();
+    if (asksDay != null &&
+        !isCommandNeedle(text) &&
+        trimmed.length >= 4 &&
+        asksDay(trimmed)) {
+      return [FindCommand(askDayLabel(trimmed), AskDayIntent(trimmed))];
+    }
+    return commandsFor(text);
+  }
 
   /// Picking a command: the box gives up the needle and the cursor, and the act
   /// happens a frame later, on the list.
@@ -504,6 +529,25 @@ class FindCommand {
 
   const FindCommand(this.label, this.intent, {this.keyHint});
 }
+
+/// Ask the Day stop's command bar [text]: the one intent that carries a
+/// payload, because it is not about the thread the reader is on — it is the
+/// words themselves, handed to the calendar. The screen answers it by
+/// selecting the Day stop and submitting [text] there.
+class AskDayIntent extends Intent {
+  const AskDayIntent(this.text);
+
+  final String text;
+
+  @override
+  bool operator ==(Object other) => other is AskDayIntent && other.text == text;
+
+  @override
+  int get hashCode => text.hashCode;
+}
+
+/// The words on the dynamic "Ask Day" row.
+String askDayLabel(String text) => 'Ask Day: ${text.trim()} ↵';
 
 /// The prefix that turns the Find box into the palette.
 ///

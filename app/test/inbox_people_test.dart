@@ -148,6 +148,7 @@ void main() {
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
       keepingDecisionClient(),
+      noCommandHeads(),
       initialSectionProvider.overrideWithValue(section),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),

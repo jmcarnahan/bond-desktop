@@ -70,11 +70,14 @@ class IconRail extends StatelessWidget {
     this.photos,
   });
 
-  /// Top to bottom. Home leads because it is where the app lands; AI is last
-  /// because it is the only one that is about the app rather than the mail.
+  /// Top to bottom, eight stops. Home leads because it is where the app
+  /// lands; AI is last because it is the only one that is about the app
+  /// rather than the mail. Day sits right after Needs You because "what's
+  /// next" is the question after "what do I owe".
   static const List<(RailSection, IconData)> stops = [
     (RailSection.home, Icons.bolt),
     (RailSection.needsYou, Icons.notifications_outlined),
+    (RailSection.day, Icons.calendar_today_outlined),
     (RailSection.storylines, Icons.tag),
     (RailSection.people, Icons.people_outline),
     (RailSection.files, Icons.folder_outlined),
@@ -144,7 +147,7 @@ class IconRail extends StatelessWidget {
                         children: [
                           Icon(icon, size: 20, color: ink),
                           const SizedBox(height: 2),
-                          // The label is what stops seven similar glyphs being
+                          // The label is what stops eight similar glyphs being
                           // a guessing game. It clips before the rail widens:
                           // the tooltip carries the whole word.
                           Padding(

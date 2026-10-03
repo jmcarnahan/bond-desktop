@@ -117,10 +117,24 @@ class McpMailBackend implements MailBackend {
     // 403 for a message the token may not read, and `SyncService` already
     // treats that status as "this one message is refused; the rest of the
     // thread must not pay for it".
+    //
+    // `not_found` is the other: the message was deleted or moved between the
+    // delta page and this read. It arrives as a result dict, not a tool
+    // exception, so it is mapped here to the 404 the SDK backend would have
+    // answered — which `SyncService` reads as "skip this one and clear its
+    // stale mark", never as a failure worth retrying.
     final error = result['error'];
+    if (error == 'not_found') {
+      throw GraphMailException('The message no longer exists.', 404);
+    }
     if (error is String && error.isNotEmpty) {
       throw GraphMailException('The server refused this message: $error', 403);
     }
+
+    final meeting = result['meeting_message_type'];
+    final meetingKind = meeting is String ? meeting.trim() : '';
+    final eventId = result['event_id'];
+    final autoReply = result['is_auto_reply'];
 
     final headers = result['headers'];
     final attachments = result['attachments'];
@@ -147,6 +161,21 @@ class McpMailBackend implements MailBackend {
         for (final entry in attachments is List ? attachments : const [])
           if (entry is Map) Map<String, Object?>.from(entry),
       ],
+      // Graph's own key name, so `_fetchDetailInto` reads one shape from both
+      // backends. The server says `none` for ordinary mail where Graph's
+      // detail simply has no key, so `none` is dropped rather than stored as
+      // a kind; any other value keeps the server's spelling, including
+      // Graph's `meetingTenativelyAccepted`, which the gate matches as spelt.
+      if (meetingKind.isNotEmpty && meetingKind.toLowerCase() != 'none')
+        'meetingMessageType': meetingKind,
+      // The linked calendar event. No Graph-detail equivalent in the SDK
+      // backend, which simply never sets it; null from the server (not a
+      // meeting message, or the event is gone) is omitted the same way.
+      if (eventId is String && eventId.isNotEmpty) 'calendarEventId': eventId,
+      // The server's own reading of the auto-reply headers. Only a JSON true
+      // is carried; false, a string or no key all say nothing, and nothing
+      // gates on it yet.
+      if (autoReply == true) 'isAutoReply': true,
     };
   }
 

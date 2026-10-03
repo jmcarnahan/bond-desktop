@@ -19,10 +19,16 @@ says, and which model serves it.
   encoder served as a mean-pooled embedding model (router id `bond-decide`)
   whose calibrated heads run in Dart from the heads file here. At a Kev 4B
   URL (`/v1/systemone`) the server answers the questions itself and no heads
-  run here.
+  run here. The calendar reads its stored answers (invite pinning, brief
+  ranking and asks, scheduling asks). Once a fitted head is adopted, the
+  encoder-heads backend also reads a Day-bar command's action from the same
+  encoder's raw vector through a second head
+  ([14-calendar.md](14-calendar.md#the-command-head)); Kev gives no raw
+  vector, so there the lexicon reads commands alone.
 - **Generative** — ONE chat model for every piece of text: the message text,
   attachment and directory digests, the storylines' writing (names,
-  summaries, charters, refreshes, recaps), drafts and Improve. It judges no
+  summaries, charters, refreshes, recaps), drafts and Improve, pre-meeting
+  briefs, and the Day bar's fallback read of a command. It judges no
   storyline membership.
   It is never asked about needs-you. The box 27B by default when the build names one, else the
   27B or the 4B the app's own router serves.
@@ -43,6 +49,7 @@ is always the authority when they disagree.
 | # | Stage | LLM | Doc |
 |---|-------|-----|-----|
 | 1 | Sync / ingest — Graph delta pull, upsert, enqueue downstream work | no | [01-sync-ingest.md](01-sync-ingest.md) |
+| 1b | Calendar mirror — the primary calendar over a rolling window, synced fire-and-forget after each mail load (MCP mode only); not a stage a message passes through | no | [14-calendar.md](14-calendar.md) |
 | 2 | Tier-1 gates — sender-only checks on delta fields | no | [02-gates.md](02-gates.md) |
 | 3 | Detail fetch (mail) — full body + headers | no | [02-gates.md](02-gates.md) |
 | 4 | Tier-2 gates — list/auto-generated header checks | no | [02-gates.md](02-gates.md) |
@@ -56,6 +63,8 @@ is always the authority when they disagree.
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap; every judgement is the decision model's (`member_of`, the `charter_specific` check; the sweep groups by cosine), the naming and the prose are generative | **yes** (names, refresh, recap) + decision model (membership, charter check) | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply gate** — the decision model's `reply_expected` probability, read from triage's stored row BEFORE any context is gathered; skipped outright when a person asked — see 07 | no§ | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
+| 13b | **Pre-meeting briefs** (`meeting_brief`) — per MEETING, not per message: planned after each calendar sync the inbox runs (not the forced syncs after a write) for meetings in the next 36 h with people the owner has mail with, written on the draft lane after `draft` | **yes** | [14-calendar.md](14-calendar.md#briefs) |
+| 13c | **Calendar commands** (`calendar_intent`) — per COMMAND, not per message: the Day bar's request read by lookup (lexicon, resolvers, people and event match); the generative model only on Enter, only when the rules could not finish, and only to copy phrases | on demand | [14-calendar.md](14-calendar.md#commands) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 15 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
 
@@ -70,7 +79,7 @@ reads the probability stage 5 stored in `message_decisions`. There is no
 **Stage numbers are the order inside a lane, not a single queue.** Since Round
 C (2026-09) the work queue drains through THREE `AiWorker` instances on three
 gates: a fast lane (stages 6–10b, plus triage's own queue in front of it on
-the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13).
+the same gate), a storyline lane (stage 11) and a draft lane (stages 12–13b).
 Within a lane the order above is exactly the order the work happens in; ACROSS
 lanes, a stage reaches the next one by enqueuing a row and waking the lane that
 owns it. What that buys is stage 5's seconds: a new message's triage,
@@ -152,6 +161,9 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Storyline recap | Generative | `storyline_recap` | `:8080` |
 | Draft generation | Generative, or Cloud drafts when set and consented | `draft_reply` | `:8080` |
 | Improve a draft | Generative, or Cloud drafts when set and consented | `draft_improve` | `:8080` |
+| Pre-meeting brief | Generative (never Cloud drafts) | `meeting_brief` | `:8080` |
+| Calendar command (Enter only, when the rules could not finish) | Generative (never Cloud drafts) | `calendar_intent` | `:8080` |
+| Day-bar command action (only once a fitted head is adopted; live preview and Enter) | Decision | — (an Enter records `command_head`; the preview records nothing) | `:8083` |
 | Embeddings | Embeddings (not routed) | `embeddings` | `:8081` (`make embed`) |
 
 The routing is a RULE, not stored rows: `AppPrefs.specForStage` sends

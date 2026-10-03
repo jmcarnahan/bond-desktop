@@ -238,6 +238,7 @@ void main() {
       overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         // This thread scores under the Needs You cut, so People is the stop
         // that carries it — and its room row and the overview both name Eric.
         initialSectionProvider.overrideWithValue(RailSection.people),

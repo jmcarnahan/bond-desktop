@@ -440,6 +440,9 @@ FindTarget? firstFindTarget({
       return firstStoryline();
     case RailSection.people:
       return firstRoom();
+    // The Day column holds days, not threads: there is no row for Enter to
+    // open.
+    case RailSection.day:
     case RailSection.files:
     case RailSection.archive:
     case RailSection.ai:

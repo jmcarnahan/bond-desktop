@@ -40,6 +40,7 @@ void main() {
     bool withAddLabel = true,
     bool withFind = true,
     int contextLinked = 0,
+    VoidCallback? onFindTime,
     bool inNeedsYou = false,
     bool withNeedsYou = false,
     bool needsYouDecided = true,
@@ -69,6 +70,7 @@ void main() {
               onContext: fullBar ? () {} : null,
               contextLinked: contextLinked,
               onCompose: fullBar ? () {} : null,
+              onFindTime: onFindTime,
               labels: labels,
               onAddLabel: withAddLabel ? () {} : null,
               onRemoveLabel: (l) => removed.add(l.id),
@@ -79,6 +81,29 @@ void main() {
       ),
     ));
   }
+
+  group('Find a time', () {
+    testWidgets('worded in a full pane, its icon alone beside, and either '
+        'way it asks', (tester) async {
+      var asked = 0;
+      await pump(tester, onFindTime: () => asked++);
+      expect(find.text('Find a time'), findsOneWidget);
+      // It says where it goes: the Day column, not a pane of its own.
+      expect(
+          find.byTooltip('Find a time — in the Day column, with these people'),
+          findsOneWidget);
+      await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
+      expect(asked, 1);
+
+      await pump(tester, width: 380, onFindTime: () => asked++);
+      expect(tester.takeException(), isNull);
+      expect(find.text('Find a time'), findsNothing);
+      expect(find.text('Mark done'), findsNothing,
+          reason: 'the two give up their words together');
+      await tester.tap(find.byKey(ThreadActionBar.findTimeKey));
+      expect(asked, 2);
+    });
+  });
 
   group('Mark done', () {
     testWidgets('opens its choices rather than acting', (tester) async {

@@ -210,6 +210,7 @@ void main() {
       overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
@@ -264,6 +265,7 @@ void main() {
           decisionClientProvider.overrideWithValue(decision)
         else
           keepingDecisionClient(),
+          noCommandHeads(),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         modelManifestProvider.overrideWithValue(testManifest()),

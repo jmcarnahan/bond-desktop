@@ -443,6 +443,7 @@ void main() {
       container = ProviderContainer(overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         triageQueueProvider.overrideWithValue(triage),
         aiWorkersProvider.overrideWithValue(workers),
       ]);
@@ -626,6 +627,7 @@ void main() {
         overrides: [
           dbProvider.overrideWithValue(db),
           keepingDecisionClient(),
+          noCommandHeads(),
           initialSectionProvider.overrideWithValue(RailSection.home),
           initialAppPrefsProvider.overrideWithValue(prefs),
           graphAuthProvider.overrideWithValue(auth),

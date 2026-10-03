@@ -14,11 +14,11 @@ import 'icon_rail.dart' show IconRail;
 /// second nullable field per kind is how the file preview and the full viewer
 /// drifted apart — one could be set while the other said something else.
 ///
-/// Eight kinds: a thread, a file, a person, the reasoning behind one
+/// Nine kinds: a thread, a file, a person, the reasoning behind one
 /// message's verdict, the whole story of what the pipeline did to one
 /// message, which of the owner's own directories a room reads when a reply is
-/// drafted in it, one indexed file out of one of those directories, and the
-/// keyboard cheat sheet.
+/// drafted in it, one indexed file out of one of those directories, the
+/// keyboard cheat sheet, and an event on the calendar.
 sealed class SidePanel {
   const SidePanel();
 }
@@ -148,6 +148,20 @@ final class ContextFilePanel extends SidePanel {
 /// two of it are the same panel.
 final class CheatSheetPanel extends SidePanel {
   const CheatSheetPanel();
+}
+
+/// A meeting, read beside whatever named it — a Day row, the Today section,
+/// an invite card in a transcript, a person's room.
+///
+/// Keyed by the Graph event id and nothing else: that is the one handle every
+/// one of those places holds, and the panel resolves the rest itself — from
+/// the calendar mirror first, and by a live read for an event outside the
+/// mirror's window (an old invite, a meeting months out), which is shown and
+/// never stored.
+final class EventPanel extends SidePanel {
+  final String eventId;
+
+  const EventPanel({required this.eventId});
 }
 
 /// The chrome around whatever is open beside the main pane: where a pop lands,

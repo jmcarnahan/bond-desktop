@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 24;
+  int get schemaVersion => 25;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -824,6 +824,33 @@ WHERE needs_you_p IS NULL''');
                     schema.messageDecisions,
                     schema.messageDecisions.vector,
                   );
+                }
+              },
+              // v25 — the calendar mirror. One SYNCED table,
+              // `calendar_events`, the primary calendar as `sync_calendar`
+              // reports it, and one DERIVED table, `event_briefs`, for the
+              // pre-meeting briefs a later phase writes.
+              //
+              // Nothing to backfill: the first sync after the upgrade has no
+              // cursor and so starts a full run over its window.
+              //
+              // Indexes as IF NOT EXISTS statements rather than
+              // `m.createIndex`, so a replay over a torn state is a no-op
+              // (db_adoption_test re-runs every step over one file).
+              from24To25: (m, schema) async {
+                if (!await _tableExists('calendar_events')) {
+                  await m.createTable(schema.calendarEvents);
+                }
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_calendar_events_start_utc '
+                  'ON calendar_events(start_utc)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_calendar_events_start_date '
+                  'ON calendar_events(start_date)',
+                );
+                if (!await _tableExists('event_briefs')) {
+                  await m.createTable(schema.eventBriefs);
                 }
               },
             ),

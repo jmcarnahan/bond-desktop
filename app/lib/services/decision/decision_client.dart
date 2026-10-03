@@ -323,6 +323,45 @@ class DecisionClient {
     });
   }
 
+  /// The encoder's raw pooled vector for each of [texts], in order, with no
+  /// heads applied — the calendar command head's input
+  /// (`services/calendar/command/command_heads.dart`), which is a second
+  /// head fitted on the same encoder and so must read exactly what the nine
+  /// read: [_vectors], the one embed-and-check path — the identity probe,
+  /// the heads pairing, `embd_normalize: -1`, the width and norm refusals,
+  /// and a long text on the token path.
+  ///
+  /// Only the encoder-heads kind has a raw vector. Your server of the
+  /// systemone kind (Kev) answers questions already calibrated and gives
+  /// none, so it is refused with a plain [LlmException] — the server is not
+  /// unavailable, and its kind stays learned — which the command classifier
+  /// reads as "no head" and leaves the command to the lexicon.
+  ///
+  /// One [LlmCallRecord] labelled `command_head` for the call, unless
+  /// [report] is false: the Day bar's live preview asks on keystrokes, and a
+  /// tally with no unit of work of its own would be folded into whatever
+  /// activity row is written next. Throws what [decideStates] throws.
+  Future<List<List<double>>> embedRaw(
+    List<String> texts, {
+    bool report = true,
+  }) async {
+    if (texts.isEmpty) return const [];
+    final sw = Stopwatch()..start();
+    final destination = target;
+    return _instrumented(destination, sw, 'command_head', (facts) async {
+      final backend = await _backendFor(destination, facts);
+      if (backend is! _EncoderHeadsBackend) {
+        throw const LlmException(
+          'The decision server answers as Kev, which gives no raw vector for '
+          'the command head; the lexicon reads commands alone.',
+        );
+      }
+      final heads = _heads();
+      final (vectors, _) = await _vectors(texts, destination, heads, facts);
+      return vectors;
+    }, report: report);
+  }
+
   /// [question]'s calibrated p(yes) for each of [states], in order: texts
   /// already rendered by the question's renderer (`storyline_state.dart`).
   ///
@@ -1342,16 +1381,23 @@ class DecisionClient {
   /// Runs [body] and tells the observer about it exactly once, however many
   /// requests it made. The outcomes are `LlmClient._post`'s: an unauthorized
   /// key is `unavailable`, because it is a subclass and parks the same way.
+  /// [label] names the record (`decision`, or `command_head` for
+  /// [embedRaw]); [report] false tells nobody, and changes nothing else.
   Future<T> _instrumented<T>(
     LlmTarget destination,
     Stopwatch sw,
     String label,
-    Future<T> Function(_CallFacts facts) body,
-  ) async {
+    Future<T> Function(_CallFacts facts) body, {
+    bool report = true,
+  }) async {
     final facts = _CallFacts(yourServer: _yours(destination));
+    void tell(String outcome, String? error) {
+      if (report) _report(destination, sw, facts, label, outcome, error);
+    }
+
     try {
       final result = await body(facts);
-      _report(destination, sw, facts, label, 'ok', null);
+      tell('ok', null);
       return result;
     } on LlmUnavailableException catch (e) {
       // A server that went away, refused the key or answered wrongly may not
@@ -1369,16 +1415,16 @@ class DecisionClient {
         _kinds.remove(_keyOf(destination));
         _paired.remove(_keyOf(destination));
       }
-      _report(destination, sw, facts, label, 'unavailable', e.message);
+      tell('unavailable', e.message);
       rethrow;
     } on LlmFormatException catch (e) {
-      _report(destination, sw, facts, label, 'format', e.message);
+      tell('format', e.message);
       rethrow;
     } on LlmException catch (e) {
-      _report(destination, sw, facts, label, 'error', e.message);
+      tell('error', e.message);
       rethrow;
     } catch (e) {
-      _report(destination, sw, facts, label, 'error', '$e');
+      tell('error', '$e');
       rethrow;
     }
   }

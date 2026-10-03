@@ -126,6 +126,7 @@ void main() {
         decision == null
             ? keepingDecisionClient()
             : decisionClientProvider.overrideWithValue(decision),
+        noCommandHeads(),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         // The two platform channels a widget test has nobody on the other end
@@ -241,7 +242,8 @@ void main() {
     expect(await store.workCounts('extract'), {'done': 1});
 
     settleGate = Completer<void>();
-    await pumpHost(tester);
+    final container = await pumpHost(tester);
+    final syncBefore = container.read(calendarSyncProvider);
     await openSection(tester, 'Processing');
 
     // The two-step IS the confirmation — there is no dialog to answer.
@@ -262,6 +264,11 @@ void main() {
     // message is back on the queue — the reset's own enqueue, not a sync's.
     expect(await store.workCounts('extract'), {'pending': 1});
     expect(thumbnailsForgotten, 1);
+    // The calendar's readers are told, the briefs' too, and the sync starts
+    // over with no throttle and no write guard from before the reset.
+    expect(container.read(calendarRevisionProvider), 1);
+    expect(container.read(briefRevisionProvider), 1);
+    expect(container.read(calendarSyncProvider), isNot(same(syncBefore)));
   });
 
   testWidgets('Forget everything and re-sync starts the inbox\'s pulls',
@@ -398,6 +405,7 @@ void main() {
       overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),

@@ -140,6 +140,16 @@ const String activityLastSyncMailKey = 'activity_last_sync_mail';
 const String activityLastSyncTeamsKey = 'activity_last_sync_teams';
 const String activityLastSweepKey = 'activity_last_sweep';
 
+/// The calendar mirror's current run — its window and run id, and whether
+/// the run has been swept — as JSON (`CalendarSync`). Mailbox bookkeeping
+/// like the bootstrap floors, so [MessageStore.wipeAll] clears it.
+const String calendarRunKey = 'calendar_run';
+
+/// The mailbox's zone and working hours as last fetched, cached as JSON with
+/// the fetch stamp (`CalendarSync.readMailboxSettings`). One mailbox's
+/// settings, so [MessageStore.wipeAll] clears it.
+const String calendarMailboxKey = 'calendar_mailbox';
+
 /// The size of the storyline sweep's pool — unassigned, embedded, not-done
 /// threads — when a sweep last passed its settle gate, as a decimal string;
 /// absent means zero. The gate lets an unsettled mailbox sweep anyway once
@@ -1161,6 +1171,43 @@ WHERE source = ? AND conversation_key = ?
           '     ORDER BY m8.received_at DESC, m8.source_message_id DESC LIMIT 1) '
           'WHERE $where ORDER BY c.last_message_at DESC',
           variables: _args(args),
+        )
+        .get();
+    return [for (final row in result) Conversation.fromRow(row.data)];
+  }
+
+  /// The conversations, of every source, that any of [addresses] took part
+  /// in and that moved at or after [sinceIso], newest first — what a
+  /// pre-meeting brief reads about the people in a meeting.
+  ///
+  /// Matched on `participants_json`'s `email`, lowercased on both sides, and
+  /// the plain row only: none of [loadConversations]' joins, because the
+  /// brief reads each thread itself. `json_each` is handed `'[]'` for a
+  /// malformed blob, so one bad row cannot fail the statement.
+  Future<List<Conversation>> conversationsWithAddresses(
+    Set<String> addresses, {
+    required String sinceIso,
+    int limit = 40,
+  }) async {
+    final wanted = {
+      for (final a in addresses)
+        if (a.trim().isNotEmpty) a.trim().toLowerCase(),
+    }.toList();
+    if (wanted.isEmpty) return const [];
+    final result = await db
+        .customSelect(
+          'SELECT c.* FROM conversations c '
+          'WHERE c.last_message_at >= ? '
+          'AND EXISTS (SELECT 1 FROM json_each('
+          '  CASE WHEN json_valid(c.participants_json) '
+          "  THEN c.participants_json ELSE '[]' END) j "
+          // Inside a CASE on the element's type: `json_extract` on a bare
+          // string element would parse it as JSON and fail the statement.
+          "  WHERE (CASE WHEN j.type = 'object' "
+          "  THEN lower(json_extract(j.value, '\$.email')) END) "
+          '  IN (${_placeholders(wanted.length)})) '
+          'ORDER BY c.last_message_at DESC, c.conversation_key ASC LIMIT ?',
+          variables: _args([sinceIso, ...wanted, limit]),
         )
         .get();
     return [for (final row in result) Conversation.fromRow(row.data)];
@@ -2750,6 +2797,105 @@ WHERE COALESCE(cta_text, '') <> ''
     );
   }
 
+  /// The threads asking for a time (`services/calendar/scheduling_ask.dart`,
+  /// docs/pipeline/14-calendar.md "Find a time"), newest first, at most
+  /// [limit] — in ONE query, so the Day stop and the thread header cost a
+  /// read, not a read per thread.
+  ///
+  /// A thread is one when the owner has not written since its NEWEST
+  /// inbound message (by `received_at DESC, source_message_id DESC`,
+  /// [latestInboundMeta]'s order; `last_outbound_at` absent or not after
+  /// it), the owner has not closed it — no `scheduling_ask` label with
+  /// `answer = 'no'` ([writeSchedulingAskLabel]: an invite sent from the
+  /// ask, or a dismiss) on that same newest message — and EITHER
+  ///
+  ///  * the model says so: the thread `needs_reply` and that message has a
+  ///    `message_decisions` row whose intent head chose `scheduling` with
+  ///    that option's probability — else the choice's own confidence, for a
+  ///    row without per-option probabilities — at least [threshold]; OR
+  ///  * the owner says so: a `scheduling_ask` label with `answer = 'yes'` on
+  ///    that newest message (the thread bar's Find a time,
+  ///    [reopenSchedulingAsk]) — with or without a decision row.
+  ///
+  /// Every label is pinned to the message by source and id, so a later
+  /// inbound message (the other person saying the time does not work) is a
+  /// new newest message that neither word is about: a closed ask comes back
+  /// by itself if the model reads the new message as one, and an ask the
+  /// owner opened stands only if the model agrees about the new message or
+  /// the owner presses again. This is the rule's one spelling; the caller
+  /// supplies only the policy's number.
+  ///
+  /// Each row carries that newest inbound message's id, which is what a
+  /// label is written against.
+  ///
+  /// `answers_json` is read under `json_valid` inside a CASE, which SQLite
+  /// evaluates lazily, so an unreadable row is simply not an ask rather than
+  /// a malformed-JSON error failing the whole read.
+  Future<
+          List<
+              ({
+                String source,
+                String conversationKey,
+                String sourceMessageId,
+              })>>
+      schedulingAskConversations({
+    int limit = 200,
+    required double threshold,
+  }) async {
+    final rows = await db.customSelect(
+      'SELECT c.source AS source, c.conversation_key AS conversation_key, '
+      '  n.source_message_id AS source_message_id '
+      'FROM conversations c '
+      'JOIN ('
+      '  SELECT m.source AS source, m.conversation_key AS conversation_key, '
+      '    m.source_message_id AS source_message_id, '
+      '    m.received_at AS received_at, '
+      '    ROW_NUMBER() OVER ('
+      '      PARTITION BY m.source, m.conversation_key '
+      '      ORDER BY m.received_at DESC, m.source_message_id DESC'
+      '    ) AS rn '
+      '  FROM messages m '
+      "  WHERE m.direction = 'inbound'"
+      ') n ON n.source = c.source '
+      '  AND n.conversation_key = c.conversation_key AND n.rn = 1 '
+      // LEFT: the owner's yes lists a thread the decision model never read.
+      'LEFT JOIN message_decisions d ON d.source = n.source '
+      '  AND d.source_message_id = n.source_message_id '
+      // A string compare, which holds only while both stamps carry the same
+      // ISO width ([isoStamp]'s six digits).
+      "WHERE (c.last_outbound_at IS NULL OR c.last_outbound_at <= "
+      "       COALESCE(n.received_at, '')) "
+      '  AND NOT EXISTS (SELECT 1 FROM decision_labels l '
+      "    WHERE l.question = 'scheduling_ask' AND l.answer = 'no' "
+      '    AND l.source = n.source '
+      '    AND l.source_message_id = n.source_message_id) '
+      "  AND ((c.state = 'needs_reply' "
+      // No decision row: json_valid(NULL) is NULL, so the CASE says 0.
+      '    AND CASE WHEN json_valid(d.answers_json) THEN '
+      "      json_extract(d.answers_json, '\$.intent.choice') = 'scheduling' "
+      '      AND COALESCE('
+      "        json_extract(d.answers_json, '\$.intent.probabilities.scheduling'), "
+      "        json_extract(d.answers_json, '\$.intent.confidence'), 0) >= ? "
+      '    ELSE 0 END) '
+      '    OR EXISTS (SELECT 1 FROM decision_labels y '
+      "      WHERE y.question = 'scheduling_ask' AND y.answer = 'yes' "
+      '      AND y.source = n.source '
+      '      AND y.source_message_id = n.source_message_id)) '
+      "ORDER BY COALESCE(c.last_message_at, c.last_inbound_at, '') DESC, "
+      '  c.conversation_key DESC '
+      'LIMIT ?',
+      variables: _args([threshold, limit]),
+    ).get();
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          conversationKey: row.data['conversation_key'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// The kept inbound messages received since [sinceIso] whose stored decision
   /// was not made under [qhash] — or that have none — newest first, at most
   /// [limit]: what the install-time re-decide works through.
@@ -3632,13 +3778,14 @@ RETURNING *
     'context_text',
     'context_chunks',
     'message_decisions',
+    'event_briefs',
   ];
 
   /// Every table a CONNECTOR or the user's own directory scan wrote.
   ///
   /// Nothing here can be recomputed: it came off a server or off this disk,
   /// and getting it back means fetching it again. [clearDerived] keeps every
-  /// row of all seven and only nulls the derived COLUMNS that sit on three of
+  /// row of all eight and only nulls the derived COLUMNS that sit on three of
   /// them.
   static const List<String> syncedTables = [
     'messages',
@@ -3648,6 +3795,7 @@ RETURNING *
     'context_dirs',
     'context_links',
     'context_files',
+    'calendar_events',
   ];
 
   /// Configuration and identity: what the user chose and who they are.
@@ -3779,7 +3927,7 @@ RETURNING *
   ///
   /// Four things happen, and the order is the method:
   ///
-  /// 1. One transaction: the seventeen [derivedTables] are emptied, the verdict
+  /// 1. One transaction: the eighteen [derivedTables] are emptied, the verdict
   ///    columns on `messages` and `conversations` are reset, the derived
   ///    columns on `context_dirs` and `context_files` are nulled, and the
   ///    one-shot markers that describe rows this just deleted are dropped.
@@ -4131,6 +4279,17 @@ FROM messages
         // a wipe does not.
         ...derivedOneShotPrefs,
         'mail_last_reconcile',
+        // The calendar mirror is mailbox data (`calendar_events` is in
+        // [syncedTables]), and these two describe that mailbox: the run over
+        // rows just deleted, and the zone and hours of an account that may
+        // not be the next one.
+        calendarRunKey,
+        calendarMailboxKey,
+        // Says the meeting fields were backfilled over rows this deletes; the
+        // next mailbox's rows are owed their own pass. Not in
+        // [derivedOneShotPrefs]: a clear keeps `source_meta_json`, so the
+        // backfill's work survives it.
+        'meeting_detail_backfill',
       ];
       await db.customUpdate(
         'DELETE FROM app_prefs WHERE key IN (${_placeholders(keys.length)})',
@@ -5430,6 +5589,101 @@ SELECT conversation_key FROM (
     );
   }
 
+  /// Appends the owner's word about whether a thread asks them for a time
+  /// and returns its row id and the store's own stamp (an undo deletes by
+  /// both, [deleteSchedulingAskLabel]): `question = 'scheduling_ask'`, about
+  /// [sourceMessageId], the thread's NEWEST inbound message — the one
+  /// [schedulingAskConversations] reads. [answer] is `no` (the ask is
+  /// answered: [origin] `invite`, an invite went out from it, or `dismiss`,
+  /// the owner's ×) or `yes` (the owner says it is one — a press goes
+  /// through [reopenSchedulingAsk], which also clears an earlier `no`).
+  /// Append-only like [writeNeedsYouLabel]. Kept by Clear AI results, like
+  /// every row of the log.
+  Future<({int id, String createdAt})> writeSchedulingAskLabel({
+    required String source,
+    required String conversationKey,
+    required String sourceMessageId,
+    required String answer,
+    required String origin,
+  }) async {
+    if (answer != 'yes' && answer != 'no') {
+      throw ArgumentError.value(answer, 'answer', 'is yes or no');
+    }
+    final createdAt = _nowIso();
+    final rows = await db.customWriteReturning(
+      'INSERT INTO decision_labels '
+      '(question, answer, source, conversation_key, origin, created_at, '
+      'source_message_id) '
+      "VALUES ('scheduling_ask', ?, ?, ?, ?, ?, ?) RETURNING id",
+      variables: _args([
+        answer,
+        source,
+        conversationKey,
+        origin,
+        createdAt,
+        sourceMessageId,
+      ]),
+    );
+    return (id: rows.first.data['id'] as int, createdAt: createdAt);
+  }
+
+  /// The owner's press of Find a time on a thread: their word that it IS a
+  /// scheduling ask, about its NEWEST inbound message (read here, in
+  /// [schedulingAskConversations]' order, so the two cannot name different
+  /// messages). Any `no` on that same message — an earlier dismiss or
+  /// invite — goes first, in the same transaction: the owner's newer word
+  /// wins. Returns the yes row's id and stamp and the message it is about,
+  /// or null when the thread has no inbound message to be about.
+  Future<({int id, String createdAt, String sourceMessageId})?>
+      reopenSchedulingAsk({
+    required String source,
+    required String conversationKey,
+    String origin = 'owner',
+  }) {
+    return db.transaction(() async {
+      final newest = await db.customSelect(
+        'SELECT source_message_id FROM messages '
+        "WHERE source = ? AND conversation_key = ? AND direction = 'inbound' "
+        'ORDER BY received_at DESC, source_message_id DESC LIMIT 1',
+        variables: _args([source, conversationKey]),
+      ).getSingleOrNull();
+      final messageId = newest?.data['source_message_id'] as String?;
+      if (messageId == null) return null;
+      await db.customUpdate(
+        'DELETE FROM decision_labels '
+        "WHERE question = 'scheduling_ask' AND answer = 'no' "
+        'AND source = ? AND source_message_id = ?',
+        variables: _args([source, messageId]),
+        updateKind: UpdateKind.delete,
+      );
+      final yes = await writeSchedulingAskLabel(
+        source: source,
+        conversationKey: conversationKey,
+        sourceMessageId: messageId,
+        answer: 'yes',
+        origin: origin,
+      );
+      return (id: yes.id, createdAt: yes.createdAt, sourceMessageId: messageId);
+    });
+  }
+
+  /// Deletes the `scheduling_ask` label [id] stamped [createdAt] — the undo
+  /// of a dismiss — and says whether it went. By id AND stamp, for
+  /// [deleteNeedsYouLabels]' reason: a deleted highest id is handed out
+  /// again, and the stamp is what tells the two rows apart.
+  Future<bool> deleteSchedulingAskLabel(
+    int id, {
+    required String createdAt,
+  }) async {
+    final rows = await db.customWriteReturning(
+      'DELETE FROM decision_labels '
+      "WHERE question = 'scheduling_ask' AND id = ? AND created_at = ? "
+      'RETURNING id',
+      variables: _args([id, createdAt]),
+    );
+    return rows.isNotEmpty;
+  }
+
   /// Every row of `decision_labels`, oldest first — for the reporting counts
   /// and the later calibration that read them.
   Future<List<Map<String, Object?>>> decisionLabels() async => [
@@ -6141,6 +6395,80 @@ SELECT conversation_key FROM (
       variables: _args([_nowIso()]),
     );
     return [for (final row in rows) row.data['source_message_id'] as String];
+  }
+
+  /// Inbound email received at or after [sinceIso] with no `meeting` key
+  /// stored, whose subject is a calendar response's (Accepted:/Declined:/
+  /// Tentative:/Tentatively accepted:/Canceled:/Cancelled:/New time proposed:)
+  /// or equals, case-insensitively and trimmed, the subject of an event in the
+  /// calendar mirror. Newest first, at most [limit] ids.
+  ///
+  /// What the sync's `meeting_detail_backfill` one-shot re-fetches: MCP rows
+  /// fetched before `read_email` sent the meeting fields. The response
+  /// prefixes alone would miss every invitation, because an Outlook invite
+  /// carries the meeting's own subject, unprefixed — and the mirror is the
+  /// list of meetings that exist, so an exact subject match against it is the
+  /// cheap way to find those without re-reading the whole mailbox. sqlite's
+  /// LIKE is case-insensitive for ASCII, which is what the prefixes want.
+  ///
+  /// The `json_valid` CASE guard is [regateMeetingResponseIds]' own: a
+  /// malformed blob reads as "no `meeting` key" rather than throwing for the
+  /// whole statement. Local echoes are excluded by their key range — they are
+  /// outbound anyway, and `_fetchDetailInto` refuses them — so the one-shot
+  /// never spends a slot on a row it would not fetch.
+  Future<List<String>> meetingBackfillCandidates({
+    required String sinceIso,
+    int limit = 200,
+  }) async {
+    const String stored = '(CASE WHEN json_valid(source_meta_json) '
+        "THEN json_extract(source_meta_json, '\$.meeting') END)";
+    final rows = await db
+        .customSelect(
+          'SELECT source_message_id FROM messages '
+          "WHERE source = 'email' AND direction = 'inbound' "
+          '  AND received_at >= ? '
+          '  AND NOT (source_message_id >= ? AND source_message_id < ?) '
+          '  AND $stored IS NULL '
+          '  AND ('
+          "    subject LIKE 'Accepted:%' OR subject LIKE 'Declined:%' "
+          "    OR subject LIKE 'Tentative:%' "
+          "    OR subject LIKE 'Tentatively accepted:%' "
+          "    OR subject LIKE 'Canceled:%' OR subject LIKE 'Cancelled:%' "
+          "    OR subject LIKE 'New time proposed:%' "
+          '    OR lower(trim(subject)) IN ('
+          '      SELECT lower(trim(subject)) FROM calendar_events '
+          "      WHERE subject <> '')"
+          '  ) '
+          'ORDER BY received_at DESC '
+          'LIMIT ?',
+          variables: _args(
+              [sinceIso, localEchoPrefix, _localEchoPrefixEnd, limit]),
+        )
+        .get();
+    return [for (final row in rows) row.data['source_message_id'] as String];
+  }
+
+  /// Whether the calendar mirror's first full read has completed: the
+  /// [calendarRunKey] pref parses as a JSON object with `swept: true`, which
+  /// `CalendarSync` writes only once a run has reached `complete` and been
+  /// swept.
+  ///
+  /// The gate on `meeting_detail_backfill`. The SDK backend never mirrors the
+  /// calendar, so the backfill is MCP-only by construction; and until a whole
+  /// window has been read the backfill's subject join would see only part of
+  /// the calendar, so the one-shot waits for the full read rather than
+  /// spending its shot on a page or two. A cursor alone is not enough: a
+  /// first read spread across ticks holds one after its first page. A
+  /// missing or malformed pref reads as not mirrored.
+  Future<bool> calendarMirrored() async {
+    final raw = await getPref(calendarRunKey);
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final json = jsonDecode(raw);
+      return json is Map && json['swept'] == true;
+    } on FormatException {
+      return false;
+    }
   }
 
   /// Takes a plan-relative deadline back off every stored ask banner, and

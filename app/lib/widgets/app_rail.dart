@@ -1,21 +1,26 @@
 import 'package:flutter/material.dart';
 
+import '../models/calendar_models.dart';
 import '../models/files_models.dart';
 import '../models/message_models.dart';
 import '../models/needs_you_sort.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
+import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/day_items.dart';
 import '../services/decision/needs_you_predicate.dart';
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
 import '../services/sender_display.dart';
 import '../theme/tokens.dart';
 import 'bond_avatar.dart';
+import 'clock_tick.dart';
 import 'dismissed_storylines_fold.dart';
 import 'find_filter.dart';
 import 'people_rooms.dart';
 import 'possible_storylines_fold.dart';
 import 'processing_hint.dart';
+import 'scheduling_ask_rows.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
@@ -40,13 +45,18 @@ import 'time_format.dart';
 /// [RailSection.drafts] is the one destination that is NOT a stop on the icon
 /// rail. It is a row in the Inbox stack — see `IconRail.stops`, which is an
 /// explicit list and does not contain it — because what it holds is the
-/// model's unsent work rather than a pile of mail, and a seventh icon for a
+/// model's unsent work rather than a pile of mail, and a ninth icon for a
 /// list that is usually empty would cost a permanent stop for an occasional
 /// one. While its pane is up the icon rail lights Inbox, which is the stack the
 /// row lives in.
+///
+/// [RailSection.day] sits right after Needs You: once a reader knows what they
+/// owe, the next question is what is coming — the calendar's day, with the
+/// deadlines and the returns from Later merged into it.
 enum RailSection {
   home,
   needsYou,
+  day,
   drafts,
   storylines,
   people,
@@ -62,6 +72,7 @@ extension RailSectionLabel on RailSection {
         // word a reader sees is the one that had to change.
         RailSection.home => 'Inbox',
         RailSection.needsYou => 'Needs You',
+        RailSection.day => 'Day',
         RailSection.drafts => 'Drafts & sent',
         RailSection.storylines => 'Storylines',
         RailSection.people => 'People',
@@ -322,6 +333,10 @@ class AppRail extends StatefulWidget {
   /// [onNewStoryline] is given.
   static const Key newStorylineKey = ValueKey('storyline-new');
 
+  /// The Day column's Scheduling asks header label, and its chevron.
+  static const Key asksHeaderKey = ValueKey('rail-asks-header');
+  static const Key asksChevronKey = ValueKey('rail-asks-chevron');
+
   final List<Conversation> conversations;
 
   /// Suggestions and live storylines together, suggestions first. Empty is
@@ -486,6 +501,62 @@ class AppRail extends StatefulWidget {
   /// the list the rail was showing, and Enter opens the row under the eyes.
   final NeedsYouSort needsYouSort;
 
+  /// Whether the Day column draws the calendar at all — the host passes
+  /// `calendarShowsMirror`. False shows "Calendar not connected" and no rows.
+  final bool calendarShown;
+
+  /// Whether the Inbox stack carries its Today section — the host passes
+  /// `calendarShowsToday`, which stays false until a tick has answered.
+  final bool todayShown;
+
+  /// What is still ahead today, at most three (`remainingToday`).
+  final List<CalendarEvent> todayMeetings;
+
+  /// The display zone the Today rows' times are read in. Null draws no
+  /// meeting rows: a time printed in the wrong zone is worse than none.
+  final CalendarZone? calendarZone;
+
+  /// The host's clock reading for this build, so the countdowns and the
+  /// pane agree about what time it is.
+  final DateTime? now;
+
+  /// Invites still owed an answer, a series counted once. Zero hides the
+  /// Invites row.
+  final int invitesCount;
+
+  /// The Day column's rows, `(day, summary)` — `upcomingDays`.
+  final List<(CalendarDate, DaySummary)> dayRows;
+
+  /// Today in the display zone. Null draws no day rows.
+  final CalendarDate? today;
+
+  /// The day the Day pane is showing; null is today.
+  final CalendarDate? selectedDay;
+
+  /// Whether the Day pane is showing the invites rather than a day.
+  final bool showingInvites;
+
+  /// Opens one day in the Day pane. Null leaves the day rows inert.
+  final void Function(CalendarDate day)? onSelectDay;
+
+  /// Opens the invites list. Null leaves the Invites rows inert.
+  final VoidCallback? onOpenInvites;
+
+  /// Opens one event beside the main pane, by its Graph id. Null sends a
+  /// Today meeting row to the Day stop instead, so the row still goes
+  /// somewhere on a host that has no side panel to open it in.
+  final void Function(String eventId)? onOpenEvent;
+
+  /// The threads asking for a time, drawn as the Day column's **Scheduling
+  /// asks · N** section above the days. Built by the host, which owns each
+  /// row's search; empty, or a calendar not shown, draws no section.
+  final List<SchedulingAskRow> schedulingAsks;
+
+  /// What an ask row's presses do. Null, or a null [calendarZone], draws the
+  /// folded heads only and nothing opens — a convenience for a test about
+  /// the section rather than the rows.
+  final SchedulingAskCallbacks? askCallbacks;
+
   const AppRail({
     super.key,
     required this.conversations,
@@ -525,6 +596,21 @@ class AppRail extends StatefulWidget {
     this.onDismissPossible,
     this.onOpenPossible,
     this.needsYouSort = NeedsYouSort.priority,
+    this.calendarShown = false,
+    this.todayShown = false,
+    this.todayMeetings = const [],
+    this.calendarZone,
+    this.now,
+    this.invitesCount = 0,
+    this.dayRows = const [],
+    this.today,
+    this.selectedDay,
+    this.showingInvites = false,
+    this.onSelectDay,
+    this.onOpenInvites,
+    this.onOpenEvent,
+    this.schedulingAsks = const [],
+    this.askCallbacks,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -538,6 +624,11 @@ class _AppRailState extends State<AppRail> {
   /// Everything starts open. A section the user closed stays closed for the
   /// life of the screen.
   final Set<RailSection> _collapsed = {};
+
+  /// The Day column's Scheduling asks, folded to their header. Its own flag
+  /// rather than a member of [_collapsed]: the asks share the Day stop's
+  /// section with the days, and closing one must not close the other.
+  bool _asksCollapsed = false;
 
   static const double _rowHeight = 32;
 
@@ -586,6 +677,7 @@ class _AppRailState extends State<AppRail> {
       case RailSection.drafts:
         return [
           ..._needsYouSection(),
+          ..._todaySection(),
           ..._draftsSection(),
           ..._storylinesSection(),
           ..._peopleSection(),
@@ -593,6 +685,8 @@ class _AppRailState extends State<AppRail> {
         ];
       case RailSection.needsYou:
         return _needsYouSection(collapsible: false);
+      case RailSection.day:
+        return [..._asksSection(), ..._daySection()];
       case RailSection.storylines:
         return _storylinesSection(collapsible: false);
       case RailSection.people:
@@ -839,6 +933,177 @@ class _AppRailState extends State<AppRail> {
                 : null,
       );
 
+  /// The Day column's threads asking for a time, above the days.
+  ///
+  /// The header and its chevron both fold the rows away and bring them back:
+  /// the section is dismissable without being lost, and its count stays in
+  /// view while it is folded. Neither selects anything, since the Day stop is
+  /// already where the reader is. Not narrowed by Find, the day rows' rule.
+  List<Widget> _asksSection() {
+    if (!widget.calendarShown || widget.schedulingAsks.isEmpty) {
+      return const [];
+    }
+    void toggle() => setState(() => _asksCollapsed = !_asksCollapsed);
+    final zone = widget.calendarZone;
+    final callbacks = widget.askCallbacks;
+    return [
+      _header(
+        RailSection.day,
+        label: 'Scheduling asks · ${widget.schedulingAsks.length}',
+        badge: null,
+        collapsed: _asksCollapsed,
+        collapsible: true,
+        onLabelTap: toggle,
+        onChevronTap: toggle,
+        labelKey: AppRail.asksHeaderKey,
+        chevronKey: AppRail.asksChevronKey,
+        highlight: false,
+      ),
+      if (!_asksCollapsed)
+        for (final row in widget.schedulingAsks)
+          if (zone != null && callbacks != null)
+            SchedulingAskTile(
+              key: ValueKey('ask-tile-${row.source}|${row.key}'),
+              row: row,
+              zone: zone,
+              callbacks: callbacks,
+            )
+          else
+            _calendarRow(label: row.subject, selected: false, onTap: null),
+      const SizedBox(height: BondSpacing.s12),
+    ];
+  }
+
+  /// The Day stop's column: the invites row, then one row per upcoming day.
+  ///
+  /// Neither Find nor the unread toggle touches it. A day is not a thread, and
+  /// a column of days that thinned out while the reader typed a name would say
+  /// their Thursday had emptied.
+  ///
+  /// Not collapsible: the days are what the stop is for, and the asks section
+  /// above it has its own chevron.
+  List<Widget> _daySection() {
+    final today = widget.today;
+    final rows = <Widget>[
+      if (widget.calendarShown && widget.invitesCount > 0)
+        _calendarRow(
+          label: 'Invites · ${widget.invitesCount}',
+          selected: widget.showingInvites && widget.scope == RailSection.day,
+          onTap: widget.onOpenInvites,
+        ),
+      if (widget.calendarShown && today != null)
+        for (final (day, summary) in widget.dayRows)
+          _calendarRow(
+            label: dayRowLabel(day, today, summary),
+            selected: widget.scope == RailSection.day &&
+                !widget.showingInvites &&
+                (widget.selectedDay ?? today) == day,
+            onTap: widget.onSelectDay == null
+                ? null
+                : () => widget.onSelectDay!(day),
+          ),
+    ];
+    return _section(
+      RailSection.day,
+      collapsible: false,
+      rows: rows,
+      placeholder: widget.calendarShown ? null : 'Calendar not connected',
+    );
+  }
+
+  /// The Inbox stack's slice of the calendar: what is still ahead today, and
+  /// the invites owed. Only once a tick has said the calendar is there — see
+  /// [AppRail.todayShown] — so the stack does not grow a section and lose it
+  /// again on a launch whose first answer is "no calendar".
+  ///
+  /// A meeting row opens the event panel beside whatever the main pane is
+  /// showing — the reader glancing at "what's next" wants the meeting, not a
+  /// change of stop. Without [AppRail.onOpenEvent] it falls back to the Day
+  /// stop, which is the next best answer to the same question.
+  List<Widget> _todaySection() {
+    if (!widget.todayShown) return const [];
+    final zone = widget.calendarZone;
+    final now = widget.now ?? DateTime.now();
+    final rows = <Widget>[
+      if (zone != null)
+        for (final e in widget.todayMeetings.take(3))
+          if (e.startUtc != null)
+            _calendarRow(
+              label: '${formatEventTime(zone, e.startUtc!)} · '
+                  '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}',
+              selected: false,
+              onTap: widget.onOpenEvent != null
+                  ? () => widget.onOpenEvent!(e.id)
+                  : () => widget.onSelectSection(RailSection.day),
+              trailing: ClockTick(
+                initial: now,
+                builder: (_, t) => Text(
+                  meetingCountdown(e, t.toUtc()) ?? '',
+                  style: BondType.caption.copyWith(color: BondColors.railAccent),
+                ),
+              ),
+            ),
+      if (widget.invitesCount > 0)
+        _calendarRow(
+          label: 'Invites · ${widget.invitesCount}',
+          selected: false,
+          onTap: widget.onOpenInvites,
+        ),
+    ];
+    return _section(
+      RailSection.day,
+      label: 'Today',
+      rows: rows,
+      placeholder: 'Nothing else today',
+    );
+  }
+
+  /// One calendar row — a day, the invites, a meeting — in the look of a Later
+  /// day row: a label, and at most something small trailing it.
+  Widget _calendarRow({
+    required String label,
+    required bool selected,
+    required VoidCallback? onTap,
+    Widget? trailing,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
+        borderRadius: BondRadii.smAll,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.onDarkFaint,
+          child: SizedBox(
+            height: _rowHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: BondType.small.copyWith(
+                        color: selected
+                            ? BondColors.onDarkPrimary
+                            : BondColors.onDarkSecondary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  ?trailing,
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   List<Widget> _section(
     RailSection section, {
     required List<Widget> rows,
@@ -846,11 +1111,13 @@ class _AppRailState extends State<AppRail> {
     Widget? action,
     String? placeholder,
     bool collapsible = true,
+    String? label,
   }) {
     final collapsed = collapsible && _collapsed.contains(section);
     return [
       _header(
         section,
+        label: label,
         badge: badge,
         action: action,
         collapsed: collapsed,
@@ -869,20 +1136,36 @@ class _AppRailState extends State<AppRail> {
   ///
   /// [collapsible] is false when this section is the ONLY thing in the column:
   /// there is nothing for a chevron to reveal underneath it, and one that
-  /// emptied the column would be an affordance that lied.
+  /// emptied the column would be an affordance that lied. The Day stop's days
+  /// keep that rule even under the Scheduling asks section (see
+  /// [_daySection]).
   ///
   /// [action] is a section-wide control, rendered after the badge and before
   /// the chevron — the one place in the row that is neither the label's target
   /// nor the chevron's. Null on every section but Storylines, which renders
   /// nothing extra and lays out exactly as it did.
+  ///
+  /// [label] overrides the section's own name on the header — the Today
+  /// section is a slice of the Day stop and says so by name.
+  ///
+  /// [onLabelTap] and [onChevronTap] replace the two targets' usual acts —
+  /// the Scheduling asks header folds itself from both, on a flag of its own
+  /// — and [highlight] false keeps it from lighting up as the selected
+  /// section beside the Day header that really is.
   Widget _header(
     RailSection section, {
     required Widget? badge,
     required bool collapsed,
     Widget? action,
     bool collapsible = true,
+    String? label,
+    VoidCallback? onLabelTap,
+    VoidCallback? onChevronTap,
+    Key? labelKey,
+    Key? chevronKey,
+    bool highlight = true,
   }) {
-    final selected = widget.selectedSection == section;
+    final selected = highlight && widget.selectedSection == section;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
@@ -894,7 +1177,8 @@ class _AppRailState extends State<AppRail> {
             children: [
               Expanded(
                 child: InkWell(
-                  onTap: () => widget.onSelectSection(section),
+                  key: labelKey,
+                  onTap: onLabelTap ?? () => widget.onSelectSection(section),
                   borderRadius: BondRadii.smAll,
                   hoverColor: BondColors.onDarkFaint,
                   child: Padding(
@@ -904,7 +1188,7 @@ class _AppRailState extends State<AppRail> {
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        section.label.toUpperCase(),
+                        (label ?? section.label).toUpperCase(),
                         style: BondType.caption.copyWith(
                           color: BondColors.onDarkMuted,
                           fontWeight: FontWeight.w600,
@@ -921,7 +1205,8 @@ class _AppRailState extends State<AppRail> {
               ?action,
               if (collapsible)
                 InkWell(
-                  onTap: () => _toggle(section),
+                  key: chevronKey,
+                  onTap: onChevronTap ?? () => _toggle(section),
                   borderRadius: BondRadii.fullAll,
                   hoverColor: BondColors.onDarkFaint,
                   child: Padding(

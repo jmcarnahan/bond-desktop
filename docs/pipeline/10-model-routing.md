@@ -29,7 +29,23 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | `message_text`, `attachment_digest`, `context_file_digest`, `context_brief`, `context_select` | Generative |
 | `storyline_name`, `storyline_refresh`, `storyline_recap` | Generative |
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
+| `meeting_brief` | Generative — never cloud drafts |
+| `calendar_intent` | Generative — never cloud drafts; on demand, not a lane |
 | `embeddings` | Embeddings, not routed |
+
+`meeting_brief` (the pre-meeting brief, [14-calendar.md](14-calendar.md#briefs))
+is deliberately NOT in `draftStageIds`: it is written FOR the owner, never in
+their name, so rule 4 below sends it to `generativeSpec` whatever Cloud drafts
+says (the calendar round's D9). `llm_routing_test` pins it.
+
+`calendar_intent` (a Day command the rules could not finish,
+[14-calendar.md](14-calendar.md#commands)) is generative too, and on demand:
+no work kind and no lane — `CommandRouter.submit` calls it on Enter only,
+at most once, and only when the best classifier's confidence (the command
+head's when one ships, else the lexicon's) is under 0.8 or a slot is
+unresolved with words left over. The live preview never calls it. It is
+not in `draftStageIds` either: it reads the owner's own words and writes
+nothing in their name, so Cloud drafts never sees it.
 
 There is no storyline-membership or storyline-grouping stage: whether a thread
 belongs to a storyline is the decision model's `member_of`, which threads the
@@ -79,6 +95,40 @@ decision model's probability is the one rule). A per-message pipeline costs the
 decision pass and one `message_text` call (plus the draft, when one is
 written). The label a call records (`LlmCallRecord.label`) is its schema:
 `decision`, `message_text`, `attachment_digest`, …
+
+**The decision model's second consumer: the Day bar's command head (the
+calendar round).** The calendar command bar asks the SAME decision client
+(`decisionClientProvider`, so the same target, key, identity probe and heads
+file) for the raw pooled vector of a typed command
+(`DecisionClient.embedRaw`, call records labelled `command_head`) and applies
+a second, separately fitted linear head in Dart (`CommandHeads`,
+`app/assets/calendar/command_heads.json`, tied to the question set's
+`expectedQhash` AND to the installed model by name, `encoder_model` against
+the installed heads' `model`). Unlike triage it never parks: no head file, a
+refused one, a head fitted on another model, a decision role that is not
+installed or not served (then no request is made at all), or a decision
+server that is down means the lexicon reads the command alone
+([14-calendar.md](14-calendar.md#the-command-head)). There is no stage row
+and no routing of its own; it follows the decision role wherever that runs.
+
+**Its third: scheduling asks.** Find a time makes NO model call: it
+reads the `intent` answer triage already stored in `message_decisions` for a
+thread's newest inbound message, and a `needs_reply` thread whose answer is
+`scheduling` at p ≥ `DecisionPolicy.booleanYes` gets the thread header's
+**Find a time** and a row in the Day column's "Scheduling asks · N"
+([14-calendar.md](14-calendar.md#find-a-time)). A message the decision model
+never read is simply not an ask.
+
+**And two more readers of stored answers.** Also without a call of their
+own, the calendar reads triage's `message_decisions` rows in two more places.
+The Day stop's invites owed pin an invite whose mail is `urgency ∈ {high,
+urgent}` or `importance = high`. The pre-meeting brief's gatherer uses the
+same rule to rank the threads it keeps. It picks an attendee's open asks by
+`needs_you_p ≥ DecisionPolicy.needsYouYes` or `reply_expected_p ≥
+DecisionPolicy.replyYes`, with a question, request or approval `intent`
+([14-calendar.md](14-calendar.md#briefs)). A message with no
+stored decision is neither pinned nor an ask. A decision read that throws
+costs an invite its pin, never the list.
 
 Why one generative model: the decision model answers every classification
 field in one forward pass of tens of milliseconds, so what is left for a chat
@@ -267,7 +317,9 @@ and `baseUrl`, and the activity log folds the model into the row as
 `detail_json` as `first_token_ms` only when there was one (only the draft
 streams). A constrained call whose content is not the JSON object it asked for
 is recorded as `format`, never `ok`. The decision client reports ONE record per
-decision or batch, labelled `decision`, however many HTTP requests it took.
+decision or batch, labelled `decision`, however many HTTP requests it took;
+`embedRaw` reports one labelled `command_head` on Enter and none for the live
+preview's keystrokes, which are no unit of work.
 
 **Two wires, one client.** `LlmClient` speaks the OpenAI wire and Bedrock's
 Converse (`LlmWire.bedrockConverse`). On Converse a JSON answer is a forced
@@ -786,13 +838,21 @@ behind a recap and a new message never waits behind either:
 |---|---|---|---|---|
 | Fast | `needs_you`, `extract`, `embed_message`, `attachment_text`, `attachment_digest`, `context_reconcile`, `context_digest`, `context_brief` | decision (`needs_you` re-decides), generative + embeddings | `fastDrainGateProvider`, shared with `TriageQueue` | `aiWorkerProvider` |
 | Storyline | `storyline`, `storyline_sweep`, `storyline_refresh`, `storyline_audit`, `storyline_recruit`, `storyline_recap` | generative + decision (`member_of`, `charter_specific`; a decision failure parks the lane) | `storylineDrainGateProvider` | `storylineWorkerProvider` |
-| Draft | `draft` | generative, or cloud drafts | `draftDrainGateProvider` | `draftWorkerProvider` |
+| Draft | `draft`, `meeting_brief` | generative, or cloud drafts (`draft` only) | `draftDrainGateProvider` | `draftWorkerProvider` |
 
 The lanes were cut when the fast lane had a 4B of its own. With one generative
 server they are still the right cut for ORDER (the storyline six mutate shared
 membership in an order that is an argument, see
 [06-storylines.md](06-storylines.md); the draft is the one kind a person
-waits for), but they now contend at one server, which queues them. On a
+waits for), but they now contend at one server, which queues them. The
+meeting brief rides the draft lane AFTER `draft`: it is the other piece of
+prose a person reads rather than a stage another stage reads, so behind the
+storyline passes it would wait on a sweep, and ahead of the draft it would
+hold up a reply somebody is waiting on for a meeting hours away. It runs one
+at a time, whatever the draft width. Order alone is not enough once the walk
+is inside a backlog of briefs, so a person's Draft reply is also named as a
+priority ref (`pump(first:)`), served at the next claim boundary — after at
+most the one brief already at the model. On a
 managed full-tier Mac that server is the 27B with one slot, so today every
 lane's calls take turns there; that is the cost the decision pass (Phase 5)
 began to remove and the one-call-per-message task (Phase 6) finishes.

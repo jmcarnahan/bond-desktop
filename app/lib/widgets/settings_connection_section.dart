@@ -10,18 +10,21 @@ import 'chips.dart';
 import 'inline_alert.dart';
 import 'settings_section.dart';
 
-/// The three extended permissions, in the order they matter to the user:
+/// The four extended permissions, in the order they matter to the user:
 /// label, the bare scope each one is really asking about, and whether a
 /// fresh sign-in can actually obtain it. Teams cannot via a direct-Graph
 /// sign-in — the SDK path still leaves `Chat.Read` out of its request (see
 /// GraphAuth.pendingAdminScopes), and in MCP mode the grant arrives through
 /// a platform-side Microsoft reconnect, not this app's sign-in — so
 /// offering "sign in again" for it would send the user through a round
-/// that cannot deliver.
+/// that cannot deliver. Calendar is the same case: only the MCP backend
+/// reads the calendar, and its `Calendars.ReadWrite` grant arrives through
+/// that same platform-side reconnect, so it is reported and never offered.
 const List<(String, String, bool)> microsoftPermissions = [
   ('Send mail', 'mail.send', true),
   ('Save drafts', 'mail.readwrite', true),
   ('Teams chats', 'chat.read', false),
+  ('Calendar (read and write)', 'calendars.readwrite', false),
 ];
 
 /// Which backend the app talks through, where, who is signed in to it, and
@@ -763,14 +766,16 @@ class MicrosoftConnectionSectionState extends State<MicrosoftConnectionSection> 
   };
 
   /// Which granted scope stands in for a scope this screen asks about — the
-  /// same two pairs `McpAuthSession._subsumedBy` holds, for the same reason:
-  /// Microsoft's consent hierarchy makes the ReadWrite grant include Read,
-  /// and the platform's admin grant for Teams is `Chat.ReadWrite` while the
-  /// row here asks the read-only question. The two matchers must agree or the
-  /// screen contradicts the Teams pill it sits on top of.
+  /// mail, chat and calendar pairs `McpAuthSession._subsumedBy` holds, for the
+  /// same reason: Microsoft's consent hierarchy makes the ReadWrite grant
+  /// include Read, and the platform's admin grant for Teams is
+  /// `Chat.ReadWrite` while the row here asks the read-only question. The two
+  /// matchers must agree or the screen contradicts the Teams pill it sits on
+  /// top of. (The directory pair is left out: no row here asks about it.)
   static const Map<String, Set<String>> _subsumedBy = {
     'mail.read': {'mail.readwrite'},
     'chat.read': {'chat.readwrite'},
+    'calendars.read': {'calendars.readwrite'},
   };
 
   /// Whether the connected account holds [scope].

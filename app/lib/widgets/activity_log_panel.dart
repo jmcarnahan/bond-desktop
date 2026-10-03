@@ -77,6 +77,11 @@ class ActivityLogPanel extends StatefulWidget {
   static const Map<String, String> _kindLabels = {
     'sync_mail': 'Mail sync',
     'sync_teams': 'Teams sync',
+    'sync_calendar': 'Calendar sync',
+    'calendar_write': 'Calendar',
+    'calendar_command': 'Calendar command',
+    'find_time': 'Find a time',
+    'scheduling_ask': 'Scheduling ask',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -104,7 +109,23 @@ class ActivityLogPanel extends StatefulWidget {
     'embed_message': 'Embed message',
     'storyline_refresh': 'Storyline refresh',
     'storyline_recap': 'Storyline recap',
+    'meeting_brief': 'Meeting brief',
     'processing': 'Processing',
+  };
+
+  /// Why a brief was skipped, in words. The row carries only the enum word
+  /// (`BriefIneligibility.wire`, or `unchanged`), never anything about the
+  /// meeting.
+  static const Map<String, String> _briefSkips = {
+    'past': 'already started',
+    'too_far': 'more than 36 hours away',
+    'no_others': 'nobody else invited',
+    'cancelled': 'cancelled',
+    'declined': 'declined',
+    'no_mail': 'no recent mail with these people',
+    'too_many': 'too many people',
+    'gone': 'no longer on the calendar',
+    'unchanged': 'nothing new since the last one',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -184,6 +205,38 @@ class ActivityLogPanel extends StatefulWidget {
     if (e.kind == 'embed_fail') {
       final reason = _reason(detail['reason']);
       return reason.isEmpty ? 'Embeddings unavailable' : 'Embeddings — $reason';
+    }
+
+    // The calendar's one error row is the grant, recorded once on the way
+    // into that state rather than every tick, so it reads as the state and
+    // names what would fix it.
+    if (e.kind == 'sync_calendar' &&
+        e.status == 'error' &&
+        detail['outcome'] == 'scope_missing') {
+      return '$label — the calendar permission is missing';
+    }
+
+    // A brief's three outcomes read as what happened to the brief. A park or
+    // a retry is the pipeline's news and keeps the general sentences below.
+    if (e.kind == 'meeting_brief') {
+      // A run that failed or was skipped over a ready brief left it standing
+      // (`kept: ready`), and the sentence says so rather than implying the
+      // panel lost its brief.
+      final kept = detail['kept'] == 'ready' ? '; the last brief stands' : '';
+      switch (e.status) {
+        case 'ok':
+          final threads = detail['threads'];
+          final n = threads is num ? threads.toInt() : 0;
+          return '$label — written from $n ${n == 1 ? 'thread' : 'threads'}';
+        case 'skipped':
+          final why = detail['reason'];
+          final words = why is String ? (_briefSkips[why] ?? _reason(why)) : '';
+          return words.isEmpty
+              ? '$label — skipped$kept'
+              : '$label — skipped ($words)$kept';
+        case 'error':
+          return '$label — failed$kept';
+      }
     }
 
     switch (e.status) {
@@ -395,6 +448,112 @@ class ActivityLogPanel extends StatefulWidget {
         return stages is List && stages.isNotEmpty
             ? 'Retried ${stages.join(', ')}'
             : 'Retried owed stages';
+      // Recorded only when the mirror moved or a new run finished, so the
+      // sentence is what changed; `swept` is what a completed run found gone.
+      case 'sync_calendar':
+        final count = e.count ?? 0;
+        final removed = detail['removed'];
+        final swept = detail['swept'];
+        final gone = (removed is num ? removed.toInt() : 0) +
+            (swept is num ? swept.toInt() : 0);
+        final parts = [
+          if (count > 0) '$count updated',
+          if (gone > 0) '$gone removed',
+        ];
+        final run = detail['run'] == 'new' ? ' (full read)' : '';
+        return parts.isEmpty
+            ? '$label — up to date$run'
+            : '$label — ${parts.join(', ')}$run';
+      // One row per write the owner made, in counts and enum words only: the
+      // action, the outcome and how many people it emailed — never whom, and
+      // never the meeting's subject.
+      case 'calendar_write':
+        final action = detail['action'];
+        final notified = detail['notified'];
+        final emailed = notified is num && notified > 0
+            ? ' · emailed ${notified.toInt()}'
+            : '';
+        if (e.status == 'failed') {
+          // One verb for every answer: a failed answer did not accept,
+          // decline or say maybe, so naming which would claim one it never
+          // gave. Each names its object, as the success lines do.
+          final verb = switch (action) {
+            'accept' || 'tentative' || 'decline' => 'answer a meeting',
+            'propose' => 'propose a new time',
+            'move' => 'move an event',
+            'cancel' => 'cancel a meeting',
+            'delete' => 'delete an event',
+            'create' => 'create an event',
+            _ => 'change an event',
+          };
+          final outcome = detail['outcome'];
+          final why = outcome is String && outcome.isNotEmpty
+              ? ' ($outcome)'
+              : '';
+          return "$label — couldn't $verb$why";
+        }
+        final phrase = detail['undo'] == true
+            ? 'Undid a change'
+            : switch (action) {
+                'accept' => 'Accepted a meeting',
+                'tentative' => 'Said maybe to a meeting',
+                'decline' => 'Declined a meeting',
+                'propose' => 'Proposed a new time',
+                'move' => 'Moved an event',
+                'cancel' => 'Cancelled a meeting',
+                'delete' => 'Deleted an event',
+                'create' => 'Created an event',
+                _ => 'Changed an event',
+              };
+        return '$label — $phrase$emailed';
+      // One row per Enter in the Day command bar, in enum words only: what
+      // was asked, who read it (the rules, the head, or the model) and what
+      // came back — never the words typed, a name or a subject.
+      case 'calendar_command':
+        final action = detail['action'];
+        final verb = switch (action) {
+          'create' => 'Create',
+          'move' => 'Move',
+          'cancel' => 'Cancel',
+          'rsvp_yes' => 'Yes',
+          'rsvp_no' => 'No',
+          'rsvp_maybe' => 'Maybe',
+          'find_time' => 'Find a time',
+          'ask_free' => 'Am I free',
+          'ask_agenda' => 'Agenda',
+          'ask_person' => 'Meetings with',
+          _ => 'Not understood',
+        };
+        final parts = [
+          verb,
+          for (final key in const ['path', 'outcome'])
+            if (detail[key] case final String word when word.isNotEmpty) word,
+        ];
+        return '$label — ${parts.join(' · ')}';
+      // Find a time on a scheduling thread: one row per search (how many
+      // slots, and whether everyone's calendars or only the owner's were
+      // read) and one per action taken on them — counts and enum words, never
+      // a person, a subject or a time.
+      case 'find_time':
+        final action = detail['action'];
+        if (action == 'put_in_reply') return '$label — put in reply';
+        if (action == 'send_invite') return '$label — invite sent';
+        if (action == 'add_to_calendar') return '$label — added to calendar';
+        final slots = detail['slots'];
+        final n = slots is num ? slots.toInt() : 0;
+        final from = detail['source'];
+        final where = from is String && from.isNotEmpty ? ' ($from)' : '';
+        return '$label — $n ${n == 1 ? 'slot' : 'slots'}$where';
+      // The owner's word on a scheduling ask, one row per label written or
+      // taken back, by its origin — an enum word, never the thread.
+      case 'scheduling_ask':
+        return switch (detail['origin']) {
+          'invite' => 'Closed an ask after an invite',
+          'dismiss' => 'Dismissed an ask',
+          'undo' => 'Brought an ask back',
+          'owner' => 'Marked a thread as asking for a time',
+          _ => label,
+        };
       // The switch at the top of the rail. Its STATUS is the whole row — `on`
       // or `off`, neither of which any of the status cases above claims — so
       // the sentence is written here rather than left to the bare label.
@@ -921,13 +1080,13 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   ///
   /// A park and a retry share the attention colour on purpose: both mean the
   /// work is still owed, and neither is something the user did wrong. Only
-  /// `error` is red.
+  /// `error` and a calendar write that `failed` are red.
   Widget _dot(String status) {
     final color = switch (status) {
       'ok' => BondColors.success,
       'skipped' => BondColors.inkMuted,
       'retry' || 'parked' => BondColors.attention,
-      'error' => BondColors.error,
+      'error' || 'failed' => BondColors.error,
       _ => BondColors.inkMuted,
     };
     return Container(

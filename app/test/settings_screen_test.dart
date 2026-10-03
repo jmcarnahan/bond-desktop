@@ -1049,7 +1049,7 @@ void main() {
       expect(find.text('Microsoft permissions'), findsNothing);
     });
 
-    testWidgets('a full grant ticks all three and offers no sign-in',
+    testWidgets('a full grant ticks all four and offers no sign-in',
         (tester) async {
       await open(
         tester,
@@ -1063,7 +1063,8 @@ void main() {
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
-      expect(find.byIcon(Icons.check), findsNWidgets(3));
+      expect(find.text('Calendar (read and write)'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsNWidgets(4));
       expect(find.byIcon(Icons.close), findsNothing);
       // A tenant that granted everything has nothing to be nagged about.
       expect(find.text('Sign in again to enable'), findsNothing);
@@ -1084,9 +1085,14 @@ void main() {
       );
       await expand(tester, 'Microsoft connection');
 
-      expect(asked, ['mail.send', 'mail.readwrite', 'chat.read']);
+      expect(asked, [
+        'mail.send',
+        'mail.readwrite',
+        'chat.read',
+        'calendars.readwrite',
+      ]);
       expect(find.byIcon(Icons.check), findsOneWidget);
-      expect(find.byIcon(Icons.close), findsNWidgets(2));
+      expect(find.byIcon(Icons.close), findsNWidgets(3));
       expect(find.text('Sign in again to enable'), findsOneWidget);
     });
 
@@ -1104,6 +1110,24 @@ void main() {
       );
       await expand(tester, 'Microsoft connection');
 
+      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.text('Sign in again to enable'), findsNothing);
+    });
+
+    testWidgets('a missing calendar grant alone offers no sign-in',
+        (tester) async {
+      // Calendars.ReadWrite arrives through the platform-side reconnect, the
+      // same as the Teams grant, so this app's sign-in cannot deliver it.
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (scope) async => scope != 'calendars.readwrite',
+        onSignInAgain: () {},
+      );
+      await expand(tester, 'Microsoft connection');
+
+      expect(find.text('Calendar (read and write)'), findsOneWidget);
       expect(find.byIcon(Icons.close), findsOneWidget);
       expect(find.text('Sign in again to enable'), findsNothing);
     });
@@ -1145,7 +1169,7 @@ void main() {
       await tester.drag(find.byType(Slider), const Offset(-100, 0));
       await tester.pumpAndSettle();
 
-      expect(reads, 3, reason: 'three scopes, asked once each');
+      expect(reads, 4, reason: 'four scopes, asked once each');
     });
   });
 

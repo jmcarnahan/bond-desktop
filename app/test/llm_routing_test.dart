@@ -459,6 +459,13 @@ void main() {
       expect(triage.baseUrl, generativeUrl);
       expect(identical(container.read(stageLlmClientProvider('draft_reply')),
           draft), isTrue);
+      // A meeting brief is written FOR the owner, never in their name: it
+      // stays on the generative model whatever Cloud drafts says (D9).
+      expect(container.read(stageLlmClientProvider('meeting_brief')).baseUrl,
+          generativeUrl);
+      // So is a calendar command: the owner's own words, read for them.
+      expect(container.read(stageLlmClientProvider('calendar_intent')).baseUrl,
+          generativeUrl);
     });
 
     test('pointing a stage elsewhere rebuilds no worker', () async {
@@ -731,7 +738,10 @@ void main() {
         'storyline_recruit',
         'storyline_recap',
       ]);
-      expect(container.read(draftWorkerProvider).kinds, ['draft']);
+      // The meeting brief rides AFTER the draft: prose a person reads, behind
+      // the reply somebody is waiting on.
+      expect(container.read(draftWorkerProvider).kinds,
+          ['draft', 'meeting_brief']);
 
       // Nothing on the fast lane dials the 27B, which is the property T1
       // rests on — and nothing appears on two lanes.

@@ -351,6 +351,137 @@ void main() {
       expect(row.sourceMetaJson, contains('precedence'),
           reason: 'the headers the bulk-mail gates read landed too');
     });
+
+    test('the meeting kind rides under Graph\'s own key', () async {
+      // `_fetchDetailInto` reads `meetingMessageType` from both backends, so
+      // the server's snake_case key is renamed, and its value kept as spelt.
+      final mcp = _FakeMcp({
+        'read_email': [
+          {
+            'body_text': 'Planning review',
+            'has_attachments': false,
+            'meeting_message_type': 'meetingRequest',
+            'event_id': 'evt-1',
+          },
+        ],
+      });
+
+      final detail = await McpMailBackend(mcp).getMessageDetail('m1');
+
+      expect(detail['meetingMessageType'], 'meetingRequest');
+      expect(detail['calendarEventId'], 'evt-1');
+    });
+
+    test('Graph\'s misspelt tentative kind is kept as the server spelt it',
+        () async {
+      // The gate matches `meetingTenativelyAccepted` literally; a corrected
+      // spelling here would be a response the gate never sees.
+      final mcp = _FakeMcp({
+        'read_email': [
+          {
+            'body_text': '',
+            'meeting_message_type': ' meetingTenativelyAccepted ',
+          },
+        ],
+      });
+
+      final detail = await McpMailBackend(mcp).getMessageDetail('m1');
+
+      expect(detail['meetingMessageType'], 'meetingTenativelyAccepted');
+    });
+
+    test('ordinary mail carries no meeting kind and no event', () async {
+      for (final kind in ['none', 'None', '', '  ']) {
+        final mcp = _FakeMcp({
+          'read_email': [
+            {
+              'body_text': 'hi',
+              'meeting_message_type': kind,
+              'event_id': null,
+            },
+          ],
+        });
+
+        final detail = await McpMailBackend(mcp).getMessageDetail('m1');
+
+        expect(detail.containsKey('meetingMessageType'), isFalse,
+            reason: '"$kind" is not a meeting kind');
+        expect(detail.containsKey('calendarEventId'), isFalse);
+      }
+    });
+
+    test('an auto-reply flag rides only when the server says true', () async {
+      final away = _FakeMcp({
+        'read_email': [
+          {'body_text': 'I am away.', 'is_auto_reply': true},
+        ],
+      });
+      expect(
+        (await McpMailBackend(away).getMessageDetail('m1'))['isAutoReply'],
+        isTrue,
+      );
+
+      for (final row in <Map<String, dynamic>>[
+        {'body_text': 'hi'},
+        {'body_text': 'hi', 'is_auto_reply': false},
+        {'body_text': 'hi', 'is_auto_reply': 'true'},
+      ]) {
+        final detail =
+            await McpMailBackend(_FakeMcp({'read_email': [row]}))
+                .getMessageDetail('m1');
+        expect(detail.containsKey('isAutoReply'), isFalse,
+            reason: '$row says nothing');
+      }
+    });
+
+    test('an event id with no meeting kind still rides', () async {
+      final mcp = _FakeMcp({
+        'read_email': [
+          {'body_text': 'hi', 'meeting_message_type': 'none', 'event_id': 'e'},
+        ],
+      });
+
+      final detail = await McpMailBackend(mcp).getMessageDetail('m1');
+
+      expect(detail.containsKey('meetingMessageType'), isFalse);
+      expect(detail['calendarEventId'], 'e');
+    });
+
+    test('the meeting kind and event id land on the stored row', () async {
+      final db = testDb();
+      addTearDown(db.close);
+      final store = MessageStore(db);
+      await store.upsertMessage({
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'subject': 'Accepted: Planning review',
+        'received_at': '2026-08-28T09:00:00Z',
+      });
+      final mcp = _FakeMcp({
+        'read_email': [
+          {
+            'body_text': '',
+            'headers': {'x-mailer': 'Outlook'},
+            'has_attachments': false,
+            'meeting_message_type': 'meetingAccepted',
+            'event_id': 'evt-contoso-1',
+          },
+        ],
+      });
+      final sync = SyncService(McpMailBackend(mcp), store);
+
+      await sync.ensureMessageBody('m1');
+
+      final row =
+          (await store.loadThread('c1', sources: const ['email'])).single;
+      expect(row.meetingMessageType, 'meetingAccepted');
+      expect(row.meetingEventId, 'evt-contoso-1');
+      // A detail fetch does not gate on its own — triage does, and the
+      // one-shots re-gate stored rows — so what is pinned here is that the
+      // stored kind is the one the response rule reads.
+      expect(await store.regateMeetingResponseIds(), ['m1']);
+    });
   });
 
   group('drafts', () {
@@ -951,6 +1082,30 @@ void main() {
       expect(row.bodyText, isNull);
       expect(await store.attachmentsForMessage('email', 'm1'), isEmpty);
       expect(await store.workCounts('attachment_text'), isEmpty);
+    });
+
+    test('a message the server no longer has is a 404, not a refusal',
+        () async {
+      // `not_found` arrives as data; the 404 is what SyncService reads as
+      // "skip this one", where the 403 path would read it as a policy.
+      final mcp = _FakeMcp({
+        'read_email': [
+          {'error': 'not_found', 'reason': 'deleted'},
+        ],
+      });
+
+      await expectLater(
+        McpMailBackend(mcp).getMessageDetail('m1'),
+        throwsA(
+          isA<GraphMailException>()
+              .having((e) => e.statusCode, 'statusCode', 404),
+        ),
+      );
+
+      final db = testDb();
+      addTearDown(db.close);
+      final sync = SyncService(McpMailBackend(mcp), MessageStore(db));
+      await expectLater(sync.ensureMessageBody('m-gone'), completes);
     });
 
     test('a vanished message does not park the triage queue', () async {

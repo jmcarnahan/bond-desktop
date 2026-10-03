@@ -1,0 +1,50 @@
+{"text": "put an hour aside tomorrow morning for planning", "action": "create"}
+{"text": "carve out 45 mins thursday at 3 for the pricing deck", "action": "create"}
+{"text": "stick a design crit in for monday 11am with sam@fabrikam.com", "action": "create"}
+{"text": "reserve friday 2 to 4 for heads-down writing", "action": "create"}
+{"text": "send priya an invite for coffee wendesday at 10", "action": "create"}
+{"text": "the 2pm needs to be later, 4 works", "action": "move"}
+{"text": "shift the budget chat with dana over to monday", "action": "move"}
+{"text": "can the design crit happen on friday instead", "action": "move"}
+{"text": "the retro should be tmrw not today", "action": "move"}
+{"text": "delay thursday's sync with kim by half an hour", "action": "move"}
+{"text": "pull the offsite off my calendar", "action": "cancel"}
+{"text": "the vendor demo isn't happening anymore, get rid of it", "action": "cancel"}
+{"text": "drop tomorrow's 1:1 with sam", "action": "cancel"}
+{"text": "cancle the focus time on friday", "action": "cancel"}
+{"text": "nix the team lunch on wednesday", "action": "cancel"}
+{"text": "count me in for the standup", "action": "rsvp_yes"}
+{"text": "i'll be at the launch review, let them know", "action": "rsvp_yes"}
+{"text": "sure, i can make morgan's coffee chat, confirm it", "action": "rsvp_yes"}
+{"text": "sign me up for the all hands on friday", "action": "rsvp_yes"}
+{"text": "reply that i will attend the contract kickoff", "action": "rsvp_yes"}
+{"text": "I won't be able to join the vendor call, let them know", "action": "rsvp_no"}
+{"text": "not going to the offsite dinner, send my regrets", "action": "rsvp_no"}
+{"text": "pass on thursday's brainstorm for me", "action": "rsvp_no"}
+{"text": "count me out of the hiring sync", "action": "rsvp_no"}
+{"text": "i'll skip kim's workshop, reply no", "action": "rsvp_no"}
+{"text": "pencil me in for the review", "action": "rsvp_maybe"}
+{"text": "not sure i can make the vendor sync, mark it as a maybe", "action": "rsvp_maybe"}
+{"text": "hold off committing to jordan's workshop, answer tentatively", "action": "rsvp_maybe"}
+{"text": "i might make the hiring debrief, reply tentative", "action": "rsvp_maybe"}
+{"text": "could go either way on the brown bag with alex, put me down as tentative", "action": "rsvp_maybe"}
+{"text": "get something on the books with Priya, 45 minutes, before friday", "action": "find_time"}
+{"text": "whens everyone free, me lee and kim, for a quick retro", "action": "find_time"}
+{"text": "need a slot that works for morgan@example.com sometime next week", "action": "find_time"}
+{"text": "look for an opening with the tailspin crew for an hour", "action": "find_time"}
+{"text": "what time works for jordan and me to catch up this week", "action": "find_time"}
+{"text": "could I squeeze something into thursday afternoon or is it booked solid", "action": "ask_free"}
+{"text": "is 3 tomorrow taken", "action": "ask_free"}
+{"text": "do i hav an opening monday mornin", "action": "ask_free"}
+{"text": "am i clear between 1 and 2 today", "action": "ask_free"}
+{"text": "whats my availability like friday", "action": "ask_free"}
+{"text": "how packed is friday for me", "action": "ask_agenda"}
+{"text": "rundown of tomorrow please", "action": "ask_agenda"}
+{"text": "whats booked for me on the 22nd", "action": "ask_agenda"}
+{"text": "how busy am i next wednesday", "action": "ask_agenda"}
+{"text": "walk me through today's meetings", "action": "ask_agenda"}
+{"text": "last time I saw Morgan?", "action": "ask_person"}
+{"text": "have i met with priya recently", "action": "ask_person"}
+{"text": "how long since jordan and i had a call", "action": "ask_person"}
+{"text": "is anything coming up with kim wingtip", "action": "ask_person"}
+{"text": "when's the next time i'm in a room with sam", "action": "ask_person"}

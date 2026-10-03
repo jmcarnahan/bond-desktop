@@ -63,6 +63,7 @@ void main() {
       overrides: [
         dbProvider.overrideWithValue(db),
         keepingDecisionClient(),
+        noCommandHeads(),
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),

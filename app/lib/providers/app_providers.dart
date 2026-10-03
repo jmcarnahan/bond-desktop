@@ -11,11 +11,13 @@ import 'package:path_provider/path_provider.dart';
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
 import '../data/app_paths.dart';
+import '../data/calendar_store.dart';
 import '../data/context_store.dart';
 import '../data/database.dart' show BondDatabase;
 import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../data/setup_store.dart';
+import '../models/calendar_models.dart' show MailboxSettings;
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/ai_workers.dart';
@@ -28,9 +30,22 @@ import '../services/attachments/html_snapshot.dart' show htmlSnapshotPng;
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
+import '../services/backend/calendar_backend.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/backend/unavailable_calendar_backend.dart';
+import '../services/calendar/brief_gatherer.dart';
+import '../services/calendar/brief_planner.dart';
+import '../services/calendar/calendar_sync.dart';
+import '../services/calendar/calendar_writes.dart';
+import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/command/command_heads.dart';
+import '../services/calendar/command/command_lexicon.dart';
+import '../services/calendar/command/command_planner.dart';
+import '../services/calendar/command/command_router.dart';
+import '../services/calendar/command/decision_command_classifier.dart';
+import '../services/calendar/meeting_brief_handler.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
@@ -38,6 +53,7 @@ import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
 import '../services/cloud_drafts.dart';
 import '../services/decision/decision_client.dart';
+import '../services/decision/decision_heads.dart' show DecisionHeads;
 import '../services/decision/decision_heads_file.dart';
 import '../services/decision/decision_input.dart' show decisionOwnerString;
 import '../services/decision/needs_you_exemplars.dart';
@@ -60,6 +76,7 @@ import '../services/llm/model_slots.dart';
 import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_attachment_backend.dart';
 import '../services/mcp/mcp_auth.dart';
+import '../services/mcp/mcp_calendar_backend.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
@@ -898,8 +915,11 @@ final attentionServiceProvider = Provider<AttentionService>(
 
 /// Typed as [MailSync], not [SyncService], so a test can override it with a
 /// stand-in that never touches the network. Typed out on the declaration as
-/// well: the re-decide reads [triageQueueProvider] at call time and the queue
-/// watches this provider, an inference cycle (never a build-time one).
+/// well, for the type-inference cycle: the re-decide reads
+/// [triageQueueProvider] at call time, and the queue reads this provider at
+/// call time too (`ref.read` on both sides, no `watch` either way — a watch
+/// on either side would make the other's read a CircularDependencyError in
+/// debug builds, see [triageQueueProvider]).
 final Provider<MailSync> syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
     ref.watch(mailBackendProvider),
@@ -970,6 +990,195 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
     // the setting. The same rule [syncServiceProvider] follows above.
     lookbackDays: () => ref.read(appPrefsProvider).teamsLookbackDays,
   );
+});
+
+/// The calendar mirror's store — a second store over the same database, for
+/// the reason [CalendarStore] gives. Mailbox data, so a wipe empties it.
+final calendarStoreProvider =
+    Provider<CalendarStore>((ref) => CalendarStore(ref.watch(dbProvider)));
+
+/// The primary calendar, behind the backend switch. MCP mode only (D11): SDK
+/// mode's sign-in asks for no calendar scope, so it gets the backend whose
+/// every call says so rather than one answering an empty calendar.
+final calendarBackendProvider = Provider<CalendarBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? const UnavailableCalendarBackend()
+      : McpCalendarBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// The calendar mirror's sync. Unlike [teamsSyncProvider] the inbox's poll
+/// timer MAY reach it: this is Graph calendar, not the Teams messaging
+/// endpoints, and it throttles itself to [CalendarSync.throttle].
+///
+/// The precheck ([calendarPrecheck]) answers SDK mode and a grant without
+/// `calendars.read` before any request, so neither costs a call; a session
+/// that cannot answer even `mail.read` — an MCP server offline, mid-restart —
+/// is treated as having no calendar right now, not as missing the scope.
+///
+/// A rebuild (backend or server change) builds a fresh [CalendarSync]; a tick
+/// the old one still has in flight is kept by the sync's generation check
+/// from writing into a run the new one has since replaced, or a wipe deleted.
+final calendarSyncProvider = Provider<CalendarSync>((ref) {
+  final auth = ref.watch(authSessionProvider);
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  late final CalendarSync sync;
+  sync = CalendarSync(
+    ref.watch(calendarBackendProvider),
+    ref.watch(messageStoreProvider),
+    ref.watch(calendarStoreProvider),
+    activityLog: ref.watch(activityLogProvider),
+    precheck: () => calendarPrecheck(mode == backendModeSdk, auth.hasScope),
+    onOutcome: calendarOutcomePublisher(ref, () => sync.availability),
+  );
+  return sync;
+});
+
+/// What a sync tick publishes to the mirror's readers, whoever started it —
+/// the inbox's poll or the forced read after a write: the availability the
+/// Day stop and the Today section show, and a [calendarRevisionProvider] bump
+/// when rows moved. A first mailbox-settings fetch is news to the zone's
+/// readers even on a tick that moved no rows; they watch the same revision.
+///
+/// The notifiers are read once, here, and the closure keeps them: a read
+/// inside it lands long after the build, where a debug outdated-ref assert
+/// would drop the bump. Public so a test's recording sync publishes through
+/// the same wiring.
+void Function(CalendarSyncOutcome outcome) calendarOutcomePublisher(
+  Ref ref,
+  CalendarAvailability Function() availability,
+) {
+  final revision = ref.read(calendarRevisionProvider.notifier);
+  final shown = ref.read(calendarAvailabilityProvider.notifier);
+  return (outcome) {
+    final now = availability();
+    if (shown.state != now) shown.state = now;
+    if (outcome.changed || outcome.settingsRefreshed) revision.state++;
+  };
+}
+
+/// Bumped after every sync that changed rows and after every calendar write.
+/// Readers of the mirror watch it, which is how a Day stop left open follows
+/// the calendar without polling the table.
+final calendarRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// Calendar writes (Phase 5). Typed as the [CalendarWriter] seam so a screen
+/// test overrides it with a fake; the real one bumps the revision after every
+/// write so readers follow without waiting for a sync.
+final calendarWritesProvider = Provider<CalendarWriter>((ref) {
+  // Read once at build and kept by the closure: the call lands after the
+  // write, where a debug outdated-ref assert would drop the bump.
+  final revision = ref.read(calendarRevisionProvider.notifier);
+  return CalendarWrites(
+    ref.watch(calendarBackendProvider),
+    ref.watch(calendarStoreProvider),
+    ref.watch(calendarSyncProvider),
+    ref.watch(messageStoreProvider),
+    activityLog: ref.watch(activityLogProvider),
+    onChanged: () => revision.state++,
+  );
+});
+
+/// The Day command bar's planner (Phase 8): the mirror to read, the backend
+/// for `find_meeting_times` only, and the same [calendarWritesProvider] every
+/// other calendar write goes through, so a command's dry run is the Day
+/// stop's own.
+final commandPlannerProvider = Provider<CommandPlanner>((ref) {
+  final store = ref.watch(messageStoreProvider);
+  return CommandPlanner(
+    calendar: ref.watch(calendarStoreProvider),
+    backend: ref.watch(calendarBackendProvider),
+    writer: ref.watch(calendarWritesProvider),
+    mailbox: () => CalendarSync.readMailboxSettings(store),
+  );
+});
+
+/// The calendar command head (`assets/calendar/command_heads.json`), read
+/// once; null when no head ships or the file was refused
+/// (`loadCommandHeadsAsset`).
+final commandHeadsProvider =
+    FutureProvider<CommandHeads?>((ref) => loadCommandHeadsAsset());
+
+/// The command head as a classifier, over the SAME decision client as
+/// triage: its identity probe, its target resolved per call, its heads file
+/// (whose width the raw vector is checked against). Also the Day bar's live
+/// refine ([DecisionCommandClassifier.classifyPreview]).
+///
+/// Ready means what the decision client would find at the top of a call:
+/// the heads file loads ([DecisionHeadsFile.current]) and the decision
+/// target carries no `unavailable` sentence (the managed router serves the
+/// model). Anything else is no request at all, so no `command_head` row.
+/// The installed heads are the same file, for the model name the command
+/// head must have been fitted on.
+final decisionCommandClassifierProvider =
+    Provider<DecisionCommandClassifier>((ref) {
+  DecisionHeads? installed() {
+    try {
+      return ref.read(decisionHeadsProvider).current();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return DecisionCommandClassifier(
+    client: () => ref.read(decisionClientProvider),
+    heads: () => ref.read(commandHeadsProvider.future),
+    decisionReady: () {
+      try {
+        final target =
+            ref.read(appPrefsProvider.notifier).targetForStage('decision');
+        return target.unavailable == null && installed() != null;
+      } catch (_) {
+        return false;
+      }
+    },
+    installedHeads: installed,
+  );
+});
+
+/// The Day command bar's router. Typed as the class so a screen test can
+/// override it with one built over fakes.
+///
+/// The intent client is resolved at Enter, never held: a Settings change to
+/// the generative role reaches the next command without rebuilding this.
+///
+/// The decision model's command head is asked FIRST, the lexicon second: the
+/// head answers only above its bar, and a head that is absent, refused,
+/// unsure or whose server is down answers nothing, so the lexicon reads the
+/// command as it did before Phase 9.
+final commandRouterProvider = Provider<CommandRouter>((ref) => CommandRouter(
+      classifiers: [
+        ref.watch(decisionCommandClassifierProvider),
+        const LexiconClassifier(),
+      ],
+      planner: ref.watch(commandPlannerProvider),
+      intentClient: () => ref.read(stageLlmClientProvider('calendar_intent')),
+      people: ref.watch(peopleBackendProvider),
+      activityLog: ref.watch(activityLogProvider),
+    ));
+
+/// What the Day stop and the Today section show about the calendar as a
+/// whole; written after each sync tick by [calendarOutcomePublisher]. SDK
+/// mode is known without asking, so it starts there rather than at unknown.
+final calendarAvailabilityProvider = StateProvider<CalendarAvailability>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? CalendarAvailability.sdkMode
+      : CalendarAvailability.unknown;
+});
+
+/// The mailbox's zone and working hours as last cached by the sync; null
+/// until the first fetch, or when the grant lacks MailboxSettings.Read.
+final mailboxSettingsProvider = FutureProvider<MailboxSettings?>((ref) {
+  ref.watch(calendarRevisionProvider);
+  return CalendarSync.readMailboxSettings(ref.watch(messageStoreProvider));
+});
+
+/// The zone the calendar displays in: the OS zone, then the mailbox's, then
+/// UTC ([resolveCalendarZone]). Never an error.
+final calendarZoneProvider = FutureProvider<CalendarZone>((ref) async {
+  final settings = await ref.watch(mailboxSettingsProvider.future);
+  return resolveCalendarZone(mailboxIana: settings?.timeZoneIana);
 });
 
 /// One chat client per pipeline stage. Constructing one opens nothing — the
@@ -1092,8 +1301,15 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     ref.watch(messageStoreProvider),
     // Triage fetches its own bodies rather than waiting for a human to open
     // the thread. Taken off [MailSync], so this stays typed to the interface
-    // a test can override.
-    ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+    // a test can override. `ref.read` at call time, never `watch`: the sync's
+    // install-time re-decide reads THIS provider from its own ref, and
+    // riverpod judges a `read` against the dependency graph exactly as it
+    // judges a `watch` — with the watch here, that read threw
+    // CircularDependencyError in every debug run and the re-decide never
+    // ran (found 2026-10-01 on the calendar branch's foreground pass;
+    // `redecide_wiring_test` pins it). Read lazily, the queue also follows a
+    // rebuilt sync (a backend switch) without rebuilding itself.
+    ensureBody: (id) => ref.read(syncServiceProvider).ensureMessageBody(id),
     // The FAST lane's gate, shared with the fast worker for ordering (see
     // [fastDrainGateProvider]); triage itself calls only the decision model.
     gate: ref.watch(fastDrainGateProvider),
@@ -1762,8 +1978,8 @@ final cloudDraftLedgerProvider = Provider<CloudDraftLedger>(
 /// `appPrefsProvider`. That omission is the whole of why pointing a stage
 /// somewhere else rebuilds no worker and aborts no drain.
 final draftHandlerProvider = Provider<DraftHandler>((ref) {
-  // The only handler on its lane, and the only one of the fourteen a person
-  // sits and waits for. A draft is prose they send under their own name — the
+  // First on its lane (the meeting brief follows it), and the only handler
+  // of the fourteen a person sits and waits for. A draft is prose they send under their own name — the
   // one place the bigger model earns its seconds.
   //
   // It still reads the storyline summary as background, which used to be
@@ -1820,20 +2036,93 @@ final draftHandlerProvider = Provider<DraftHandler>((ref) {
   );
 });
 
-/// The DRAFT lane's worker: one handler, on the 27B, at the width the prose
-/// server was started with.
+/// The DRAFT lane's worker: the draft handler, on the 27B, at the width the
+/// prose server was started with, and the meeting brief behind it.
 ///
 /// Alone on its gate because of what a draft IS — the one piece of work in
 /// this app a person sits and waits for. Behind the old single drain it waited
 /// for everything: a sweep of confirms, twenty recaps, the whole pass coming
 /// round. Here the worst case is one prose call already at the server.
+///
+/// The brief rides here, AFTER the draft, because it is the other piece of
+/// prose a person reads rather than a stage another stage reads: behind the
+/// storyline passes it would wait on a sweep, and ahead of the draft it would
+/// hold up a reply somebody is waiting on for a meeting hours away.
 final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
   return _lane(
     ref,
-    handlers: [ref.watch(draftHandlerProvider)],
+    handlers: [
+      ref.watch(draftHandlerProvider),
+      ref.watch(meetingBriefHandlerProvider),
+    ],
     gate: draftDrainGateProvider,
   );
 });
+
+/// Bumped after every brief the handler stores and after a Regenerate, so an
+/// open event panel and the Day agenda's teasers re-read `event_briefs`.
+final briefRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// Ticks each time the draft lane reports on `meeting_brief` work — after
+/// the worker has written the work row, which [briefRevisionProvider]'s bump
+/// (made from inside the handler, before that write) cannot see. A reader
+/// that shows "Writing the brief…" watches both, so the sentence goes the
+/// moment the row is done rather than at the next unrelated rebuild.
+final briefWorkTickProvider = StreamProvider.autoDispose<int>((ref) {
+  var tick = 0;
+  return ref
+      .watch(draftWorkerProvider)
+      .progress
+      .where((p) => p.kind == 'meeting_brief')
+      .map((_) => ++tick);
+});
+
+/// What a pre-meeting brief is written from. The owner's address is the
+/// sync's own lookup (`storedAccount`, `mail` then `userPrincipalName`); the
+/// zone is the calendar's display zone as last resolved, UTC until it has
+/// been. Both `read` inside closures, never `watch`: a zone or account change
+/// must not rebuild the draft lane mid-drain.
+final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
+      ref.watch(messageStoreProvider),
+      ref.watch(calendarStoreProvider),
+      ownerAddress: () => ref.read(authSessionProvider).storedAccount.then(
+            (account) => account?.mail ?? account?.userPrincipalName,
+          ),
+      zone: () {
+        try {
+          return ref.read(calendarZoneProvider).valueOrNull ??
+              CalendarZone.utc();
+        } catch (_) {
+          return CalendarZone.utc();
+        }
+      },
+    ));
+
+/// The `meeting_brief` handler, on the draft lane. Its client is the stage's
+/// own ([stageLlmClientProvider]), which resolves to the generative model and
+/// never to Cloud drafts: `meeting_brief` is not in `draftStageIds` (D9).
+final meetingBriefHandlerProvider = Provider<MeetingBriefHandler>((ref) {
+  final client = ref.watch(stageLlmClientProvider('meeting_brief'));
+  // Read once at build and kept by the closure, never read inside it: the
+  // call lands mid-drain, where a debug outdated-ref assert would drop the
+  // bump.
+  final briefs = ref.read(briefRevisionProvider.notifier);
+  return MeetingBriefHandler(
+    ref.watch(calendarStoreProvider),
+    ref.watch(briefGathererProvider),
+    client: () => client,
+    activityLog: ref.watch(activityLogProvider),
+    onStored: () => briefs.state++,
+  );
+});
+
+/// Queues the briefs a calendar sync makes due; the inbox calls it after a
+/// sync that completed while processing is on, and pumps the draft lane.
+final briefPlannerProvider = Provider<BriefPlanner>((ref) => BriefPlanner(
+      ref.watch(messageStoreProvider),
+      ref.watch(calendarStoreProvider),
+      ref.watch(briefGathererProvider),
+    ));
 
 /// Who the owner is, from the account the sync signed in with.
 ///

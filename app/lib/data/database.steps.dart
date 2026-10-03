@@ -16836,6 +16836,1280 @@ class Shape44 extends i0.VersionedTable {
       columnsByName['vector']! as i1.GeneratedColumn<i2.Uint8List>;
 }
 
+final class Schema25 extends i0.VersionedSchema {
+  Schema25({required super.database}) : super(version: 25);
+  @override
+  late final List<i1.DatabaseSchemaEntity> entities = [
+    messages,
+    ixMessagesConv,
+    ixMessagesTriage,
+    conversations,
+    ixConvLast,
+    syncState,
+    workItems,
+    ixWorkPending,
+    messageAi,
+    conversationAi,
+    storylines,
+    ixStorylinesStatus,
+    storylineMembers,
+    ixStorylineMembersConv,
+    storylineMemberBlocks,
+    feedbackEvents,
+    ixFeedbackScope,
+    activityEvents,
+    ixActivityCreated,
+    ixActivityKind,
+    senderPrefs,
+    appPrefs,
+    drafts,
+    ixDraftsConv,
+    messageNotify,
+    ixMessageNotifyOpen,
+    ixMessagesCreated,
+    messageProgress,
+    ixMessageProgressFeed,
+    ixMessageProgressVisible,
+    ixMessageProgressConv,
+    messageVectors,
+    ixMessageVectorsMessage,
+    ixMessageVectorsUnindexed,
+    attachments,
+    ixAttachmentsMessage,
+    ixAttachmentsPinned,
+    attachmentText,
+    attachmentChunks,
+    ixAttachmentChunksSeq,
+    ixAttachmentChunksUnindexed,
+    contextDirs,
+    contextLinks,
+    ixContextLinksScope,
+    contextFiles,
+    ixContextFilesPath,
+    contextText,
+    contextChunks,
+    ixContextChunksSeq,
+    ixContextChunksUnindexed,
+    ixContextChunksFile,
+    setupState,
+    labels,
+    ixLabelsNameKey,
+    conversationLabels,
+    ixConvLabelsLabel,
+    messageDecisions,
+    decisionLabels,
+    calendarEvents,
+    ixCalendarEventsStartUtc,
+    ixCalendarEventsStartDate,
+    eventBriefs,
+  ];
+  late final Shape41 messages = Shape41(
+    source: i0.VersionedTable(
+      entityName: 'messages',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [
+        _column_0,
+        _column_1,
+        _column_2,
+        _column_3,
+        _column_4,
+        _column_5,
+        _column_6,
+        _column_7,
+        _column_8,
+        _column_9,
+        _column_10,
+        _column_11,
+        _column_12,
+        _column_13,
+        _column_14,
+        _column_15,
+        _column_16,
+        _column_17,
+        _column_18,
+        _column_19,
+        _column_20,
+        _column_21,
+        _column_22,
+        _column_23,
+        _column_24,
+        _column_25,
+        _column_26,
+        _column_92,
+        _column_93,
+        _column_94,
+        _column_131,
+        _column_132,
+        _column_133,
+        _column_213,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixMessagesConv = i1.Index(
+    'ix_messages_conv',
+    'CREATE INDEX ix_messages_conv ON messages (source, conversation_key, received_at)',
+  );
+  final i1.Index ixMessagesTriage = i1.Index(
+    'ix_messages_triage',
+    'CREATE INDEX ix_messages_triage ON messages (triage_status, received_at DESC)',
+  );
+  late final Shape1 conversations = Shape1(
+    source: i0.VersionedTable(
+      entityName: 'conversations',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, conversation_key)'],
+      columns: [
+        _column_0,
+        _column_3,
+        _column_5,
+        _column_27,
+        _column_28,
+        _column_20,
+        _column_29,
+        _column_30,
+        _column_31,
+        _column_32,
+        _column_33,
+        _column_34,
+        _column_35,
+        _column_36,
+        _column_37,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixConvLast = i1.Index(
+    'ix_conv_last',
+    'CREATE INDEX ix_conv_last ON conversations (last_message_at DESC)',
+  );
+  late final Shape2 syncState = Shape2(
+    source: i0.VersionedTable(
+      entityName: 'sync_state',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, folder)'],
+      columns: [_column_0, _column_38, _column_39, _column_40],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape3 workItems = Shape3(
+    source: i0.VersionedTable(
+      entityName: 'work_items',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(task_kind, source, entity_id)'],
+      columns: [
+        _column_41,
+        _column_0,
+        _column_42,
+        _column_43,
+        _column_44,
+        _column_45,
+        _column_46,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixWorkPending = i1.Index(
+    'ix_work_pending',
+    'CREATE INDEX ix_work_pending ON work_items (task_kind, status, created_at DESC)',
+  );
+  late final Shape4 messageAi = Shape4(
+    source: i0.VersionedTable(
+      entityName: 'message_ai',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [_column_0, _column_1, _column_47, _column_48],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape5 conversationAi = Shape5(
+    source: i0.VersionedTable(
+      entityName: 'conversation_ai',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, conversation_key)'],
+      columns: [
+        _column_0,
+        _column_3,
+        _column_49,
+        _column_50,
+        _column_51,
+        _column_52,
+        _column_53,
+        _column_54,
+        _column_55,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape22 storylines = Shape22(
+    source: i0.VersionedTable(
+      entityName: 'storylines',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_56,
+        _column_57,
+        _column_21,
+        _column_58,
+        _column_59,
+        _column_60,
+        _column_61,
+        _column_62,
+        _column_63,
+        _column_24,
+        _column_25,
+        _column_88,
+        _column_89,
+        _column_100,
+        _column_124,
+        _column_125,
+        _column_126,
+        _column_127,
+        _column_128,
+        _column_129,
+        _column_130,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixStorylinesStatus = i1.Index(
+    'ix_storylines_status',
+    'CREATE INDEX ix_storylines_status ON storylines (status, last_activity_at DESC)',
+  );
+  late final Shape7 storylineMembers = Shape7(
+    source: i0.VersionedTable(
+      entityName: 'storyline_members',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(storyline_id, source, conversation_key)'],
+      columns: [
+        _column_64,
+        _column_0,
+        _column_3,
+        _column_65,
+        _column_66,
+        _column_67,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixStorylineMembersConv = i1.Index(
+    'ix_storyline_members_conv',
+    'CREATE INDEX ix_storyline_members_conv ON storyline_members (source, conversation_key)',
+  );
+  late final Shape28 storylineMemberBlocks = Shape28(
+    source: i0.VersionedTable(
+      entityName: 'storyline_member_blocks',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(storyline_id, source, conversation_key)'],
+      columns: [
+        _column_64,
+        _column_0,
+        _column_3,
+        _column_68,
+        _column_167,
+        _column_66,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape9 feedbackEvents = Shape9(
+    source: i0.VersionedTable(
+      entityName: 'feedback_events',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_70,
+        _column_71,
+        _column_4,
+        _column_72,
+        _column_24,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixFeedbackScope = i1.Index(
+    'ix_feedback_scope',
+    'CREATE INDEX ix_feedback_scope ON feedback_events (scope, scope_key, created_at DESC)',
+  );
+  late final Shape10 activityEvents = Shape10(
+    source: i0.VersionedTable(
+      entityName: 'activity_events',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_73,
+        _column_74,
+        _column_75,
+        _column_76,
+        _column_77,
+        _column_78,
+        _column_79,
+        _column_24,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixActivityCreated = i1.Index(
+    'ix_activity_created',
+    'CREATE INDEX ix_activity_created ON activity_events (created_at DESC)',
+  );
+  final i1.Index ixActivityKind = i1.Index(
+    'ix_activity_kind',
+    'CREATE INDEX ix_activity_kind ON activity_events (kind, created_at DESC)',
+  );
+  late final Shape11 senderPrefs = Shape11(
+    source: i0.VersionedTable(
+      entityName: 'sender_prefs',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [_column_80, _column_81, _column_25],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape12 appPrefs = Shape12(
+    source: i0.VersionedTable(
+      entityName: 'app_prefs',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [_column_82, _column_83],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape29 drafts = Shape29(
+    source: i0.VersionedTable(
+      entityName: 'drafts',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, reply_to_message_id)'],
+      columns: [
+        _column_0,
+        _column_3,
+        _column_84,
+        _column_85,
+        _column_66,
+        _column_58,
+        _column_86,
+        _column_87,
+        _column_24,
+        _column_25,
+        _column_90,
+        _column_91,
+        _column_168,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixDraftsConv = i1.Index(
+    'ix_drafts_conv',
+    'CREATE INDEX ix_drafts_conv ON drafts (source, conversation_key)',
+  );
+  late final Shape17 messageNotify = Shape17(
+    source: i0.VersionedTable(
+      entityName: 'message_notify',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [
+        _column_95,
+        _column_1,
+        _column_3,
+        _column_96,
+        _column_97,
+        _column_98,
+        _column_99,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixMessageNotifyOpen = i1.Index(
+    'ix_message_notify_open',
+    'CREATE INDEX ix_message_notify_open ON message_notify (state, deadline_at)',
+  );
+  final i1.Index ixMessagesCreated = i1.Index(
+    'ix_messages_created',
+    'CREATE INDEX ix_messages_created ON messages (created_at DESC)',
+  );
+  late final Shape21 messageProgress = Shape21(
+    source: i0.VersionedTable(
+      entityName: 'message_progress',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [
+        _column_95,
+        _column_1,
+        _column_3,
+        _column_101,
+        _column_102,
+        _column_103,
+        _column_104,
+        _column_105,
+        _column_106,
+        _column_107,
+        _column_108,
+        _column_109,
+        _column_110,
+        _column_111,
+        _column_112,
+        _column_113,
+        _column_114,
+        _column_115,
+        _column_19,
+        _column_24,
+        _column_25,
+        _column_122,
+        _column_123,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixMessageProgressFeed = i1.Index(
+    'ix_message_progress_feed',
+    'CREATE INDEX ix_message_progress_feed ON message_progress (received_at DESC, source_message_id DESC)',
+  );
+  final i1.Index ixMessageProgressVisible = i1.Index(
+    'ix_message_progress_visible',
+    'CREATE INDEX ix_message_progress_visible ON message_progress (dropped, received_at DESC, source_message_id DESC)',
+  );
+  final i1.Index ixMessageProgressConv = i1.Index(
+    'ix_message_progress_conv',
+    'CREATE INDEX ix_message_progress_conv ON message_progress (source, conversation_key)',
+  );
+  late final Shape20 messageVectors = Shape20(
+    source: i0.VersionedTable(
+      entityName: 'message_vectors',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_95,
+        _column_1,
+        _column_116,
+        _column_117,
+        _column_118,
+        _column_119,
+        _column_9,
+        _column_120,
+        _column_121,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixMessageVectorsMessage = i1.Index(
+    'ix_message_vectors_message',
+    'CREATE UNIQUE INDEX ix_message_vectors_message ON message_vectors (source, source_message_id)',
+  );
+  final i1.Index ixMessageVectorsUnindexed = i1.Index(
+    'ix_message_vectors_unindexed',
+    'CREATE INDEX ix_message_vectors_unindexed ON message_vectors (indexed_at)',
+  );
+  late final Shape25 attachments = Shape25(
+    source: i0.VersionedTable(
+      entityName: 'attachments',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [
+        'PRIMARY KEY(source, source_message_id, attachment_id)',
+      ],
+      columns: [
+        _column_0,
+        _column_1,
+        _column_134,
+        _column_135,
+        _column_136,
+        _column_137,
+        _column_138,
+        _column_139,
+        _column_140,
+        _column_141,
+        _column_142,
+        _column_143,
+        _column_144,
+        _column_145,
+        _column_146,
+        _column_147,
+        _column_148,
+        _column_149,
+        _column_150,
+        _column_151,
+        _column_152,
+        _column_153,
+        _column_154,
+        _column_155,
+        _column_156,
+        _column_157,
+        _column_158,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixAttachmentsMessage = i1.Index(
+    'ix_attachments_message',
+    'CREATE INDEX ix_attachments_message ON attachments (source, source_message_id, ordinal)',
+  );
+  final i1.Index ixAttachmentsPinned = i1.Index(
+    'ix_attachments_pinned',
+    'CREATE INDEX ix_attachments_pinned ON attachments (pinned_storyline_id)',
+  );
+  late final Shape26 attachmentText = Shape26(
+    source: i0.VersionedTable(
+      entityName: 'attachment_text',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [
+        'PRIMARY KEY(source, source_message_id, attachment_id)',
+      ],
+      columns: [
+        _column_0,
+        _column_1,
+        _column_134,
+        _column_159,
+        _column_160,
+        _column_161,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape27 attachmentChunks = Shape27(
+    source: i0.VersionedTable(
+      entityName: 'attachment_chunks',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_95,
+        _column_1,
+        _column_134,
+        _column_162,
+        _column_163,
+        _column_164,
+        _column_160,
+        _column_49,
+        _column_165,
+        _column_51,
+        _column_166,
+        _column_121,
+        _column_24,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixAttachmentChunksSeq = i1.Index(
+    'ix_attachment_chunks_seq',
+    'CREATE UNIQUE INDEX ix_attachment_chunks_seq ON attachment_chunks (source, source_message_id, attachment_id, seq)',
+  );
+  final i1.Index ixAttachmentChunksUnindexed = i1.Index(
+    'ix_attachment_chunks_unindexed',
+    'CREATE INDEX ix_attachment_chunks_unindexed ON attachment_chunks (indexed_at)',
+  );
+  late final Shape30 contextDirs = Shape30(
+    source: i0.VersionedTable(
+      entityName: 'context_dirs',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_169,
+        _column_170,
+        _column_171,
+        _column_172,
+        _column_43,
+        _column_45,
+        _column_173,
+        _column_174,
+        _column_175,
+        _column_176,
+        _column_177,
+        _column_178,
+        _column_179,
+        _column_180,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape31 contextLinks = Shape31(
+    source: i0.VersionedTable(
+      entityName: 'context_links',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(dir_id, scope_kind, source, scope_key)'],
+      columns: [_column_181, _column_182, _column_183, _column_71, _column_67],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixContextLinksScope = i1.Index(
+    'ix_context_links_scope',
+    'CREATE INDEX ix_context_links_scope ON context_links (scope_kind, source, scope_key)',
+  );
+  late final Shape32 contextFiles = Shape32(
+    source: i0.VersionedTable(
+      entityName: 'context_files',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_181,
+        _column_184,
+        _column_139,
+        _column_185,
+        _column_186,
+        _column_187,
+        _column_188,
+        _column_189,
+        _column_190,
+        _column_153,
+        _column_152,
+        _column_191,
+        _column_151,
+        _column_192,
+        _column_193,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixContextFilesPath = i1.Index(
+    'ix_context_files_path',
+    'CREATE UNIQUE INDEX ix_context_files_path ON context_files (dir_id, rel_path)',
+  );
+  late final Shape33 contextText = Shape33(
+    source: i0.VersionedTable(
+      entityName: 'context_text',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [_column_194, _column_159, _column_160],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape34 contextChunks = Shape34(
+    source: i0.VersionedTable(
+      entityName: 'context_chunks',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_195,
+        _column_162,
+        _column_163,
+        _column_164,
+        _column_160,
+        _column_49,
+        _column_165,
+        _column_51,
+        _column_166,
+        _column_121,
+        _column_24,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixContextChunksSeq = i1.Index(
+    'ix_context_chunks_seq',
+    'CREATE UNIQUE INDEX ix_context_chunks_seq ON context_chunks (file_id, seq)',
+  );
+  final i1.Index ixContextChunksUnindexed = i1.Index(
+    'ix_context_chunks_unindexed',
+    'CREATE INDEX ix_context_chunks_unindexed ON context_chunks (indexed_at)',
+  );
+  final i1.Index ixContextChunksFile = i1.Index(
+    'ix_context_chunks_file',
+    'CREATE INDEX ix_context_chunks_file ON context_chunks (file_id)',
+  );
+  late final Shape35 setupState = Shape35(
+    source: i0.VersionedTable(
+      entityName: 'setup_state',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [_column_196, _column_83, _column_25],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape36 labels = Shape36(
+    source: i0.VersionedTable(
+      entityName: 'labels',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_56,
+        _column_197,
+        _column_198,
+        _column_199,
+        _column_200,
+        _column_201,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixLabelsNameKey = i1.Index(
+    'ix_labels_name_key',
+    'CREATE UNIQUE INDEX ix_labels_name_key ON labels (name_key)',
+  );
+  late final Shape37 conversationLabels = Shape37(
+    source: i0.VersionedTable(
+      entityName: 'conversation_labels',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, conversation_key, label_id)'],
+      columns: [_column_95, _column_3, _column_202, _column_203, _column_204],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixConvLabelsLabel = i1.Index(
+    'ix_conv_labels_label',
+    'CREATE INDEX ix_conv_labels_label ON conversation_labels (label_id, applied_at DESC)',
+  );
+  late final Shape44 messageDecisions = Shape44(
+    source: i0.VersionedTable(
+      entityName: 'message_decisions',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [
+        _column_95,
+        _column_1,
+        _column_209,
+        _column_210,
+        _column_211,
+        _column_212,
+        _column_213,
+        _column_214,
+        _column_215,
+        _column_216,
+        _column_217,
+        _column_218,
+        _column_226,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape43 decisionLabels = Shape43(
+    source: i0.VersionedTable(
+      entityName: 'decision_labels',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_219,
+        _column_220,
+        _column_114,
+        _column_74,
+        _column_221,
+        _column_222,
+        _column_223,
+        _column_224,
+        _column_88,
+        _column_72,
+        _column_24,
+        _column_225,
+        _column_226,
+        _column_227,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape45 calendarEvents = Shape45(
+    source: i0.VersionedTable(
+      entityName: 'calendar_events',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_169,
+        _column_228,
+        _column_229,
+        _column_230,
+        _column_231,
+        _column_232,
+        _column_233,
+        _column_234,
+        _column_235,
+        _column_236,
+        _column_237,
+        _column_238,
+        _column_239,
+        _column_240,
+        _column_241,
+        _column_242,
+        _column_243,
+        _column_244,
+        _column_245,
+        _column_246,
+        _column_247,
+        _column_248,
+        _column_249,
+        _column_250,
+        _column_251,
+        _column_252,
+        _column_253,
+        _column_254,
+        _column_255,
+        _column_256,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixCalendarEventsStartUtc = i1.Index(
+    'ix_calendar_events_start_utc',
+    'CREATE INDEX ix_calendar_events_start_utc ON calendar_events (start_utc)',
+  );
+  final i1.Index ixCalendarEventsStartDate = i1.Index(
+    'ix_calendar_events_start_date',
+    'CREATE INDEX ix_calendar_events_start_date ON calendar_events (start_date)',
+  );
+  late final Shape46 eventBriefs = Shape46(
+    source: i0.VersionedTable(
+      entityName: 'event_briefs',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_257,
+        _column_258,
+        _column_75,
+        _column_177,
+        _column_259,
+        _column_260,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+}
+
+class Shape45 extends i0.VersionedTable {
+  Shape45({required super.source, required super.alias}) : super.aliased();
+  i1.GeneratedColumn<String> get id =>
+      columnsByName['id']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get seriesMasterId =>
+      columnsByName['series_master_id']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get icalUid =>
+      columnsByName['ical_uid']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get eventType =>
+      columnsByName['event_type']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get subject =>
+      columnsByName['subject']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get location =>
+      columnsByName['location']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get organizerName =>
+      columnsByName['organizer_name']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get organizerAddress =>
+      columnsByName['organizer_address']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get isOrganizer =>
+      columnsByName['is_organizer']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get isAllDay =>
+      columnsByName['is_all_day']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get isCancelled =>
+      columnsByName['is_cancelled']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get startUtc =>
+      columnsByName['start_utc']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get endUtc =>
+      columnsByName['end_utc']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get startDate =>
+      columnsByName['start_date']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get endDate =>
+      columnsByName['end_date']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get showAs =>
+      columnsByName['show_as']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get responseStatus =>
+      columnsByName['response_status']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get responseRequested =>
+      columnsByName['response_requested']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get allowNewTimeProposals =>
+      columnsByName['allow_new_time_proposals']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get sensitivity =>
+      columnsByName['sensitivity']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get joinUrl =>
+      columnsByName['join_url']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get webLink =>
+      columnsByName['web_link']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get changeKey =>
+      columnsByName['change_key']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get attendeesJson =>
+      columnsByName['attendees_json']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get categoriesJson =>
+      columnsByName['categories_json']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get isReminderOn =>
+      columnsByName['is_reminder_on']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get reminderMinutes =>
+      columnsByName['reminder_minutes']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get bodyPreview =>
+      columnsByName['body_preview']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get syncRun =>
+      columnsByName['sync_run']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get syncedAt =>
+      columnsByName['synced_at']! as i1.GeneratedColumn<String>;
+}
+
+i1.GeneratedColumn<String> _column_228(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'series_master_id',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_229(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'ical_uid',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_230(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'event_type',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_231(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'subject',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_232(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'location',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_233(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'organizer_name',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_234(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'organizer_address',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<int> _column_235(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'is_organizer',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints: 'NOT NULL DEFAULT 0',
+      defaultValue: const i1.CustomExpression('0'),
+    );
+i1.GeneratedColumn<int> _column_236(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'is_all_day',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints: 'NOT NULL DEFAULT 0',
+      defaultValue: const i1.CustomExpression('0'),
+    );
+i1.GeneratedColumn<int> _column_237(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'is_cancelled',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints: 'NOT NULL DEFAULT 0',
+      defaultValue: const i1.CustomExpression('0'),
+    );
+i1.GeneratedColumn<String> _column_238(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'start_utc',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.string,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<String> _column_239(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'end_utc',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.string,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<String> _column_240(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'start_date',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.string,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<String> _column_241(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'end_date',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.string,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<String> _column_242(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'show_as',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_243(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'response_status',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'none\'',
+      defaultValue: const i1.CustomExpression('\'none\''),
+    );
+i1.GeneratedColumn<int> _column_244(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'response_requested',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.int,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<int> _column_245(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'allow_new_time_proposals',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.int,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<String> _column_246(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'sensitivity',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_247(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'join_url',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_248(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'web_link',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_249(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'change_key',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_250(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'attendees_json',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'[]\'',
+      defaultValue: const i1.CustomExpression('\'[]\''),
+    );
+i1.GeneratedColumn<String> _column_251(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'categories_json',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'[]\'',
+      defaultValue: const i1.CustomExpression('\'[]\''),
+    );
+i1.GeneratedColumn<int> _column_252(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'is_reminder_on',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.int,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<int> _column_253(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'reminder_minutes',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.int,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<String> _column_254(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'body_preview',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_255(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'sync_run',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_256(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'synced_at',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL',
+    );
+
+class Shape46 extends i0.VersionedTable {
+  Shape46({required super.source, required super.alias}) : super.aliased();
+  i1.GeneratedColumn<String> get eventId =>
+      columnsByName['event_id']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get inputsHash =>
+      columnsByName['inputs_hash']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get status =>
+      columnsByName['status']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get briefJson =>
+      columnsByName['brief_json']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get model =>
+      columnsByName['model']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get generatedAt =>
+      columnsByName['generated_at']! as i1.GeneratedColumn<String>;
+}
+
+i1.GeneratedColumn<String> _column_257(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'event_id',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL PRIMARY KEY',
+    );
+i1.GeneratedColumn<String> _column_258(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'inputs_hash',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL',
+    );
+i1.GeneratedColumn<String> _column_259(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'model',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL DEFAULT \'\'',
+      defaultValue: const i1.CustomExpression('\'\''),
+    );
+i1.GeneratedColumn<String> _column_260(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'generated_at',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.string,
+      $customConstraints: 'NOT NULL',
+    );
 i0.MigrationStepWithVersion migrationSteps({
   required Future<void> Function(i1.Migrator m, Schema2 schema) from1To2,
   required Future<void> Function(i1.Migrator m, Schema3 schema) from2To3,
@@ -16860,6 +18134,7 @@ i0.MigrationStepWithVersion migrationSteps({
   required Future<void> Function(i1.Migrator m, Schema22 schema) from21To22,
   required Future<void> Function(i1.Migrator m, Schema23 schema) from22To23,
   required Future<void> Function(i1.Migrator m, Schema24 schema) from23To24,
+  required Future<void> Function(i1.Migrator m, Schema25 schema) from24To25,
 }) {
   return (currentVersion, database) async {
     switch (currentVersion) {
@@ -16978,6 +18253,11 @@ i0.MigrationStepWithVersion migrationSteps({
         final migrator = i1.Migrator(database, schema);
         await from23To24(migrator, schema);
         return 24;
+      case 24:
+        final schema = Schema25(database: database);
+        final migrator = i1.Migrator(database, schema);
+        await from24To25(migrator, schema);
+        return 25;
       default:
         throw ArgumentError.value('Unknown migration from $currentVersion');
     }
@@ -17008,6 +18288,7 @@ i1.OnUpgrade stepByStep({
   required Future<void> Function(i1.Migrator m, Schema22 schema) from21To22,
   required Future<void> Function(i1.Migrator m, Schema23 schema) from22To23,
   required Future<void> Function(i1.Migrator m, Schema24 schema) from23To24,
+  required Future<void> Function(i1.Migrator m, Schema25 schema) from24To25,
 }) => i0.VersionedSchema.stepByStepHelper(
   step: migrationSteps(
     from1To2: from1To2,
@@ -17033,5 +18314,6 @@ i1.OnUpgrade stepByStep({
     from21To22: from21To22,
     from22To23: from22To23,
     from23To24: from23To24,
+    from24To25: from24To25,
   ),
 );
