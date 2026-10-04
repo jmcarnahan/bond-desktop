@@ -16,11 +16,14 @@ import 'time_format.dart';
 /// app stored, by its ids ([onOpenMaterial]).
 ///
 /// [compact] is the agenda's face, drawn under a meeting row whose glance
-/// already shows the headline: ONLY a ready brief's body — Questions, Prep,
-/// Materials, Open asks, at most [compactPointsCap] References and one
-/// Regenerate — with no heading, headline, footer or status sentence, and
-/// nothing at all in any other state (the event panel is where those say
-/// why). The panel draws the same body in the same order, with every point.
+/// already shows the headline: a ready brief's body — the catch-up, in the
+/// order it is read: Briefing, From the materials, People, Questions, Prep,
+/// Open asks, at most [compactPointsCap] References — and one Regenerate,
+/// with no heading, headline or footer. In any other state it draws nothing
+/// but the one sentence that says the files sent ahead are still being read
+/// (the event panel is where the other states say why). The panel draws the
+/// headline, the same body in the same order with every point, and the
+/// Generated line.
 ///
 /// The states, in the order they win:
 /// 0. declined or cancelled ([eligible] false with that reason) — even over
@@ -57,6 +60,10 @@ class BriefSection extends StatelessWidget {
   static Key askThreadKeyFor(int i) => ValueKey('brief-ask-thread-$i');
   static Key materialKeyFor(int i) => ValueKey('brief-material-$i');
   static Key materialTextKeyFor(int i) => ValueKey('brief-material-text-$i');
+  static Key materialPointKeyFor(int i, int j) =>
+      ValueKey('brief-material-point-$i-$j');
+  static Key personKeyFor(int i) => ValueKey('brief-person-$i');
+  static const Key briefingKey = ValueKey('brief-briefing');
   static Key questionKeyFor(int i) => ValueKey('brief-question-$i');
 
   /// How many points the agenda's face shows under References; the panel
@@ -75,6 +82,8 @@ class BriefSection extends StatelessWidget {
       'A brief is written in the 36 hours before the meeting.';
   static const String startedText = 'No brief — this meeting has started.';
   static const String ineligibleText = 'No brief for this meeting.';
+  static const String materialsPendingText =
+      'Reading the files sent ahead — brief coming.';
   static const String failedText = "The brief couldn't be written.";
   static const String comingText =
       'Brief coming after the next calendar sync.';
@@ -119,11 +128,18 @@ class BriefSection extends StatelessWidget {
         : Padding(padding: padding, child: drawn);
   }
 
-  /// The agenda's face: a ready brief's body, else nothing.
+  /// The agenda's face: a ready brief's body; a brief waiting on its files
+  /// says so; else nothing.
   Widget? _compact() {
     final v = view;
     final brief = v?.brief?.brief;
-    if (v == null || brief == null || brief.headline.isEmpty) return null;
+    if (v == null || brief == null || brief.headline.isEmpty) {
+      return v?.brief?.skipReason == 'materials_pending'
+          ? Text(materialsPendingText,
+              key: statusKey,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted))
+          : null;
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -160,6 +176,11 @@ class BriefSection extends StatelessWidget {
     }
     if (v.queued && v.processingOn) return _status(writingText);
     if (!v.processingOn) return _status(pausedText);
+    // A wait for the files ends in a brief only while the quick check still
+    // passes: a meeting that has started says so, not "brief coming".
+    if (stored?.skipReason == 'materials_pending' && eligible == false) {
+      return _status(reasonText(ineligibleReason));
+    }
     if (stored?.status == EventBrief.skipped) {
       return _status(reasonText(stored!.skipReason));
     }
@@ -184,6 +205,7 @@ class BriefSection extends StatelessWidget {
         'too_many' => tooManyText,
         'too_far' => tooFarText,
         'past' => startedText,
+        'materials_pending' => materialsPendingText,
         _ => ineligibleText,
       };
 
@@ -233,15 +255,58 @@ class BriefSection extends StatelessWidget {
     );
   }
 
-  /// What both faces draw under the headline, in order: the questions, the
-  /// prep, the materials, the open asks, then the points under References —
-  /// what to do before the meeting first, what it rests on last. The compact
-  /// face shows at most [compactPointsCap] points; the panel shows them all.
+  /// What both faces draw under the headline, in the order a catch-up is
+  /// read: the briefing as one paragraph, what each file sent ahead says,
+  /// the people, the questions, the prep, the open asks, then the points
+  /// under References — what it rests on last. The compact face shows at
+  /// most [compactPointsCap] points; the panel shows them all.
   List<Widget> _body(MeetingBrief brief) {
     final points = compact && brief.points.length > compactPointsCap
         ? compactPointsCap
         : brief.points.length;
     return [
+      if (brief.briefing.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('Briefing', style: BondType.label),
+        Padding(
+          padding: const EdgeInsets.only(top: BondSpacing.s4),
+          // A sentence cut at its cap ends mid-thought: an ellipsis keeps
+          // it from running into the next.
+          child: SelectableText(
+              brief.briefing.map(_closed).join(' '),
+              key: briefingKey, style: BondType.body),
+        ),
+      ],
+      if (brief.materials.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('From the materials', style: BondType.label),
+        for (var i = 0; i < brief.materials.length; i++)
+          _material(
+              i, brief.materials[i], brief.materialAt(brief.materials[i].file)),
+      ],
+      if (brief.people.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('People', style: BondType.label),
+        for (var i = 0; i < brief.people.length; i++)
+          Padding(
+            key: personKeyFor(i),
+            padding: const EdgeInsets.only(top: BondSpacing.s4),
+            // A person with no name is the line alone, never a dangling dash.
+            child: Text.rich(
+              TextSpan(children: [
+                if (brief.people[i].name.trim().isNotEmpty) ...[
+                  TextSpan(
+                    text: brief.people[i].name,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const TextSpan(text: ' — '),
+                ],
+                TextSpan(text: brief.people[i].line),
+              ]),
+              style: BondType.small,
+            ),
+          ),
+      ],
       if (brief.questions.isNotEmpty) ...[
         const SizedBox(height: BondSpacing.s8),
         Text('Questions', style: BondType.label),
@@ -261,13 +326,6 @@ class BriefSection extends StatelessWidget {
             padding: const EdgeInsets.only(top: BondSpacing.s4),
             child: Text('• $p', style: BondType.small),
           ),
-      ],
-      if (brief.materials.isNotEmpty) ...[
-        const SizedBox(height: BondSpacing.s8),
-        Text('Materials', style: BondType.label),
-        for (var i = 0; i < brief.materials.length; i++)
-          _material(
-              i, brief.materials[i], brief.materialAt(brief.materials[i].file)),
       ],
       if (brief.openAsks.isNotEmpty) ...[
         const SizedBox(height: BondSpacing.s8),
@@ -296,10 +354,17 @@ class BriefSection extends StatelessWidget {
     ];
   }
 
+  /// [s] as it reads in the paragraph: ending in its own punctuation, else
+  /// in an ellipsis.
+  static String _closed(String s) =>
+      _closedEnd.hasMatch(s) ? s : '$s…';
+  static final RegExp _closedEnd = RegExp(r'''[.!?…]["')”’]*$''');
+
   /// One material: the file's chip when the brief still holds its ref, then
-  /// what the file says. A takeaway whose ref is missing (a row from an
-  /// older build) is drawn alone rather than dropped. The chip's label is the
-  /// file name as stored with the brief — the sender's text, so plain.
+  /// what the file says, one bullet per point. Points whose ref is missing
+  /// (a row from an older build) are drawn alone rather than dropped. The
+  /// chip's label is the file name as stored with the brief — the sender's
+  /// text, so plain.
   Widget _material(int i, BriefMaterialOut m, BriefMaterialRef? ref) {
     final open = onOpenMaterial;
     final name = ref == null || ref.name.isEmpty ? '(no name)' : ref.name;
@@ -330,10 +395,17 @@ class BriefSection extends StatelessWidget {
                     ),
                   ),
           ),
-        Padding(
+        Column(
           key: materialTextKeyFor(i),
-          padding: const EdgeInsets.only(top: BondSpacing.s4),
-          child: Text(m.takeaway, style: BondType.small),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var j = 0; j < m.points.length; j++)
+              Padding(
+                key: materialPointKeyFor(i, j),
+                padding: const EdgeInsets.only(top: BondSpacing.s4),
+                child: Text('• ${m.points[j]}', style: BondType.small),
+              ),
+          ],
         ),
       ],
     );

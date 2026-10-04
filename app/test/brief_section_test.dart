@@ -17,6 +17,14 @@ void main() {
       List<BriefPoint> morePoints = const []}) {
     final brief = MeetingBrief(
       headline: 'Dana is waiting on the quote.',
+      briefing: const [
+        'You owe Dana the renewal quote.',
+        'The deck sets it at 12k.',
+      ],
+      people: const [
+        BriefPersonOut(name: 'Dana', line: 'Fabrikam buyer; asked for the quote.'),
+        BriefPersonOut(name: 'Lee', line: 'Signs for Fabrikam.'),
+      ],
       points: [
         const BriefPoint(text: 'The quote is owed.', thread: 0),
         const BriefPoint(text: 'Nothing else is open.'),
@@ -26,8 +34,11 @@ void main() {
         BriefAskOut(person: 'Dana', ask: 'Send the quote', thread: 0),
       ],
       materials: const [
-        BriefMaterialOut(file: 0, takeaway: 'The deck prices the renewal at 12k.'),
-        BriefMaterialOut(file: 1, takeaway: 'The sheet lists three open items.'),
+        BriefMaterialOut(file: 0, points: [
+          'The deck prices the renewal at 12k.',
+          'Phase two starts in March.',
+        ]),
+        BriefMaterialOut(file: 1, points: ['The sheet lists three open items.']),
       ],
       questions: const [
         'Is 12k the final number?',
@@ -126,43 +137,134 @@ void main() {
     expect(find.byKey(BriefSection.pointThreadKeyFor(1)), findsNothing);
   });
 
-  testWidgets('questions and prep come before the references', (tester) async {
+  testWidgets('the catch-up order: briefing, materials, people, questions, '
+      'prep, open asks, references', (tester) async {
     await pump(tester, EventBriefView(brief: ready()));
 
-    expect(find.text('Materials'), findsOneWidget);
-    expect(find.text('Questions'), findsOneWidget);
-    expect(find.text('References'), findsOneWidget);
+    for (final label in [
+      'Briefing',
+      'From the materials',
+      'People',
+      'Questions',
+      'Prep',
+      'Open asks',
+      'References',
+    ]) {
+      expect(find.text(label), findsOneWidget, reason: label);
+    }
+    expect(find.text('Materials'), findsNothing);
     expect(find.text('Renewal deck.pptx'), findsOneWidget);
-    expect(find.text('The deck prices the renewal at 12k.'), findsOneWidget);
     expect(find.text('1. Is 12k the final number?'), findsOneWidget);
     expect(find.text('2. Who signs for Fabrikam?'), findsOneWidget);
 
-    // Questions, then Prep, then Materials, then Open asks, then the points
-    // under References.
-    final headline = top(tester, find.byKey(BriefSection.headlineKey));
-    final questions = top(tester, find.text('Questions'));
-    final secondQuestion = top(tester, find.byKey(BriefSection.questionKeyFor(1)));
-    final prep = top(tester, find.text('Prep'));
-    final materials = top(tester, find.text('Materials'));
-    final secondFile = top(tester, find.byKey(BriefSection.materialTextKeyFor(1)));
-    final asks = top(tester, find.text('Open asks'));
-    final references = top(tester, find.text('References'));
-    final point = top(tester, find.byKey(BriefSection.pointKeyFor(0)));
-    expect(headline, lessThan(questions));
-    expect(questions, lessThan(secondQuestion));
-    expect(secondQuestion, lessThan(prep));
-    expect(prep, lessThan(materials));
-    expect(materials, lessThan(secondFile));
-    expect(secondFile, lessThan(asks));
-    expect(asks, lessThan(references));
-    expect(references, lessThan(point));
+    final order = [
+      find.byKey(BriefSection.headlineKey),
+      find.text('Briefing'),
+      find.byKey(BriefSection.briefingKey),
+      find.text('From the materials'),
+      find.byKey(BriefSection.materialPointKeyFor(0, 1)),
+      find.byKey(BriefSection.materialPointKeyFor(1, 0)),
+      find.text('People'),
+      find.byKey(BriefSection.personKeyFor(1)),
+      find.text('Questions'),
+      find.byKey(BriefSection.questionKeyFor(1)),
+      find.text('Prep'),
+      find.text('Open asks'),
+      find.byKey(BriefSection.askKeyFor(0)),
+      find.text('References'),
+      find.byKey(BriefSection.pointKeyFor(0)),
+      find.byKey(BriefSection.statusKey),
+    ];
+    for (var i = 1; i < order.length; i++) {
+      expect(top(tester, order[i - 1]), lessThan(top(tester, order[i])),
+          reason: '${order[i - 1]} before ${order[i]}');
+    }
 
     // The compact face keeps the same order.
     await pump(tester, EventBriefView(brief: ready()), compact: true);
-    expect(top(tester, find.text('Questions')),
-        lessThan(top(tester, find.text('Prep'))));
-    expect(top(tester, find.text('Prep')),
-        lessThan(top(tester, find.text('References'))));
+    final compactOrder = [
+      'Briefing',
+      'From the materials',
+      'People',
+      'Questions',
+      'Prep',
+      'Open asks',
+      'References',
+    ];
+    for (var i = 1; i < compactOrder.length; i++) {
+      expect(top(tester, find.text(compactOrder[i - 1])),
+          lessThan(top(tester, find.text(compactOrder[i]))),
+          reason: '${compactOrder[i - 1]} before ${compactOrder[i]}');
+    }
+  });
+
+  testWidgets('the briefing is one paragraph of its sentences',
+      (tester) async {
+    await pump(tester, EventBriefView(brief: ready()));
+
+    final briefing = find.byKey(BriefSection.briefingKey);
+    expect(briefing, findsOneWidget);
+    expect(tester.widget<SelectableText>(briefing).data,
+        'You owe Dana the renewal quote. The deck sets it at 12k.');
+    expect(find.text('You owe Dana the renewal quote.'), findsNothing,
+        reason: 'one paragraph, not a line per sentence');
+
+    // A sentence cut at its cap ends in an ellipsis rather than running
+    // into the next; one with its own punctuation is left alone.
+    await pump(
+        tester,
+        EventBriefView(
+            brief: _readyRow(
+                const MeetingBrief(headline: 'Glance.', briefing: [
+                  'The deck sets the price at',
+                  'You owe the quote!',
+                  'Dana said "by Friday."',
+                ]),
+                now)));
+    expect(
+        tester.widget<SelectableText>(find.byKey(BriefSection.briefingKey))
+            .data,
+        'The deck sets the price at… You owe the quote! '
+        'Dana said "by Friday."');
+
+    // No sentences, no block.
+    await pump(
+        tester,
+        EventBriefView(
+            brief: _readyRow(const MeetingBrief(headline: 'Just the glance.'),
+                now)));
+    expect(find.text('Briefing'), findsNothing);
+    expect(find.byKey(BriefSection.briefingKey), findsNothing);
+  });
+
+  testWidgets('a person is a name and a line', (tester) async {
+    await pump(tester, EventBriefView(brief: ready()));
+
+    final person = find.byKey(BriefSection.personKeyFor(0));
+    expect(person, findsOneWidget);
+    final rich = tester.widget<Text>(
+        find.descendant(of: person, matching: find.byType(Text)));
+    expect(rich.textSpan!.toPlainText(),
+        'Dana — Fabrikam buyer; asked for the quote.');
+    final name = (rich.textSpan! as TextSpan).children!.first as TextSpan;
+    expect(name.text, 'Dana');
+    expect(name.style!.fontWeight, FontWeight.w600);
+    expect(find.byKey(BriefSection.personKeyFor(1)), findsOneWidget);
+    expect(find.byKey(BriefSection.personKeyFor(2)), findsNothing);
+
+    // No name: the line alone, no dangling dash.
+    await pump(
+        tester,
+        EventBriefView(
+            brief: _readyRow(
+                const MeetingBrief(headline: 'Glance.', people: [
+                  BriefPersonOut(name: ' ', line: 'Signs for Fabrikam.'),
+                ]),
+                now)));
+    final nameless = tester.widget<Text>(find.descendant(
+        of: find.byKey(BriefSection.personKeyFor(0)),
+        matching: find.byType(Text)));
+    expect(nameless.textSpan!.toPlainText(), 'Signs for Fabrikam.');
   });
 
   testWidgets('the compact face shows three references at most; the panel '
@@ -188,8 +290,8 @@ void main() {
     expect(find.text('• Fifth point.'), findsOneWidget);
   });
 
-  testWidgets('a material chip opens its file; a missing ref draws the '
-      'takeaway alone', (tester) async {
+  testWidgets('a material draws its points as bullets under its chip; a '
+      'missing ref draws the points alone', (tester) async {
     await pump(tester, EventBriefView(brief: ready()));
 
     final chip = find.byKey(BriefSection.materialKeyFor(0));
@@ -203,15 +305,27 @@ void main() {
     expect(files.single.messageId, 'm-1');
     expect(files.single.attachmentId, 'a-1');
 
-    // The second takeaway points at index 1, which the brief does not hold.
-    expect(find.byKey(BriefSection.materialKeyFor(1)), findsNothing);
-    expect(find.byKey(BriefSection.materialTextKeyFor(1)), findsOneWidget);
-    expect(find.text('The sheet lists three open items.'), findsOneWidget);
+    // The chip, then its points as bullets, in order.
+    expect(find.text('• The deck prices the renewal at 12k.'), findsOneWidget);
+    expect(find.text('• Phase two starts in March.'), findsOneWidget);
+    expect(top(tester, chip),
+        lessThan(top(tester, find.byKey(BriefSection.materialPointKeyFor(0, 0)))));
+    expect(top(tester, find.byKey(BriefSection.materialPointKeyFor(0, 0))),
+        lessThan(top(tester, find.byKey(BriefSection.materialPointKeyFor(0, 1)))));
+    expect(find.byKey(BriefSection.materialPointKeyFor(0, 2)), findsNothing);
 
-    // No ref at all: both takeaways, no chip.
+    // The second material points at index 1, which the brief does not hold.
+    expect(find.byKey(BriefSection.materialKeyFor(1)), findsNothing);
+    expect(find.byKey(BriefSection.materialPointKeyFor(1, 0)), findsOneWidget);
+    expect(find.text('• The sheet lists three open items.'), findsOneWidget);
+    expect(find.text('(no name)'), findsNothing,
+        reason: 'a missing ref draws no chip at all');
+
+    // No ref at all: every point, no chip.
     await pump(tester, EventBriefView(brief: ready(withMaterials: false)));
     expect(find.byKey(BriefSection.materialKeyFor(0)), findsNothing);
-    expect(find.text('The deck prices the renewal at 12k.'), findsOneWidget);
+    expect(find.text('• The deck prices the renewal at 12k.'), findsOneWidget);
+    expect(find.byKey(BriefSection.materialPointKeyFor(0, 1)), findsOneWidget);
 
     // No opener: the name is plain text, not a chip.
     await pump(tester, EventBriefView(brief: ready()), canOpenFiles: false);
@@ -219,8 +333,9 @@ void main() {
     expect(find.text('Renewal deck.pptx'), findsOneWidget);
   });
 
-  testWidgets('compact draws questions, prep, materials, asks and points — no '
-      'heading, no footer, no status', (tester) async {
+  testWidgets('compact draws the briefing, materials, people, questions, '
+      'prep, asks and points — no heading, no footer, no status',
+      (tester) async {
     await pump(tester, EventBriefView(brief: ready()), compact: true);
 
     expect(find.byKey(BriefSection.headlineKey), findsNothing,
@@ -230,7 +345,9 @@ void main() {
     expect(find.textContaining('Generated'), findsNothing);
     expect(find.text('Brief'), findsNothing);
     expect(find.text('• The quote is owed.'), findsOneWidget);
+    expect(find.byKey(BriefSection.briefingKey), findsOneWidget);
     expect(find.byKey(BriefSection.materialKeyFor(0)), findsOneWidget);
+    expect(find.byKey(BriefSection.personKeyFor(0)), findsOneWidget);
     expect(find.text('1. Is 12k the final number?'), findsOneWidget);
     expect(find.text('Dana: Send the quote'), findsOneWidget);
     expect(find.text('• Have the quote ready'), findsOneWidget);
@@ -258,7 +375,8 @@ void main() {
     expect(find.text(BriefSection.pausedText), findsOneWidget);
   });
 
-  testWidgets('compact with no ready brief draws nothing', (tester) async {
+  testWidgets('compact with no ready brief draws nothing but the files '
+      'sentence', (tester) async {
     for (final view in [
       null,
       const EventBriefView(queued: true),
@@ -367,6 +485,27 @@ void main() {
         reason: 'nothing while the read is in flight');
   });
 
+  testWidgets('a materials_pending brief shows its sentence in both faces',
+      (tester) async {
+    final pending = EventBriefView(
+        brief:
+            row(EventBrief.skipped, hash: 'ineligible:materials_pending'));
+    await pump(tester, pending);
+    expect(status(tester), 'Reading the files sent ahead — brief coming.');
+    expect(BriefSection.reasonText('materials_pending'),
+        BriefSection.materialsPendingText);
+
+    // Once the meeting has started (or the quick check says no for any
+    // other reason) no brief is coming: its sentence wins.
+    await pump(tester, pending, eligible: false, reason: 'past');
+    expect(status(tester), BriefSection.startedText);
+
+    await pump(tester, pending, compact: true);
+    expect(status(tester), BriefSection.materialsPendingText);
+    expect(find.byKey(BriefSection.regenerateKey), findsNothing);
+    expect(find.byKey(BriefSection.headlineKey), findsNothing);
+  });
+
   testWidgets('a decline or a cancel outranks a ready brief; another reason '
       'does not', (tester) async {
     for (final reason in ['declined', 'cancelled']) {
@@ -388,3 +527,12 @@ void main() {
     expect(regenerated, 1);
   });
 }
+
+/// A ready row holding [brief], generated two hours before [now].
+EventBrief _readyRow(MeetingBrief brief, DateTime now) => EventBrief(
+      eventId: 'evt-1',
+      inputsHash: 'h',
+      status: EventBrief.ready,
+      briefJson: jsonEncode(brief.toJson()),
+      generatedAt: calendarStamp(now.subtract(const Duration(hours: 2))),
+    );

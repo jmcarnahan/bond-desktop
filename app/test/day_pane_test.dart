@@ -91,6 +91,7 @@ void main() {
     void Function(GridSpan)? onGridSpanChanged,
     Widget? grid,
     Map<String, MeetingBrief> briefs = const {},
+    Set<String> briefsWaiting = const {},
     Set<String> expandedBriefs = const {},
     void Function(String)? onToggleBrief,
     Widget Function(String)? briefBody,
@@ -125,6 +126,7 @@ void main() {
           onGridSpanChanged: onGridSpanChanged ?? (_) {},
           grid: grid,
           briefs: briefs,
+          briefsWaiting: briefsWaiting,
           expandedBriefs: expandedBriefs,
           onToggleBrief: onToggleBrief,
           briefBody: briefBody,
@@ -161,7 +163,7 @@ void main() {
       final teaser = find.byKey(DayPane.briefTeaserKeyFor('briefed'));
       expect(teaser, findsOneWidget);
       expect(tester.widget<Text>(teaser).data, 'Dana is waiting on the quote.');
-      expect(tester.widget<Text>(teaser).maxLines, 2);
+      expect(tester.widget<Text>(teaser).maxLines, 3);
       expect(find.byKey(DayPane.briefTeaserKeyFor('plain')), findsNothing);
       expect(find.byKey(DayPane.briefTeaserKeyFor('off')), findsNothing,
           reason: 'a cancelled meeting shows no glance');
@@ -171,7 +173,63 @@ void main() {
       expect(find.byKey(DayPane.briefToggleKeyFor('no')), findsNothing);
     });
 
-    testWidgets('the glance shows up to two lines and a toggle; toggling '
+    testWidgets('a pending note draws in the glance slot without a chevron',
+        (tester) async {
+      const note = 'Reading the files sent ahead — brief coming.';
+      await pumpPane(
+        tester,
+        events: [
+          timed('pending', 'Fabrikam sync', DateTime.utc(2026, 9, 29, 20),
+              location: 'Room 4'),
+          timed('both', 'Contoso review', DateTime.utc(2026, 9, 29, 21)),
+          timed('off', 'Northwind call', DateTime.utc(2026, 9, 29, 22),
+              isCancelled: true),
+        ],
+        briefs: const {
+          'both': MeetingBrief(headline: 'The written brief wins.'),
+        },
+        briefsWaiting: const {'pending', 'both', 'off'},
+        onToggleBrief: (_) {},
+      );
+
+      final shown = find.byKey(DayPane.briefNoteKeyFor('pending'));
+      expect(shown, findsOneWidget);
+      expect(tester.widget<Text>(shown).data, note);
+      expect(tester.widget<Text>(shown).maxLines, 1);
+      expect(find.byKey(DayPane.briefToggleKeyFor('pending')), findsNothing,
+          reason: 'nothing to open yet');
+      expect(find.byKey(DayPane.briefTeaserKeyFor('pending')), findsNothing);
+      // In the glance slot: under the subject, above the location.
+      expect(tester.getTopLeft(find.text('Fabrikam sync')).dy,
+          lessThan(tester.getTopLeft(shown).dy));
+      expect(tester.getTopLeft(shown).dy,
+          lessThan(tester.getTopLeft(find.text('Room 4')).dy));
+
+      expect(find.byKey(DayPane.briefNoteKeyFor('both')), findsNothing,
+          reason: 'a written brief wins');
+      expect(find.byKey(DayPane.briefTeaserKeyFor('both')), findsOneWidget);
+      expect(find.byKey(DayPane.briefNoteKeyFor('off')), findsNothing,
+          reason: 'a cancelled meeting offers no brief');
+    });
+
+    testWidgets('no note once the meeting has started', (tester) async {
+      await pumpPane(
+        tester,
+        events: [
+          // `now` is 16:00Z: one under way, one starting this instant, one
+          // still ahead.
+          timed('under-way', 'Fabrikam sync', DateTime.utc(2026, 9, 29, 15, 45)),
+          timed('starting', 'Contoso review', DateTime.utc(2026, 9, 29, 16)),
+          timed('ahead', 'Northwind call', DateTime.utc(2026, 9, 29, 20)),
+        ],
+        briefsWaiting: const {'under-way', 'starting', 'ahead'},
+      );
+      expect(find.byKey(DayPane.briefNoteKeyFor('under-way')), findsNothing);
+      expect(find.byKey(DayPane.briefNoteKeyFor('starting')), findsNothing);
+      expect(find.byKey(DayPane.briefNoteKeyFor('ahead')), findsOneWidget);
+    });
+
+    testWidgets('the glance shows up to three lines and a toggle; toggling '
         'asks the host', (tester) async {
       final toggled = <String>[];
       final opened = <String>[];
@@ -192,7 +250,7 @@ void main() {
 
       final glance = tester.widget<Text>(
           find.byKey(DayPane.briefTeaserKeyFor('briefed')));
-      expect(glance.maxLines, 2);
+      expect(glance.maxLines, 3);
       expect(glance.overflow, TextOverflow.ellipsis);
       final toggle = find.byKey(DayPane.briefToggleKeyFor('briefed'));
       expect(toggle, findsOneWidget);

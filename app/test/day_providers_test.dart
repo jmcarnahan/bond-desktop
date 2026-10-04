@@ -38,8 +38,11 @@ void main() {
     await db.close();
   });
 
-  ProviderContainer containerFor(CalendarAvailability availability) {
+  ProviderContainer containerFor(CalendarAvailability availability,
+      {bool processingOn = true}) {
     final container = ProviderContainer(overrides: [
+      processingProvider
+          .overrideWith((ref) => ProcessingNotifier(processingOn)),
       dbProvider.overrideWithValue(db),
       calendarAvailabilityProvider.overrideWith((ref) => availability),
       calendarZoneProvider.overrideWith((ref) async => la),
@@ -158,6 +161,60 @@ void main() {
       expect(briefs.keys, ['briefed']);
       expect(briefs['briefed']!.headline, 'The Q3 numbers are due.');
       expect(briefs['briefed']!.questions, ['What is still open?']);
+    });
+
+    test('a materials_pending brief is a note for its day', () async {
+      await calendar.upsertEvents([
+        timed('pending', la.localDateTime(day, 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('no-mail', la.localDateTime(day, 10, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('briefed', la.localDateTime(day, 11, 0).toUtc(),
+            responseStatus: 'accepted'),
+        timed('tomorrow', la.localDateTime(day.addDays(1), 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+      ], syncRun: 'run-1');
+      Future<void> skipped(String id, String why) => calendar.putBrief(
+            eventId: id,
+            inputsHash: '${EventBrief.ineligiblePrefix}$why',
+            status: EventBrief.skipped,
+            generatedAt: '2026-10-15T08:00:00.000000Z',
+          );
+      await skipped('pending', 'materials_pending');
+      await skipped('no-mail', 'no_mail');
+      await brief('briefed', EventBrief.ready, 'The Q3 numbers are due.');
+      await skipped('tomorrow', 'materials_pending');
+
+      final container = containerFor(CalendarAvailability.available);
+      final waiting =
+          await readFuture(container, dayBriefsWaitingProvider(day).future);
+      expect(waiting, {'pending'});
+      final briefs = await readFuture(container, dayBriefsProvider(day).future);
+      expect(briefs.keys, ['briefed'], reason: 'a note is not a brief');
+    });
+
+    test('no notes while processing is off', () async {
+      await calendar.upsertEvents([
+        timed('pending', la.localDateTime(day, 9, 0).toUtc(),
+            responseStatus: 'accepted'),
+      ], syncRun: 'run-1');
+      await calendar.putBrief(
+        eventId: 'pending',
+        inputsHash: '${EventBrief.ineligiblePrefix}materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: '2026-10-15T08:00:00.000000Z',
+      );
+
+      final off = await readFuture(
+        containerFor(CalendarAvailability.available, processingOn: false),
+        dayBriefsWaitingProvider(day).future,
+      );
+      expect(off, isEmpty);
+      final on = await readFuture(
+        containerFor(CalendarAvailability.available),
+        dayBriefsWaitingProvider(day).future,
+      );
+      expect(on, {'pending'}, reason: 'the same row, processing on');
     });
   });
 

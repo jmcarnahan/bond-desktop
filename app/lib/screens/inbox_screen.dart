@@ -5364,6 +5364,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? ref.watch(dayBriefsProvider(day)).valueOrNull ??
               const <String, MeetingBrief>{}
           : const <String, MeetingBrief>{},
+      briefsWaiting: shows
+          ? ref.watch(dayBriefsWaitingProvider(day)).valueOrNull ??
+              const <String>{}
+          : const <String>{},
       expandedBriefs: _expandedBriefs,
       onToggleBrief: _toggleBrief,
       briefBody: (id) => _briefBody(id, now: now),
@@ -8486,8 +8490,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// One agenda meeting's brief, opened under its row: the compact face,
-  /// which draws only a ready brief (the glance above it is the headline).
+  /// One agenda meeting's brief, opened under its row: the compact face — a
+  /// ready brief's body (the glance above it is the headline), or the files
+  /// sentence if the row turned pending under it. A row waiting on its files
+  /// has no chevron, so its note in the glance slot is what the agenda shows.
   /// A [Consumer] so a new brief landing rebuilds this body and not the day.
   Widget _briefBody(String eventId, {required DateTime now}) => Consumer(
         builder: (context, ref, _) => BriefSection(

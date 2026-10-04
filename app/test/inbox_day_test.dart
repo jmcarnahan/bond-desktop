@@ -843,6 +843,55 @@ void main() {
       );
     });
 
+    testWidgets('a meeting waiting for its files says so in the agenda; one '
+        'that has started does not', (tester) async {
+      final nowUtc = DateTime.now().toUtc();
+      // The last minute of today, so it is ahead of the clock and on
+      // today's pane at any hour but that minute.
+      final ahead = la.localDateTime(la.dateOf(nowUtc), 23, 59).toUtc();
+      final started = nowUtc.subtract(const Duration(minutes: 10));
+      CalendarEvent meeting(String id, String subject, DateTime start) =>
+          CalendarEvent(
+            id: id,
+            subject: subject,
+            startUtc: start,
+            endUtc: start.add(const Duration(minutes: 30)),
+            responseStatus: 'accepted',
+            showAs: 'busy',
+            attendees: const [
+              Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+            ],
+          );
+      await CalendarStore(db).upsertEvents([
+        meeting('evt-pending', 'Fabrikam sync', ahead),
+        meeting('evt-started', 'Contoso review', started),
+      ], syncRun: 'run-2');
+      for (final id in ['evt-pending', 'evt-started']) {
+        await CalendarStore(db).putBrief(
+          eventId: id,
+          inputsHash: '${EventBrief.ineligiblePrefix}materials_pending',
+          status: EventBrief.skipped,
+          generatedAt: calendarStamp(DateTime.now()),
+        );
+      }
+      // Processing on: with it off no brief is coming and the agenda says
+      // nothing (the panel says why).
+      await pumpScreen(tester, overrides: [
+        processingProvider.overrideWith((ref) => ProcessingNotifier(true)),
+      ]);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      final note = find.byKey(DayPane.briefNoteKeyFor('evt-pending'));
+      expect(note, findsOneWidget);
+      expect(tester.widget<Text>(note).data,
+          'Reading the files sent ahead — brief coming.');
+      expect(find.byKey(DayPane.briefToggleKeyFor('evt-pending')), findsNothing);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('evt-pending')), findsNothing);
+      expect(find.byKey(DayPane.briefNoteKeyFor('evt-started')), findsNothing,
+          reason: 'no brief is coming for a meeting under way');
+    });
+
     /// A meeting under way now (on today's pane at any hour, and still ahead
     /// for the Today section), with a ready brief that names two files: one
     /// stored on the invite's mail, one the store no longer holds.
@@ -926,7 +975,7 @@ void main() {
       await tester.tap(find.byKey(DayPane.briefToggleKeyFor('evt-brief')));
       await pumps(tester);
       expect(find.text('1. Which phase starts first?'), findsOneWidget);
-      expect(find.text('The deck proposes two phases.'), findsOneWidget);
+      expect(find.text('• The deck proposes two phases.'), findsOneWidget);
       expect(find.byType(SidePanelHost), findsNothing,
           reason: 'the toggle opens the brief, not the event');
 

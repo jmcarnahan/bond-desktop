@@ -7,6 +7,7 @@ import '../services/calendar/calendar_sync.dart' show CalendarAvailability;
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
 import '../theme/tokens.dart';
+import 'brief_section.dart' show BriefSection;
 import 'chips.dart';
 import 'clock_tick.dart';
 import 'command_plan_card.dart' show CommandPlanCard;
@@ -65,6 +66,7 @@ class DayPane extends StatelessWidget {
     this.onOpenEvent,
     this.inviteActions,
     this.briefs = const {},
+    this.briefsWaiting = const {},
     this.expandedBriefs = const {},
     this.onToggleBrief,
     this.briefBody,
@@ -76,6 +78,11 @@ class DayPane extends StatelessWidget {
   /// The key of a meeting row's brief glance.
   static Key briefTeaserKeyFor(String eventId) =>
       ValueKey('day-brief-teaser-$eventId');
+
+  /// The key of a meeting row's brief note, drawn in the glance slot while
+  /// its brief waits.
+  static Key briefNoteKeyFor(String eventId) =>
+      ValueKey('day-brief-note-$eventId');
 
   /// The key of the button beside a glance that opens and closes the brief.
   static Key briefToggleKeyFor(String eventId) =>
@@ -150,10 +157,17 @@ class DayPane extends StatelessWidget {
   /// on a button inside the row is the button's, never the row's open.
   final Widget Function(InviteEntry entry)? inviteActions;
 
-  /// Written briefs by event id. Each one's glance (its headline, up to two
+  /// Written briefs by event id. Each one's glance (its headline, up to three
   /// lines) is drawn muted under the meeting's subject, so the day reads at a
   /// look; model output over other people's mail, so plain text.
   final Map<String, MeetingBrief> briefs;
+
+  /// The meetings whose brief is not written yet but is coming (the files
+  /// sent ahead are still being read): each says so muted in the glance slot
+  /// ([BriefSection.materialsPendingText]) with no chevron — there is nothing
+  /// to open yet — until it starts, when no brief is coming any more. A
+  /// written brief wins.
+  final Set<String> briefsWaiting;
 
   /// The meetings whose brief is open under their row. The host holds it.
   final Set<String> expandedBriefs;
@@ -452,6 +466,13 @@ class DayPane extends StatelessWidget {
     // A meeting the owner is not going to offers no brief.
     final brief = cancelled || declined ? null : briefs[e.id];
     final expanded = brief != null && expandedBriefs.contains(e.id);
+    // A wait the planner stops tending once the meeting starts: no brief
+    // is coming, so the note goes.
+    final started = e.startUtc != null && !e.startUtc!.isAfter(nowUtc);
+    final note = !cancelled &&
+        !declined &&
+        !started &&
+        briefsWaiting.contains(e.id);
     final glance = brief == null || brief.headline.isEmpty
         ? null
         : _glance(e.id, brief.headline, expanded);
@@ -486,6 +507,10 @@ class DayPane extends StatelessWidget {
           ],
         ),
         ?glance,
+        if (glance == null && note)
+          Text(BriefSection.materialsPendingText,
+              key: briefNoteKeyFor(e.id), style: _caption,
+              maxLines: 1, overflow: TextOverflow.ellipsis),
         if (e.location.trim().isNotEmpty)
           Text(e.location.trim(), style: _muted, maxLines: 1,
               overflow: TextOverflow.ellipsis),
@@ -555,7 +580,7 @@ class DayPane extends StatelessWidget {
       headline,
       key: briefTeaserKeyFor(id),
       style: _muted,
-      maxLines: 2,
+      maxLines: 3,
       overflow: TextOverflow.ellipsis,
     );
     if (toggle == null) return text;
