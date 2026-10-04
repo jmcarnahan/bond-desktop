@@ -994,16 +994,18 @@ that bite.
     `showAs` for the tentative hold, for every face and for the overlap
     maths — never compare the strings elsewhere (the one other `showAs`
     read, `overlaps.dart` dropping `free`/`workingElsewhere` time, is about
-    blocking, not standing). An accepted meeting Outlook shows as tentative
-    is a Maybe on the agenda, the grid and Today, while the panel line and
-    the chosen button follow the ANSWER ("You accepted", Yes chosen) — a
-    deliberate softening of D8, recorded in the plan. Order: cancelled →
-    organizer (`isOwnersEvent`, which lives
-    there now) → the ANSWER (`answerOf`: accepted / tentative / declined) →
-    unanswered (`needsResponse`) → `showAs: tentative` → noAnswerNeeded.
-    **Unanswered wins over "shown tentative"**: Outlook puts every
-    unanswered invite on the calendar as tentative, so reading `showAs`
-    first would call every open invite a Maybe. `isTentativeHold(e)` (a
+    blocking, not standing). Order: cancelled → organizer (`isOwnersEvent`,
+    which lives there now) → the ANSWER (`answerOf`: accepted / tentative /
+    declined — **the answer wins over `showAs`**: Outlook pencils every new
+    invite in as `showAs: tentative` and a fresh Yes only moves `show_as`
+    on a later delta, so "accepted + shown tentative" is ACCEPTED, never a
+    Maybe; the second live pass found every face calling a just-accepted
+    meeting a Maybe for minutes) → unanswered (`needsResponse`) →
+    `showAs: tentative` → noAnswerNeeded. **Unanswered wins over "shown
+    tentative"** for the same reason. `setResponseStatus` also moves
+    `show_as` the way Outlook records an answer (tentative → busy on Yes,
+    → tentative on Maybe) and `keepAnswerFor` keeps the stored `show_as`
+    with the kept answer. `isTentativeHold(e)` (a
     Maybe standing OR `showAs` tentative) is the soft-overlap predicate and
     `tentativeBlocks`' rule; a Maybe ANSWER is a soft overlap now.
   - The chosen (disabled) answer button follows the ANSWER (`answerOf`),
@@ -1080,8 +1082,15 @@ that bite.
   - Threads: the event's own invite threads first (`messagesForEvent` for the
     occurrence, then its series master; ≤ 3), then the 30-day address match;
     `noMail` means no threads at all. Materials (`BriefMaterial`) are the
-    chosen threads' inbound and outbound, non-inline `file|reference`
-    attachments that are not images (the owner's own: sender `you`),
+    files on THIS MEETING'S OWN invite threads only (the occurrence's, then
+    its series master's) — inbound and outbound, non-inline `file|reference`
+    attachments that are not images (the owner's own: sender `you`). Files on
+    the address-matched threads are `BriefInput.otherFiles`: names only
+    (≤ 4, 80 chars as fenced), written under "Files on other threads with
+    these people (NOT sent for this meeting)", and the prompt forbids reading
+    the meeting's purpose from them (live lesson 2026-10-04: a test meeting
+    with no attachment was briefed as a candidate review because the same
+    person's earlier invites carried a resume). Materials are
     newest first, the newest copy per lowercased name, ≤ 6, each with its
     digest, its TEXT (`attachmentTextOf` for a `done` file, cut at a word
     to `materialTextCap` 6000, raw — the task fences it; `textCut` says it
@@ -1157,8 +1166,10 @@ that bite.
     whole and uncut (`!textCut`, never a length guess).
     `materialTextCharsWritten` runs the same spend for the activity row's
     `text_chars`. The size guard in `meeting_brief_task_test` holds a
-    maximal prompt (every label 300 characters of `&<>`) at ≤ 37800
-    characters (37012 measured, plus 2%). A material line
+    maximal prompt (every label 300 characters of `&<>`, four other files
+    fenced at `otherFileNameCap` 80) at ≤ 38500 characters (38133 measured,
+    plus ~1%; 37012/37800 before the other-files block; the ceiling is
+    (16384 − 2700) × 3.0 ≈ 41052). A material line
     puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
     block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the

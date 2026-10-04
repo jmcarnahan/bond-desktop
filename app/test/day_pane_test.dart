@@ -515,6 +515,50 @@ void main() {
       expect(opened, [('email', 'conv-9')]);
     });
 
+    testWidgets('every row type starts its subject at the same x',
+        (tester) async {
+      await pumpPane(
+        tester,
+        events: [
+          const CalendarEvent(
+            id: 'banner',
+            subject: 'Fabrikam offsite',
+            isAllDay: true,
+            startDate: today,
+            endDate: CalendarDate(2026, 9, 30),
+          ),
+          timed('m1', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 20)),
+        ],
+        conversations: const [
+          Conversation(
+            id: 'conv-7',
+            source: 'teams',
+            subject: 'Fabrikam quote',
+            latestDeadline: '2026-09-29',
+          ),
+        ],
+        reminders: [
+          Reminder(
+            id: 'rem-1',
+            kind: ReminderKind.replyBy,
+            source: 'email',
+            conversationKey: 'conv-9',
+            title: 'Reply to Contoso: Q3 numbers',
+            remindAt: DateTime.utc(2026, 9, 29, 21).toIso8601String(),
+            status: ReminderStatus.active,
+            createdFrom: ReminderOrigin.bar,
+            createdAt: '2026-09-29T15:00:00.000000Z',
+            updatedAt: '2026-09-29T15:00:00.000000Z',
+          ),
+        ],
+      );
+      final meeting = tester.getTopLeft(find.text('Contoso kickoff')).dx;
+      expect(tester.getTopLeft(find.text('Fabrikam offsite')).dx, meeting);
+      expect(tester.getTopLeft(find.text('Fabrikam quote')).dx, meeting);
+      expect(tester.getTopLeft(find.text('Reply to Contoso: Q3 numbers')).dx,
+          meeting);
+    });
+
     testWidgets('Agenda | Grid switches the view, and Day | Week shows only '
         'on the grid', (tester) async {
       final views = <DayView>[];
@@ -854,6 +898,21 @@ void main() {
               of: find.byKey(DayPane.meetingRowKeyFor('yes')),
               matching: find.text('Maybe')),
           findsNothing);
+    });
+
+    testWidgets('a row the owner just accepted shows no Maybe caption',
+        (tester) async {
+      // Outlook still pencils it in as tentative; the answer wins.
+      await pumpPane(tester, events: [
+        timed('yes', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 17),
+            responseStatus: 'accepted', showAs: 'tentative'),
+      ]);
+      expect(
+          find.descendant(
+              of: find.byKey(DayPane.meetingRowKeyFor('yes')),
+              matching: find.text('Maybe')),
+          findsNothing);
+      expect(barOf(tester, 'yes'), standingBarColor(EventStanding.accepted));
     });
 
     testWidgets('the clash strip names each overlapping meeting, hard before '

@@ -526,6 +526,33 @@ void main() {
     await unmount(tester);
   }, variant: platforms);
 
+  testWidgets("a drop's ghost says it is a move to send or cancel, on a "
+      'half-hour tile too', (tester) async {
+    for (final minutes in [30, 60]) {
+      await pumpGrid(
+        tester,
+        proposal: GridProposal(
+          startUtc: DateTime.utc(2026, 10, 7, 20),
+          endUtc: DateTime.utc(2026, 10, 7, 20, minutes),
+          label: 'Move here?',
+          caption: 'Send or Cancel above',
+        ),
+      );
+      final ghost = find.byKey(DayGrid.proposalKey);
+      expect(
+          find.descendant(
+              of: ghost, matching: find.textContaining('Move here?')),
+          findsOneWidget,
+          reason: '$minutes minutes');
+      expect(
+          find.descendant(
+              of: ghost, matching: find.textContaining('Send or Cancel above')),
+          findsOneWidget,
+          reason: '$minutes minutes');
+      await unmount(tester);
+    }
+  });
+
   testWidgets('tapping an event opens it by id', (tester) async {
     final opened = <String>[];
     await pumpGrid(

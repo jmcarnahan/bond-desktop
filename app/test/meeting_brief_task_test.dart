@@ -15,6 +15,7 @@ void main() {
     List<BriefThread> waiting = const [],
     List<BriefStoryline> storylines = const [],
     List<BriefMaterial> materials = const [],
+    List<String> otherFiles = const [],
     List<BriefPerson> people = const [],
     int peopleMore = 0,
     String? lastMet,
@@ -51,6 +52,7 @@ void main() {
       waitingOn: waiting,
       storylines: storylines,
       materials: materials,
+      otherFiles: otherFiles,
       people: people,
       peopleMore: peopleMore,
       lastMet: lastMet,
@@ -107,12 +109,18 @@ void main() {
       expect(prompt, contains('material numbers ONLY to the numbered '
           'materials list'));
       expect(prompt, isNot(contains('Never write today')));
+      expect(prompt, contains("- The meeting's PURPOSE comes from its own "
+          'invite'));
+      expect(prompt, contains('was NOT sent for this meeting: do not describe '
+          'this meeting as being about it'));
+      expect(prompt, contains('("The invite gives no agenda.")'));
       const order = [
         '- evidence:',
         '- headline:',
         '- briefing:',
         '- people:',
         '- materials:',
+        "- The meeting's PURPOSE",
         '- questions:',
         '- open_asks:',
         '- points:',
@@ -221,16 +229,19 @@ void main() {
     });
 
     test('a maximal input fits the context beside the answer', () {
-      // 16384 tokens of context at three characters a token (names, dates
-      // and JSON-ish text tokenise denser than prose), minus the answer's
-      // maxTokens: about 41k characters. 37800 (about 12.6k tokens, 15.3k
-      // with the answer) keeps a margin under that for the digits the
-      // materials budget weights but the rest does not. Measured at about
-      // 37.0k (37012) with every cap full and every label 300 characters of
-      // `&<>`, which the fence escapes, so each costs its full escaped cap;
-      // the guard is that plus 2%. A cap bump that moves it past this has
-      // to pay for itself elsewhere.
-      const promptCharBudget = 37800;
+      // The ceiling: 16384 tokens of context minus the answer's 2700
+      // maxTokens, at the measured 3.0 characters a token (names, dates and
+      // JSON-ish text tokenise denser than prose): (16384 - 2700) * 3 =
+      // 41052 characters of prompt. The guard sits under that with a margin
+      // for the digits the materials budget weights but the rest does not,
+      // at the measured maximum plus about 1-2%. Measured at 38133 with every
+      // cap full, every label 300 characters of `&<>` (which the fence
+      // escapes, so each costs its full escaped cap) and four other files
+      // whose names are fenced at 80 (`otherFileNameCap`); it was 37012
+      // before the other files and their rule. 38500 (about 12.8k tokens,
+      // 15.5k with the answer). A cap bump that moves it past this has to
+      // pay for itself elsewhere.
+      const promptCharBudget = 38500;
       expect(promptCharBudget,
           lessThanOrEqualTo((16384 - MeetingBriefTask.maxTokens) * 3));
       String words(int n) => List.filled(n ~/ 5, 'word').join(' ');
@@ -321,6 +332,9 @@ void main() {
                   wrapUntrusted('passage', 'p' * BriefGatherer.passageCap),
               ],
             ),
+        ],
+        otherFiles: [
+          for (var i = 0; i < BriefGatherer.maxOtherFiles; i++) dense(300),
         ],
         invitePreview:
             wrapUntrusted('invite', 'i' * BriefGatherer.invitePreviewCap),
@@ -422,6 +436,37 @@ void main() {
       expect(bare, isNot(contains('Materials')));
       expect(bare, isNot(contains('From the invite')));
       expect(bare, isNot(contains('Last met')));
+    });
+
+    test('other files with these people are listed by name, fenced, as NOT '
+        'sent for this meeting, between the materials and the invite', () {
+      final msg = const MeetingBriefTask().buildUserMessage(input(
+        materials: const [
+          BriefMaterial(
+            source: 'email',
+            messageId: 'm-1',
+            attachmentId: 'a-1',
+            name: 'quote.pdf',
+            sender: 'Dana Lee',
+            date: '2026-09-28',
+            textStatus: 'done',
+          ),
+        ],
+        otherFiles: const ['northwind-deck.pdf', 'a&b <notes>.docx'],
+        invitePreview: wrapUntrusted('invite', 'Agenda: renewal.'),
+      ));
+      const heading =
+          'Files on other threads with these people (NOT sent for this '
+          'meeting):';
+      expect(msg, contains(heading));
+      expect(msg, contains('- ${wrapUntrusted('file', 'northwind-deck.pdf')}'));
+      expect(msg, contains('- ${wrapUntrusted('file', 'a&b <notes>.docx')}'));
+      expect(msg, isNot(contains('a&b <notes>')));
+      expect(msg.indexOf('Materials'), lessThan(msg.indexOf(heading)));
+      expect(msg.indexOf(heading), lessThan(msg.indexOf('From the invite')));
+
+      final bare = const MeetingBriefTask().buildUserMessage(input());
+      expect(bare, isNot(contains('Files on other threads')));
     });
 
     test('materials are numbered, fenced, with the digest, the text and '

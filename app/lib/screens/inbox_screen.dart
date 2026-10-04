@@ -553,7 +553,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   CalendarZone? _lastGridZone;
 
   /// The move a grid drop asked for, while its write is in flight: the grid
-  /// draws it as the ghost tile, "Moving here…", beside the tile that stays
+  /// draws it as the ghost tile, "Move here?" over "Send or Cancel above"
+  /// (the confirm strip's buttons), beside the tile that stays
   /// where the store has it. Cleared by the flow's `onIdle`; drawn only while
   /// the flow says busy, so a flow that went away mid-write leaves no ghost.
   ({String id, DateTime startUtc, DateTime endUtc})? _gridMove;
@@ -5503,7 +5504,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ? GridProposal(
                 startUtc: pending.startUtc,
                 endUtc: pending.endUtc,
-                label: 'Moving here…',
+                label: 'Move here?',
+                caption: 'Send or Cancel above',
               )
             : commandGhost,
         locked: busy,
@@ -8513,9 +8515,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onRegenerate: () => unawaited(_regenerateBrief(shown.id)),
       // Offered only where a request would be honoured: the quick check with
       // the horizon lifted must be clear, or a far-off block with nobody
-      // else would offer a button whose press ends as a skipped row.
+      // else would offer a button whose press ends as a skipped row. The
+      // owner's address (the gatherer's own `mail` then UPN) keeps their own
+      // attendee row from counting as somebody else; unknown, it does.
       onWrite: briefQuickCheck(shown,
-                  owner: null, now: nowUtc, zone: zone, asked: true) ==
+                  owner: _owner?.mail ?? _owner?.userPrincipalName,
+                  now: nowUtc,
+                  zone: zone,
+                  asked: true) ==
               null
           ? () => unawaited(_regenerateBrief(shown.id))
           : null,

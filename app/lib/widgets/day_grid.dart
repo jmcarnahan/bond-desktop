@@ -30,15 +30,21 @@ class GridProposal {
     required this.endUtc,
     required this.label,
     this.subject = '',
+    this.caption = '',
     this.adjustable = false,
   });
 
   final DateTime startUtc;
   final DateTime endUtc;
 
-  /// What the ghost is ("Proposed", "Moving here…"), drawn as its caption
+  /// What the ghost is ("Proposed", "Move here?"), drawn as its caption
   /// under [subject], or as its title when there is no subject.
   final String label;
+
+  /// The caption under an unnamed ghost's [label] title — a drop's "Send or
+  /// Cancel above", so the ghost says it is the move the confirm strip
+  /// asks about. Unused when there is a [subject].
+  final String caption;
 
   /// What is being proposed: the invite's or the blank event's name, or the
   /// moved meeting's subject. Untrusted text, drawn plain.
@@ -55,11 +61,12 @@ class GridProposal {
       other.endUtc == endUtc &&
       other.label == label &&
       other.subject == subject &&
+      other.caption == caption &&
       other.adjustable == adjustable;
 
   @override
   int get hashCode =>
-      Object.hash(startUtc, endUtc, label, subject, adjustable);
+      Object.hash(startUtc, endUtc, label, subject, caption, adjustable);
 }
 
 /// The Day stop's grid: one day or one week of time columns, drawn by the
@@ -520,7 +527,7 @@ class _DayGridState extends State<DayGrid> {
             : EventInteraction.allowNone(),
         kind: _TileKind.proposal,
         title: named ? p.subject.trim() : p.label,
-        caption: named ? p.label : '',
+        caption: named ? p.label : p.caption,
         movable: adjustable,
       ));
     }

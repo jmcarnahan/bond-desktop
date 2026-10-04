@@ -258,13 +258,22 @@ void main() {
       expect(standingOf(ev('organizer')), EventStanding.organizer);
       expect(standingOf(ev('accepted')), EventStanding.accepted);
       expect(standingOf(ev('tentativelyAccepted')), EventStanding.tentative);
-      expect(standingOf(ev('accepted', showAs: 'tentative')),
-          EventStanding.tentative);
       expect(standingOf(ev('declined')), EventStanding.declined);
       expect(standingOf(ev('notResponded')), EventStanding.unanswered);
       expect(standingOf(ev('none')), EventStanding.unanswered);
       expect(standingOf(ev('notResponded', requested: false)),
           EventStanding.noAnswerNeeded);
+    });
+
+    test('an accepted meeting shown tentative is Accepted (the answer wins); '
+        'unanswered and shown tentative is Unanswered; no answer asked and '
+        'shown tentative is a Maybe', () {
+      expect(standingOf(ev('accepted', showAs: 'tentative')),
+          EventStanding.accepted);
+      expect(standingOf(ev('notResponded', showAs: 'tentative')),
+          EventStanding.unanswered);
+      expect(standingOf(ev('none', showAs: 'tentative', requested: false)),
+          EventStanding.tentative);
     });
 
     test('an invite owed an answer is unanswered though Outlook shows it '
@@ -278,7 +287,7 @@ void main() {
     test('case and spaces do not matter', () {
       expect(standingOf(ev(' DECLINED ')), EventStanding.declined);
       expect(standingOf(ev('TentativelyAccepted')), EventStanding.tentative);
-      expect(standingOf(ev('accepted', showAs: ' Tentative')),
+      expect(standingOf(ev('none', showAs: ' Tentative', requested: false)),
           EventStanding.tentative);
     });
 
@@ -292,7 +301,7 @@ void main() {
       expect(standingWord(EventStanding.noAnswerNeeded), '');
     });
 
-    test('a Maybe only by showAs: the panel line says what was answered', () {
+    test('shown tentative: the panel line says what was answered', () {
       expect(responseLine(ev('accepted', showAs: 'tentative')),
           'You accepted');
       expect(responseLine(ev('none', showAs: 'tentative', requested: false)),

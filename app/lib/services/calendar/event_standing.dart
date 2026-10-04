@@ -48,8 +48,10 @@ enum EventStanding {
 }
 
 /// [e]'s standing. Cancelled wins over any answer, then the owner's own
-/// meeting, then the answer. A Maybe is a tentative answer OR an accepted
-/// meeting the owner shows as `tentative`. An invite still owed an answer is
+/// meeting, then the answer — and the ANSWER wins over `showAs`: Outlook
+/// pencils every new invite in as `tentative` and moves it only on a later
+/// delta, so an accepted meeting shown tentative is Accepted, never a Maybe.
+/// A Maybe is a tentative answer. An invite still owed an answer is
 /// [EventStanding.unanswered] even though Outlook pencils every new invite in
 /// as `showAs: tentative` — the owner has not said maybe, they have said
 /// nothing; only an unanswered meeting that asks for no answer and is shown
@@ -60,7 +62,7 @@ EventStanding standingOf(CalendarEvent e) {
   final shownTentative = e.showAs.trim().toLowerCase() == 'tentative';
   switch (answerOf(e)) {
     case EventAnswer.accepted:
-      return shownTentative ? EventStanding.tentative : EventStanding.accepted;
+      return EventStanding.accepted;
     case EventAnswer.tentative:
       return EventStanding.tentative;
     case EventAnswer.declined:

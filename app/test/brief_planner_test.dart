@@ -287,6 +287,9 @@ void main() {
           MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
       'body_text': 'Deck attached.',
       'triage_status': 'done',
+      // evt-1's invite: a file on it is a material.
+      'source_meta_json':
+          jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-1'}),
     });
     await store.upsertAttachments('email', 'm-1', [
       {
@@ -530,6 +533,9 @@ void main() {
             MessageStore.isoStamp(now.subtract(const Duration(hours: 1))),
         'body_text': 'The deck.',
         'triage_status': 'done',
+        // evt-1's invite: a file on it is a material.
+        'source_meta_json':
+            jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-1'}),
       });
       await store.upsertAttachments('email', 'm-1', [
         {

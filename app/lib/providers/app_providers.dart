@@ -2154,9 +2154,12 @@ final briefWorkTickProvider = StreamProvider.autoDispose<int>((ref) {
 
 /// What a pre-meeting brief is written from. The owner's address is the
 /// sync's own lookup (`storedAccount`, `mail` then `userPrincipalName`); the
-/// zone is the calendar's display zone as last resolved, UTC until it has
-/// been. Both `read` inside closures, never `watch`: a zone or account change
-/// must not rebuild the draft lane mid-drain.
+/// zone is the calendar's display zone as last resolved; until it has been
+/// the closure throws [BriefZoneUnknown] (the worker retries the row), never
+/// UTC, whose "today and tomorrow" is not the owner's — the planner already
+/// waits for the zone, so only a queued or asked row can meet it. Both
+/// `read` inside closures, never `watch`: a zone or account change must not
+/// rebuild the draft lane mid-drain.
 final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
       ref.watch(messageStoreProvider),
       ref.watch(calendarStoreProvider),
@@ -2164,12 +2167,11 @@ final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
             (account) => account?.mail ?? account?.userPrincipalName,
           ),
       zone: () {
+        CalendarZone? zone;
         try {
-          return ref.read(calendarZoneProvider).valueOrNull ??
-              CalendarZone.utc();
-        } catch (_) {
-          return CalendarZone.utc();
-        }
+          zone = ref.read(calendarZoneProvider).valueOrNull;
+        } catch (_) {}
+        return zone ?? (throw const BriefZoneUnknown());
       },
       // The retriever's client: the materials' passages are searched the
       // way a draft's are.

@@ -12,6 +12,7 @@ import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/calendar_errors.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
+import 'package:bond_inbox/services/calendar/event_standing.dart';
 import 'package:bond_inbox/services/calendar/write_rules.dart' show mayEmailFor;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -275,10 +276,14 @@ void main() {
     String eventType = '',
     bool isOrganizer = true,
     List<Attendee> attendees = const [],
+    String responseStatus = 'none',
+    String showAs = '',
   }) =>
       CalendarEvent(
         id: id,
         subject: 'Budget review',
+        responseStatus: responseStatus,
+        showAs: showAs,
         seriesMasterId: seriesMasterId,
         eventType: eventType,
         isOrganizer: isOrganizer,
@@ -616,6 +621,20 @@ void main() {
       expect((await calendar.event('other'))!.responseStatus, 'none');
       expect(sync.noted, containsAll(['occ-1', 'occ-2']));
       expect(changed, 1);
+    });
+
+    test('Yes on a tentative-shown invite leaves a row whose standing is '
+        'accepted', () async {
+      await calendar.upsertEvents([
+        timed('e1',
+            isOrganizer: false,
+            responseStatus: 'notResponded',
+            showAs: 'tentative'),
+      ], syncRun: run);
+      await writes.commit(const RespondToEvent('e1', RsvpResponse.accept));
+      final row = (await calendar.event('e1'))!;
+      expect(row.showAs, 'busy');
+      expect(standingOf(row), EventStanding.accepted);
     });
 
     test('tentative and decline store their Graph words', () async {

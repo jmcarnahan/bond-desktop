@@ -132,8 +132,9 @@ class BriefStoryline {
   });
 }
 
-/// A file sent ahead of a meeting — by one of its people or by the owner —
-/// as the brief task is shown it.
+/// A file on one of THIS meeting's invite threads — sent by one of its
+/// people or by the owner — as the brief task is shown it. A file on other
+/// mail with the same people is never one ([BriefInput.otherFiles]).
 ///
 /// The identity ([source], [messageId], [attachmentId]) is what the handler
 /// stores so the agenda can open the file; the rest is what the model reads.
@@ -339,9 +340,18 @@ class BriefInput {
   final List<BriefThread> waitingOn;
   final List<BriefStoryline> storylines;
 
-  /// The files sent on [threads] — the attendees' and the owner's own —
-  /// newest first.
+  /// The files sent on THIS meeting's own invite threads (the
+  /// occurrence's, then its series master's) — whoever sent them, the owner
+  /// included — newest first. Never a file from a thread that merely
+  /// involves the same people: that is in [otherFiles].
   final List<BriefMaterial> materials;
+
+  /// The names of the files on the address-matched threads in [threads] —
+  /// mail with these people that is not about this meeting — newest first,
+  /// one per name, at most [BriefGatherer.maxOtherFiles]. Raw, like every
+  /// label; the task lists them as NOT sent for this meeting, so a resume
+  /// sent for another interview cannot become this meeting's purpose.
+  final List<String> otherFiles;
 
   /// Whether any of [materials] is still being read: its `text_status` is
   /// `pending` AND its `attachment_text` work row is `pending` or
@@ -385,6 +395,7 @@ class BriefInput {
     this.waitingOn = const [],
     this.storylines = const [],
     this.materials = const [],
+    this.otherFiles = const [],
     this.materialsPending = false,
     this.people = const [],
     this.peopleMore = 0,
@@ -436,6 +447,18 @@ class BriefOwnerUnknown implements Exception {
 
   @override
   String toString() => "BriefOwnerUnknown: the owner's address is not known "
+      'yet';
+}
+
+/// The gatherer's display zone asked for before it has resolved. Thrown by
+/// the zone closure rather than answering UTC, whose "today and tomorrow"
+/// is not the owner's; the worker retries the meeting as it does
+/// [BriefOwnerUnknown].
+class BriefZoneUnknown implements Exception {
+  const BriefZoneUnknown();
+
+  @override
+  String toString() => 'BriefZoneUnknown: the display zone has not resolved '
       'yet';
 }
 
@@ -727,6 +750,7 @@ class BriefGatherer {
   static const int maxWaiting = 3;
   static const int maxStorylines = 2;
   static const int maxMaterials = 6;
+  static const int maxOtherFiles = 4;
   static const int maxUnlisted = 4;
 
   /// How many of the six threads the meeting's own invite threads may take:
@@ -888,9 +912,9 @@ class BriefGatherer {
     });
     // The invite threads lead, newest first as the store returns them, and
     // count toward the six.
-    final chosen = [...invites.take(maxInviteThreads), ...candidates]
-        .take(maxThreads)
-        .toList();
+    final inviteChosen = invites.take(maxInviteThreads).toList();
+    final chosen =
+        [...inviteChosen, ...candidates].take(maxThreads).toList();
 
     final threads = [
       for (final k in chosen)
@@ -978,7 +1002,14 @@ class BriefGatherer {
       }
     }
 
-    final found = _materialsOf(chosen, nameOf, zone);
+    // Materials come from the meeting's own invite threads only; a file on
+    // other mail with the same people is named, never read, as not sent for
+    // this meeting.
+    final found = _materialsOf(inviteChosen, nameOf, zone);
+    final otherFiles = [
+      for (final (_, a) in _filesOf(chosen.skip(inviteChosen.length)))
+        (a.name ?? '').trim(),
+    ].take(maxOtherFiles).toList();
     final (:pending, :unqueued) = await _readingOf(found, nowUtc);
     final materials = passages
         ? await _withPassages(event, await _withText(found))
@@ -1016,6 +1047,7 @@ class BriefGatherer {
       asks: asks,
       storylines: storylines,
       materials: materials,
+      otherFiles: otherFiles,
     );
 
     return BriefEligible(
@@ -1032,6 +1064,7 @@ class BriefGatherer {
       waitingOn: waitingOn,
       storylines: storylines,
       materials: materials,
+      otherFiles: otherFiles,
       materialsPending: pending,
       people: people,
       peopleMore: math.max(0, others.length - maxPeople),
@@ -1066,8 +1099,8 @@ class BriefGatherer {
     return intent != null && askIntents.contains(intent) ? intent : null;
   }
 
-  /// The files on [chosen], newest mail first, at most [maxMaterials]: the
-  /// people's and the owner's own (the deck the owner attached to the invite
+  /// The files on [chosen] (the meeting's own invite threads), newest mail
+  /// first, at most [maxMaterials]: the people's and the owner's own (the deck the owner attached to the invite
   /// they sent is the likeliest thing the meeting is about), documents only
   /// — never an inline logo, a picture, a quoted message or a card. A file not read yet is
   /// still listed, so the brief can say it arrived. One material per file
@@ -1077,41 +1110,49 @@ class BriefGatherer {
     List<_Candidate> chosen,
     Map<String, String> nameOf,
     CalendarZone zone,
-  ) {
+  ) =>
+      [
+        for (final (m, a) in _filesOf(chosen).take(maxMaterials))
+          BriefMaterial(
+            source: m.source,
+            messageId: m.id,
+            attachmentId: a.attachmentId,
+            name: (a.name ?? '').trim(),
+            contentType: a.contentType ?? '',
+            sender: m.outbound ? 'you' : _who(m, nameOf),
+            date: _dayOf(m.receivedAt, zone),
+            receivedAt: m.receivedAt ?? '',
+            textStatus: a.textStatus,
+            digestStatus: a.digestStatus,
+            digest: a.digest,
+          ),
+      ];
+
+  /// The documents on [threads]' mail, both directions, newest mail first,
+  /// one per file NAME (case-insensitive, the newest copy) — never an inline
+  /// logo, a picture, a quoted message or a card. [_materialsOf] and the
+  /// other files ([BriefInput.otherFiles]) share the one filter.
+  static Iterable<(Message, AttachmentRef)> _filesOf(
+      Iterable<_Candidate> threads) sync* {
     final carrying = [
-      for (final k in chosen)
+      for (final k in threads)
         for (final m in k.messages)
           if (m.attachments.isNotEmpty) m,
     ]..sort((a, b) {
         final byTime = (b.receivedAt ?? '').compareTo(a.receivedAt ?? '');
         return byTime != 0 ? byTime : a.id.compareTo(b.id);
       });
-    final out = <BriefMaterial>[];
     final seen = <String>{};
     for (final m in carrying) {
       for (final a in m.attachments) {
-        if (out.length >= maxMaterials) return out;
         final name = (a.name ?? '').trim();
         if (name.isEmpty || a.isInline) continue;
         if (a.kind != 'file' && a.kind != 'reference') continue;
         if ((a.contentType ?? '').toLowerCase().startsWith('image/')) continue;
         if (!seen.add(name.toLowerCase())) continue;
-        out.add(BriefMaterial(
-          source: m.source,
-          messageId: m.id,
-          attachmentId: a.attachmentId,
-          name: name,
-          contentType: a.contentType ?? '',
-          sender: m.outbound ? 'you' : _who(m, nameOf),
-          date: _dayOf(m.receivedAt, zone),
-          receivedAt: m.receivedAt ?? '',
-          textStatus: a.textStatus,
-          digestStatus: a.digestStatus,
-          digest: a.digest,
-        ));
+        yield (m, a);
       }
     }
-    return out;
   }
 
   /// Whether any of [materials] is still being read, and which are listed
@@ -1414,7 +1455,9 @@ class BriefGatherer {
   /// stamp moves when it falls back to a rewritten summary. A material's
   /// text and digest states are, so a deck whose words or digest land after
   /// the first brief moves the hash; its name is not — a rename says nothing
-  /// new. Passages are not: they follow from the text, which is hashed.
+  /// new. Passages are not: they follow from the text, which is hashed. An
+  /// other file's lower-cased name is: a new file with these people changes
+  /// what the brief is told.
   static String _hash({
     required CalendarEvent event,
     required String? owner,
@@ -1422,6 +1465,7 @@ class BriefGatherer {
     required List<BriefAsk> asks,
     required List<BriefStoryline> storylines,
     required List<BriefMaterial> materials,
+    required List<String> otherFiles,
   }) {
     final lines = <String>[
       'event|${event.id}|${event.changeKey}',
@@ -1436,6 +1480,7 @@ class BriefGatherer {
       for (final m in materials)
         'material|${m.messageId}|${m.attachmentId}|${m.textStatus}|'
             '${m.digestStatus}',
+      for (final f in otherFiles) 'otherfile|${f.toLowerCase()}',
     ];
     return sha256.convert(utf8.encode(lines.join('\n'))).toString();
   }

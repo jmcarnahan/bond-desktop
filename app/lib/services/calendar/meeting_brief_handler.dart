@@ -309,6 +309,7 @@ class MeetingBriefHandler extends WorkHandler {
         'threads': input.threads.length,
         'asks': withThreads.openAsks.length,
         'materials': input.materials.length,
+        'other_files': input.otherFiles.length,
         'questions': withThreads.questions.length,
         'people': input.people.length,
         // What the model was shown of the files, not what was gathered.

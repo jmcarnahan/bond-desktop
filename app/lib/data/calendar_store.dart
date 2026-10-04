@@ -72,7 +72,10 @@ class CalendarStore {
   /// when the stored answer is one of the owner's own ([_answers]), a page
   /// that carries any other status — unanswered, or the answer it replaced
   /// (Accepted → Maybe from a clash row) — keeps the stored answer; a page
-  /// that agrees is applied as is. The rest of the row is the page's.
+  /// that agrees is applied as is. A kept answer keeps the stored `show_as`
+  /// with it: [setResponseStatus] moved it with the answer, and the lagging
+  /// page's `tentative` would turn a fresh Yes back into a Maybe. The rest of
+  /// the row is the page's.
   ///
   /// Returns the rows written.
   Future<int> upsertEvents(
@@ -97,10 +100,11 @@ class CalendarStore {
         final row = event.toDbRow(syncRun: syncRun, syncedAt: syncedAt);
         final answer = stored[event.id];
         if (answer != null) {
-          final mine = answer.trim().toLowerCase();
+          final mine = answer.status.trim().toLowerCase();
           if (_answers.contains(mine) &&
               event.responseStatus.trim().toLowerCase() != mine) {
-            row['response_status'] = answer;
+            row['response_status'] = answer.status;
+            row['show_as'] = answer.showAs;
           }
         }
         await db.customUpdate(
@@ -120,23 +124,27 @@ class CalendarStore {
     'declined',
   };
 
-  /// The stored `response_status` of each of [ids] the mirror holds, as
-  /// stored. Chunked as [deleteEvents] is.
-  Future<Map<String, String>> _responseStatuses(List<String> ids) async {
-    final out = <String, String>{};
+  /// The stored `response_status` and `show_as` of each of [ids] the mirror
+  /// holds, as stored. Chunked as [deleteEvents] is.
+  Future<Map<String, ({String status, String showAs})>> _responseStatuses(
+    List<String> ids,
+  ) async {
+    final out = <String, ({String status, String showAs})>{};
     for (var i = 0; i < ids.length; i += 500) {
       final end = i + 500 > ids.length ? ids.length : i + 500;
       final chunk = ids.sublist(i, end);
       final rows = await db
           .customSelect(
-            'SELECT id, response_status FROM calendar_events '
+            'SELECT id, response_status, show_as FROM calendar_events '
             'WHERE id IN (${_placeholders(chunk.length)})',
             variables: _args(chunk),
           )
           .get();
       for (final r in rows) {
-        out[r.data['id'] as String] =
-            r.data['response_status'] as String? ?? '';
+        out[r.data['id'] as String] = (
+          status: r.data['response_status'] as String? ?? '',
+          showAs: r.data['show_as'] as String? ?? '',
+        );
       }
     }
     return out;
@@ -201,14 +209,24 @@ class CalendarStore {
   /// meeting in it, and the Day stop and the invites list read the
   /// occurrences, not the master. Returns the ids it touched, which the write
   /// guard notes so a page read before the answer cannot put "none" back.
+  ///
+  /// Outlook records the answer on the free/busy word; the mirror agrees at
+  /// once so no face reads a fresh Yes as a Maybe: `accepted` turns a
+  /// `tentative` show_as `busy` (`free`, `oof`, `workingElsewhere` and
+  /// `busy` are left alone), `tentativelyAccepted` makes it `tentative`, and
+  /// `declined` leaves it.
   Future<List<String>> setResponseStatus(String id, String status) {
     return db.transaction(() async {
       final ids = await _idsWithOccurrences(id);
       if (ids.isEmpty) return ids;
+      final answer = status.trim().toLowerCase();
       await db.customUpdate(
-        'UPDATE calendar_events SET response_status = ? '
+        'UPDATE calendar_events SET response_status = ?, show_as = CASE '
+        "WHEN ? = 'accepted' AND lower(show_as) = 'tentative' THEN 'busy' "
+        "WHEN ? = 'tentativelyaccepted' THEN 'tentative' "
+        'ELSE show_as END '
         'WHERE id = ? OR series_master_id = ?',
-        variables: _args([status, id, id]),
+        variables: _args([status, answer, answer, id, id]),
       );
       return ids;
     });

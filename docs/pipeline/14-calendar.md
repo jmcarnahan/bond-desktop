@@ -598,11 +598,13 @@ in-memory.
   (`app/lib/services/calendar/event_standing.dart`, re-exported by
   `event_view.dart`), the ONE reader of `responseStatus`, and of `showAs` for
   the tentative hold (`overlaps.dart` reads `showAs` once more, only to drop
-  `free`/`workingElsewhere` time — blocking, not standing). An accepted
-  meeting Outlook shows as tentative is a Maybe on the agenda, the grid and
-  Today, while the panel's response line and the chosen answer button follow
-  the ANSWER ("You accepted", Yes chosen) — a deliberate softening of the
-  one-standing rule, so a face that shows the answer never lies about it — in
+  `free`/`workingElsewhere` time — blocking, not standing). The owner's ANSWER
+  wins over `showAs`: Outlook pencils every new invite in as `showAs:
+  tentative` and a fresh Yes moves `show_as` only on a later delta, so an
+  accepted meeting shown tentative is Accepted on every face (the second live
+  pass found a just-accepted meeting called a Maybe for minutes); the mirror's
+  `setResponseStatus` also moves `show_as` as Outlook records an answer
+  (tentative → busy on Yes, → tentative on Maybe) — in
   the one palette every calendar face shares (`toneOfStanding`,
   `standingBarColor`, `standingFillColor` in
   `app/lib/widgets/event_standing_style.dart`):
@@ -648,7 +650,9 @@ in-memory.
   moves at once and offers Undo, a meeting with guests waits on the confirm
   strip, drawn over the grid, naming who is emailed. While that write is in
   flight the grid is `locked` (every tile undraggable) and shows where the
-  move would land as a ghost tile, "Moving here…", which the flow's `onIdle`
+  move would land as a ghost tile titled "Move here?" with the caption "Send
+  or Cancel above" (it is the move the strip asks about, not a new event; on
+  a half-hour tile the caption rides the title's line), which the flow's `onIdle`
   takes down when the write goes through, fails or is dismissed. The grid
   never moves the tile itself: it renders from the store, so a refused,
   failed or dismissed move leaves the tile where it was, and a move that went
@@ -690,7 +694,8 @@ in-memory.
 - **The ghost tile.** `DayGrid.proposal` draws a tile — a solid 1.5 px
   primary outline on an 8 % fill; solid because Flutter's `Border` has no
   dashed style — for a time that is not on the calendar: the pending drop's
-  "Moving here…", which is undraggable (`adjustable: false`), and a
+  "Move here?" over "Send or Cancel above" (`GridProposal.caption`, an
+  unnamed ghost's caption), which is undraggable (`adjustable: false`), and a
   standing proposal, "Proposed" ([The bar](#the-bar)), which moves and
   resizes (the proposal tile, below).
 - **The proposal tile** (a standing proposal's ghost) is a kalender event of
@@ -1149,8 +1154,10 @@ the two gathers hash alike:
   is the owner's, at most 3.
 - **Storylines** — the live storylines of the kept threads, at most 2: the
   title, and the recap (else the summary) capped at 400 and fenced.
-- **Materials** (`BriefMaterial`) — the files on any message in the kept
-  threads, inbound or outbound (no sender check, unlike the asks: the deck
+- **Materials** (`BriefMaterial`) — the files on any message in this
+  meeting's OWN invite threads among the kept ones (the occurrence's, then
+  its series master's; never an address-matched thread), inbound or
+  outbound (no sender check, unlike the asks: the deck
   the owner attached to the invite they sent is as much the meeting's as
   the one the other side sent), newest mail first: kind
   `file` or `reference`, not inline, not `image/*`, named; one per file name
@@ -1161,7 +1168,15 @@ the two gathers hash alike:
   else the address; the word `you` for the owner's own), the day its mail arrived (`yyyy-MM-dd` in the display
   zone), its `text_status`, and its digest (`attachments.digest_json`) when
   there is one. A file whose text is not read yet is still listed — the brief
-  names it as arrived. **Text** (handler's gather only): a file whose
+  names it as arrived. **Other files** (`BriefInput.otherFiles`): the files
+  on the kept address-matched threads — mail with these people that is not
+  this meeting's — by the same filter (both directions, newest first, one
+  per name), NAMES only, at most 4 (`BriefGatherer.maxOtherFiles`), never
+  read. The task lists them as other files with these people, not sent for
+  this meeting, and the prompt forbids reading the meeting's purpose from
+  them: a resume the owner sent the same person for another interview is
+  not what this meeting is about. Both gathers carry them alike. **Text**
+  (handler's gather only): a file whose
   `text_status` is `done` carries its `attachment_text` (`attachmentTextOf`),
   runs of spaces and blank lines closed up, cut at a word to 6000 characters
   (`BriefGatherer.materialTextCap`, `capAtWord`) — the head of the document,
@@ -1249,7 +1264,9 @@ other copy, rather than risk saying something false.
 the owner's address, each kept thread's `source|key|last_message_at|
 message_count`, each ask's message id, each storyline's id with the sha256
 of its shown text (the recap, else the summary), and each material's
-`message id|attachment id|text_status|digest_status`. A new
+`message id|attachment id|text_status|digest_status`, and each other
+file's `otherfile|<lower-cased name>` (a new file with these people changes
+what the brief is told). A new
 message moves its thread's stamp and count, so it moves the hash; an edit to
 an existing message's text alone does not. A storyline's text is hashed
 because a recap is rewritten in place, moving no id or stamp. A material's
@@ -1297,7 +1314,16 @@ left (a partial head beats "not shown"). Round 2: the passages, with what is
 left, for every material whose text was not written whole and uncut (a text
 written whole that the gatherer did not cut — `BriefMaterial.textCut`, set
 when the squeezed words ran past `materialTextCap` — is the whole document,
-and its passages would be duplicates). Each block is tried on its own, so a later,
+and its passages would be duplicates). After the materials and before the
+invite, when there are any, **Files on other threads with these people (NOT
+sent for this meeting):** — one `- ` line per name, capped at 80 characters as fenced
+(`otherFileNameCap`, not `labelCap`'s 120) and fenced as `file`, outside the budget. The rule after `materials` says the
+meeting's PURPOSE comes from its own invite — the subject, the invite text
+and the threads about this meeting — never from a file or thread that merely
+involves the same people; such a file is named only when the invite or a
+thread about this meeting refers to it, and an invite that says little gets
+a brief that says so ("The invite gives no agenda.") and then what is open
+with these people. Each block is tried on its own, so a later,
 smaller one may still fit. A digest at its caps is about 1.7k, so one file's
 digest and whole 6000-character text fit, plus a second's digest, and the
 head of its text when the digests are short of their caps; a third is named
@@ -1316,13 +1342,15 @@ tokens), and a truncated answer is invalid JSON — a failed brief retried on
 the same inputs — so the budget sits over the realistic answer, and a test
 holds the caps' sum / 4 within 1.2 × `maxTokens`. Worst case in, measured by
 the size guard in `meeting_brief_task_test` (every cap full, every label 300
-characters of `&<>`, so each costs its full escaped 120): about 37.0k
-characters (37012) with the 3.9k system prompt — six threads with their two
+characters of `&<>`, so each costs its full escaped 120): about 38.1k
+characters (38133) with the 4.5k system prompt — six threads with their two
 600-character snippets, four asks, two storylines, the materials' 10k plus
-six name lines, eight people, fifteen attendee names, the invite 0.7k and
-the headers — about 12.3k tokens at three characters a token, plus the 2.7k
-answer: about 15.0k, inside the 16384 context. The guard holds it at 37800
-(the measurement plus 2%).
+six name lines, four other files (each name fenced at 80,
+`otherFileNameCap`), eight people, fifteen attendee names, the invite 0.7k
+and the headers — about 12.7k tokens at three characters a token, plus the
+2.7k answer: about 15.4k, inside the 16384 context. The ceiling is (16384 −
+2700) × 3 = 41052 characters of prompt; the guard holds it at 38500 (the
+measurement plus about 1%; 37800 before the other files and their rule).
 
 The schema (v3) is flat and in THIS order, which is the order the grammar
 makes the model write: `evidence` (one sentence — what the meeting is for and
@@ -1391,7 +1419,7 @@ and a `material_refs` list of `{source, message_id, attachment_id, name}` in
 the materials' order, so a material line opens its file the same way
 (`MeetingBrief.materialAt`) — and the resolved model name. Stored v1 and v2
 rows decode (above). The activity detail carries `threads`, `asks`,
-`materials`, `questions` and `people` counts and `text_chars` (the
+`materials`, `other_files`, `questions` and `people` counts and `text_chars` (the
 characters of the materials' text the message actually carried —
 `MeetingBriefTask.materialTextCharsWritten`, the same spend as the message —
 not what was gathered), `queued_text` when it queued any, and `fetched`
@@ -1584,7 +1612,7 @@ meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks, materials,
-questions, people, text_chars}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word,
+other_files, questions, people, text_chars}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word,
 `materials_pending` — "reading the files sent ahead" — or `unchanged`) →
 "Meeting brief — skipped (no recent mail with these people)";
 `error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)

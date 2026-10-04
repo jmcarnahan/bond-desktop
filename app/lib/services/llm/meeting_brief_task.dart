@@ -28,6 +28,7 @@ Rules:
 - briefing: at most 6 sentences, one per entry — each at most about 40 words — that catch the owner up on the subject: what this is about, how it got here with these people, what changed most recently, what is at stake or must be decided, and what the files say about it. Each sentence stands on a fact from the inputs with its date or its source; none restates the headline. When the inputs are thin, write fewer, never vaguer.
 - people: one line for each person listed — one line, at most about 25 words — in the order given: who they are as the inputs show it (their organisation, their part in the threads), the last thing they wrote or asked and when, and anything open with them. A person the inputs say nothing about gets the line "no recent mail". Use only the names given.
 - materials: the numbered materials are files sent ahead; the text of a file is shown when it has been read, and a file whose line says "you" is one the owner sent. For each one that matters, up to 5 points, each a short line, of what it SAYS — the figures, names, dates, claims, decisions asked for, and gaps, as written in the file: the detail the owner would otherwise have to open it for. A material shown unread or not shown is named as arrived in one point, not summarised. Use only numbers in the materials list; leave this empty when there are none.
+- The meeting's PURPOSE comes from its own invite — the subject, the invite text, and the threads about THIS meeting — never from files or threads that merely involve the same people. A file listed under "Files on other threads with these people" was NOT sent for this meeting: do not describe this meeting as being about it, and name it only when the invite or a thread about this meeting refers to it. An invite that says little gets a brief that says so ("The invite gives no agenda.") and then what is open with these people.
 - questions: at most 5 questions the owner could ask in the meeting, each grounded in one specific fact from a file or a thread and naming it. Never rhetorical, never generic.
 - open_asks: at most 4 things one of these people asked the owner that are still open. Name the person as the input names them. Take them from the "Open asks" section; leave this empty when that section is empty.
 - points: at most 5 short lines on where things stand in the threads, each naming the thread it comes from by its number in the list, or -1 when it comes from no one thread.
@@ -120,16 +121,20 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
   /// six is budget the materials could use.
   static const int labelCap = 120;
 
-  /// [s] cut so its fenced form is at most [labelCap] characters: the fence
+  /// An other file's name ([BriefInput.otherFiles]) as the fence writes it:
+  /// a file named, never read, needs less than a label's 120.
+  static const int otherFileNameCap = 80;
+
+  /// [s] cut so its fenced form is at most [cap] characters: the fence
   /// writes `&` as five and `<` and `>` as four, so an `&`-dense subject cut
   /// by length alone would cost four times a plain one.
-  static String _label(String s) {
+  static String _label(String s, {int cap = labelCap}) {
     var cost = 0;
     var end = 0;
     for (var i = 0; i < s.length; i++) {
       final unit = s.codeUnitAt(i);
       cost += unit == 0x26 ? 5 : (unit == 0x3c || unit == 0x3e ? 4 : 1);
-      if (cost > labelCap) break;
+      if (cost > cap) break;
       end = i + 1;
     }
     return capRunes(s, end);
@@ -415,6 +420,17 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
               if (m.date.isNotEmpty) m.date,
             ].join(' · '))}');
         written.forEach(buffer.writeln);
+      }
+    }
+
+    if (input.otherFiles.isNotEmpty) {
+      buffer
+        ..writeln()
+        ..writeln('Files on other threads with these people '
+            '(NOT sent for this meeting):');
+      for (final f in input.otherFiles) {
+        buffer.writeln(
+            '- ${wrapUntrusted('file', _label(f, cap: otherFileNameCap))}');
       }
     }
 

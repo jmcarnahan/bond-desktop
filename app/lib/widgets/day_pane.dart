@@ -117,9 +117,11 @@ class DayPane extends StatelessWidget {
   static Key briefToggleKeyFor(String eventId) =>
       ValueKey('day-brief-toggle-$eventId');
 
-  /// Where a meeting row's subject starts: the time column and its gap, then
-  /// the standing bar and its gap. An opened brief is drawn from here, under
-  /// the subject it belongs to.
+  /// Where every row's subject starts: the time column and its gap, then
+  /// the standing bar and its gap — a meeting row draws the bar, every other
+  /// row leaves its room empty, so the subject column never steps between
+  /// row types. An opened brief is drawn from here, under the subject it
+  /// belongs to.
   static const double subjectIndent =
       _whenWidth + BondSpacing.s12 + _barWidth + BondSpacing.s8;
   static const double _barWidth = 3;
@@ -478,12 +480,26 @@ class DayPane extends StatelessWidget {
         ),
       );
 
-  Widget _row({required Widget when, required Widget body, VoidCallback? onTap}) {
+  /// [barred]: the body draws the standing bar itself (a meeting row);
+  /// every other body is inset by the bar's room, so one [subjectIndent]
+  /// holds for all rows.
+  Widget _row({
+    required Widget when,
+    required Widget body,
+    VoidCallback? onTap,
+    bool barred = false,
+  }) {
+    final inset = barred
+        ? body
+        : Padding(
+            padding: const EdgeInsets.only(left: _barWidth + BondSpacing.s8),
+            child: body,
+          );
     final content = Padding(
       padding: const EdgeInsets.symmetric(vertical: BondSpacing.s8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [when, const SizedBox(width: BondSpacing.s12), Expanded(child: body)],
+        children: [when, const SizedBox(width: BondSpacing.s12), Expanded(child: inset)],
       ),
     );
     if (onTap == null) return content;
@@ -604,6 +620,7 @@ class DayPane extends StatelessWidget {
       child: _row(
         when: _when(range),
         onTap: _openEvent(e),
+        barred: true,
         // The bar is the body's left border, so it runs the body's full
         // height whatever the row grows to (glance, strip, buttons).
         body: Container(

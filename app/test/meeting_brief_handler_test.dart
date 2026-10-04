@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
@@ -12,6 +14,7 @@ import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/meeting_brief_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_embed_server.dart';
@@ -110,7 +113,12 @@ void main() {
     return json;
   }
 
-  Future<void> seedThread({Duration ago = const Duration(hours: 2)}) async {
+  /// Dana's thread, its message [eventId]'s invite: the meeting's own mail,
+  /// so a file on it is a material.
+  Future<void> seedThread({
+    Duration ago = const Duration(hours: 2),
+    String eventId = 'evt-1',
+  }) async {
     final at = MessageStore.isoStamp(now.subtract(ago));
     await store.upsertConversation({
       'source': 'email',
@@ -133,6 +141,8 @@ void main() {
       'received_at': at,
       'body_text': 'Can you send the quote before we meet?',
       'triage_status': 'done',
+      'source_meta_json':
+          jsonEncode({'meeting': 'meetingRequest', 'event_id': eventId}),
     });
   }
 
@@ -237,10 +247,59 @@ void main() {
     final detail =
         jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
     expect(detail['materials'], 1);
+    expect(detail['other_files'], 0);
     expect(detail['questions'], 1);
     expect(detail['threads'], 1);
     expect(detail['people'], 1);
     expect(detail['text_chars'], 'Tier B is 12k a year.'.length);
+  });
+
+  test('a file on other mail with Dana is no material: the activity counts '
+      'it as another file, and the model is told it was not sent for this '
+      'meeting', () async {
+    await seedEvent();
+    // Another meeting's invite: address-matched, not this meeting's mail.
+    await seedThread(eventId: 'evt-other');
+    await store.upsertAttachments('email', 'm-1', [
+      {
+        'attachment_id': 'a-deck',
+        'ordinal': 0,
+        'kind': 'file',
+        'name': 'northwind-deck.pdf',
+        'content_type': 'application/pdf',
+        'is_inline': 0,
+      },
+    ]);
+    await store.setAttachmentText('email', 'm-1', 'a-deck',
+        status: 'done', text: 'Northwind pricing.');
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    final msg = llm.userMessages.single;
+    expect(msg, isNot(contains('Materials sent ahead')));
+    expect(msg, isNot(contains('Northwind pricing.')),
+        reason: "another meeting's file is named, never read");
+    expect(msg, contains('Files on other threads with these people (NOT sent '
+        'for this meeting):'));
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    final detail =
+        jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
+    expect(detail['materials'], 0);
+    expect(detail['other_files'], 1);
+    expect(detail['text_chars'], 0);
   });
 
   /// m-1 flagged as carrying a file nobody has listed yet.
@@ -835,6 +894,38 @@ void main() {
         h.run(item('evt-1')), throwsA(isA<BriefOwnerUnknown>()));
     expect(await calendar.brief('evt-1'), isNull);
     expect(llm.calls, isEmpty);
+  });
+
+  test("the provider's gatherer has no zone until the display zone resolves: "
+      'an asked brief is retried, never dated in UTC', () async {
+    await seedEvent();
+    await seedThread();
+    final zone = Completer<CalendarZone>();
+    final container = ProviderContainer(overrides: [
+      dbProvider.overrideWithValue(db),
+      calendarZoneProvider.overrideWith((ref) => zone.future),
+    ]);
+    addTearDown(container.dispose);
+    final provided = container.read(briefGathererProvider);
+    expect(provided.zoneNow, throwsA(isA<BriefZoneUnknown>()));
+
+    final unknown = BriefGatherer(
+      store,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: provided.zoneNow,
+    );
+    final llm = ScriptedLlm.never();
+    final h = MeetingBriefHandler(calendar, unknown,
+        client: () => llm, clock: () => now);
+    await expectLater(h.run(item('evt-1', asked: true)),
+        throwsA(isA<BriefZoneUnknown>()));
+    expect(await calendar.brief('evt-1'), isNull);
+    expect(llm.calls, isEmpty);
+
+    zone.complete(CalendarZone.tryNamed('America/Los_Angeles')!);
+    await container.read(calendarZoneProvider.future);
+    expect(provided.zoneNow().iana, 'America/Los_Angeles');
   });
 
   test("a series master is briefed as its next occurrence, under the "

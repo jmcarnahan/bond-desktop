@@ -25,6 +25,8 @@ import 'package:bond_inbox/providers/draft_provider.dart' show DraftNotifier;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/models/person.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart'
+    show AccountInfo;
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
@@ -65,6 +67,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_auth_session.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -977,6 +980,44 @@ void main() {
           {'asked': true});
     });
 
+    testWidgets('a block with only the owner, two days out, offers no Write a '
+        'brief', (tester) async {
+      const me = 'jordan@contoso.com';
+      final today = la.dateOf(DateTime.now().toUtc());
+      final start = la.localDateTime(today.addDays(2), 10, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-focus',
+          subject: 'Focus block',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          // Not marked the organiser's copy, so the owner's own attendee row
+          // is the one name on it.
+          organizerAddress: me,
+          attendees: const [Attendee(name: 'Jordan Bond', address: me)],
+        ),
+      ], syncRun: 'run-2');
+      await pumpScreen(tester, overrides: [
+        authSessionProvider.overrideWithValue(FakeAuthSession(
+          signedIn: true,
+          account: const AccountInfo(displayName: 'Jordan Bond', mail: me),
+        )),
+      ]);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.byTooltip('Next day'));
+        await pumps(tester);
+      }
+      await tester.tap(find.text('Focus block'));
+      await pumps(tester);
+      expect(inSide(find.text('Focus block')), findsWidgets);
+      expect(inSide(find.byKey(BriefSection.writeKey)), findsNothing);
+    });
+
     testWidgets('a meeting waiting for its files says so in the agenda; one '
         'that has started does not', (tester) async {
       final nowUtc = DateTime.now().toUtc();
@@ -1641,7 +1682,16 @@ void main() {
 
       // Where it would land, drawn beside the tile that has not moved.
       expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
-      expect(find.text('Moving here…'), findsOneWidget);
+      // It says what it is: the move the strip above sends or cancels.
+      final ghost = find.byKey(DayGrid.proposalKey);
+      expect(
+          find.descendant(
+              of: ghost, matching: find.textContaining('Move here?')),
+          findsOneWidget);
+      expect(
+          find.descendant(
+              of: ghost, matching: find.textContaining('Send or Cancel above')),
+          findsOneWidget);
       expect(tester.widget<DayGrid>(find.byType(DayGrid)).locked, isTrue);
 
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);

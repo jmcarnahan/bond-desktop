@@ -42,6 +42,7 @@ void main() {
     String organizerAddress = 'dana@contoso.com',
     List<Attendee> attendees = const [],
     String changeKey = 'ck-1',
+    String showAs = '',
   }) =>
       CalendarEvent(
         id: id,
@@ -56,6 +57,7 @@ void main() {
         organizerAddress: organizerAddress,
         attendees: attendees,
         changeKey: changeKey,
+        showAs: showAs,
       );
 
   CalendarEvent allDay(
@@ -178,6 +180,72 @@ void main() {
       final four = (await calendar.event('evt-4'))!;
       expect(four.responseStatus, 'tentativelyAccepted');
       expect(four.changeKey, 'ck-3');
+    });
+
+    test(
+        "upsertEvents keepAnswerFor: the stored show_as rides with the kept "
+        'answer; an agreeing page brings its own', () async {
+      await calendar.upsertEvents(
+        [
+          timed('evt-1',
+              start: inHours(3),
+              responseStatus: 'notResponded',
+              showAs: 'tentative'),
+          timed('evt-2',
+              start: inHours(4),
+              responseStatus: 'notResponded',
+              showAs: 'tentative'),
+        ],
+        syncRun: 'run-a',
+      );
+      await calendar.setResponseStatus('evt-1', 'accepted');
+      await calendar.setResponseStatus('evt-2', 'accepted');
+      // A lagging page: still unanswered and still pencilled in.
+      await calendar.upsertEvents(
+        [
+          timed('evt-1',
+              start: inHours(3),
+              responseStatus: 'notResponded',
+              showAs: 'tentative'),
+          // A page that has caught up with the answer is applied whole.
+          timed('evt-2',
+              start: inHours(4), responseStatus: 'accepted', showAs: 'oof'),
+        ],
+        syncRun: 'run-b',
+        keepAnswerFor: {'evt-1', 'evt-2'},
+      );
+      final one = (await calendar.event('evt-1'))!;
+      expect(one.responseStatus, 'accepted');
+      expect(one.showAs, 'busy');
+      expect((await calendar.event('evt-2'))!.showAs, 'oof');
+    });
+
+    test(
+        'an accept moves a tentative show_as to busy, a maybe to tentative, '
+        'a free one is left alone', () async {
+      await calendar.upsertEvents(
+        [
+          timed('evt-1', start: inHours(3), showAs: 'tentative'),
+          timed('evt-2', start: inHours(4), showAs: 'busy'),
+          timed('evt-3', start: inHours(5), showAs: 'free'),
+          timed('evt-4', start: inHours(6), showAs: 'tentative'),
+          timed('evt-5', start: inHours(7), showAs: 'Tentative'),
+        ],
+        syncRun: 'run-a',
+      );
+      await calendar.setResponseStatus('evt-1', 'accepted');
+      await calendar.setResponseStatus('evt-2', 'tentativelyAccepted');
+      await calendar.setResponseStatus('evt-3', 'accepted');
+      await calendar.setResponseStatus('evt-4', 'declined');
+      await calendar.setResponseStatus('evt-5', 'accepted');
+      Future<String> showAs(String id) async =>
+          (await calendar.event(id))!.showAs;
+      expect(await showAs('evt-1'), 'busy');
+      expect(await showAs('evt-2'), 'tentative');
+      expect(await showAs('evt-3'), 'free');
+      expect(await showAs('evt-4'), 'tentative');
+      expect(await showAs('evt-5'), 'busy');
+      expect((await calendar.event('evt-1'))!.responseStatus, 'accepted');
     });
 
     test('deleteEvents ignores ids it never stored', () async {

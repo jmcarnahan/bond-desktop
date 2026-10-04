@@ -163,15 +163,18 @@ void main() {
         ownerKnown: true,
       );
 
-  /// A thread with Dana: a conversation row and one inbound message.
+  /// A thread with Dana: a conversation row and one inbound message —
+  /// with [eventId], that event's invite (its own mail, where materials
+  /// come from).
   Future<void> thread(
     String key, {
     String state = 'waiting',
     Duration ago = const Duration(hours: 2),
     String body = 'Hello there.',
+    String? eventId,
   }) async {
     await conversation(key, state: state, ago: ago);
-    await message('m-$key', key, body: body, ago: ago);
+    await message('m-$key', key, body: body, ago: ago, eventId: eventId);
   }
 
   Future<BriefInput> eligible(CalendarEvent e, {bool asked = false}) async {
@@ -550,11 +553,15 @@ void main() {
   group('caps', () {
     test('seven threads → six; five asks → four; ten materials → six', () async {
       for (var i = 0; i < 7; i++) {
-        await thread('c-$i', state: 'needs_reply', ago: Duration(hours: i + 1));
+        await thread('c-$i',
+            state: 'needs_reply',
+            ago: Duration(hours: i + 1),
+            eventId: i == 0 ? 'evt-1' : null);
         await decide('m-c-$i', needsYou: 0.9, intent: 'request');
       }
+      // Materials come from the invite thread only: all ten on it.
       for (var i = 0; i < 10; i++) {
-        await store.upsertAttachments('email', 'm-c-${i % 6}', [
+        await store.upsertAttachments('email', 'm-c-0', [
           {
             'attachment_id': 'a-$i',
             'ordinal': i,
@@ -721,7 +728,7 @@ void main() {
       await conversation('c-1', count: 3, ago: const Duration(hours: 1));
       await message('m-old', 'c-1', ago: const Duration(hours: 30));
       await message('m-mine', 'c-1', outbound: true, ago: const Duration(hours: 5));
-      await message('m-new', 'c-1', ago: const Duration(hours: 1));
+      await message('m-new', 'c-1', ago: const Duration(hours: 1), eventId: 'evt-1');
       await attach('m-old', 'a-old', name: 'terms.pdf',
           contentType: 'application/pdf');
       await attach('m-mine', 'a-mine', name: 'my reply.pdf');
@@ -776,6 +783,70 @@ void main() {
               'you · ${dayOf(const Duration(hours: 3))}')}'));
     });
 
+    test('a file on another thread with the same person is not a material '
+        '— it is listed by name as another file', () async {
+      // The meeting's own invite, sent by the owner, carries no file.
+      await conversation('c-invite', ago: const Duration(hours: 3));
+      await message('m-invite', 'c-invite',
+          outbound: true, ago: const Duration(hours: 3), eventId: 'evt-1');
+      // Other mail the owner sent Dana — another meeting's invite — with a
+      // deck on it.
+      await conversation('c-other', ago: const Duration(days: 2));
+      await message('m-other', 'c-other',
+          outbound: true, ago: const Duration(days: 2), eventId: 'evt-other');
+      await attach('m-other', 'a-deck', name: 'northwind-deck.pdf',
+          contentType: 'application/pdf');
+
+      final input = await eligible(meeting());
+      expect([for (final t in input.threads) t.conversationKey],
+          ['c-invite', 'c-other'],
+          reason: 'the other thread is still mail with these people');
+      expect(input.materials, isEmpty);
+      expect(input.otherFiles, ['northwind-deck.pdf']);
+      final msg = const MeetingBriefTask().buildUserMessage(input);
+      expect(msg, isNot(contains('Materials sent ahead')));
+      expect(msg, contains('Files on other threads with these people (NOT '
+          'sent for this meeting):\n- '
+          '${wrapUntrusted('file', 'northwind-deck.pdf')}'));
+    });
+
+    test('other files move the hash, four at most, newest first, deduped',
+        () async {
+      await thread('c-invite', eventId: 'evt-1');
+      await conversation('c-other', count: 6, ago: const Duration(hours: 1));
+      for (var i = 0; i < 6; i++) {
+        await message('m-o$i', 'c-other', ago: Duration(hours: 10 - i));
+      }
+      final first = await eligible(meeting());
+      expect(first.otherFiles, isEmpty);
+
+      await attach('m-o0', 'a-0', name: 'contoso-terms.pdf');
+      final one = await eligible(meeting());
+      expect(one.otherFiles, ['contoso-terms.pdf']);
+      expect(one.materials, isEmpty);
+      expect(one.inputsHash, isNot(first.inputsHash),
+          reason: 'a new file with these people changes the inputs');
+      final light = await gatherer.gather(meeting(), now: now, passages: false)
+          as BriefEligible;
+      expect(light.input.otherFiles, one.otherFiles);
+      expect(light.input.inputsHash, one.inputsHash);
+
+      // A newer copy of the same name under another case is one file.
+      await attach('m-o1', 'a-1', name: 'Contoso-Terms.PDF');
+      await attach('m-o2', 'a-2', name: 'photo.jpg', contentType: 'image/jpeg');
+      await attach('m-o3', 'a-3', name: 'notes-3.docx');
+      await attach('m-o4', 'a-4', name: 'notes-4.docx');
+      await attach('m-o5', 'a-5', name: 'notes-5.docx');
+      await attach('m-o5', 'a-6', name: 'notes-6.docx', ordinal: 1);
+      final many = await eligible(meeting());
+      expect(BriefGatherer.maxOtherFiles, 4);
+      expect(many.otherFiles,
+          ['notes-5.docx', 'notes-6.docx', 'notes-4.docx', 'notes-3.docx']);
+
+      final few = await eligible(meeting());
+      expect(few.inputsHash, many.inputsHash, reason: 'stable');
+    });
+
     test('a mail with attachments not yet listed is reported as unlisted',
         () async {
       await conversation('c-invite', count: 2, ago: const Duration(hours: 1));
@@ -804,7 +875,7 @@ void main() {
     });
 
     test('an unread deck is listed as arrived, with no digest', () async {
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'Board deck.pptx');
 
       final input = await eligible(meeting());
@@ -820,7 +891,7 @@ void main() {
     });
 
     test('images and inline files are not materials', () async {
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-inline', name: 'inline.pdf', inline: true,
           ordinal: 0);
       await attach('m-c-1', 'a-photo', name: 'photo.jpg',
@@ -845,7 +916,7 @@ void main() {
       await conversation('c-1', count: 3, ago: const Duration(hours: 1));
       await message('m-1', 'c-1', ago: const Duration(hours: 9));
       await message('m-2', 'c-1', ago: const Duration(hours: 5));
-      await message('m-3', 'c-1', ago: const Duration(hours: 1));
+      await message('m-3', 'c-1', ago: const Duration(hours: 1), eventId: 'evt-1');
       await attach('m-1', 'a-1', name: 'Q3 Plan.pptx');
       await attach('m-2', 'a-2', name: 'q3 plan.pptx');
       await attach('m-3', 'a-3', name: 'Q3 plan.pptx');
@@ -857,7 +928,7 @@ void main() {
     });
 
     test('a digest landing moves the hash; a renamed file does not', () async {
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       final first = (await eligible(meeting())).inputsHash;
 
@@ -877,7 +948,7 @@ void main() {
 
     test("a read file carries its text, cut at a word to the cap; the "
         "planner's gather reads none, and the hash is the same", () async {
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       final words = List.filled(2000, 'word').join(' ');
       await store.setAttachmentText('email', 'm-c-1', 'a-deck',
@@ -913,7 +984,7 @@ void main() {
     test('a file still being read is pending; a skipped or read one is not',
         () async {
       // An hour old: inside the wait's age cap.
-      await thread('c-1', ago: const Duration(hours: 1));
+      await thread('c-1', ago: const Duration(hours: 1), eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       await queueText('m-c-1', 'a-deck');
       final pending = await eligible(meeting());
@@ -935,7 +1006,7 @@ void main() {
 
     test('a file whose text work gave up is not pending', () async {
       // An hour old: inside the wait's age cap.
-      await thread('c-1', ago: const Duration(hours: 1));
+      await thread('c-1', ago: const Duration(hours: 1), eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       await queueText('m-c-1', 'a-deck');
       // The worker's give-up: the WORK row says error, and nothing touches
@@ -952,7 +1023,7 @@ void main() {
 
     test('a file read for more than two hours is not waited for', () async {
       await conversation('c-1', ago: const Duration(hours: 3));
-      await message('m-c-1', 'c-1', ago: const Duration(hours: 3));
+      await message('m-c-1', 'c-1', ago: const Duration(hours: 3), eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       await queueText('m-c-1', 'a-deck');
       // Mail three hours old whose text work was only just asked for: the
@@ -968,7 +1039,7 @@ void main() {
 
       // The same file on mail an hour old is waited for.
       await conversation('c-2', ago: const Duration(hours: 1));
-      await message('m-c-2', 'c-2', ago: const Duration(hours: 1));
+      await message('m-c-2', 'c-2', ago: const Duration(hours: 1), eventId: 'evt-1');
       await attach('m-c-2', 'a-memo', name: 'memo.pdf');
       await queueText('m-c-2', 'a-memo');
       expect((await eligible(meeting())).materialsPending, isTrue);
@@ -977,7 +1048,7 @@ void main() {
     test('a listed file with no text work is reported unqueued, not pending',
         () async {
       // An hour old: inside the wait's age cap.
-      await thread('c-1', ago: const Duration(hours: 1));
+      await thread('c-1', ago: const Duration(hours: 1), eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       for (final passages in [true, false]) {
         final g = await gatherer.gather(meeting(), now: now,
@@ -1023,7 +1094,7 @@ void main() {
     test('passages come from the chunks nearest the meeting, two per file at '
         'most', () async {
       final chunks = _ChunkStore(db);
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx', ordinal: 0);
       await attach('m-c-1', 'a-sheet', name: 'numbers.xlsx',
           contentType: 'application/vnd.ms-excel', ordinal: 1);
@@ -1079,7 +1150,7 @@ void main() {
 
     test('a long deck cannot starve the other files of passages', () async {
       final chunks = _ChunkStore(db);
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck', name: 'deck.pptx', ordinal: 0);
       await attach('m-c-1', 'a-memo', name: 'memo.docx', ordinal: 1);
       chunks.hits = [
@@ -1103,7 +1174,7 @@ void main() {
 
     test('no chunks, no embedding call', () async {
       final chunks = _ChunkStore(db)..hasChunks = false;
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck');
       final server = FakeEmbedServer();
       final input = await withChunks(chunks, server).gather(meeting(), now: now);
@@ -1113,7 +1184,7 @@ void main() {
     });
 
     test('a passage failure costs no brief', () async {
-      await thread('c-1');
+      await thread('c-1', eventId: 'evt-1');
       await attach('m-c-1', 'a-deck');
 
       final throwing = _ChunkStore(db)..throwOnKnn = true;
