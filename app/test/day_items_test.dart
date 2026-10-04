@@ -235,8 +235,9 @@ void main() {
       expect(describe(items), ['meeting:t']);
     });
 
-    test('deadlines: open threads whose showable deadline lands on the day',
-        () {
+    test(
+        'deadlines: open threads whose showable deadline lands on the day; an '
+        'invite thread with a deadline draws no Due row', () {
       const day = CalendarDate(2026, 10, 1);
       final items = buildDayItems(
         day: day,
@@ -254,6 +255,10 @@ void main() {
           // Plan-relative with no date in it: never shown, so never placed.
           Conversation(id: 'plan', latestDeadline: 'Day 1'),
           Conversation(id: 'none'),
+          // An invite whose meeting time the text model read as a deadline:
+          // the conversations query reads a meeting message's deadline as
+          // NULL, so it arrives here with none and draws no Due row.
+          Conversation(id: 'invite', subject: 'Candidate review'),
         ],
       );
       expect(describe(items), ['due:yes']);
@@ -345,7 +350,8 @@ void main() {
       expect(overlapLine(const Overlaps()), isNull);
     });
 
-    test('cancelled and declined meetings stay on the day', () {
+    test('a cancelled meeting stays on the day struck through; a declined one '
+        'is gone', () {
       final items = buildDayItems(
         day: today,
         now: now,
@@ -354,10 +360,19 @@ void main() {
           timed('gone', DateTime.utc(2026, 9, 29, 20), isCancelled: true),
           timed('no', DateTime.utc(2026, 9, 29, 21),
               responseStatus: 'declined'),
+          timed('a', DateTime.utc(2026, 9, 29, 21)),
+          timed('b', DateTime.utc(2026, 9, 29, 21, 15)),
         ],
         conversations: const [],
       );
-      expect(describe(items), ['now', 'meeting:gone', 'meeting:no']);
+      expect(
+          describe(items), ['now', 'meeting:gone', 'meeting:a', 'meeting:b']);
+      // The declined meeting never counted as a clash, and leaving the day
+      // does not change what the others overlap.
+      final a =
+          items.whereType<MeetingItem>().firstWhere((m) => m.event.id == 'a');
+      expect([for (final e in a.overlaps.hard) e.id], ['b']);
+      expect(a.overlaps.soft, isEmpty);
     });
 
     test('a DST day: 9:00 on Nov 1 in Los Angeles is 9:00', () {

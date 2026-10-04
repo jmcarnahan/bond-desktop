@@ -213,6 +213,7 @@ alone, and only the setters that move `_section` clear it.
 | a Due or Back-from-Later row on the agenda | that thread, in main (`_select`) |
 | a reminder row on the agenda (*Reminder · in To Do*), or its tile in the grid's header | the thread it is about, in main (`_select`) |
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
+| Yes / Maybe / No / Dismiss on an invite row, or on an unanswered meeting's agenda row (`EventActions`, compact) | nothing opens: the write's inline confirm strip in the row (Send / Cancel; Dismiss / Cancel for the quiet decline that tells the organiser nothing), then the toast; a dismissed meeting leaves the agenda at once |
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
 | a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time), and the pane underneath moves to the day it searches (`_followAsk` sets `_selectedDay` alone, so a thread, New message, Settings, the log or Invites open there stays open); the header and its chevron fold the section and bring it back |

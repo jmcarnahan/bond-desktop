@@ -259,12 +259,15 @@ class ExtractHandler extends WorkHandler {
       // a human could see.
       temperature: 0,
     );
+    // A meeting message's time is never the reader's deadline (the model has
+    // read it as one): not stored, not on the banner, not on the activity row.
+    final deadline = message.meetingMessageType != null ? '' : text.deadline;
     await _store.writeMessageText(
       source,
       id,
       summary: text.summary,
       actionItems: text.actionItems,
-      deadline: text.deadline,
+      deadline: deadline,
     );
     // Intent and importance are the decision model's (the triage pass stored
     // its answers); a message decided before this build has none, and reads
@@ -296,7 +299,7 @@ class ExtractHandler extends WorkHandler {
         needsAction: written['needs_action'] == 1,
         summary: text.summary,
         actionItems: text.actionItems,
-        deadline: text.deadline,
+        deadline: deadline,
       );
     }
 
@@ -312,7 +315,7 @@ class ExtractHandler extends WorkHandler {
       'topics': result.topics.take(5).toList(),
       if (result.project.isNotEmpty) 'project': result.project,
       'action_items': text.actionItems.length,
-      if (text.deadline.isNotEmpty) 'deadline': text.deadline,
+      if (deadline.isNotEmpty) 'deadline': deadline,
     });
 
     await _fileBucket(source, written, result);

@@ -5397,6 +5397,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           compact: true,
         ),
       ),
+      // An unanswered meeting is answered on its agenda row too. The row IS
+      // the occurrence, so there is no series folding here.
+      meetingActions: (e) => CalendarWriteFlow(
+        key: ValueKey('agenda-write-${e.id}'),
+        writer: ref.read(calendarWritesProvider),
+        onDone: _calendarWriteDone,
+        onFailed: _calendarWriteFailed,
+        builder: (context, start, busy) => EventActions(
+          key: ValueKey(e.id),
+          target: e,
+          shown: e,
+          respondId: null,
+          zone: zone,
+          clock: DateTime.now,
+          today: today,
+          start: start,
+          busy: busy,
+          compact: true,
+        ),
+      ),
     );
   }
 

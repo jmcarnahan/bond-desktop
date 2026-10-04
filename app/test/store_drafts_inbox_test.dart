@@ -35,6 +35,7 @@ void main() {
     String? deadline,
     String from = 'Dana Whitfield',
     String? fromAddress = 'dana@example.com',
+    String? sourceMetaJson,
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -46,6 +47,7 @@ void main() {
       'from_address': fromAddress,
       'received_at': receivedAt,
       'body_text': 'the hero paragraph',
+      'source_meta_json': ?sourceMetaJson,
     });
     if (deadline != null) {
       // The one path that writes a deadline: triage reads it out of the
@@ -109,6 +111,65 @@ void main() {
       final rows = await store.loadConversations();
 
       expect(rows.single.latestDeadline, 'by Friday');
+    });
+
+    test(
+        "a meeting invite's deadline is not the thread's latestDeadline; "
+        "a plain mail's is", () async {
+      await seedConversation(key: 'invite');
+      await seedConversation(key: 'plain');
+      // The text model read the invite's own meeting time as a deadline; the
+      // time is the event's to show (the agenda row, Invites), not a Due row.
+      await seedInbound(
+        id: 'm-invite',
+        key: 'invite',
+        deadline: 'Sunday Oct 4, 2026 2pm',
+        sourceMetaJson: '{"meeting": "meetingRequest", "event_id": "evt-1"}',
+      );
+      await seedInbound(id: 'm-plain', key: 'plain', deadline: 'Friday');
+
+      final rows = {
+        for (final c in await store.loadConversations()) c.id: c,
+      };
+
+      expect(rows['invite']!.latestDeadline, isNull);
+      expect(rows['plain']!.latestDeadline, 'Friday');
+    });
+
+    test(
+        'a blob that is not JSON, names no meeting, or names none keeps the '
+        'deadline',
+        () async {
+      await seedConversation(key: 'broken');
+      await seedConversation(key: 'empty');
+      await seedInbound(
+        id: 'm-broken',
+        key: 'broken',
+        deadline: 'Friday',
+        sourceMetaJson: 'not json',
+      );
+      await seedInbound(
+        id: 'm-empty',
+        key: 'empty',
+        deadline: 'Monday',
+        sourceMetaJson: '{"meeting": ""}',
+      );
+      // Graph's own word for "not a meeting message".
+      await seedConversation(key: 'none');
+      await seedInbound(
+        id: 'm-none',
+        key: 'none',
+        deadline: 'Tuesday',
+        sourceMetaJson: '{"meeting": "none"}',
+      );
+
+      final rows = {
+        for (final c in await store.loadConversations()) c.id: c,
+      };
+
+      expect(rows['broken']!.latestDeadline, 'Friday');
+      expect(rows['empty']!.latestDeadline, 'Monday');
+      expect(rows['none']!.latestDeadline, 'Tuesday');
     });
 
     test('pending_draft_count counts a suggestion on the newest inbound',

@@ -219,10 +219,13 @@ Iterable<ReminderItem> _remindersOn(
 /// so a deadline whose day has passed is simply not on today: overdue work
 /// is Needs You's to raise, not the agenda's.
 ///
-/// Declined and cancelled meetings stay on the day — the row fades or strikes
-/// through — because a meeting that silently vanished is a meeting somebody
-/// turns up to. Overlaps are measured against [events] as given, which
-/// [overlapsForEvent] already filters for cancelled, declined and free time.
+/// A declined meeting is not on the day — the owner said no, and Outlook
+/// removes it from the calendar anyway (the mirror's `_applyLocally` marks it
+/// declined at once, so the row leaves before the write returns). A cancelled
+/// meeting stays, struck through with a Cancelled caption, because a meeting
+/// that silently vanished is one somebody turns up to. Overlaps are measured
+/// against [events] as given, which [overlapsForEvent] already filters for
+/// cancelled, declined and free time.
 ///
 /// [now] may be in any zone: instants are compared in UTC, and the deadline
 /// parser is handed [now] itself (as the fallback anchor) because it reads
@@ -238,7 +241,8 @@ List<DayItem> buildDayItems({
   final nowUtc = now.toUtc();
   final dayEvents = [
     for (final e in events)
-      if (!e.isSeriesMaster && eventTouchesDay(e, day, zone)) e,
+      if (!e.isSeriesMaster && !_declined(e) && eventTouchesDay(e, day, zone))
+        e,
   ];
 
   final allDay = <DayItem>[

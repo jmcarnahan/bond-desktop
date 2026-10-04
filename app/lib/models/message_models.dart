@@ -599,7 +599,10 @@ class Message {
   final bool? replyExpected;
 
   /// The date or timeframe triage read out of the message, in the sender's own
-  /// words ("Friday", "before the 15th"). Null when the message named none.
+  /// words ("Friday", "before the 15th"). Null when the message named none,
+  /// and null for a meeting message, whatever extraction stored: its time is
+  /// the event's, never the reader's deadline ([fromRow] and [fromJson] drop
+  /// it, so every reader of this field keeps the rule).
   final String? deadline;
 
   /// The decision model's probability that this message needs the owner,
@@ -764,15 +767,21 @@ class Message {
   /// Null on ordinary mail, on every Teams message, and on any row whose
   /// detail was fetched before its connector sent the field (MCP rows before
   /// the `meeting_detail_backfill` one-shot reached them): a reader must treat
-  /// null as "nobody said", never as "not a meeting".
-  String? get meetingMessageType {
-    final raw = sourceMetaJson;
+  /// null as "nobody said", never as "not a meeting". Graph's `none` names
+  /// no meeting and reads null too.
+  String? get meetingMessageType => _meetingTypeOf(sourceMetaJson);
+
+  /// [meetingMessageType] read off a raw `source_meta_json` blob, for the
+  /// factories, which decide [deadline] before a [Message] exists.
+  static String? _meetingTypeOf(String? raw) {
     if (raw == null || raw.isEmpty) return null;
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return null;
       final meeting = decoded['meeting'];
-      if (meeting is! String || meeting.isEmpty) return null;
+      if (meeting is! String) return null;
+      final word = meeting.trim().toLowerCase();
+      if (word.isEmpty || word == 'none') return null;
       return meeting;
     } on FormatException {
       return null;
@@ -841,6 +850,8 @@ class Message {
   factory Message.fromJson(Map<String, dynamic> json) {
     final rawTo = json['to'] as List<dynamic>?;
     final rawActionItems = json['action_items'] as List<dynamic>?;
+    final meta = json['source_meta_json'];
+    final meeting = _meetingTypeOf(meta is String ? meta : null) != null;
     return Message(
       id: json['id'] as String? ?? '',
       source: json['source'] as String? ?? 'email',
@@ -867,7 +878,7 @@ class Message {
       triageStatus: json['triage_status'] as String? ?? 'pending',
       addressedMe: json['addressed_me'] as bool? ?? false,
       replyExpected: json['reply_expected'] as bool?,
-      deadline: json['deadline'] as String?,
+      deadline: meeting ? null : json['deadline'] as String?,
       needsYouP: (json['needs_you_p'] as num?)?.toDouble(),
       needsYouReason: json['needs_you_reason'] as String?,
     );
@@ -877,6 +888,8 @@ class Message {
   /// `to_json` / `action_items_json` are JSON-encoded TEXT and
   /// `needs_action` / `is_read` are 0/1 integers (STRICT has no bool).
   factory Message.fromRow(Map<String, Object?> row) {
+    final meeting =
+        _meetingTypeOf(row['source_meta_json'] as String?) != null;
     return Message(
       id: row['source_message_id'] as String? ?? '',
       source: row['source'] as String? ?? 'email',
@@ -908,7 +921,7 @@ class Message {
       // Null survives as null: a row triage v2 has never judged is not a row
       // it judged "no".
       replyExpected: _boolFromInt(row['reply_expected']),
-      deadline: row['deadline'] as String?,
+      deadline: meeting ? null : row['deadline'] as String?,
       // Tri-state, exactly as `reply_expected` above: a row the needs-you pass
       // has never reached is not a row it judged "no", and the Why panel says
       // which of the two it is looking at.

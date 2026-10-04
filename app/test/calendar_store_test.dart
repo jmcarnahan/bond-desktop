@@ -117,6 +117,42 @@ void main() {
       expect(await calendar.event('evt-2'), isNotNull);
     });
 
+    test(
+        "upsertEvents keeps a fresh answer over a page's notResponded; applies "
+        'any other change; an id not in keepAnswerFor is overwritten', () async {
+      await calendar.upsertEvents(
+        [
+          timed('evt-1', start: inHours(3), responseStatus: 'accepted'),
+          timed('evt-2', start: inHours(4), responseStatus: 'accepted'),
+          timed('evt-3', start: inHours(5), responseStatus: 'declined'),
+        ],
+        syncRun: 'run-a',
+      );
+      // A lagging page: still unanswered, but with a new change key.
+      final written = await calendar.upsertEvents(
+        [
+          timed('evt-1',
+              start: inHours(3),
+              responseStatus: 'notResponded',
+              changeKey: 'ck-2'),
+          timed('evt-2', start: inHours(4), responseStatus: 'notResponded'),
+          timed('evt-3', start: inHours(5), responseStatus: 'tentativelyAccepted'),
+        ],
+        syncRun: 'run-b',
+        keepAnswerFor: {'evt-1', 'evt-3'},
+      );
+
+      expect(written, 3);
+      final one = (await calendar.event('evt-1'))!;
+      expect(one.responseStatus, 'accepted');
+      expect(one.changeKey, 'ck-2');
+      // Not answered here lately: the page is believed.
+      expect((await calendar.event('evt-2'))!.responseStatus, 'notResponded');
+      // A page that carries an ANSWER is applied, held or not.
+      expect((await calendar.event('evt-3'))!.responseStatus,
+          'tentativelyAccepted');
+    });
+
     test('deleteEvents ignores ids it never stored', () async {
       await calendar.upsertEvents([
         timed('evt-1', start: inHours(1)),

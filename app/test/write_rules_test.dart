@@ -497,5 +497,43 @@ void main() {
       expect(dismissLabelFor(const RespondToEvent('x', RsvpResponse.accept)),
           'Cancel');
     });
+
+    test("the quiet decline's summary, done message, confirm label and empty "
+        'may-email', () {
+      const quiet =
+          RespondToEvent('e1', RsvpResponse.decline, sendResponse: false);
+      final invite = CalendarEvent(
+        id: 'e1',
+        subject: 'Design review',
+        organizerAddress: 'dana@contoso.com',
+        attendees: const [guest],
+        startUtc: DateTime.utc(2026, 10, 7, 17),
+        endUtc: DateTime.utc(2026, 10, 7, 18),
+      );
+      expect(
+          writeSummary(quiet,
+              shown: invite, series: false, zone: la, today: today),
+          'Dismiss "Design review" · Wednesday, Oct 7 · 10:00–11:00 AM'
+          ' — declines without telling the organiser');
+      expect(
+          writeSummary(quiet,
+              shown: invite, series: true, zone: la, today: today),
+          'Dismiss every meeting in "Design review"'
+          ' — declines without telling the organiser');
+      expect(writeDoneMessage(quiet, shown: invite, series: false, zone: la),
+          'Dismissed "Design review" — nobody was told.');
+      expect(writeDoneMessage(quiet, shown: invite, series: true, zone: la),
+          'Dismissed every meeting in "Design review" — nobody was told.');
+      expect(mayEmailFor(quiet, event: invite), isEmpty);
+      expect(confirmLabelFor(quiet), 'Dismiss');
+      expect(dismissLabelFor(quiet), 'Cancel');
+      // The sending decline keeps its words.
+      expect(confirmLabelFor(const RespondToEvent('e1', RsvpResponse.decline)),
+          'Send');
+      expect(
+          mayEmailFor(const RespondToEvent('e1', RsvpResponse.decline),
+              event: invite),
+          ['dana@contoso.com']);
+    });
   });
 }

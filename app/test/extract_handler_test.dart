@@ -135,6 +135,7 @@ void main() {
     String? summary,
     String? triageStatus,
     Map<String, String>? headers,
+    String? meeting,
   }) async {
     await store.upsertMessage({
       'source': 'email',
@@ -148,8 +149,12 @@ void main() {
       'body_text': 'Can we still ship on Thursday?',
       // The shape the detail fetch stores them in, which is what
       // `classificationOf` reads a machine sender off.
-      'source_meta_json':
-          headers == null ? null : jsonEncode({'headers': headers}),
+      'source_meta_json': headers == null && meeting == null
+          ? null
+          : jsonEncode({
+              'headers': ?headers,
+              if (meeting != null) ...{'meeting': meeting, 'event_id': 'evt-1'},
+            }),
     });
     if (summary != null) {
       await writeTriaged(
@@ -334,6 +339,61 @@ void main() {
       expect(stored['project'], 'Website redesign');
       expect(stored['intent'], 'request');
       expect(stored['importance'], 'high');
+    });
+
+    test("a meeting message's deadline is stored empty", () async {
+      await seedMessage(summary: 'An older summary.', meeting: 'meetingRequest');
+      // The model read the invite's own meeting time as a deadline.
+      final llm = scripted([
+        answer(
+          summary: 'Jordan invites you to the launch review.',
+          deadline: 'Sunday Oct 4, 2026 2pm',
+        ),
+      ]);
+
+      await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
+
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      expect(row['summary'], 'Jordan invites you to the launch review.');
+      expect(row['deadline'], isNull);
+    });
+
+    test("a meeting message's deadline never reaches the thread's ask",
+        () async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'conv-1',
+        'subject': 'Launch review',
+        'state': 'needs_reply',
+        'last_inbound_at': '2026-08-29T10:00:00Z',
+        'last_message_at': '2026-08-29T10:00:00Z',
+      });
+      await seedMessage(triageStatus: 'triaged', meeting: 'meetingRequest');
+      await store.writeTriage(
+        'email',
+        'm1',
+        status: 'triaged',
+        result: const TriageResult(
+          urgency: 'high',
+          category: 'work',
+          needsAction: true,
+        ),
+      );
+
+      await runOne(ExtractHandler(
+        store,
+        scripted([
+          answer(
+            actionItems: const ['Answer the launch review invite'],
+            deadline: 'Sunday Oct 4, 2026 2pm',
+          ),
+        ]),
+        FakeEmbeddings().client,
+      ));
+
+      // The ask lands without the meeting's own time as a "by …" tail.
+      final conversation = (await store.getConversationRow('email', 'conv-1'))!;
+      expect(conversation['cta_text'], 'Answer the launch review invite');
     });
 
     test('a message decided before the decision model reads the quiet middle',

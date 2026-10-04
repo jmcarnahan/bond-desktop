@@ -65,6 +65,7 @@ class DayPane extends StatelessWidget {
     this.grid,
     this.onOpenEvent,
     this.inviteActions,
+    this.meetingActions,
     this.briefs = const {},
     this.briefsWaiting = const {},
     this.expandedBriefs = const {},
@@ -74,6 +75,10 @@ class DayPane extends StatelessWidget {
     this.planCard,
     this.reminders = const [],
   });
+
+  /// The key of a meeting's agenda row.
+  static Key meetingRowKeyFor(String eventId) =>
+      ValueKey('day-meeting-$eventId');
 
   /// The key of a meeting row's brief glance.
   static Key briefTeaserKeyFor(String eventId) =>
@@ -156,6 +161,14 @@ class DayPane extends StatelessWidget {
   /// builds it (the writes need the app's writer); null draws none. A press
   /// on a button inside the row is the button's, never the row's open.
   final Widget Function(InviteEntry entry)? inviteActions;
+
+  /// Yes / Maybe / No / Dismiss for an UNANSWERED meeting's agenda row that
+  /// has not ended, drawn under its text exactly as [inviteActions] is under
+  /// an invite row;
+  /// the host builds it (the writes need the app's writer); null draws the
+  /// 'RSVP owed' chip instead. A press inside is the button's, never the
+  /// row's open.
+  final Widget Function(CalendarEvent e)? meetingActions;
 
   /// Written briefs by event id. Each one's glance (its headline, up to three
   /// lines) is drawn muted under the meeting's subject, so the day reads at a
@@ -457,25 +470,27 @@ class DayPane extends StatelessWidget {
   Widget _meetingRow(MeetingItem item, DateTime t) {
     final e = item.event;
     final cancelled = e.isCancelled;
-    final declined = e.responseStatus.trim().toLowerCase() == 'declined';
     final overlap = overlapLine(item.overlaps);
     final nowUtc = t.toUtc();
     final range = (e.startUtc != null && e.endUtc != null)
         ? formatEventRange(zone, e.startUtc!, e.endUtc!)
         : '';
     // A meeting the owner is not going to offers no brief.
-    final brief = cancelled || declined ? null : briefs[e.id];
+    final brief = cancelled ? null : briefs[e.id];
     final expanded = brief != null && expandedBriefs.contains(e.id);
     // A wait the planner stops tending once the meeting starts: no brief
     // is coming, so the note goes.
     final started = e.startUtc != null && !e.startUtc!.isAfter(nowUtc);
-    final note = !cancelled &&
-        !declined &&
-        !started &&
-        briefsWaiting.contains(e.id);
+    final note = !cancelled && !started && briefsWaiting.contains(e.id);
     final glance = brief == null || brief.headline.isEmpty
         ? null
         : _glance(e.id, brief.headline, expanded);
+    // The invitation is answered where it is seen, until the meeting ends;
+    // the chip is the fallback when the host gives no buttons, and all an
+    // ended meeting still owed an answer shows.
+    final ended = e.endUtc != null && !e.endUtc!.isAfter(nowUtc);
+    final actions =
+        item.needsResponse && !ended ? meetingActions?.call(e) : null;
 
     final body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -515,12 +530,15 @@ class DayPane extends StatelessWidget {
           Text(e.location.trim(), style: _muted, maxLines: 1,
               overflow: TextOverflow.ellipsis),
         if (cancelled) Text('Cancelled', style: _caption),
-        if (declined) Text('Declined', style: _caption),
         if (overlap != null)
           Text(
             overlap,
             style: BondType.caption.copyWith(color: BondColors.attention),
           ),
+        if (actions != null) ...[
+          const SizedBox(height: BondSpacing.s4),
+          actions,
+        ],
       ],
     );
 
@@ -534,25 +552,27 @@ class DayPane extends StatelessWidget {
           onPressed: () => onOpenLink(e.joinUrl),
           child: const Text('Join'),
         ),
-      if (item.needsResponse) ...[
+      if (item.needsResponse && actions == null) ...[
         const SizedBox(width: BondSpacing.s8),
         const BondChip(tone: BondTone.attention, label: 'RSVP owed'),
       ],
     ];
 
-    final row = _row(
-      when: _when(range),
-      onTap: _openEvent(e),
-      body: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(child: body),
-          const SizedBox(width: BondSpacing.s8),
-          ...trailing,
-        ],
+    final row = KeyedSubtree(
+      key: meetingRowKeyFor(e.id),
+      child: _row(
+        when: _when(range),
+        onTap: _openEvent(e),
+        body: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: body),
+            const SizedBox(width: BondSpacing.s8),
+            ...trailing,
+          ],
+        ),
       ),
     );
-    if (declined) return Opacity(opacity: 0.5, child: row);
     final open = briefBody;
     if (glance == null || !expanded || open == null) return row;
     return Column(

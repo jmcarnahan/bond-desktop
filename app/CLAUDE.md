@@ -951,6 +951,36 @@ that bite.
   - A write that confirms by its kind but whose dry run named nobody says
     "This may email: …" from `mayEmailFor`; the toast says "Emails go to …"
     (a preview, never "Emailed").
+- **Invitations (the clean-up round, 2026-10):**
+  - A meeting message's time is never a deadline. ONE SQL reader,
+    `MessageStore._meetingMessageSql(alias)` (a `json_valid`-guarded CASE,
+    lower-cased `$.meeting` NOT IN ('', 'none') — Graph's enum has `none`),
+    feeds the conversations query's `latest_deadline` and
+    `latestInboundMeta`'s `deadline`; ONE Dart reader,
+    `Message._meetingTypeOf`, feeds `meetingMessageType` and both factories,
+    which read `deadline` as null for a meeting message. The extraction
+    computes the deadline once for `writeMessageText`, `foldCtaUp` and the
+    activity row. An invitation is never a Due row nor a deadline reminder.
+  - A declined meeting is NOT drawn (agenda, grid, Today); a cancelled one is,
+    struck through. `_applyLocally` marks the mirror declined at once, so a
+    Dismiss or No leaves the agenda before the write returns.
+  - Dismiss is `RespondToEvent(sendResponse: false)` (`quiet`): a bare
+    decline — never a comment or a proposal (asserted in `_send`), emails
+    nobody (`mayEmailFor` adds none), still waits on the strip (label
+    'Dismiss'), activity `quiet: true`. `EventActions.dismissKey` shows only
+    while `needsResponse`, in compact and full mode. No path rebuilds a
+    `RespondToEvent` (retry reuses the object; `_undoFor` is null for an
+    answer).
+  - An unanswered meeting's agenda row carries the compact Yes / Maybe / No /
+    Dismiss (`DayPane.meetingActions`, host-built like `inviteActions`) while
+    the meeting has not ended; otherwise the 'RSVP owed' chip. After Yes the
+    row stays and the buttons go; after Dismiss the row leaves.
+  - The answer belt: `CalendarSync.answerHold` (2 min). `guarded`,
+    `keepAnswerFor` and `held` are read INSIDE the page transaction after
+    `_checkRun`; `upsertEvents(keepAnswerFor:)` disbelieves only
+    ''/`none`/`notResponded` over a stored answer; `_applyLocally` notes the
+    write BEFORE `setResponseStatus`. A test of a lagging page goes through
+    `syncNow(force:)`, never `upsertEvents` alone.
 - **The UI write path:**
   - `CalendarWriteFlow` is the ONE write state machine. The panel, cards,
     grid, command card and Find a time all go through it (or through

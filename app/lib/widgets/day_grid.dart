@@ -236,7 +236,6 @@ class _GridTile extends KalenderEvent {
     this.eventId = '',
     this.item,
     this.tentative = false,
-    this.declined = false,
     this.cancelled = false,
     this.overlap = false,
     this.movable = false,
@@ -248,7 +247,6 @@ class _GridTile extends KalenderEvent {
   final String eventId;
   final DayItem? item;
   final bool tentative;
-  final bool declined;
   final bool cancelled;
   final bool overlap;
   final bool movable;
@@ -266,7 +264,6 @@ class _GridTile extends KalenderEvent {
         eventId: eventId,
         item: item,
         tentative: tentative,
-        declined: declined,
         cancelled: cancelled,
         overlap: overlap,
         movable: movable,
@@ -283,7 +280,6 @@ class _GridTile extends KalenderEvent {
         other.eventId == eventId &&
         other.item == item &&
         other.tentative == tentative &&
-        other.declined == declined &&
         other.cancelled == cancelled &&
         other.overlap == overlap &&
         other.movable == movable &&
@@ -292,7 +288,7 @@ class _GridTile extends KalenderEvent {
 
   @override
   int get hashCode => Object.hash(super.hashCode, kind, title, eventId, item,
-      tentative, declined, cancelled, overlap, movable, caption);
+      tentative, cancelled, overlap, movable, caption);
 }
 
 class _DayGridState extends State<DayGrid> {
@@ -407,6 +403,9 @@ class _DayGridState extends State<DayGrid> {
     for (final e in widget.events) {
       if (e.isSeriesMaster) continue;
       final status = e.responseStatus.trim().toLowerCase();
+      // A declined meeting is not drawn: the owner said no, and Outlook
+      // takes it off the calendar anyway.
+      if (status == 'declined') continue;
       final tentative =
           status == 'tentativelyaccepted' || e.showAs.trim().toLowerCase() == 'tentative';
       if (e.isAllDay) {
@@ -424,7 +423,6 @@ class _DayGridState extends State<DayGrid> {
           title: e.subject,
           eventId: e.id,
           tentative: tentative,
-          declined: status == 'declined',
           cancelled: e.isCancelled,
         ));
         continue;
@@ -450,7 +448,6 @@ class _DayGridState extends State<DayGrid> {
         title: e.subject,
         eventId: e.id,
         tentative: tentative,
-        declined: status == 'declined',
         cancelled: e.isCancelled,
         overlap: overlapsForEvent(e, widget.events, zone: zone).hard.isNotEmpty,
         movable: movable,
@@ -724,7 +721,7 @@ class _DayGridState extends State<DayGrid> {
         }
     }
 
-    final struck = event.cancelled || event.declined;
+    final struck = event.cancelled;
     final title = Text(
       event.kind == _TileKind.event ? _subject(event.title) : event.title,
       maxLines: 1,
@@ -737,7 +734,7 @@ class _DayGridState extends State<DayGrid> {
     );
     final timed = !event.isAllDay;
 
-    Widget box = LayoutBuilder(
+    return LayoutBuilder(
       builder: (context, constraints) {
         final tall = constraints.maxHeight > 30;
         return Container(
@@ -812,8 +809,6 @@ class _DayGridState extends State<DayGrid> {
         );
       },
     );
-    if (event.declined) box = Opacity(opacity: 0.4, child: box);
-    return box;
   }
 
   static Key _markerKey(DayItem? item) => switch (item) {

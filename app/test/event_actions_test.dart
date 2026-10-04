@@ -191,6 +191,48 @@ void main() {
       expect(started.single.done, 'Declined "Design review".');
     });
 
+    testWidgets(
+        'Dismiss shows only while unanswered, in compact and full mode, and '
+        'starts a quiet decline with no comment', (tester) async {
+      await pump(tester, target: meeting(), compact: true);
+      expect(find.byKey(EventActions.dismissKey), findsOneWidget);
+
+      // Full mode, with a note typed: the note never rides a Dismiss.
+      await pump(tester,
+          target: meeting(organizerAddress: 'sam@fabrikam.com'));
+      await tester.tap(find.byKey(EventActions.addNoteKey));
+      await tester.pump();
+      await tester.enterText(
+          find.byKey(EventActions.noteFieldKey), 'Running late');
+      await tester.tap(find.byKey(EventActions.dismissKey));
+
+      final write = started.single.write as RespondToEvent;
+      expect(write.response, RsvpResponse.decline);
+      expect(write.sendResponse, isFalse);
+      expect(write.quiet, isTrue);
+      expect(write.comment, isNull);
+      expect(write.eventId, 'e1');
+      expect(started.single.summary,
+          endsWith(' — declines without telling the organiser'));
+      expect(started.single.done,
+          'Dismissed "Design review" — nobody was told.');
+      expect(started.single.mayEmail, isEmpty);
+
+      for (final answered in [
+        meeting(responseStatus: 'accepted'),
+        meeting(responseStatus: 'tentativelyAccepted'),
+        meeting(responseStatus: 'declined'),
+      ]) {
+        await pump(tester, target: answered);
+        expect(find.byKey(EventActions.yesKey), findsOneWidget);
+        expect(find.byKey(EventActions.dismissKey), findsNothing);
+      }
+      await pump(tester, target: meeting(isOrganizer: true));
+      expect(find.byKey(EventActions.dismissKey), findsNothing);
+      await pump(tester, target: meeting(isCancelled: true));
+      expect(find.byKey(EventActions.dismissKey), findsNothing);
+    });
+
     testWidgets('an answer hands the flow the organiser it may email',
         (tester) async {
       await pump(tester,

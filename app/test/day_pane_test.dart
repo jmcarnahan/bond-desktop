@@ -84,6 +84,7 @@ void main() {
     VoidCallback? onOpenSettings,
     void Function(String)? onOpenEvent,
     Widget Function(InviteEntry entry)? inviteActions,
+    Widget Function(CalendarEvent e)? meetingActions,
     DateTime? at,
     DayView view = DayView.agenda,
     void Function(DayView)? onViewChanged,
@@ -120,6 +121,7 @@ void main() {
           onOpenSettings: onOpenSettings ?? () {},
           onOpenEvent: onOpenEvent,
           inviteActions: inviteActions,
+          meetingActions: meetingActions,
           view: view,
           onViewChanged: onViewChanged ?? (_) {},
           gridSpan: gridSpan,
@@ -371,8 +373,9 @@ void main() {
       expect(find.text('RSVP owed'), findsNothing);
     });
 
-    testWidgets('the overlap line, and the cancelled and declined captions',
-        (tester) async {
+    testWidgets(
+        'the overlap line and the cancelled caption; a declined meeting draws '
+        'no row', (tester) async {
       await pumpPane(tester, events: [
         timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20),
             length: const Duration(hours: 1)),
@@ -388,12 +391,9 @@ void main() {
       expect(find.text('Cancelled'), findsOneWidget);
       final struck = tester.widget<Text>(find.text('Offsite prep'));
       expect(struck.style?.decoration, TextDecoration.lineThrough);
-      expect(find.text('Declined'), findsOneWidget);
-      expect(
-        find.ancestor(
-            of: find.text('Vendor pitch'), matching: find.byType(Opacity)),
-        findsOneWidget,
-      );
+      // The owner said no: the row is gone, not faded.
+      expect(find.text('Vendor pitch'), findsNothing);
+      expect(find.text('Declined'), findsNothing);
     });
 
     testWidgets('an empty day, available and still reading', (tester) async {
@@ -862,6 +862,85 @@ void main() {
       await tester.pump();
       expect(pressed, ['inv-2']);
       expect(opened, isEmpty);
+    });
+
+    testWidgets('an unanswered meeting row carries its actions and a press on '
+        'one is not an open', (tester) async {
+      final opened = <String>[];
+      final pressed = <String>[];
+      await pumpPane(
+        tester,
+        onOpenEvent: opened.add,
+        meetingActions: (e) => TextButton(
+          key: ValueKey('yes-${e.id}'),
+          onPressed: () => pressed.add(e.id),
+          child: const Text('Yes'),
+        ),
+        events: [
+          timed('owed', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 20),
+              responseStatus: 'notResponded'),
+        ],
+      );
+      final row = find.byKey(DayPane.meetingRowKeyFor('owed'));
+      expect(row, findsOneWidget);
+      expect(
+          find.descendant(
+              of: row, matching: find.byKey(const ValueKey('yes-owed'))),
+          findsOneWidget);
+      expect(find.text('RSVP owed'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('yes-owed')));
+      await tester.pump();
+      expect(pressed, ['owed']);
+      expect(opened, isEmpty);
+    });
+
+    testWidgets('no actions builder → the RSVP owed chip', (tester) async {
+      await pumpPane(tester, events: [
+        timed('owed', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 20),
+            responseStatus: 'notResponded'),
+      ]);
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed')), findsOneWidget);
+      expect(find.text('RSVP owed'), findsOneWidget);
+    });
+
+    testWidgets('an unanswered meeting that has ended shows the chip, not the '
+        'buttons', (tester) async {
+      final built = <String>[];
+      await pumpPane(
+        tester,
+        meetingActions: (e) {
+          built.add(e.id);
+          return Text('Yes ${e.id}');
+        },
+        events: [
+          timed('over', 'Contoso standup',
+              now.subtract(const Duration(hours: 1)),
+              responseStatus: 'notResponded'),
+        ],
+      );
+      expect(find.byKey(DayPane.meetingRowKeyFor('over')), findsOneWidget);
+      expect(built, isEmpty);
+      expect(find.text('RSVP owed'), findsOneWidget);
+    });
+
+    testWidgets('an answered meeting row carries no actions', (tester) async {
+      final built = <String>[];
+      await pumpPane(
+        tester,
+        meetingActions: (e) {
+          built.add(e.id);
+          return Text('Yes ${e.id}');
+        },
+        events: [
+          timed('yes', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 20)),
+          timed('maybe', 'Fabrikam review', DateTime.utc(2026, 9, 29, 21),
+              responseStatus: 'tentativelyAccepted'),
+        ],
+      );
+      expect(find.byKey(DayPane.meetingRowKeyFor('yes')), findsOneWidget);
+      expect(find.byKey(DayPane.meetingRowKeyFor('maybe')), findsOneWidget);
+      expect(built, isEmpty);
+      expect(find.text('RSVP owed'), findsNothing);
     });
 
     testWidgets('without a handler the rows stay inert', (tester) async {

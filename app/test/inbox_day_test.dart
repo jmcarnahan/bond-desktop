@@ -165,6 +165,40 @@ class _RecordingWriter implements CalendarWriter {
   }
 }
 
+/// A [_RecordingWriter] that moves the mirror as the real writer does after
+/// an answer: the row's response stored at once, then [onChanged] — the
+/// revision bump `calendarWritesProvider` wires — so the agenda reads again.
+class _AnsweringWriter extends _RecordingWriter {
+  _AnsweringWriter(this.calendar);
+
+  final CalendarStore calendar;
+
+  /// Set once the screen is up, from the test's own container.
+  void Function()? onChanged;
+
+  @override
+  Future<WriteOutcome> commit(
+    CalendarWrite write, {
+    WritePreview? preview,
+    bool isUndo = false,
+  }) async {
+    final outcome =
+        await super.commit(write, preview: preview, isUndo: isUndo);
+    if (write is RespondToEvent) {
+      await calendar.setResponseStatus(
+        write.eventId,
+        switch (write.response) {
+          RsvpResponse.accept => 'accepted',
+          RsvpResponse.tentative => 'tentativelyAccepted',
+          RsvpResponse.decline => 'declined',
+        },
+      );
+      onChanged?.call();
+    }
+    return outcome;
+  }
+}
+
 /// The command bar's backend: nothing in these tests asks for a common
 /// time, so every call is a failure the test would see.
 class _NoMeetingTimes extends Fake implements CalendarBackend {}
@@ -1302,6 +1336,115 @@ void main() {
       final answer = writer.committed.single.write as RespondToEvent;
       expect(answer.eventId, 'inv-1');
       expect(answer.response, RsvpResponse.accept);
+    });
+  });
+
+  group('answered on the agenda', () {
+    // A minute from now, derived from the clock (the suite has no clock
+    // helper; the grid group derives its day the same way): ahead, so it is
+    // owed and its buttons draw (an ended meeting draws the chip). In the
+    // day's last minute that start is tomorrow, so the meeting starts five
+    // minutes ago instead — still on today and not ended, only not owed in
+    // Invites, which the count check allows for.
+    Future<DateTime> seedOwed() async {
+      final now = DateTime.now().toUtc();
+      final soon = now.add(const Duration(minutes: 1));
+      final start = la.dateOf(soon) == la.dateOf(now)
+          ? soon
+          : now.subtract(const Duration(minutes: 5));
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'owed-1',
+          subject: 'Fabrikam roadmap',
+          organizerName: 'Dana Contoso',
+          organizerAddress: 'dana@contoso.com',
+          isOrganizer: false,
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'notResponded',
+          responseRequested: true,
+          showAs: 'tentative',
+          attendees: const [
+            Attendee(name: 'Dana Contoso', address: 'dana@contoso.com'),
+            Attendee(name: 'Sam Fabrikam', address: 'sam@fabrikam.com'),
+          ],
+        ),
+      ], syncRun: 'run-1');
+      return start;
+    }
+
+    Future<_AnsweringWriter> pumpWithWriter(WidgetTester tester) async {
+      final writer = _AnsweringWriter(CalendarStore(db));
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      final container = ProviderScope.containerOf(
+          tester.element(find.byType(InboxScreen)));
+      writer.onChanged =
+          () => container.read(calendarRevisionProvider.notifier).state++;
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      return writer;
+    }
+
+    Finder inRow(Finder f) => find.descendant(
+        of: find.byKey(DayPane.meetingRowKeyFor('owed-1')), matching: f);
+
+    testWidgets('an invite answered on the agenda keeps its row and loses its buttons',
+        (tester) async {
+      final start = await seedOwed();
+      final writer = await pumpWithWriter(tester);
+      final ahead = start.isAfter(DateTime.now().toUtc());
+
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed-1')), findsOneWidget);
+      expect(find.text('RSVP owed'), findsNothing);
+      if (ahead) expect(find.text('Invites · 1'), findsWidgets);
+
+      await tester.tap(inRow(find.byKey(EventActions.yesKey)));
+      await pumps(tester);
+      expect(writer.previewed.single, isA<RespondToEvent>());
+      expect(inRow(find.byType(WriteConfirmStrip)), findsOneWidget);
+      expect(writer.committed, isEmpty);
+
+      await tester.tap(inRow(find.byKey(WriteConfirmStrip.confirmKey)));
+      await pumps(tester);
+      final answer = writer.committed.single.write as RespondToEvent;
+      expect(answer.eventId, 'owed-1');
+      expect(answer.response, RsvpResponse.accept);
+      expect(answer.sendResponse, isTrue);
+
+      // An accepted meeting stays on the day; it no longer asks.
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed-1')), findsOneWidget);
+      expect(inRow(find.byKey(EventActions.yesKey)), findsNothing);
+      expect(find.text('Invites · 1'), findsNothing);
+    });
+
+    testWidgets(
+        'Dismiss on the agenda row: the strip reads Dismiss, the write is '
+        'quiet, and the row is gone', (tester) async {
+      await seedOwed();
+      final writer = await pumpWithWriter(tester);
+
+      await tester.tap(inRow(find.byKey(EventActions.dismissKey)));
+      await pumps(tester);
+      final strip = inRow(find.byType(WriteConfirmStrip));
+      expect(strip, findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byKey(WriteConfirmStrip.confirmKey),
+              matching: find.text('Dismiss')),
+          findsOneWidget);
+      expect(find.byKey(WriteConfirmStrip.emailsKey), findsNothing,
+          reason: 'a Dismiss emails nobody');
+      expect(writer.committed, isEmpty);
+
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await pumps(tester);
+      final quiet = writer.committed.single.write as RespondToEvent;
+      expect(quiet.response, RsvpResponse.decline);
+      expect(quiet.sendResponse, isFalse);
+      expect(quiet.comment, isNull);
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed-1')), findsNothing);
+      expect(find.text('Fabrikam roadmap'), findsNothing);
     });
   });
 

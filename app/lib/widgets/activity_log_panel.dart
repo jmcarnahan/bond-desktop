@@ -517,6 +517,8 @@ class ActivityLogPanel extends StatefulWidget {
       // never the meeting's subject.
       case 'calendar_write':
         final action = detail['action'];
+        // A Dismiss: the decline that told the organiser nothing.
+        final quiet = action == 'decline' && detail['quiet'] == true;
         final notified = detail['notified'];
         final emailed = notified is num && notified > 0
             ? ' · emailed ${notified.toInt()}'
@@ -526,6 +528,7 @@ class ActivityLogPanel extends StatefulWidget {
           // decline or say maybe, so naming which would claim one it never
           // gave. Each names its object, as the success lines do.
           final verb = switch (action) {
+            _ when quiet => 'dismiss an invitation',
             'accept' || 'tentative' || 'decline' => 'answer a meeting',
             'propose' => 'propose a new time',
             'move' => 'move an event',
@@ -543,6 +546,7 @@ class ActivityLogPanel extends StatefulWidget {
         final phrase = detail['undo'] == true
             ? 'Undid a change'
             : switch (action) {
+                _ when quiet => 'Dismissed an invitation',
                 'accept' => 'Accepted a meeting',
                 'tentative' => 'Said maybe to a meeting',
                 'decline' => 'Declined a meeting',

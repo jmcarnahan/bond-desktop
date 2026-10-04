@@ -200,7 +200,10 @@ conversations the inbox already holds:
   `services/decision/needs_you_predicate.dart` so a service can ask it)
   whose `latestDeadline` reads as a day (`showableDeadline` +
   `parseDeadline`, anchored to the mail that named it, as the Day timeline
-  reads it) that is today or later;
+  reads it) that is today or later — a meeting message never yields one:
+  the conversations query reads `latestDeadline` as NULL when the newest
+  inbound message carries `source_meta_json.meeting`, so an invitation's
+  meeting time is never a deadline reminder;
 - with no active reminder of any kind on the thread;
 - reminded at **09:00** on that day on the owner's wall; a 09:00 already
   past is skipped, not moved;

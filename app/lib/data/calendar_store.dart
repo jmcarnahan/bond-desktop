@@ -67,11 +67,17 @@ class CalendarStore {
   /// `synced_at` = now. Ids in [skipIds] are NOT written: they are events
   /// this app wrote a moment ago, and a sync page that started before the
   /// write would put the old version back (the write-sequence guard).
+  ///
+  /// [keepAnswerFor]: ids this app answered within `CalendarSync.answerHold`:
+  /// a page that still says the invite is unanswered keeps the stored answer,
+  /// the rest of the row is the page's.
+  ///
   /// Returns the rows written.
   Future<int> upsertEvents(
     List<CalendarEvent> events, {
     required String syncRun,
     Set<String> skipIds = const {},
+    Set<String> keepAnswerFor = const {},
   }) async {
     final keep = [
       for (final e in events)
@@ -80,8 +86,20 @@ class CalendarStore {
     if (keep.isEmpty) return 0;
     final syncedAt = calendarStamp(DateTime.now());
     await db.transaction(() async {
+      final held = [
+        for (final e in keep)
+          if (keepAnswerFor.contains(e.id) && _unanswered(e.responseStatus))
+            e.id,
+      ];
+      final stored = await _responseStatuses(held);
       for (final event in keep) {
         final row = event.toDbRow(syncRun: syncRun, syncedAt: syncedAt);
+        final answer = stored[event.id];
+        if (answer != null &&
+            _answers.contains(answer.trim().toLowerCase()) &&
+            _unanswered(event.responseStatus)) {
+          row['response_status'] = answer;
+        }
         await db.customUpdate(
           _upsertSql,
           variables: _args([for (final c in _columns) row[c]]),
@@ -89,6 +107,41 @@ class CalendarStore {
       }
     });
     return keep.length;
+  }
+
+  /// The owner's own answers, lower-cased, that a lagging page's "unanswered"
+  /// does not overwrite (see [upsertEvents]' `keepAnswerFor`).
+  static const Set<String> _answers = {
+    'accepted',
+    'tentativelyaccepted',
+    'declined',
+  };
+
+  static bool _unanswered(String status) {
+    final s = status.trim().toLowerCase();
+    return s.isEmpty || s == 'none' || s == 'notresponded';
+  }
+
+  /// The stored `response_status` of each of [ids] the mirror holds, as
+  /// stored. Chunked as [deleteEvents] is.
+  Future<Map<String, String>> _responseStatuses(List<String> ids) async {
+    final out = <String, String>{};
+    for (var i = 0; i < ids.length; i += 500) {
+      final end = i + 500 > ids.length ? ids.length : i + 500;
+      final chunk = ids.sublist(i, end);
+      final rows = await db
+          .customSelect(
+            'SELECT id, response_status FROM calendar_events '
+            'WHERE id IN (${_placeholders(chunk.length)})',
+            variables: _args(chunk),
+          )
+          .get();
+      for (final r in rows) {
+        out[r.data['id'] as String] =
+            r.data['response_status'] as String? ?? '';
+      }
+    }
+    return out;
   }
 
   /// Deletes by id. Unknown ids are ignored: `sync_calendar`'s `removed` may

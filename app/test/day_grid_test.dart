@@ -296,6 +296,35 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('a declined event draws no tile', (tester) async {
+    await pumpGrid(tester, events: [
+      theirs('accepted-id', 'Fabrikam sync', DateTime.utc(2026, 10, 7, 17)),
+      CalendarEvent(
+        id: 'declined-id',
+        subject: 'Vendor pitch',
+        startUtc: DateTime.utc(2026, 10, 7, 19),
+        endUtc: DateTime.utc(2026, 10, 7, 20),
+        responseStatus: 'declined',
+        organizerAddress: 'dana@fabrikam.com',
+        showAs: 'free',
+      ),
+      const CalendarEvent(
+        id: 'declined-day',
+        subject: 'Northwind offsite',
+        isAllDay: true,
+        startDate: day,
+        endDate: CalendarDate(2026, 10, 8),
+        responseStatus: 'declined',
+      ),
+    ]);
+
+    expect(find.byKey(DayGrid.tileKeyFor('accepted-id')), findsOneWidget);
+    expect(find.byKey(DayGrid.tileKeyFor('declined-id')), findsNothing);
+    expect(find.text('Vendor pitch'), findsNothing);
+    expect(find.byKey(DayGrid.tileKeyFor('declined-day')), findsNothing);
+    await unmount(tester);
+  });
+
   testWidgets('a deadline sits in the header and its tap opens the item',
       (tester) async {
     const conv = Conversation(

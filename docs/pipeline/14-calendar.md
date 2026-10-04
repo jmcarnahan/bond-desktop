@@ -131,7 +131,7 @@ and unlike it in one respect: this IS mailbox data.
 
 | Method | Reads or writes |
 |---|---|
-| `upsertEvents(events, syncRun:, skipIds:)` | one transaction (a savepoint when the sync's page transaction is open); `INSERT … ON CONFLICT(id) DO UPDATE` over every column of `CalendarEvent.toDbRow`, so the column list cannot drift from the model; ids in `skipIds` are not written |
+| `upsertEvents(events, syncRun:, skipIds:, keepAnswerFor:)` | one transaction (a savepoint when the sync's page transaction is open); `INSERT … ON CONFLICT(id) DO UPDATE` over every column of `CalendarEvent.toDbRow`, so the column list cannot drift from the model; ids in `skipIds` are not written; an id in `keepAnswerFor` whose page status is empty, `none` or `notResponded` keeps a stored `accepted`/`tentativelyAccepted`/`declined` (the rest of the row is the page's) |
 | `retagRun(ids, runId)` | sets `sync_run` on the stored rows of `ids` and nothing else; the write guard's re-tag |
 | `deleteEvents(ids)` | by id; ids never stored are ignored |
 | `sweepRun(runId, keepIds:)` | deletes every row whose `sync_run` is not `runId`, except `keepIds` |
@@ -298,6 +298,13 @@ never deletes the app's own write. Ids noted within `writeGuardSpan`
 (10 minutes) are also kept by a sweep, as a belt. Older notes are pruned on
 every call.
 
+The guard covers only pages requested while the write was in the air; the
+forced sync after a write starts after the note, so a lagging Graph delta in it
+could put `notResponded` back over the app's own answer. The belt: ids noted
+within `answerHold` (2 minutes) before the page's request stamp go to
+`upsertEvents(keepAnswerFor:)`, where a page status of none/`notResponded`
+keeps the stored answer and the rest of the row is applied.
+
 ## Mailbox settings
 
 After a `synced` tick, when the `calendar_mailbox` pref (`calendarMailboxKey`)
@@ -413,8 +420,15 @@ one clears the side panel, as any stop does; stepping the date once there
    deadlines resolve against the inbound message that named them
    (`lastInboundAt`, falling back to now), so "EOD" said three weeks ago is not
    due today; a deadline whose day has passed does not appear on today's
-   agenda — overdue work lives in Needs You. A deadline's day is read in the
-   device zone (`DateTime.toLocal()`), meetings and returns in the display
+   agenda — overdue work lives in Needs You. A meeting message — anything
+   whose `source_meta_json.meeting` names a type other than Graph's `none` —
+   never names a deadline: the query reads its `latest_deadline` as NULL (and
+   `latestInboundMeta` its `deadline`, so attention is not raised either),
+   `Message.fromRow`/`fromJson` read its `deadline` as null (the message row's
+   chip, the re-fold, notifications), and the extraction stores none and puts
+   no "by …" on the thread's ask, so an invitation is never a Due row; its
+   time is the event's to show. A
+   deadline's day is read in the device zone (`DateTime.toLocal()`), meetings and returns in the display
    zone; the two differ only when the OS zone lookup fails and the display
    zone falls back to the mailbox's — a known edge.
 3. **Everything with an instant**, by that instant: meetings, **returns**
@@ -424,10 +438,12 @@ one clears the side panel, as any stop does; stepping the date once there
    starting at or after it, so a meeting starting this minute reads as next.
    A meeting and a return at the same instant put the meeting first.
 
-A thread gives ONE row per day: a deadline beats a return. Declined and
-cancelled meetings stay on the day — a cancelled one struck through with a
-`Cancelled` caption, a declined one faded with a `Declined` caption — because
-a meeting that silently vanished is one somebody turns up to. Each meeting's
+A thread gives ONE row per day: a deadline beats a return. A declined meeting
+is not on the day at all — the owner said no, and Outlook removes it from the
+calendar anyway; the local apply marks it declined at once, so the row leaves
+before the write returns. A cancelled meeting stays, struck through with a
+`Cancelled` caption, because a meeting that silently vanished is one somebody
+turns up to. Each meeting's
 overlap line comes from `overlapsForEvent` against that same day's events,
 which skips cancelled, declined, free and workingElsewhere. A timed event sits
 on every local date it touches, from the date of its start through the date of
@@ -442,6 +458,12 @@ fifteen minutes before its start until its end. The agenda sits under one
 30-second clock tick, so the Now marker, the countdowns and Join follow the
 clock on a pane nobody touches. A meeting, all-day or invite row opens the
 event beside ([Events, invite cards and people](#events-invite-cards-and-people)).
+An unanswered meeting's row (`MeetingItem.needsResponse`) carries the compact
+Yes / Maybe / No / Dismiss under its text, through the host's `meetingActions`
+builder (one `CalendarWriteFlow` per event, `agenda-write-<id>`, no series
+folding — the row IS the occurrence); the 'RSVP owed' chip gives way to the
+buttons and is drawn only when no builder is given. A press inside is the
+button's, never the row's open. Rows are keyed `DayPane.meetingRowKeyFor(id)`.
 
 ### What shows, per availability
 
@@ -477,8 +499,9 @@ its series master, through `messagesForEvent` — has a stored decision with
 urgency `high` or `urgent`, or importance `high`. Pinned entries come first,
 then soonest first. A decision read that throws costs that invite its pin,
 never the list. Overlaps for all invites come from ONE `eventsBetween` over
-the span they cover, capped at 121 days. Each row carries Yes / Maybe / No
-(see Writes). A row answers the whole series, through its master's id, only
+the span they cover, capped at 121 days. Each row carries Yes / Maybe / No /
+Dismiss (see Writes), and an unanswered meeting's agenda row carries the same
+Yes / Maybe / No / Dismiss, so an invitation is answered where it is seen. A row answers the whole series, through its master's id, only
 when more than one occurrence is owed AND the one shown is a plain occurrence
 (`InviteEntry.answersSeries`); a single owed invite, and a lone owed exception
 — a moved meeting of a series answered already — answers itself, since an
@@ -538,9 +561,9 @@ in-memory.
 
 - **Tiles.** A timed event is a tile at its instants on the display zone's
   clock, titled by its subject (plain text) with its range when there is
-  room. Tentative is a lighter fill with a fainter bar, declined is faded and
-  struck through, cancelled is grey and struck through, and a hard overlap
-  turns the tile's left bar to the attention colour.
+  room. Tentative is a lighter fill with a fainter bar, cancelled is grey and
+  struck through, and a hard overlap turns the tile's left bar to the
+  attention colour. A declined event draws no tile.
 - **The all-day header** holds all-day events, the day's **deadlines** (`Due ·
   subject · the sender's words`) and **returns** (`Back: subject`), taken by
   `rangeMarkers(from, toExclusive)`, which shares its one private rule with
@@ -792,7 +815,7 @@ so ✕ comes back to it.
 carries a card under its body (`MeetingCardHost` → `MeetingCard`). No id, no
 card — nothing is matched by subject. Responses never get one; the gates have
 already kept them out of the list. A request card shows the when line, the
-overlap line, the tally, Yes / Maybe / No (see Writes), Join and **Open
+overlap line, the tally, Yes / Maybe / No / Dismiss while unanswered (see Writes), Join and **Open
 event**; a cancellation, or a request
 whose event has since been cancelled, is one line — `Cancelled: Design review
 · Friday, Oct 2 · 10:00–10:30 AM`. An event the calendar no longer has says
@@ -837,6 +860,22 @@ whatever the server happened to name. An Undo exists only for a write whose
 DRY RUN emailed nobody — a commit made without a preview never offers one —
 because an answer, once sent, can be followed by another but not taken back.
 
+**Dismiss.** `RespondToEvent(sendResponse: false)` — Outlook's "Decline › Do
+not send a response": a decline that tells the organiser nothing, so the
+meeting leaves every device and nobody is emailed. `EventActions` offers it
+(`event-actions-dismiss`, after No) only while the invite is unanswered
+(`CalendarEvent.needsResponse`), in compact and full mode alike, and never
+with the typed note or a proposal (Graph refuses both without a response;
+`_send` asserts it and sends neither). It still waits on the strip because
+the owner asked for the confirm: the summary reads `Dismiss "subject" · when —
+declines without telling the organiser` (a series: `Dismiss every meeting in
+…`), the buttons **Dismiss** / **Cancel**, no "This may email" line
+(`mayEmailFor` is empty for it), and the toast `Dismissed "subject" — nobody
+was told.` The mirror marks it declined at once, so the row leaves the agenda,
+the grid and the Today list (a declined meeting is not drawn); its activity
+row is a `decline` with `quiet: true`, read as "Dismissed an invitation". It
+has no Undo and no Try again, as every answer.
+
 The Undo is itself a write sent with no confirm, so it runs its own dry run
 first (`_refuseUndo`) and is refused, with nothing sent, when:
 
@@ -880,7 +919,9 @@ one row it answered:
   legacy naive `start`/`end` are never read) only notes its id and waits for
   the forced sync, whose publisher bumps the revision when it brings the row;
 - an answer → `CalendarStore.setResponseStatus` on the id and, for a master,
-  every mirrored occurrence, each id noted;
+  every mirrored occurrence, each id noted — so for `answerHold` (2 minutes)
+  a sync page that still says unanswered keeps the answer (see The write
+  guard);
 - a cancel or a delete → `CalendarStore.deleteWithOccurrences`, each id noted.
 
 Then `calendarRevisionProvider` is bumped, so the Day stop, the panel and the
@@ -940,8 +981,9 @@ gotcha 6); Propose is hidden when the organiser set
 answer or a cancel goes to the MASTER and so to every meeting in it — the
 summary says "every meeting in …" — while a move or a proposal acts on the
 occurrence on display: moving a whole series is recurrence editing, which is
-not done here. The event panel shows the full set; the meeting card and each
-Invites row show Yes / Maybe / No only.
+not done here. The event panel shows the full set; the meeting card, each
+Invites row and an unanswered meeting's agenda row show Yes / Maybe / No only,
+plus **Dismiss** while the invite is unanswered.
 
 **No pickers.** The new time is typed — "Thu 3pm", "tomorrow 10–10:30" — and
 read by the date resolver (booking mode), with the absolute result shown under
@@ -1466,7 +1508,7 @@ chevron — not once the meeting has started, when the planner no longer
 tends the wait; a ready brief wins. A body is only opened under a ready
 brief, so the note is what the agenda shows: the compact face's own copy of
 the sentence serves only a host that draws a compact face for a skipped row
-(a row that turned pending under an open brief). None of it on a cancelled or a declined meeting. The **Today
+(a row that turned pending under an open brief). None of it on a cancelled meeting (a declined one is not on the agenda). The **Today
 section** of the rail draws the same glance under each of its up to three
 meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 `dayBriefsProvider(today)`, only while that section is shown.

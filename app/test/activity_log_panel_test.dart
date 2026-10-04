@@ -1005,6 +1005,23 @@ void main() {
           "Calendar — couldn't create an event (scope_missing)");
     });
 
+    test("a quiet decline reads as a dismissed invitation", () {
+      String write({String status = 'ok', String outcome = 'ok'}) =>
+          ActivityLogPanel.describe(_event(
+            kind: 'calendar_write',
+            status: status,
+            detail: {
+              'action': 'decline',
+              'outcome': outcome,
+              'notified': 0,
+              'quiet': true,
+            },
+          ));
+      expect(write(), 'Calendar — Dismissed an invitation');
+      expect(write(status: 'failed', outcome: 'transient'),
+          "Calendar — couldn't dismiss an invitation (transient)");
+    });
+
     test('one changed file reads as one file', () {
       expect(
         ActivityLogPanel.describe(_event(

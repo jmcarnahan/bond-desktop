@@ -1070,8 +1070,11 @@ WHERE source = ? AND conversation_key = ?
           // The newest one's and nobody else's: a date somebody named three
           // replies ago is history, and a Deadlines tab that surfaced it would
           // be listing threads whose deadline has already been answered. Off
-          // the `ni` join below, which is that message.
-          '  ni.deadline AS latest_deadline, '
+          // the `ni` join below, which is that message. A meeting message's
+          // time is the EVENT's to show (the agenda row, Invites), never a
+          // deadline: the text model has read an invite's meeting time as one.
+          '  CASE WHEN ${_meetingMessageSql('ni')} '
+          '    THEN NULL ELSE ni.deadline END AS latest_deadline, '
           // How many suggestions are waiting on this thread — and the message
           // it keys off is the SAME newest-inbound rule [getDraft] uses, on
           // purpose. A pending draft is the one the thread would actually
@@ -4848,6 +4851,16 @@ FROM messages
             _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
       );
 
+  /// Whether the `messages` row aliased [alias] is a meeting message (its
+  /// `source_meta_json.meeting` names a type — `Message.meetingMessageType`;
+  /// Graph's `none` names none), as SQL. A blob that is null or invalid JSON
+  /// is not one; the CASE guards `json_extract` for the reason
+  /// [_bodyStaleSql] gives.
+  static String _meetingMessageSql(String alias) =>
+      "CASE WHEN json_valid($alias.source_meta_json) "
+      "THEN lower(trim(COALESCE(json_extract($alias.source_meta_json, "
+      "'\$.meeting'), ''))) ELSE '' END NOT IN ('', 'none')";
+
   /// Whether a `messages` row carries the stale-body mark, as SQL. A blob that
   /// is null or invalid JSON carries no mark. A CASE and not an AND, because
   /// SQLite does not promise to skip the `json_extract` when `json_valid` is
@@ -5168,7 +5181,12 @@ FROM messages
           '    a.extraction_json AS extraction_json, '
           '    m.needs_action AS needs_action, '
           '    m.reply_expected AS reply_expected, '
-          '    m.deadline AS deadline, m.addressed_me AS addressed_me, '
+          // A meeting message's time is never a deadline (the conversations
+          // query's `latest_deadline` reads it the same way), so it never
+          // raises a thread's attention either.
+          '    CASE WHEN ${_meetingMessageSql('m')} '
+          '      THEN NULL ELSE m.deadline END AS deadline, '
+          '    m.addressed_me AS addressed_me, '
           '    m.needs_you_p AS needs_you_p, '
           '    ROW_NUMBER() OVER ('
           '      PARTITION BY m.source, m.conversation_key '
