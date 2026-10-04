@@ -136,6 +136,8 @@ class AttachmentPreviewPanel extends StatefulWidget {
   static const Key sourceLinkKey = ValueKey('attachment-preview-source-link');
   static const Key openRefusedKey = ValueKey('attachment-preview-open-refused');
   static const Key externalChipKey = ValueKey('attachment-preview-external');
+  static const Key shortcutLinkKey = ValueKey('attachment-preview-shortcut');
+  static const Key notPdfKey = ValueKey('attachment-preview-not-pdf');
 
   @override
   State<AttachmentPreviewPanel> createState() => _AttachmentPreviewPanelState();
@@ -287,7 +289,11 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
       _workbookLoad ??= _held(bytes.then(widget.engines.workbook));
     }
     if (kind == PreviewKind.pdf && _segment == PreviewSegment.text) {
-      _pdfTextLoad ??= _held(bytes.then(_pdfTextOf));
+      // Bytes that are not a PDF are never opened as one — the Preview
+      // segment draws them as what they are, and so does this one.
+      _pdfTextLoad ??= _held(
+        bytes.then((data) => looksLikePdf(data) ? _pdfTextOf(data) : ''),
+      );
     }
   }
 
@@ -814,6 +820,11 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
         text
             ? _textBody()
             : ImagePreview(bytes: data, name: widget.attachment.name),
+      // The content type said PDF and the bytes did not: Gmail labels its
+      // Drive-link shortcut `application/pdf`, and pdfium handed those bytes
+      // drew an error box over the whole panel. Words are shown as words,
+      // anything else is named.
+      PreviewKind.pdf when !looksLikePdf(data) => _notPdfBody(data),
       PreviewKind.pdf =>
         text
             ? _pdfTextBody()
@@ -823,12 +834,10 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
                 renderer: widget.engines.pdf,
               ),
       PreviewKind.sheet => _sheetBody(asText: text),
-      PreviewKind.text => TextPreview(
+      PreviewKind.text => _shortcutRow(
         // Malformed bytes are shown as best they can be rather than thrown
         // over: a log with one bad byte in it is still a log.
-        text: utf8.decode(data, allowMalformed: true),
-        mono: monoForName(widget.attachment.name),
-        note: _textNote,
+        utf8.decode(data, allowMalformed: true),
       ),
       // Never reached — the ladder above answers these five before any bytes
       // are asked for.
@@ -838,6 +847,60 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
       PreviewKind.link ||
       PreviewKind.unsupported => _unsupportedBody(),
     };
+  }
+
+  /// A file the connector called a PDF whose bytes are not one.
+  Widget _notPdfBody(Uint8List data) {
+    final words = textOfBytes(data);
+    if (words == null) {
+      return UnsupportedPreview(
+        key: AttachmentPreviewPanel.notPdfKey,
+        glyph: _glyph,
+        name: widget.attachment.name,
+        size: widget.attachment.size,
+        reason: 'This file says it is a PDF, but it is not one.',
+      );
+    }
+    return KeyedSubtree(
+      key: AttachmentPreviewPanel.notPdfKey,
+      child: _shortcutRow(words),
+    );
+  }
+
+  /// A text file's words, with the address above them when the file is an
+  /// Internet shortcut.
+  ///
+  /// The shortcut is the thing a sender meant to be pressed, so its one web
+  /// address is a link here, through the host's guarded launcher — never the
+  /// file itself, which Open still refuses ([openRefused]: Windows and macOS
+  /// both RUN a shortcut, and it can name anything). [shortcutUrlOf] answers
+  /// null for anything but http(s), so a `file:` shortcut draws its text and
+  /// no link.
+  Widget _shortcutRow(String words) {
+    final body = TextPreview(
+      text: words,
+      mono: monoForName(widget.attachment.name),
+      note: _textNote,
+    );
+    final url = shortcutUrlOf(widget.attachment.name, words);
+    final openLink = widget.onOpenLink;
+    if (url == null || openLink == null) return body;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            key: AttachmentPreviewPanel.shortcutLinkKey,
+            onPressed: () => openLink(url),
+            icon: const Icon(Icons.link, size: 16),
+            label: Text(url, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+        ),
+        const SizedBox(height: BondSpacing.s8),
+        Expanded(child: body),
+      ],
+    );
   }
 
   Widget _pdfTextBody() => FutureBuilder<String>(

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'dart:typed_data';
 
@@ -41,6 +42,15 @@ const _quote = WorkbookTables([
     totalRows: 1,
   ),
 ]);
+
+/// The head of a real PDF, which is all the panel's sniff reads.
+final Uint8List _pdfBytes = Uint8List.fromList(utf8.encode('%PDF-1.4\n%'));
+
+/// A Windows Internet shortcut, padded to the 254 bytes Gmail's was.
+final Uint8List _shortcutBytes = Uint8List.fromList(utf8.encode(
+  '${'[InternetShortcut]\r\nURL=https://docs.example.com/x\r\n'.padRight(252)}'
+  '\r\n',
+));
 
 /// A workbook decoder that answers without a zip. [failing] is how a corrupt
 /// file is scripted.
@@ -569,14 +579,100 @@ void main() {
     testWidgets('a PDF goes through the renderer and never pdfium',
         (tester) async {
       final attachment = ref(name: 'Terms.pdf');
-      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
-          Uint8List.fromList([1, 2, 3]);
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] = _pdfBytes;
       await pump(tester, attachment);
 
       expect(find.byKey(PdfPreview.viewerKey), findsOneWidget);
       expect(find.byKey(FakePdfRenderer.viewerKey), findsOneWidget);
       expect(pdf.lastViewerSourceName, 'Terms.pdf');
     });
+
+    testWidgets(
+        'bytes that are not a PDF under a pdf content type draw the text '
+        'preview, not the PDF viewer', (tester) async {
+      // What Gmail sent: its Drive-link shortcut, labelled application/pdf,
+      // under a name that says nothing.
+      final attachment = ref(name: 'open', contentType: 'application/pdf');
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] = _shortcutBytes;
+      await pump(tester, attachment);
+
+      expect(find.byType(PdfPreview), findsNothing);
+      expect(pdf.lastViewerBytes, isNull);
+      expect(find.byKey(AttachmentPreviewPanel.notPdfKey), findsOneWidget);
+      final body = tester.widget<SelectableText>(
+        find.byKey(TextPreview.bodyKey),
+      );
+      expect(body.data, contains('URL=https://docs.example.com/x'));
+    });
+
+    testWidgets('binary bytes under a pdf content type are named, not drawn',
+        (tester) async {
+      final attachment = ref(name: 'open', contentType: 'application/pdf');
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([0, 1, 2, 0xff]);
+      await pump(tester, attachment);
+
+      expect(find.byType(PdfPreview), findsNothing);
+      expect(find.byType(UnsupportedPreview), findsOneWidget);
+      expect(
+        find.text('This file says it is a PDF, but it is not one.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a PDF is still the PDF viewer', (tester) async {
+      final attachment = ref(name: 'open', contentType: 'application/pdf');
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          // A byte-order mark in front, which pdfium reads past.
+          Uint8List.fromList(utf8.encode('\uFEFF%PDF-1.4\n'));
+      await pump(tester, attachment);
+
+      expect(find.byKey(PdfPreview.viewerKey), findsOneWidget);
+      expect(find.byKey(AttachmentPreviewPanel.notPdfKey), findsNothing);
+    });
+
+    testWidgets('an Internet shortcut draws its address as a link',
+        (tester) async {
+      final attachment = ref(name: 'open.url', contentType: 'application/pdf');
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] = _shortcutBytes;
+      final opened = <String>[];
+      await pump(tester, attachment, onOpen: () {}, onOpenLink: opened.add);
+
+      expect(find.byType(PdfPreview), findsNothing);
+      expect(find.text('https://docs.example.com/x'), findsOneWidget);
+      await tester.tap(find.byKey(AttachmentPreviewPanel.shortcutLinkKey));
+      expect(opened, ['https://docs.example.com/x']);
+      // The FILE still cannot be opened: a shortcut can launch anything.
+      expect(find.byKey(AttachmentPreviewPanel.openKey), findsNothing);
+      expect(find.byKey(AttachmentPreviewPanel.openRefusedKey), findsOneWidget);
+    });
+
+    testWidgets('a webloc draws its address as a link', (tester) async {
+      final attachment = ref(name: 'Deck.webloc', contentType: null);
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList(utf8.encode(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">'
+            '<dict>\n\t<key>URL</key>\n\t<string>https://docs.example.com/'
+            'deck?a=1&amp;b=2</string>\n</dict>\n</plist>\n',
+          ));
+      final opened = <String>[];
+      await pump(tester, attachment, onOpenLink: opened.add);
+
+      await tester.tap(find.byKey(AttachmentPreviewPanel.shortcutLinkKey));
+      expect(opened, ['https://docs.example.com/deck?a=1&b=2']);
+    });
+
+    for (final target in ['javascript:alert(1)', 'file:///Applications/x.app']) {
+      testWidgets('a shortcut to $target draws no link', (tester) async {
+        final attachment = ref(name: 'open.url', contentType: null);
+        bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+            Uint8List.fromList(utf8.encode('[InternetShortcut]\nURL=$target\n'));
+        await pump(tester, attachment, onOpenLink: (_) {});
+
+        expect(find.byKey(AttachmentPreviewPanel.shortcutLinkKey), findsNothing);
+        expect(find.byKey(TextPreview.bodyKey), findsOneWidget);
+      });
+    }
 
     testWidgets('a sheet renders through the decoder', (tester) async {
       final attachment = ref(name: 'Quote.xlsx', contentType: null);
@@ -870,8 +966,7 @@ void main() {
   group('the Text segment', () {
     testWidgets('a PDF is its pages joined', (tester) async {
       final attachment = ref(name: 'Terms.pdf');
-      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
-          Uint8List.fromList([1, 2, 3]);
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] = _pdfBytes;
       pdf = FakePdfRenderer(pages: ['page one', 'page two']);
       await pump(tester, attachment);
       await tapSegment(tester, 'Text');

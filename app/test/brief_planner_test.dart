@@ -376,6 +376,75 @@ void main() {
       expect(gatherer.gathers, 2);
     });
 
+    test('a skipped meeting is gathered again on the next pass once its mail '
+        'arrives', () async {
+      // A Gmail invite: the event syncs a few seconds before its mail.
+      await calendar.upsertEvents([
+        meeting('evt-ed', attendees: const [Attendee(name: 'Ed', address: ed)]),
+      ], syncRun: 'run-1');
+      expect(await plan(), 0);
+      expect((await calendar.brief('evt-ed'))?.skipReason, 'no_mail');
+      expect(gatherer.gathers, 1);
+
+      // Still no mail: gathered again, nothing rewritten or queued.
+      expect(await plan(after: const Duration(seconds: 30)), 0);
+      expect(gatherer.gathers, 2, reason: 'a skipped row is never throttled');
+      expect(await status('evt-ed'), isNull);
+
+      final at = MessageStore.isoStamp(now);
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-invite',
+        'subject': 'Invitation: Northwind',
+        'participants_json': jsonEncode([
+          {'name': 'Me', 'email': owner},
+        ]),
+        'state': 'waiting',
+        'message_count': 1,
+        'last_message_at': at,
+      });
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-invite',
+        'conversation_key': 'c-invite',
+        'direction': 'inbound',
+        'from_name': 'Calendar',
+        'from_address': 'calendar-notification@example.com',
+        'received_at': at,
+        'body_text': 'You have been invited.',
+        'triage_status': 'done',
+        'source_meta_json':
+            jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-ed'}),
+      });
+      expect(await plan(after: const Duration(minutes: 1)), 1);
+      expect(await status('evt-ed'), 'pending');
+    });
+
+    test('a ready brief still waits out the recheck', () async {
+      await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+      await readyBrief('evt-1', hash: await currentHash('evt-1'));
+      expect(await plan(), 0);
+      expect(gatherer.gathers, 1);
+
+      // New mail moves the hash, but the row was checked a minute ago.
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-1',
+        'subject': 'Fabrikam renewal',
+        'participants_json': jsonEncode([
+          {'name': 'Dana', 'email': dana},
+        ]),
+        'state': 'waiting',
+        'message_count': 2,
+        'last_message_at': MessageStore.isoStamp(now),
+      });
+      expect(await plan(after: const Duration(minutes: 1)), 0);
+      expect(gatherer.gathers, 1);
+      expect(await plan(after: const Duration(minutes: 16)), 1);
+      expect(gatherer.gathers, 2);
+      expect(await status('evt-1'), 'pending');
+    });
+
     test('a cleared table gathers at once', () async {
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
       await readyBrief('evt-1', hash: await currentHash('evt-1'));

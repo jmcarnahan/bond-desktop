@@ -16,6 +16,9 @@
 /// pumping a widget.
 library;
 
+import 'dart:convert';
+import 'dart:typed_data';
+
 import '../../models/attachment_models.dart';
 import '../attachment_format.dart';
 
@@ -80,6 +83,8 @@ bool monoForName(String? name) => const {
       'yml',
       'log',
       'ini',
+      'url',
+      'webloc',
     }.contains(extensionOf(name));
 
 PreviewKind? _kindForExtension(String extension) {
@@ -109,6 +114,11 @@ PreviewKind? _kindForExtension(String extension) {
     'ini' ||
     'tsv' =>
       PreviewKind.text,
+    // An Internet shortcut is a few lines of text naming a web address — the
+    // INI `URL=` of Windows, the plist `URL` key of macOS — whatever its type
+    // says. Gmail labels its Drive-link shortcut `application/pdf`, and those
+    // bytes handed to the PDF viewer were a red error box filling the panel.
+    'url' || 'webloc' => PreviewKind.text,
     // Read through the server's extracted words rather than rendered: nothing
     // in this app lays out a Word document, and the text is what a person
     // wanted from it anyway.
@@ -214,3 +224,79 @@ bool openRefused(AttachmentRef ref) {
   final type = ref.contentType?.split(';').first.trim().toLowerCase() ?? '';
   return _executableContentTypes.contains(type);
 }
+
+/// Whether [bytes] are a PDF at all.
+///
+/// The content type is the sender's word and the name is too; the bytes are
+/// not. pdfium looks for the `%PDF-` header anywhere in the first 1024 bytes,
+/// so a file with a BOM or a little junk in front of it still opens, and this
+/// asks the same question rather than a stricter one that would refuse a file
+/// the viewer could have drawn.
+bool looksLikePdf(Uint8List bytes) {
+  final end = bytes.length < 1024 ? bytes.length : 1024;
+  const magic = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
+  outer:
+  for (var i = 0; i + magic.length <= end; i++) {
+    for (var j = 0; j < magic.length; j++) {
+      if (bytes[i + j] != magic[j]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
+/// [bytes] as words, or null when they are not words.
+///
+/// Strict UTF-8 with no control characters short of tab, newline, form feed
+/// and carriage return: a file that fails either is a binary that only looked
+/// like something else, and drawing it as text would be a screen of boxes.
+String? textOfBytes(Uint8List bytes) {
+  final String text;
+  try {
+    text = utf8.decode(bytes);
+  } on FormatException {
+    return null;
+  }
+  for (final unit in text.codeUnits) {
+    if (unit < 0x20 && unit != 0x09 && unit != 0x0a && unit != 0x0c &&
+        unit != 0x0d) {
+      return null;
+    }
+  }
+  return text;
+}
+
+/// The one web address an Internet shortcut names, or null.
+///
+/// A `.url` is INI: the first `URL=` line, the key read in any case. A
+/// `.webloc` is an XML plist: the `<string>` straight after `<key>URL</key>`,
+/// with the five XML entities decoded; a binary plist names nothing here.
+/// Either answer must be an http(s) address with a host ([webUriOf]) — a
+/// shortcut is a stranger's file, and a `file:` or `javascript:` one gets no
+/// link at all.
+String? shortcutUrlOf(String? name, String text) {
+  final String? raw = switch (extensionOf(name)) {
+    'url' => _iniUrl.firstMatch(text)?.group(1),
+    'webloc' => _plistUrl.firstMatch(text)?.group(1),
+    _ => null,
+  };
+  if (raw == null) return null;
+  final url = raw
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&apos;', "'")
+      .replaceAll('&amp;', '&')
+      .trim();
+  return webUriOf(url) == null ? null : url;
+}
+
+final RegExp _iniUrl = RegExp(
+  r'^[ \t]*URL[ \t]*=[ \t]*(\S.*?)[ \t]*$',
+  multiLine: true,
+  caseSensitive: false,
+);
+
+final RegExp _plistUrl = RegExp(
+  r'<key>\s*URL\s*</key>\s*<string>([^<]*)</string>',
+);

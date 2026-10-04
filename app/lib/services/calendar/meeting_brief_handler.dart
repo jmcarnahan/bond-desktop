@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../../data/calendar_store.dart';
 import '../../models/calendar_models.dart';
 import '../activity_log.dart';
@@ -66,6 +68,7 @@ class MeetingBriefHandler extends WorkHandler {
     ActivityLog? activityLog,
     DateTime Function()? clock,
     this._onStored,
+    this._fetchDetails,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _clock = clock ?? DateTime.now;
 
@@ -81,6 +84,13 @@ class MeetingBriefHandler extends WorkHandler {
 
   /// Told after every row this handler writes, so an open panel re-reads.
   final void Function()? _onStored;
+
+  /// Fetches the detail of mail messages whose files nobody has listed yet,
+  /// listing them and queueing their text — the sync's body fetch, handed in
+  /// as a closure because `services/` never reads a provider. Null (tests,
+  /// or no sync wired) briefs from what is listed.
+  final Future<void> Function(String source, List<String> messageIds)?
+      _fetchDetails;
 
   @override
   String get kind => 'meeting_brief';
@@ -115,7 +125,32 @@ class MeetingBriefHandler extends WorkHandler {
     final id = event.id;
     final existing = await _calendar.brief(id);
 
-    final gathered = await _gatherer.gather(event, now: now);
+    var gathered = await _gatherer.gather(event, now: now);
+    // A thread's mail that says it carries files nobody has listed — the
+    // owner's own invite with its PDF, sent from this mailbox and so never
+    // triaged — is fetched ONCE and the meeting gathered again, so this
+    // brief already names the file. Its text and digest arrive later through
+    // the attachment lane and move the hash. Never a loop: whatever the
+    // second gather finds is what the brief is written from, and a failed
+    // fetch is the first gather's answer.
+    final fetch = _fetchDetails;
+    if (fetch != null &&
+        gathered is BriefEligible &&
+        gathered.unlisted.isNotEmpty) {
+      final bySource = <String, List<String>>{};
+      for (final u in gathered.unlisted) {
+        (bySource[u.source] ??= []).add(u.messageId);
+      }
+      try {
+        for (final MapEntry(key: source, value: ids) in bySource.entries) {
+          await fetch(source, ids);
+        }
+        _log.note({'fetched': gathered.unlisted.length});
+        gathered = await _gatherer.gather(event, now: now);
+      } on Object catch (e) {
+        debugPrint('MeetingBriefHandler: no detail fetch (${e.runtimeType})');
+      }
+    }
     final BriefInput input;
     switch (gathered) {
       case BriefIneligible(:final why):

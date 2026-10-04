@@ -339,7 +339,13 @@ handlers' cue to hydrate a message's attachment rows; the list card's 📎
 count reads the rows themselves (`attachment_count` in `loadConversations`),
 so for mail it appears once the detail fetch has written them. The attachment LIST arrives later
 and differently per connector: mail writes rows inside `_fetchDetailInto`,
-because the detail fetch is the first moment a list exists; chat writes them
+because the detail fetch is the first moment a list exists — and that fetch
+runs for triage (the queue's `ensureBody`, inbound mail only), when a thread
+is opened (`ensureBodies`), for the storyline judge (`ensureBodiesFor`: the
+rows, but no text work queued), and before a meeting brief for a kept thread's mail that has the
+flag and no rows (`ensureMessageBody`, through the brief handler's
+`fetchDetails`: an invite the owner sent with a PDF on it, which no triage
+ever fetched — [14-calendar.md](14-calendar.md#briefs)); chat writes them
 in `_ingestChat`'s insert loop, because chat has no detail step. A Teams
 quote-reply arrives as a `message_reference` entry, and its quote lands on the
 columns mail's `item` rows own: `item_from` is who was quoted, `card_text` the

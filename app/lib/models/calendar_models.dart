@@ -758,7 +758,8 @@ class BriefAskOut {
       };
 }
 
-/// One line of a brief about a file the attendees sent. [file] is a 0-based
+/// One line of a brief about a file sent ahead — the attendees' or the
+/// owner's own. [file] is a 0-based
 /// index into [MeetingBrief.materialRefs]; the task drops an entry whose
 /// number is outside the list it showed, so there is no -1 here.
 @immutable
@@ -830,7 +831,7 @@ class MeetingBrief {
   final List<BriefPoint> points;
   final List<BriefAskOut> openAsks;
 
-  /// What the files they sent say, each pointing into [materialRefs].
+  /// What the files sent ahead say, each pointing into [materialRefs].
   final List<BriefMaterialOut> materials;
 
   /// Questions worth asking in the meeting, at most three.

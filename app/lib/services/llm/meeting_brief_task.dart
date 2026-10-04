@@ -1,4 +1,5 @@
 import '../../models/calendar_models.dart';
+import '../calendar/ask_words.dart' show capAtWord;
 import '../calendar/brief_gatherer.dart';
 import 'json_task.dart';
 import 'prompt_guard.dart';
@@ -13,14 +14,14 @@ import 'prompt_guard.dart';
 /// into the room on the strength of it. So every line is tied to a numbered
 /// thread where it can be, and an empty section is the honest answer.
 const String _meetingBriefRules = '''
-You are writing a short brief for the inbox's owner, who is about to walk into a meeting. You are given the meeting, what the owner's recent mail with the people in it says, and the files those people sent. Write only what those inputs say.
+You are writing a short brief for the inbox's owner, who is about to walk into a meeting. You are given the meeting, what the owner's recent mail with the people in it says, and the files sent ahead of it, by those people or by the owner. Write only what those inputs say.
 
 Rules:
 - evidence: ONE sentence naming what this meeting is for and where things stand with these people. Write it first — everything below should follow from it.
 - headline: one or two dense sentences the owner reads in their agenda before the meeting: where things stand, what has to be decided, what arrived to read. When nothing is open with these people, say so plainly.
 - points: at most 5 short lines on where things stand with these people. Each names the thread it comes from by its number in the list, or -1 when it comes from no one thread.
 - open_asks: at most 4 things one of these people asked the owner that are still open. Name the person as the input names them. Take them from the "Open asks" section; leave this empty when that section is empty.
-- materials: the numbered materials are files these people sent. For each one that matters for this meeting, one line on what it says that the owner should know going in. A material marked unread or not shown is named as arrived, not summarised. Use only numbers in the materials list; leave this empty when there are none.
+- materials: the numbered materials are files sent ahead, by these people or by the owner; a material whose line says "you" is one the owner sent, which they know but may want summarised for the meeting. For each one that matters for this meeting, one line on what it says that the owner should know going in. A material marked unread or not shown is named as arrived, not summarised. Use only numbers in the materials list; leave this empty when there are none.
 - questions: at most 3 questions the owner could ask in the meeting, each grounded in the inputs — a gap in what was sent, a decision still open, a figure to confirm, something a material raises. Never rhetorical, never generic.
 - prep: at most 3 short things the owner could do or have ready before the meeting. Empty when the inputs suggest none.
 - Name people by the names given. Never guess at who someone is.
@@ -274,7 +275,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
     if (input.materials.isNotEmpty) {
       buffer
         ..writeln()
-        ..writeln('Materials they sent, numbered:');
+        ..writeln('Materials sent ahead, numbered ("you" is the owner):');
       // The digests and passages share one budget, filled in material order
       // (newest mail first); once a block does not fit, every later material
       // is named and dated only. The name line is never budgeted: a file the
@@ -389,8 +390,10 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
     }
 
     return MeetingBrief(
-      evidence: _string(json['evidence'], evidenceCap),
-      headline: _string(json['headline'], headlineCap),
+      // The glance is read in two lines under a meeting row, so it is cut
+      // back to a word, never through one.
+      evidence: _words(json['evidence'], evidenceCap),
+      headline: _words(json['headline'], headlineCap),
       points: points,
       openAsks: asks,
       materials: materials,
@@ -401,6 +404,9 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
 
   static String _string(Object? raw, int cap) =>
       raw is String ? _clamp(raw.trim(), cap) : '';
+
+  static String _words(Object? raw, int cap) =>
+      raw is String ? capAtWord(raw.trim(), cap) : '';
 
   static List<String> _list(Object? raw, int cap, int max) {
     if (raw is! List) return const [];

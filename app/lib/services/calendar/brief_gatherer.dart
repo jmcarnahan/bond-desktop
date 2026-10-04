@@ -124,7 +124,8 @@ class BriefStoryline {
   });
 }
 
-/// A file one of the meeting's people sent, as the brief task is shown it.
+/// A file sent ahead of a meeting — by one of its people or by the owner —
+/// as the brief task is shown it.
 ///
 /// The identity ([source], [messageId], [attachmentId]) is what the handler
 /// stores so the agenda can open the file; the rest is what the model reads.
@@ -143,7 +144,7 @@ class BriefMaterial {
   final String contentType;
 
   /// The invite's name for whoever sent it, else the sender's, else the
-  /// address.
+  /// address; the word `you` when the owner sent it.
   final String sender;
 
   /// `yyyy-MM-dd` of the mail that carried it, in the display zone; '' when
@@ -232,7 +233,8 @@ class BriefInput {
   final List<BriefThread> waitingOn;
   final List<BriefStoryline> storylines;
 
-  /// The files the attendees sent on [threads], newest first.
+  /// The files sent on [threads] — the attendees' and the owner's own —
+  /// newest first.
   final List<BriefMaterial> materials;
 
   /// "Last met 3 days ago", or null when the mirror holds no earlier meeting
@@ -268,7 +270,15 @@ sealed class BriefGather {
 
 final class BriefEligible extends BriefGather {
   final BriefInput input;
-  const BriefEligible(this.input);
+
+  /// The chosen threads' mail messages that say they carry files nobody has
+  /// listed yet (`has_attachments` set, no `attachments` row) — a sent
+  /// invite's own PDF, whose detail is fetched only when its thread is
+  /// opened. Newest first, at most [BriefGatherer.maxUnlisted]. The handler
+  /// fetches them once and gathers again.
+  final List<({String source, String messageId})> unlisted;
+
+  const BriefEligible(this.input, {this.unlisted = const []});
 }
 
 final class BriefIneligible extends BriefGather {
@@ -488,6 +498,7 @@ class BriefGatherer {
   static const int maxWaiting = 3;
   static const int maxStorylines = 2;
   static const int maxMaterials = 6;
+  static const int maxUnlisted = 4;
 
   /// How many of the six threads the meeting's own invite threads may take:
   /// a long weekly series has an invite thread per update, and must not push
@@ -720,7 +731,7 @@ class BriefGatherer {
       materials: materials,
     );
 
-    return BriefEligible(BriefInput(
+    return BriefEligible(unlisted: _unlistedOf(chosen), BriefInput(
       event: event,
       whenLocal: briefWhenLine(event, zone),
       nowLocal: briefNowLine(nowUtc, zone),
@@ -764,9 +775,10 @@ class BriefGatherer {
     return intent != null && askIntents.contains(intent) ? intent : null;
   }
 
-  /// The files the people in [chosen] sent, newest mail first, at most
-  /// [maxMaterials]: documents only — never the owner's own, never an inline
-  /// logo, a picture, a quoted message or a card. A file not read yet is
+  /// The files on [chosen], newest mail first, at most [maxMaterials]: the
+  /// people's and the owner's own (the deck the owner attached to the invite
+  /// they sent is the likeliest thing the meeting is about), documents only
+  /// — never an inline logo, a picture, a quoted message or a card. A file not read yet is
   /// still listed, so the brief can say it arrived. One material per file
   /// NAME (case-insensitive), the newest copy: the same deck re-attached on
   /// every reply is one thing to read, not six.
@@ -775,17 +787,17 @@ class BriefGatherer {
     Map<String, String> nameOf,
     CalendarZone zone,
   ) {
-    final inbound = [
+    final carrying = [
       for (final k in chosen)
         for (final m in k.messages)
-          if (!m.outbound && m.attachments.isNotEmpty) m,
+          if (m.attachments.isNotEmpty) m,
     ]..sort((a, b) {
         final byTime = (b.receivedAt ?? '').compareTo(a.receivedAt ?? '');
         return byTime != 0 ? byTime : a.id.compareTo(b.id);
       });
     final out = <BriefMaterial>[];
     final seen = <String>{};
-    for (final m in inbound) {
+    for (final m in carrying) {
       for (final a in m.attachments) {
         if (out.length >= maxMaterials) return out;
         final name = (a.name ?? '').trim();
@@ -799,7 +811,7 @@ class BriefGatherer {
           attachmentId: a.attachmentId,
           name: name,
           contentType: a.contentType ?? '',
-          sender: _who(m, nameOf),
+          sender: m.outbound ? 'you' : _who(m, nameOf),
           date: _dayOf(m.receivedAt, zone),
           textStatus: a.textStatus,
           digestStatus: a.digestStatus,
@@ -808,6 +820,27 @@ class BriefGatherer {
       }
     }
     return out;
+  }
+
+  /// The mail messages on [chosen] whose files are not listed yet, newest
+  /// first, at most [maxUnlisted]: the row says it carries attachments and
+  /// `loadThread` hydrated none. Mail only — a chat's files arrive with the
+  /// message.
+  static List<({String source, String messageId})> _unlistedOf(
+      List<_Candidate> chosen) {
+    final unlisted = [
+      for (final k in chosen)
+        for (final m in k.messages)
+          if (m.source == 'email' && m.hasAttachments && m.attachments.isEmpty)
+            m,
+    ]..sort((a, b) {
+        final byTime = (b.receivedAt ?? '').compareTo(a.receivedAt ?? '');
+        return byTime != 0 ? byTime : a.id.compareTo(b.id);
+      });
+    return [
+      for (final m in unlisted.take(maxUnlisted))
+        (source: m.source, messageId: m.id),
+    ];
   }
 
   /// `yyyy-MM-dd` of [iso] in [zone] — the day the owner saw the mail

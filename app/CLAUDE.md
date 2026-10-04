@@ -1010,16 +1010,24 @@ that bite.
   - Threads: the event's own invite threads first (`messagesForEvent` for the
     occurrence, then its series master; ≤ 3), then the 30-day address match;
     `noMail` means no threads at all. Materials (`BriefMaterial`) are the
-    chosen threads' inbound, non-inline `file|reference` attachments that are
-    not images, newest first, the newest copy per lowercased name, ≤ 6, each
-    with its digest and ≤ 2 passages from ONE scoped `chunkKnn` (attachment
+    chosen threads' inbound and outbound, non-inline `file|reference`
+    attachments that are not images (the owner's own: sender `you`),
+    newest first, the newest copy per lowercased name, ≤ 6, each with its
+    digest and ≤ 2 passages from ONE scoped `chunkKnn` (attachment
     ids, then the exact `(messageId, attachmentId)` pair). The planner
     gathers with `passages: false` (a plan is store reads, never an
     embedding; passages are unhashed, so the hash is the same); only the
     handler embeds the meeting, once, lazily. The hash carries
     `material|msg|att|textStatus|digestStatus`, so a deck whose text or
     digest lands later re-briefs within the 15-minute recheck.
-  - The task is v2, evidence first: `evidence, headline (the glance, ≤ 240),
+  - A chosen thread's mail with `has_attachments` and no `attachments` row
+    (the owner's sent invite: its detail runs only on a thread open) is
+    `BriefEligible.unlisted` (≤ 4). The handler's `fetchDetails` (the
+    sync's `ensureMessageBody`, which lists the files AND queues their text;
+    `ensureBodiesFor` queues none) runs ONCE, then it gathers again; a
+    failed fetch keeps the first gather. Never a loop.
+  - The task is v2, evidence first: `evidence, headline (the glance, ≤ 240,
+    cut at a word by `capAtWord`),
     points, open_asks, materials[{file, takeaway}] ≤ 4, questions ≤ 3, prep`;
     a material index outside the list is dropped, never -1; v1 stored rows
     still decode. A material line puts `read|unread|not shown` OUTSIDE the
@@ -1027,9 +1035,10 @@ that bite.
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
     forced sync after a write). It skips an event only when its brief is
     fresh (< 2 h) AND the inputs hash is unchanged; `_queuedFor` (event id →
-    last queued hash) stops a retry storm; it rechecks an event at most
-    every 15 minutes in memory, except rows with no brief, which it plans at
-    once after Clear AI results.
+    last queued hash) stops a retry storm; it rechecks a `ready` or `failed`
+    row at most every 15 minutes in memory. Rows with no brief (after Clear
+    AI results) and `skipped` rows (any `ineligible:*`) are gathered on
+    EVERY pass: a Gmail invite's event syncs seconds before its mail.
   - A failed or skipped run over a ready brief calls `touchBrief` (it moves
     only `generated_at`) — except a skip for `gone`, `declined` or
     `cancelled`, which replaces the brief with a skipped row.
@@ -1038,7 +1047,9 @@ that bite.
     `briefRevisionProvider` (NOT `briefWorkTickProvider`); `DayPane` draws the
     glance (`day-brief-teaser-$id`, two lines, not focusable) and the chevron
     (`day-brief-toggle-$id`, the one keyboard toggle); `BriefSection(compact:)`
-    draws only a READY brief; `_setSelectedDay` is the one writer of
+    draws only a READY brief; both faces draw Questions, Prep, Materials,
+    Open asks, then the points under References (compact: at most
+    `compactPointsCap` = 3); `_setSelectedDay` is the one writer of
     `_selectedDay` and clears `_expandedBriefs` only when the day changes;
     `_openMaterial` rebuilds the `AttachmentRef` from `attachmentRow` and
     toasts 'That file is no longer here.' on a missing row.

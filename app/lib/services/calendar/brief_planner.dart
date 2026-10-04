@@ -19,7 +19,7 @@ import 'calendar_zone.dart';
 /// only once it is older than [freshFor] (unless its inputs moved). What
 /// keeps a thread that is busy the morning of a meeting from buying a model
 /// call per sync is the [recheck] throttle below, which gathers each event
-/// at most every fifteen minutes. At most [maxPerPass] per pass, the soonest
+/// with a ready or failed brief at most every fifteen minutes. At most [maxPerPass] per pass, the soonest
 /// meetings first, so a calendar full of meetings costs a few calls a sync
 /// rather than a burst — and queued so the soonest drains first.
 ///
@@ -35,9 +35,16 @@ import 'calendar_zone.dart';
 /// **The recheck throttle.** Gathering is store reads, but up to twenty
 /// candidate threads per meeting is not free, and the calendar syncs every
 /// few minutes. So an event whose stored row has not moved since it was
-/// gathered less than [recheck] ago is not gathered again. An event with NO
-/// stored row is never throttled: that is the state after Clear AI results,
-/// and the next synced tick should plan it at once.
+/// gathered less than [recheck] ago is not gathered again. The throttle
+/// holds a READY or FAILED row only. An event with NO stored row is never
+/// throttled: that is the state after Clear AI results, and the next synced
+/// tick should plan it at once. Nor is a `skipped` row: its reason is the
+/// kind that goes away within seconds — a Gmail invite's event syncs before
+/// its mail, which is then the meeting's thread — and a quarter of an hour
+/// of "No brief — no recent mail" over a thread that is there is a wrong
+/// sentence. Few events in the window are skipped, and the gather is store
+/// reads; [_queuedFor] and the "already says so" check keep an unchanged
+/// reason from queueing or writing anything.
 ///
 /// **Not per-message.** `clearDerived` empties `event_briefs` (a derived
 /// table) and the next sync's plan writes them again, so nothing is added to
@@ -138,6 +145,7 @@ class BriefPlanner {
           generated != null && nowUtc.difference(generated) < freshFor;
       final checked = _lastChecked[e.id];
       if (stored != null &&
+          stored.status != EventBrief.skipped &&
           checked != null &&
           nowUtc.difference(checked.at) < recheck &&
           checked.generatedAt == stored.generatedAt) {

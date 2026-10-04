@@ -11,12 +11,16 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   final now = DateTime.utc(2026, 9, 29, 16);
 
-  EventBrief ready({bool withThreads = true, bool withMaterials = true}) {
+  EventBrief ready(
+      {bool withThreads = true,
+      bool withMaterials = true,
+      List<BriefPoint> morePoints = const []}) {
     final brief = MeetingBrief(
       headline: 'Dana is waiting on the quote.',
-      points: const [
-        BriefPoint(text: 'The quote is owed.', thread: 0),
-        BriefPoint(text: 'Nothing else is open.'),
+      points: [
+        const BriefPoint(text: 'The quote is owed.', thread: 0),
+        const BriefPoint(text: 'Nothing else is open.'),
+        ...morePoints,
       ],
       openAsks: const [
         BriefAskOut(person: 'Dana', ask: 'Send the quote', thread: 0),
@@ -122,31 +126,66 @@ void main() {
     expect(find.byKey(BriefSection.pointThreadKeyFor(1)), findsNothing);
   });
 
-  testWidgets('a ready brief also lists its materials and questions, in '
-      'order', (tester) async {
+  testWidgets('questions and prep come before the references', (tester) async {
     await pump(tester, EventBriefView(brief: ready()));
 
     expect(find.text('Materials'), findsOneWidget);
     expect(find.text('Questions'), findsOneWidget);
+    expect(find.text('References'), findsOneWidget);
     expect(find.text('Renewal deck.pptx'), findsOneWidget);
     expect(find.text('The deck prices the renewal at 12k.'), findsOneWidget);
     expect(find.text('1. Is 12k the final number?'), findsOneWidget);
     expect(find.text('2. Who signs for Fabrikam?'), findsOneWidget);
 
-    // Points, then Materials, then Questions, then Open asks, then Prep.
-    final point = top(tester, find.byKey(BriefSection.pointKeyFor(1)));
-    final materials = top(tester, find.text('Materials'));
-    final secondFile = top(tester, find.byKey(BriefSection.materialTextKeyFor(1)));
+    // Questions, then Prep, then Materials, then Open asks, then the points
+    // under References.
+    final headline = top(tester, find.byKey(BriefSection.headlineKey));
     final questions = top(tester, find.text('Questions'));
     final secondQuestion = top(tester, find.byKey(BriefSection.questionKeyFor(1)));
-    final asks = top(tester, find.text('Open asks'));
     final prep = top(tester, find.text('Prep'));
-    expect(point, lessThan(materials));
-    expect(materials, lessThan(secondFile));
-    expect(secondFile, lessThan(questions));
+    final materials = top(tester, find.text('Materials'));
+    final secondFile = top(tester, find.byKey(BriefSection.materialTextKeyFor(1)));
+    final asks = top(tester, find.text('Open asks'));
+    final references = top(tester, find.text('References'));
+    final point = top(tester, find.byKey(BriefSection.pointKeyFor(0)));
+    expect(headline, lessThan(questions));
     expect(questions, lessThan(secondQuestion));
-    expect(secondQuestion, lessThan(asks));
-    expect(asks, lessThan(prep));
+    expect(secondQuestion, lessThan(prep));
+    expect(prep, lessThan(materials));
+    expect(materials, lessThan(secondFile));
+    expect(secondFile, lessThan(asks));
+    expect(asks, lessThan(references));
+    expect(references, lessThan(point));
+
+    // The compact face keeps the same order.
+    await pump(tester, EventBriefView(brief: ready()), compact: true);
+    expect(top(tester, find.text('Questions')),
+        lessThan(top(tester, find.text('Prep'))));
+    expect(top(tester, find.text('Prep')),
+        lessThan(top(tester, find.text('References'))));
+  });
+
+  testWidgets('the compact face shows three references at most; the panel '
+      'shows them all', (tester) async {
+    final brief = ready(morePoints: const [
+      BriefPoint(text: 'Third point.'),
+      BriefPoint(text: 'Fourth point.'),
+      BriefPoint(text: 'Fifth point.'),
+    ]);
+    expect(BriefSection.compactPointsCap, 3);
+
+    await pump(tester, EventBriefView(brief: brief), compact: true);
+    for (var i = 0; i < 3; i++) {
+      expect(find.byKey(BriefSection.pointKeyFor(i)), findsOneWidget);
+    }
+    expect(find.byKey(BriefSection.pointKeyFor(3)), findsNothing);
+    expect(find.text('• Fourth point.'), findsNothing);
+
+    await pump(tester, EventBriefView(brief: brief));
+    for (var i = 0; i < 5; i++) {
+      expect(find.byKey(BriefSection.pointKeyFor(i)), findsOneWidget);
+    }
+    expect(find.text('• Fifth point.'), findsOneWidget);
   });
 
   testWidgets('a material chip opens its file; a missing ref draws the '
@@ -180,7 +219,7 @@ void main() {
     expect(find.text('Renewal deck.pptx'), findsOneWidget);
   });
 
-  testWidgets('compact draws points, materials, questions and asks — no '
+  testWidgets('compact draws questions, prep, materials, asks and points — no '
       'heading, no footer, no status', (tester) async {
     await pump(tester, EventBriefView(brief: ready()), compact: true);
 

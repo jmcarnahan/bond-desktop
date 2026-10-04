@@ -2191,6 +2191,18 @@ final meetingBriefHandlerProvider = Provider<MeetingBriefHandler>((ref) {
     client: () => client,
     activityLog: ref.watch(activityLogProvider),
     onStored: () => briefs.state++,
+    // A thread's mail whose files are not listed yet (the owner's own sent
+    // invite) gets its detail before the brief: `ensureMessageBody` lists the
+    // files AND queues their `attachment_text`, which `ensureBodiesFor` does
+    // not, and fetches even when a body is stored. Mail only; `ref.read` at
+    // the call, never `watch`, as the triage queue's `ensureBody` does.
+    fetchDetails: (source, ids) async {
+      if (source != 'email') return;
+      final sync = ref.read(syncServiceProvider);
+      for (final id in ids) {
+        await sync.ensureMessageBody(id);
+      }
+    },
   );
 });
 

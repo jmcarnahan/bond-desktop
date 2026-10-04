@@ -119,6 +119,7 @@ void main() {
     String body = 'Hello there.',
     Duration ago = const Duration(hours: 2),
     String? eventId,
+    bool hasAttachments = false,
   }) =>
       store.upsertMessage({
         'source': 'email',
@@ -131,6 +132,7 @@ void main() {
         'received_at': stampAgo(ago),
         'body_text': body,
         'triage_status': 'done',
+        if (hasAttachments) 'has_attachments': 1,
         if (eventId != null)
           'source_meta_json':
               jsonEncode({'meeting': 'meetingRequest', 'event_id': eventId}),
@@ -605,8 +607,9 @@ void main() {
 
       final input = await eligible(meeting());
       expect([for (final m in input.materials) m.name],
-          ['Q3 plan.pptx', 'terms.pdf'],
-          reason: "newest mail first, and never the owner's own file");
+          ['Q3 plan.pptx', 'my reply.pdf', 'terms.pdf'],
+          reason: "newest mail first, the owner's own file among them");
+      expect(input.materials[1].sender, 'you');
       final deck = input.materials.first;
       expect((deck.source, deck.messageId, deck.attachmentId),
           ('email', 'm-new', 'a-deck'));
@@ -620,6 +623,60 @@ void main() {
       expect(terms.date, dayOf(const Duration(hours: 30)));
       expect(terms.textStatus, 'pending');
       expect(terms.digest, isNull);
+    });
+
+    test("the owner's own attachment on the invite they sent is a material, "
+        'sender you', () async {
+      // The owner organised it: the invite in this mailbox is their Sent
+      // Items copy, outbound, with the agenda on it.
+      await conversation('c-invite', ago: const Duration(hours: 3));
+      await message('m-invite', 'c-invite',
+          outbound: true,
+          ago: const Duration(hours: 3),
+          eventId: 'evt-1',
+          hasAttachments: true);
+      await attach('m-invite', 'a-agenda', name: 'Agenda.pdf',
+          contentType: 'application/pdf');
+
+      final g = await gatherer.gather(meeting(), now: now);
+      expect(g, isA<BriefEligible>());
+      final eligible = g as BriefEligible;
+      final agenda = eligible.input.materials.single;
+      expect((agenda.messageId, agenda.attachmentId, agenda.name),
+          ('m-invite', 'a-agenda', 'Agenda.pdf'));
+      expect(agenda.sender, 'you');
+      expect(eligible.unlisted, isEmpty, reason: 'its file is listed');
+      expect(
+          const MeetingBriefTask().buildUserMessage(eligible.input),
+          contains('[1] (unread) ${wrapUntrusted('material', 'Agenda.pdf · '
+              'you · ${dayOf(const Duration(hours: 3))}')}'));
+    });
+
+    test('a mail with attachments not yet listed is reported as unlisted',
+        () async {
+      await conversation('c-invite', count: 2, ago: const Duration(hours: 1));
+      await message('m-invite', 'c-invite',
+          outbound: true,
+          ago: const Duration(hours: 3),
+          eventId: 'evt-1',
+          hasAttachments: true);
+      await message('m-reply', 'c-invite',
+          ago: const Duration(hours: 1), hasAttachments: true);
+      await message('m-plain', 'c-invite', ago: const Duration(hours: 2));
+
+      final g = await gatherer.gather(meeting(), now: now, passages: false);
+      expect(g, isA<BriefEligible>());
+      final eligible = g as BriefEligible;
+      expect(eligible.input.materials, isEmpty);
+      expect([for (final u in eligible.unlisted) (u.source, u.messageId)],
+          [('email', 'm-reply'), ('email', 'm-invite')],
+          reason: 'newest first, both directions, never a mail with no files');
+
+      // Listed, it is a material and no longer unlisted.
+      await attach('m-reply', 'a-1', name: 'notes.docx');
+      final again = await gatherer.gather(meeting(), now: now) as BriefEligible;
+      expect([for (final u in again.unlisted) u.messageId], ['m-invite']);
+      expect(again.input.materials.single.name, 'notes.docx');
     });
 
     test('an unread deck is listed as arrived, with no digest', () async {

@@ -764,9 +764,9 @@ answers for a link and for a file over the cap too.
 | kind | Preview | Text | Bytes fetched |
 |---|---|---|---|
 | image | `ImagePreview` (zoom to 8×) | the server's words | yes |
-| pdf | `PdfPreview` through the `PdfRenderer` seam | the pages joined | yes |
+| pdf | `PdfPreview` through the `PdfRenderer` seam — only when the bytes are a PDF (`looksLikePdf`); otherwise their words in `TextPreview`, or `UnsupportedPreview` for a binary | the pages joined | yes |
 | sheet | `SheetPreview` through the `WorkbookDecoder` | first sheet as TSV | yes |
-| text | `TextPreview`, mono for csv/tsv/json/xml/yaml/log/ini | the same | yes |
+| text | `TextPreview`, mono for csv/tsv/json/xml/yaml/log/ini/url/webloc; an Internet shortcut (`.url`, `.webloc`) also draws its one web address as a link above the words | the same | yes |
 | document (docx, pptx) | the server's words, under OneDrive's picture for a chat file | the same | **no** |
 | eml / `item` | `EmlPreview` — a `MessageRow`, because a forwarded message is a message | the body | **no** |
 | reference (a mail link) | whatever its name or type says — a PDF renders as a PDF, with the drive's own thumbnail | the server's words | **yes**, by url |
@@ -780,6 +780,31 @@ connector's `kind` is the last resort. `heic`, `tiff` and `xls` are named as
 unsupported on purpose — the first two are images Flutter cannot decode, the
 third a binary workbook `xlsx_reader.dart` does not read, and a broken frame
 says less than a line naming the file.
+
+The content type is the sender's word, so a PDF is drawn as one only when its
+bytes say so: `looksLikePdf` finds `%PDF-` in the first 1024 bytes, where
+pdfium itself looks. Gmail labels its "attach a Drive link" shortcut
+`application/pdf`; those 254 bytes of `[InternetShortcut]` handed to the
+viewer drew pdfrx's own error banner, whose `SelectionArea` threw for want of
+`MaterialLocalizations` and filled the panel with a red box. Bytes that are
+not a PDF are shown as text when they decode as strict UTF-8 with no control
+characters (`textOfBytes`), and named otherwise ("This file says it is a PDF,
+but it is not one."); the Text segment never opens them either. As a second
+belt, `PdfrxRenderer` hands `PdfViewerParams` an `errorBannerBuilder` that
+draws one muted sentence in place of that banner, for a real-looking PDF
+pdfium still refuses.
+
+An Internet shortcut is named by its extension, which beats its content type:
+`.url` and `.webloc` are `text` and carry the 🔗 glyph. `shortcutUrlOf` reads
+the address — a `.url`'s first `URL=` line (key in any case, either line
+ending), a `.webloc`'s `<string>` straight after `<key>URL</key>` with the
+five XML entities decoded (a binary plist names nothing) — and keeps it only
+when `webUriOf` passes it as http(s) with a host. The panel draws it as a link
+above the words, through the host's guarded `onOpenLink`; a `file:` or
+`javascript:` shortcut draws its text and no link. Open stays refused for the
+FILE (`url` and `webloc` are in `openRefused`'s list: both systems run a
+shortcut), so the caption still says to save it — the link is the thing to
+press.
 
 A `message_reference` never reaches this table: a quote-reply is drawn as a
 quote block above the reply (`widgets/quote_block.dart`) and sits on no file
@@ -1033,8 +1058,8 @@ recorded is in `07-replies.md`.
 
 **…and into briefs.** A pre-meeting brief reads the same text without the
 retriever class (`BriefGatherer._withPassages`,
-`app/lib/services/calendar/brief_gatherer.dart`): each file the meeting's
-people sent (up to 6) brings its digest from `attachments.digest_json`, and,
+`app/lib/services/calendar/brief_gatherer.dart`): each file sent ahead on the
+meeting's threads, by its people or by the owner (up to 6) brings its digest from `attachments.digest_json`, and,
 when `hasAttachmentChunks` says its attachment id holds passages, the 4
 chunks nearest the meeting's subject and invite preview — embedded once per
 gather under `documentPrefix`, the same document-against-documents rule —

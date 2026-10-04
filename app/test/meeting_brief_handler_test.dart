@@ -204,7 +204,8 @@ void main() {
     await briefs.run(item('evt-1'));
     await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
 
-    expect(llm.userMessages.single, contains('Materials they sent, numbered:'));
+    expect(llm.userMessages.single,
+        contains('Materials sent ahead, numbered ("you" is the owner):'));
     final brief = (await calendar.brief('evt-1'))!.brief!;
     expect(brief.evidence, 'A renewal call; Dana is waiting on the quote.');
     expect(brief.questions, ['Is the price final?']);
@@ -223,6 +224,95 @@ void main() {
     expect(detail['materials'], 1);
     expect(detail['questions'], 1);
     expect(detail['threads'], 1);
+  });
+
+  /// m-1 flagged as carrying a file nobody has listed yet.
+  Future<void> flagUnlisted() => db.customStatement(
+      "UPDATE messages SET has_attachments = 1 WHERE source_message_id = 'm-1'");
+
+  test('unlisted attachments are fetched once before the brief is written',
+      () async {
+    await seedEvent();
+    await seedThread();
+    await flagUnlisted();
+    final fetched = <(String, List<String>)>[];
+    final llm = ScriptedLlm(answers: {
+      'meeting_brief': {
+        ...answer,
+        'materials': [
+          {'file': 1, 'takeaway': 'The quote is attached, unread.'},
+        ],
+      },
+    });
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+      // The detail fetch lists the file, as the sync's would.
+      fetchDetails: (source, ids) async {
+        fetched.add((source, ids));
+        await store.upsertAttachments('email', 'm-1', [
+          {
+            'attachment_id': 'a-quote',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'quote.pdf',
+            'content_type': 'application/pdf',
+            'is_inline': 0,
+          },
+        ]);
+      },
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect([for (final (source, ids) in fetched) '$source:${ids.join(',')}'],
+        ['email:m-1']);
+    expect(llm.userMessages.single, contains('quote.pdf'),
+        reason: 'the second gather sees the file the fetch listed');
+    final brief = (await calendar.brief('evt-1'))!.brief!;
+    expect(brief.materialAt(0)?.name, 'quote.pdf');
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    final detail =
+        jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
+    expect(detail['fetched'], 1);
+    expect(detail['materials'], 1);
+
+    // Listed now: the next run fetches nothing.
+    await briefs.run(item('evt-1', asked: true));
+    expect(fetched, hasLength(1));
+  });
+
+  test('a failing fetch still writes the brief', () async {
+    await seedEvent();
+    await seedThread();
+    await flagUnlisted();
+    var calls = 0;
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      clock: () => now,
+      fetchDetails: (source, ids) async {
+        calls++;
+        throw StateError('Graph is down');
+      },
+    );
+
+    await briefs.run(item('evt-1'));
+
+    expect(calls, 1, reason: 'asked once, never retried in the run');
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.ready);
+    expect(row.brief!.materialRefs, isEmpty);
   });
 
   test('an ineligible meeting is skipped with its reason, and no call',

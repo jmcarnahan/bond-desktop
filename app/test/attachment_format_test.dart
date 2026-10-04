@@ -46,6 +46,12 @@ void main() {
       );
     });
 
+    test('an Internet shortcut is a link, whatever its type says', () {
+      // Gmail labels its Drive-link shortcut application/pdf.
+      expect(attachmentGlyph('file', 'application/pdf', name: 'open.url'), '🔗');
+      expect(attachmentGlyph('file', null, name: 'Deck.webloc'), '🔗');
+    });
+
     test('falls back to the content type when the name says nothing', () {
       expect(attachmentGlyph('file', 'application/pdf', name: 'download'), '📕');
       expect(attachmentGlyph('file', 'image/png'), '🖼');

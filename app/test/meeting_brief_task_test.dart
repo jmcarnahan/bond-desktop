@@ -78,7 +78,8 @@ void main() {
       final prompt = const MeetingBriefTask().systemPrompt;
       expect(prompt, contains('- evidence: ONE sentence'));
       expect(prompt, contains('- materials: the numbered materials are files '
-          'these people sent.'));
+          'sent ahead, by these people or by the owner; a material whose line '
+          'says "you" is one the owner sent'));
       expect(prompt, contains('A material marked unread or not shown is named '
           'as arrived, not summarised.'));
       expect(prompt, contains('- questions: at most 3 questions'));
@@ -219,7 +220,7 @@ void main() {
       expect(msg, contains('Waiting on them (the owner wrote last): [2]'));
       expect(msg, contains(wrapUntrusted('storyline_title', 'Fabrikam renewal')));
       expect(msg, contains('Pricing agreed'));
-      expect(msg, contains('Materials they sent, numbered:'));
+      expect(msg, contains('Materials sent ahead, numbered ("you" is the owner):'));
       expect(msg.indexOf('Storylines'), lessThan(msg.indexOf('Materials')));
       expect(msg.indexOf('Materials'), lessThan(msg.indexOf('From the invite')));
       expect(msg, contains(wrapUntrusted('invite', 'Agenda: renewal.')));
@@ -259,7 +260,7 @@ void main() {
       ];
       final msg =
           const MeetingBriefTask().buildUserMessage(input(materials: materials));
-      expect(msg, contains('Materials they sent, numbered:'));
+      expect(msg, contains('Materials sent ahead, numbered ("you" is the owner):'));
       expect(
           msg,
           contains('[1] (read) ${wrapUntrusted('material', 'deck-1.pptx · '
@@ -307,6 +308,25 @@ void main() {
           contains('[1] (unread) ${wrapUntrusted('material', 'Q3 plan.pptx · '
               'Dana Lee · 2026-09-28')}'));
       expect(msg, isNot(contains('source="digest"')));
+    });
+
+    test('a file the owner sent reads "you" as its sender', () {
+      final msg = const MeetingBriefTask().buildUserMessage(input(materials: const [
+        BriefMaterial(
+          source: 'email',
+          messageId: 'm-1',
+          attachmentId: 'a-1',
+          name: 'Agenda.pdf',
+          sender: 'you',
+          date: '2026-09-28',
+          textStatus: 'pending',
+        ),
+      ]));
+      expect(msg, contains('Materials sent ahead, numbered ("you" is the owner):'));
+      expect(
+          msg,
+          contains('[1] (unread) ${wrapUntrusted('material', 'Agenda.pdf · '
+              'you · 2026-09-28')}'));
     });
 
     test('a read material with nothing to show is not shown, not read', () {
@@ -415,6 +435,24 @@ void main() {
         'headline': '$head\u{1F600}tail',
       });
       expect(brief.headline, head);
+    });
+
+    test('a long glance is cut at a word, never inside one', () {
+      final words = [for (var i = 0; i < 60; i++) 'word$i'];
+      final long = words.join(' ');
+      expect(long.length, greaterThan(300));
+      final brief = const MeetingBriefTask().validate({
+        'evidence': long,
+        'headline': long,
+      });
+      expect(brief.headline.length, lessThanOrEqualTo(240));
+      expect(brief.headline.length, greaterThan(200));
+      expect(long, startsWith(brief.headline));
+      // The next character of the original is the space the cut stopped at.
+      expect(long[brief.headline.length], ' ');
+      expect(words, contains(brief.headline.split(' ').last));
+      expect(brief.evidence.length, lessThanOrEqualTo(MeetingBriefTask.evidenceCap));
+      expect(long[brief.evidence.length], ' ');
     });
 
     test('never throws on a malformed answer', () {

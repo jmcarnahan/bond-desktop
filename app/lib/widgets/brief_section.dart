@@ -16,10 +16,11 @@ import 'time_format.dart';
 /// app stored, by its ids ([onOpenMaterial]).
 ///
 /// [compact] is the agenda's face, drawn under a meeting row whose glance
-/// already shows the headline: ONLY a ready brief's body — points,
-/// Materials, Questions, Open asks, Prep and one Regenerate — with no
-/// heading, headline, footer or status sentence, and nothing at all in any
-/// other state (the event panel is where those say why).
+/// already shows the headline: ONLY a ready brief's body — Questions, Prep,
+/// Materials, Open asks, at most [compactPointsCap] References and one
+/// Regenerate — with no heading, headline, footer or status sentence, and
+/// nothing at all in any other state (the event panel is where those say
+/// why). The panel draws the same body in the same order, with every point.
 ///
 /// The states, in the order they win:
 /// 0. declined or cancelled ([eligible] false with that reason) — even over
@@ -57,6 +58,10 @@ class BriefSection extends StatelessWidget {
   static Key materialKeyFor(int i) => ValueKey('brief-material-$i');
   static Key materialTextKeyFor(int i) => ValueKey('brief-material-text-$i');
   static Key questionKeyFor(int i) => ValueKey('brief-question-$i');
+
+  /// How many points the agenda's face shows under References; the panel
+  /// shows them all.
+  static const int compactPointsCap = 3;
 
   static const String writingText = 'Writing the brief…';
   static const String rewritingText = 'Rewriting…';
@@ -228,57 +233,68 @@ class BriefSection extends StatelessWidget {
     );
   }
 
-  /// What both faces draw under the headline, in order: the points, the
-  /// materials, the questions, the open asks and the prep.
-  List<Widget> _body(MeetingBrief brief) => [
-        for (var i = 0; i < brief.points.length; i++)
+  /// What both faces draw under the headline, in order: the questions, the
+  /// prep, the materials, the open asks, then the points under References —
+  /// what to do before the meeting first, what it rests on last. The compact
+  /// face shows at most [compactPointsCap] points; the panel shows them all.
+  List<Widget> _body(MeetingBrief brief) {
+    final points = compact && brief.points.length > compactPointsCap
+        ? compactPointsCap
+        : brief.points.length;
+    return [
+      if (brief.questions.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('Questions', style: BondType.label),
+        for (var i = 0; i < brief.questions.length; i++)
+          Padding(
+            key: questionKeyFor(i),
+            padding: const EdgeInsets.only(top: BondSpacing.s4),
+            child:
+                Text('${i + 1}. ${brief.questions[i]}', style: BondType.small),
+          ),
+      ],
+      if (brief.prep.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('Prep', style: BondType.label),
+        for (final p in brief.prep)
+          Padding(
+            padding: const EdgeInsets.only(top: BondSpacing.s4),
+            child: Text('• $p', style: BondType.small),
+          ),
+      ],
+      if (brief.materials.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('Materials', style: BondType.label),
+        for (var i = 0; i < brief.materials.length; i++)
+          _material(
+              i, brief.materials[i], brief.materialAt(brief.materials[i].file)),
+      ],
+      if (brief.openAsks.isNotEmpty) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('Open asks', style: BondType.label),
+        for (var i = 0; i < brief.openAsks.length; i++)
+          _line(
+            key: askKeyFor(i),
+            text: brief.openAsks[i].person.isEmpty
+                ? brief.openAsks[i].ask
+                : '${brief.openAsks[i].person}: ${brief.openAsks[i].ask}',
+            thread: brief.threadAt(brief.openAsks[i].thread),
+            chipKey: askThreadKeyFor(i),
+          ),
+      ],
+      if (points > 0) ...[
+        const SizedBox(height: BondSpacing.s8),
+        Text('References', style: BondType.label),
+        for (var i = 0; i < points; i++)
           _line(
             key: pointKeyFor(i),
             text: '• ${brief.points[i].text}',
             thread: brief.threadAt(brief.points[i].thread),
             chipKey: pointThreadKeyFor(i),
           ),
-        if (brief.materials.isNotEmpty) ...[
-          const SizedBox(height: BondSpacing.s8),
-          Text('Materials', style: BondType.label),
-          for (var i = 0; i < brief.materials.length; i++)
-            _material(
-                i, brief.materials[i], brief.materialAt(brief.materials[i].file)),
-        ],
-        if (brief.questions.isNotEmpty) ...[
-          const SizedBox(height: BondSpacing.s8),
-          Text('Questions', style: BondType.label),
-          for (var i = 0; i < brief.questions.length; i++)
-            Padding(
-              key: questionKeyFor(i),
-              padding: const EdgeInsets.only(top: BondSpacing.s4),
-              child: Text('${i + 1}. ${brief.questions[i]}',
-                  style: BondType.small),
-            ),
-        ],
-        if (brief.openAsks.isNotEmpty) ...[
-          const SizedBox(height: BondSpacing.s8),
-          Text('Open asks', style: BondType.label),
-          for (var i = 0; i < brief.openAsks.length; i++)
-            _line(
-              key: askKeyFor(i),
-              text: brief.openAsks[i].person.isEmpty
-                  ? brief.openAsks[i].ask
-                  : '${brief.openAsks[i].person}: ${brief.openAsks[i].ask}',
-              thread: brief.threadAt(brief.openAsks[i].thread),
-              chipKey: askThreadKeyFor(i),
-            ),
-        ],
-        if (brief.prep.isNotEmpty) ...[
-          const SizedBox(height: BondSpacing.s8),
-          Text('Prep', style: BondType.label),
-          for (final p in brief.prep)
-            Padding(
-              padding: const EdgeInsets.only(top: BondSpacing.s4),
-              child: Text('• $p', style: BondType.small),
-            ),
-        ],
-      ];
+      ],
+    ];
+  }
 
   /// One material: the file's chip when the brief still holds its ref, then
   /// what the file says. A takeaway whose ref is missing (a row from an

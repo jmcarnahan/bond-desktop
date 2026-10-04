@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:bond_inbox/widgets/preview/preview_kind.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -28,6 +31,18 @@ void main() {
           name: 'Notes.txt',
           contentType: 'application/octet-stream',
         )),
+        PreviewKind.text,
+      );
+    });
+
+    test('an Internet shortcut is text whatever its type says', () {
+      // Gmail labels its Drive-link shortcut this way.
+      expect(
+        previewKindFor(ref(name: 'open.url', contentType: 'application/pdf')),
+        PreviewKind.text,
+      );
+      expect(
+        previewKindFor(ref(name: 'Deck.webloc', contentType: null)),
         PreviewKind.text,
       );
     });
@@ -236,6 +251,78 @@ void main() {
       expect(monoForName('Letter.txt'), isFalse);
       expect(monoForName('Letter.md'), isFalse);
       expect(monoForName(null), isFalse);
+    });
+  });
+
+  group('looksLikePdf', () {
+    test('reads the header within the first 1024 bytes', () {
+      expect(looksLikePdf(Uint8List.fromList(utf8.encode('%PDF-1.7\n'))), isTrue);
+      expect(
+        looksLikePdf(Uint8List.fromList(utf8.encode('\uFEFF  %PDF-1.4'))),
+        isTrue,
+      );
+      expect(
+        looksLikePdf(Uint8List.fromList(
+          utf8.encode('${' ' * 1024}%PDF-1.4'),
+        )),
+        isFalse,
+      );
+      expect(
+        looksLikePdf(Uint8List.fromList(
+          utf8.encode('[InternetShortcut]\nURL=https://docs.example.com/x'),
+        )),
+        isFalse,
+      );
+      expect(looksLikePdf(Uint8List(0)), isFalse);
+    });
+  });
+
+  group('shortcutUrlOf', () {
+    test('a .url names its URL= line, in any case and either line ending', () {
+      expect(
+        shortcutUrlOf(
+          'open.url',
+          '[InternetShortcut]\r\nIDList=\r\nurl = https://docs.example.com/x \r\n',
+        ),
+        'https://docs.example.com/x',
+      );
+    });
+
+    test('a .webloc names the string under its URL key', () {
+      expect(
+        shortcutUrlOf(
+          'Deck.webloc',
+          '<plist version="1.0"><dict><key>URL</key>\n<string>'
+              'https://docs.example.com/d?a=1&amp;b=2</string></dict></plist>',
+        ),
+        'https://docs.example.com/d?a=1&b=2',
+      );
+    });
+
+    test('anything but a web address names nothing', () {
+      for (final target in [
+        'javascript:alert(1)',
+        'file:///Applications/x.app',
+        'smb://fileserver/share',
+      ]) {
+        expect(
+          shortcutUrlOf('open.url', '[InternetShortcut]\nURL=$target\n'),
+          isNull,
+          reason: target,
+        );
+      }
+      // And a text file is not a shortcut, whatever it says.
+      expect(shortcutUrlOf('notes.txt', 'URL=https://docs.example.com/x'),
+          isNull);
+    });
+  });
+
+  group('textOfBytes', () {
+    test('words are words; a binary is not', () {
+      expect(textOfBytes(Uint8List.fromList(utf8.encode('a\tb\r\n'))),
+          'a\tb\r\n');
+      expect(textOfBytes(Uint8List.fromList([0x61, 0xff])), isNull);
+      expect(textOfBytes(Uint8List.fromList([0x61, 0x00, 0x62])), isNull);
     });
   });
 }
