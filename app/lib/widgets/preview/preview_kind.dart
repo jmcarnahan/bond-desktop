@@ -250,13 +250,15 @@ bool looksLikePdf(Uint8List bytes) {
 /// Strict UTF-8 with no control characters short of tab, newline, form feed
 /// and carriage return: a file that fails either is a binary that only looked
 /// like something else, and drawing it as text would be a screen of boxes.
+/// A leading byte-order mark is dropped: it is not a word.
 String? textOfBytes(Uint8List bytes) {
-  final String text;
+  String text;
   try {
     text = utf8.decode(bytes);
   } on FormatException {
     return null;
   }
+  if (text.startsWith(_bom)) text = text.substring(1);
   for (final unit in text.codeUnits) {
     if (unit < 0x20 && unit != 0x09 && unit != 0x0a && unit != 0x0c &&
         unit != 0x0d) {
@@ -273,11 +275,15 @@ String? textOfBytes(Uint8List bytes) {
 /// with the five XML entities decoded; a binary plist names nothing here.
 /// Either answer must be an http(s) address with a host ([webUriOf]) — a
 /// shortcut is a stranger's file, and a `file:` or `javascript:` one gets no
-/// link at all.
+/// link at all. Only the first [shortcutScanCap] characters are searched,
+/// after a leading byte-order mark: a shortcut is a few lines, and the file
+/// may be megabytes.
 String? shortcutUrlOf(String? name, String text) {
+  var head = text.startsWith(_bom) ? text.substring(1) : text;
+  if (head.length > shortcutScanCap) head = head.substring(0, shortcutScanCap);
   final String? raw = switch (extensionOf(name)) {
-    'url' => _iniUrl.firstMatch(text)?.group(1),
-    'webloc' => _plistUrl.firstMatch(text)?.group(1),
+    'url' => _iniUrl.firstMatch(head)?.group(1),
+    'webloc' => _plistUrl.firstMatch(head)?.group(1),
     _ => null,
   };
   if (raw == null) return null;
@@ -291,8 +297,15 @@ String? shortcutUrlOf(String? name, String text) {
   return webUriOf(url) == null ? null : url;
 }
 
+/// How much of a shortcut's text [shortcutUrlOf] searches for its address.
+const int shortcutScanCap = 64 * 1024;
+
+const String _bom = '\uFEFF';
+
+/// The rest of the line after `URL=`, trimmed by the caller. No lazy group
+/// and no trailing anchor: those backtrack over a long run of spaces.
 final RegExp _iniUrl = RegExp(
-  r'^[ \t]*URL[ \t]*=[ \t]*(\S.*?)[ \t]*$',
+  r'^[ \t]*URL[ \t]*=([^\r\n]*)',
   multiLine: true,
   caseSensitive: false,
 );

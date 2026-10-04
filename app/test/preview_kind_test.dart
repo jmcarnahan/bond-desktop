@@ -315,6 +315,23 @@ void main() {
       expect(shortcutUrlOf('notes.txt', 'URL=https://docs.example.com/x'),
           isNull);
     });
+
+    test('a long run of spaces on the URL= line is read promptly', () {
+      final clock = Stopwatch()..start();
+      expect(shortcutUrlOf('notes.url', 'URL=a${' ' * 200000}b'), isNull);
+      expect(clock.elapsedMilliseconds, lessThan(500),
+          reason: 'no backtracking over the spaces');
+    });
+
+    test('a byte-order mark before a bare URL= line is not in the way', () {
+      expect(
+        shortcutUrlOf('open.url', '\uFEFFURL=https://docs.example.com/x\r\n'),
+        'https://docs.example.com/x',
+      );
+      final bytes = Uint8List.fromList(
+          [0xef, 0xbb, 0xbf, ...utf8.encode('URL=https://docs.example.com/x')]);
+      expect(textOfBytes(bytes), 'URL=https://docs.example.com/x');
+    });
   });
 
   group('textOfBytes', () {

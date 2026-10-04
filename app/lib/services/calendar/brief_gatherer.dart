@@ -162,9 +162,9 @@ class BriefMaterial {
   /// the mail has no readable stamp.
   final String date;
 
-  /// The carrying mail's `received_at` stamp, for how long a file still
-  /// being read is waited for ([BriefGatherer.pendingMaxAge]); '' when the
-  /// mail has none. Not hashed.
+  /// The carrying mail's `received_at` stamp, one end of how long a file
+  /// still being read is waited for ([BriefGatherer.pendingMaxAge]); '' when
+  /// the mail has none. Not hashed.
   final String receivedAt;
 
   /// `attachments.text_status`: `pending`, `done` or `skipped`.
@@ -186,6 +186,11 @@ class BriefMaterial {
   /// is not `done`, or the gather was the planner's, which reads no text.
   final String text;
 
+  /// Whether [text] is a head: the extracted words ran past
+  /// [BriefGatherer.materialTextCap] and were cut. The task shows the
+  /// passages only for a file it did not show whole.
+  final bool textCut;
+
   const BriefMaterial({
     required this.source,
     required this.messageId,
@@ -200,35 +205,40 @@ class BriefMaterial {
     this.digest,
     this.passages = const [],
     this.text = '',
+    this.textCut = false,
   });
 
   BriefMaterial withPassages(List<String> passages) =>
       _copy(passages: passages);
 
-  BriefMaterial withText(String text) => _copy(text: text);
+  BriefMaterial withText(String text, {bool cut = false}) =>
+      _copy(text: text, textCut: cut);
 
-  BriefMaterial _copy({List<String>? passages, String? text}) => BriefMaterial(
-        source: source,
-        messageId: messageId,
-        attachmentId: attachmentId,
-        name: name,
-        contentType: contentType,
-        sender: sender,
-        date: date,
-        receivedAt: receivedAt,
-        textStatus: textStatus,
-        digestStatus: digestStatus,
-        digest: digest,
-        passages: passages ?? this.passages,
-        text: text ?? this.text,
-      );
+  BriefMaterial _copy({List<String>? passages, String? text, bool? textCut}) =>
+      BriefMaterial(
+          source: source,
+          messageId: messageId,
+          attachmentId: attachmentId,
+          name: name,
+          contentType: contentType,
+          sender: sender,
+          date: date,
+          receivedAt: receivedAt,
+          textStatus: textStatus,
+          digestStatus: digestStatus,
+          digest: digest,
+          passages: passages ?? this.passages,
+          text: text ?? this.text,
+          textCut: textCut ?? this.textCut,
+        );
 }
 
 /// One other person in a meeting, as the brief task is shown them: who they
 /// are as far as the mail and the calendar say, and what is open with them.
 ///
-/// The labels ([name], [org], [lastSubject]) are raw — the task fences each
-/// as it lays the block out; the two bodies ([lastWords], [openAsk]) arrive
+/// The labels ([name], [org], [lastSubject]) are raw — the task caps and
+/// fences each as it lays the block out (the org inside the name's fence:
+/// a domain's owner chose it); the two bodies ([lastWords], [openAsk]) arrive
 /// already inside [wrapUntrusted], the [BriefInput] rule. Never hashed:
 /// every field follows from inputs that are (the threads, the asks, the
 /// event), except [lastMet], and a past meeting ageing by a day is no reason
@@ -335,8 +345,10 @@ class BriefInput {
 
   /// Whether any of [materials] is still being read: its `text_status` is
   /// `pending` AND its `attachment_text` work row is `pending` or
-  /// `processing` AND its mail arrived less than
-  /// [BriefGatherer.pendingMaxAge] ago. A file whose text work gave up
+  /// `processing` AND it has been being read for less than
+  /// [BriefGatherer.pendingMaxAge]: measured from the later of its mail's
+  /// `received_at` and its text work row's `created_at`, so a file a fetch
+  /// lists on mail sent days ago is still waited for. A file whose text work gave up
   /// (the work row `error`, the attachment row left `pending`) or was never
   /// queued ([BriefEligible.unqueued]) is not being read, and an old one is
   /// not worth holding a brief for. The handler waits on it while the
@@ -400,9 +412,9 @@ final class BriefEligible extends BriefGather {
   /// The materials whose attachment row is `pending` with NO
   /// `attachment_text` work row at all — listed by a fetch that queued no
   /// text (`ensureBodiesFor`), so nothing will ever read them unless
-  /// somebody queues it. [young] is whether the carrying mail is inside
-  /// [BriefGatherer.pendingMaxAge], the same age rule
-  /// [BriefInput.materialsPending] reads. The handler queues them once.
+  /// somebody queues it. [young] is always true: the handler queues them
+  /// once, this run, so their reading starts now and the next gather times
+  /// it from the work row's `created_at` ([BriefInput.materialsPending]).
   final List<({BriefMaterial material, bool young})> unqueued;
 
   const BriefEligible(
@@ -480,8 +492,10 @@ const Set<String> _secondLevelSuffixes = {
 /// `sam@contoso.co.uk`. '' for a consumer mailbox ([briefConsumerDomains]),
 /// a Google calendar resource (`*.calendar.google.com`), an address written
 /// as an IP, or anything that is not an address; the tenant for Microsoft's
-/// `contoso.onmicrosoft.com`. Only letters, digits and hyphens ever come back, which is
-/// why the task can lay it out unfenced.
+/// `contoso.onmicrosoft.com` (and its `contoso.mail.onmicrosoft.com`
+/// routing domain). Only letters, digits and hyphens ever come back — but
+/// whoever owns a domain chose its words, so the task fences it with the
+/// name.
 String briefOrgOf(String address) {
   final at = address.lastIndexOf('@');
   if (at < 0) return '';
@@ -493,22 +507,27 @@ String briefOrgOf(String address) {
   ];
   if (labels.length < 2) return '';
   // An address written as an IP names no organisation.
-  if (labels.every((l) => RegExp(r'^[0-9]+$').hasMatch(l))) return '';
+  if (labels.every(_numericLabel.hasMatch)) return '';
   final twoPart = labels.length >= 3 &&
       labels.last.length == 2 &&
       _secondLevelSuffixes.contains(labels[labels.length - 2]);
   // Microsoft's tenant domain (`contoso.onmicrosoft.com`, a default M365
-  // address or a B2B guest) names the tenant in the label before it.
-  final tenant = labels.indexOf('onmicrosoft');
+  // address or a B2B guest) names the tenant in the label before it, or
+  // before the `mail` of its routing domain (`contoso.mail.onmicrosoft.com`).
+  var tenant = labels.indexOf('onmicrosoft');
+  if (tenant > 1 && labels[tenant - 1] == 'mail') tenant -= 1;
   if (tenant == 0) return '';
   final org = tenant > 0
       ? labels[tenant - 1]
       : labels[labels.length - (twoPart ? 3 : 2)];
   // A label the DNS letters could not spell (an unencoded IDN, a stray
-  // character) is not shown: the task writes this one unfenced.
-  if (!RegExp(r'^[a-z0-9-]+$').hasMatch(org)) return '';
+  // character) is not shown.
+  if (!_dnsLabel.hasMatch(org)) return '';
   return briefConsumerDomains.contains(org) ? '' : org;
 }
+
+final RegExp _numericLabel = RegExp(r'^[0-9]+$');
+final RegExp _dnsLabel = RegExp(r'^[a-z0-9-]+$');
 
 /// How far ahead a meeting is briefed (D6).
 const Duration briefHorizon = Duration(hours: 36);
@@ -730,9 +749,10 @@ class BriefGatherer {
   /// The most people the people block lists; the rest are counted.
   static const int maxPeople = 8;
 
-  /// How long after its mail arrived a file still being read is waited
-  /// for. A backstop: the work row's state is the rule, and a file whose
-  /// extraction neither finishes nor gives up in two hours is not going to.
+  /// How long a file still being read is waited for, from the later of its
+  /// mail's arrival and its text work's first ask. A backstop: the work
+  /// row's state is the rule, and a file whose extraction neither finishes
+  /// nor gives up in two hours is not going to.
   static const Duration pendingMaxAge = Duration(hours: 2);
 
   /// The work kind that reads a file's text (`AttachmentTextHandler.kind`).
@@ -1087,21 +1107,30 @@ class BriefGatherer {
     final unqueued = <({BriefMaterial material, bool young})>[];
     for (final m in materials) {
       if (m.textStatus != 'pending') continue;
-      final at = DateTime.tryParse(m.receivedAt);
-      // An unreadable stamp is never waited for: the age is the backstop,
-      // and a file with none cannot show it is young.
-      final young =
-          at != null && nowUtc.difference(at.toUtc()) < pendingMaxAge;
-      final work = await _store.workStatusOf(
+      final work = await _store.workRowOf(
           textKind, m.source, attachmentEntityId(m.messageId, m.attachmentId));
       if (work == null) {
-        unqueued.add((material: m, young: young));
-      } else if (young && (work == 'pending' || work == 'processing')) {
+        // Queued by the handler this run, so its reading starts now.
+        unqueued.add((material: m, young: true));
+        continue;
+      }
+      if (work.status != 'pending' && work.status != 'processing') continue;
+      // The age is how long the file has been BEING READ: from the later of
+      // its mail's arrival and its text work's first ask, so the owner's
+      // invite sent days ago, whose file a fetch only now listed, is still
+      // waited for. Unreadable stamps are never waited for: the age is the
+      // backstop, and a file with neither cannot show it is young.
+      final at = _later(DateTime.tryParse(m.receivedAt),
+          DateTime.tryParse(work.createdAt));
+      if (at != null && nowUtc.difference(at.toUtc()) < pendingMaxAge) {
         pending = true;
       }
     }
     return (pending: pending, unqueued: unqueued);
   }
+
+  static DateTime? _later(DateTime? a, DateTime? b) =>
+      a == null ? b : (b == null || a.isAfter(b) ? a : b);
 
   /// Queues the text work [materials] are owed, and says how many it asked
   /// for. `enqueueWork` is INSERT OR IGNORE, so a second ask changes
@@ -1132,7 +1161,10 @@ class BriefGatherer {
             .replaceAll(RegExp(r'[ \t]+'), ' ')
             .replaceAll(RegExp(r'\s*\n\s*\n\s*'), '\n\n')
             .trim();
-        out.add(text.isEmpty ? m : m.withText(capAtWord(text, materialTextCap)));
+        out.add(text.isEmpty
+            ? m
+            : m.withText(capAtWord(text, materialTextCap),
+                cut: text.length > materialTextCap));
       } on Object catch (e) {
         debugPrint('BriefGatherer: no material text (${e.runtimeType})');
         out.add(m);

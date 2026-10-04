@@ -31,9 +31,10 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// every skipped row it is gathered on every pass, and queued when the text
 /// lands and moves the hash, or when the light gather says nothing is being
 /// read any more though the hash did not move (the text work gave up, or the
-/// mail aged past [BriefGatherer.pendingMaxAge]); and once the meeting comes
-/// inside the grace it is queued on the same hash, once, so it is briefed
-/// with what is read rather than waiting on a file that may never finish.
+/// file has been read for longer than [BriefGatherer.pendingMaxAge]); and
+/// once the meeting comes inside the grace it is queued on the same hash,
+/// once, so it is briefed with what is read rather than waiting on a file
+/// that may never finish.
 ///
 /// **What it writes itself.** A meeting found ineligible for a reason that
 /// can change while it stays on the calendar ([recorded]: no recent mail,
@@ -195,7 +196,7 @@ class BriefPlanner {
           // meeting waiting on its files is briefed once it is inside the
           // grace, on whatever is read — or once nothing is being read any
           // more, which can happen without the hash moving (the text work
-          // gave up, or the mail aged past the wait).
+          // gave up, or the file has been read past the wait).
           final start = briefStartOf(e, zone);
           final waiting = stored?.skipReason ==
               BriefIneligibility.materialsPending.wire;

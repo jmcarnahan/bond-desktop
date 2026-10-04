@@ -160,6 +160,11 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   Future<WorkbookTables>? _workbookLoad;
   Future<String>? _pdfTextLoad;
 
+  /// What the loaded bytes read as — their words and the shortcut address in
+  /// them — worked out once per bytes, never on every build: the decode is
+  /// a full pass over up to 10 MB of a stranger's file.
+  ({Uint8List data, String? words, String? url})? _read;
+
   /// OneDrive's rendering of a chat's shared document, for the one kind that
   /// has a picture but no bytes to draw it from.
   Future<Uint8List?>? _thumbLoad;
@@ -199,6 +204,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
 
     _workbookLoad = null;
     _pdfTextLoad = null;
+    _read = null;
     _thumbLoad = null;
     // Cleared here for EVERY attachment, not only inside `_startBytes`: a
     // document or a link needs no bytes, so a refusal remembered from the
@@ -710,6 +716,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
           _bytesLoad = _startBytes();
           _workbookLoad = null;
           _pdfTextLoad = null;
+          _read = null;
           _ensureDerived();
         }),
         child: const Text('Try again'),
@@ -834,11 +841,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
                 renderer: widget.engines.pdf,
               ),
       PreviewKind.sheet => _sheetBody(asText: text),
-      PreviewKind.text => _shortcutRow(
-        // Malformed bytes are shown as best they can be rather than thrown
-        // over: a log with one bad byte in it is still a log.
-        utf8.decode(data, allowMalformed: true),
-      ),
+      PreviewKind.text => _textOfData(data),
       // Never reached — the ladder above answers these five before any bytes
       // are asked for.
       PreviewKind.html ||
@@ -849,9 +852,32 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     };
   }
 
+  /// [data]'s words and the shortcut address in them, from [_read] when it
+  /// was worked out for these same bytes. [strict] is [textOfBytes] (null
+  /// for a binary); otherwise malformed bytes are shown as best they can be
+  /// rather than thrown over: a log with one bad byte in it is still a log.
+  ({String? words, String? url}) _readOf(Uint8List data,
+      {required bool strict}) {
+    final read = _read;
+    if (read != null && identical(read.data, data)) {
+      return (words: read.words, url: read.url);
+    }
+    final words =
+        strict ? textOfBytes(data) : utf8.decode(data, allowMalformed: true);
+    final url =
+        words == null ? null : shortcutUrlOf(widget.attachment.name, words);
+    _read = (data: data, words: words, url: url);
+    return (words: words, url: url);
+  }
+
+  Widget _textOfData(Uint8List data) {
+    final (:words, :url) = _readOf(data, strict: false);
+    return _shortcutRow(words ?? '', url);
+  }
+
   /// A file the connector called a PDF whose bytes are not one.
   Widget _notPdfBody(Uint8List data) {
-    final words = textOfBytes(data);
+    final (:words, :url) = _readOf(data, strict: true);
     if (words == null) {
       return UnsupportedPreview(
         key: AttachmentPreviewPanel.notPdfKey,
@@ -863,7 +889,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     }
     return KeyedSubtree(
       key: AttachmentPreviewPanel.notPdfKey,
-      child: _shortcutRow(words),
+      child: _shortcutRow(words, url),
     );
   }
 
@@ -875,14 +901,14 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   /// file itself, which Open still refuses ([openRefused]: Windows and macOS
   /// both RUN a shortcut, and it can name anything). [shortcutUrlOf] answers
   /// null for anything but http(s), so a `file:` shortcut draws its text and
-  /// no link.
-  Widget _shortcutRow(String words) {
+  /// no link. [url] is its answer for [words], read once per bytes
+  /// ([_readOf]).
+  Widget _shortcutRow(String words, String? url) {
     final body = TextPreview(
       text: words,
       mono: monoForName(widget.attachment.name),
       note: _textNote,
     );
-    final url = shortcutUrlOf(widget.attachment.name, words);
     final openLink = widget.onOpenLink;
     if (url == null || openLink == null) return body;
     return Column(

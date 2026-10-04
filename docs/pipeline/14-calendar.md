@@ -1055,17 +1055,20 @@ the two gathers hash alike:
   raw, fenced by the task as `material_text`; a store error costs that file
   its text, never the brief. **Pending**: `BriefInput.materialsPending` is
   true when a material's `text_status` is `pending` AND its `attachment_text`
-  work row (`workStatusOf('attachment_text', source,
+  work row (`workRowOf('attachment_text', source,
   attachmentEntityId(messageId, attachmentId))`) is `pending` or
-  `processing` AND its mail arrived less than 2 hours ago
-  (`BriefGatherer.pendingMaxAge`, from `received_at` against the gather's
-  `now`). There is no `error` `text_status`: a text work row that gave up
+  `processing` AND the file has been being read for less than 2 hours
+  (`BriefGatherer.pendingMaxAge`, from the LATER of the mail's `received_at`
+  and the work row's `created_at`, against the gather's `now` — so the
+  owner's invite sent days ago, whose file the handler's fetch only now
+  listed and queued, is still waited for; `created_at` is fixed at the first
+  ask). There is no `error` `text_status`: a text work row that gave up
   (`error` after its attempts) leaves the attachment row `pending` for good,
   so the work row is what says a file is still being read, and the age is
   the backstop. A `pending` file with NO work row at all — listed by
   `ensureBodiesFor`, which queues no text — is reported in
-  `BriefEligible.unqueued` (with whether its mail is young enough to wait
-  for) rather than counted. Both gathers compute both from the stored states
+  `BriefEligible.unqueued` (always young: the handler queues it this run,
+  so its reading starts now) rather than counted. Both gathers compute both from the stored states
   and the work rows. **Passages**: with an embeddings client
   (`briefGathererProvider` passes the retriever's), and when
   `hasAttachmentChunks` says a file's attachment id has chunks, the meeting's
@@ -1097,7 +1100,8 @@ the two gathers hash alike:
   "+N more". Each: the invite's name (else the address), the
   organisation (`briefOrgOf`: the label before the domain's public suffix —
   `fabrikam` for `mail.fabrikam.com`, `contoso` for `contoso.co.uk`, the
-  tenant `contoso` for `contoso.onmicrosoft.com` — and ''
+  tenant `contoso` for `contoso.onmicrosoft.com` and for its
+  `contoso.mail.onmicrosoft.com` routing domain — and ''
   for a consumer mailbox (gmail, googlemail, outlook, hotmail, live, msn,
   yahoo, icloud, me, mac, proton, protonmail, aol), a
   `*.calendar.google.com` resource, an address written as an IP, or a label
@@ -1154,16 +1158,19 @@ The user message opens with `Now: <absolute local time>` and the meeting line,
 both absolute (`briefWhenLine`: "Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All
 day · Wed 7 Oct 2026"), the fenced attendees and the last-met line, then
 **People, numbered, the organiser first:** — per person `[n]` and the fenced
-name, then the app's words outside the fence: the organisation (or "no
-organisation known"), `organiser|attendee` and the answer; then, only when
-present, their "Last met …" line, "in N of the threads", "last wrote <ago>:"
-with the fenced subject (capped at 120, `labelCap`) and the fenced last
-words, and "open ask: yes (see Open asks)" — the ask itself is said once, in
+`name · organisation` (the organisation is a DNS label whoever owns the
+domain chose, so it is untrusted text like the name), then the app's words
+outside the fence: "no organisation known" when there is none,
+`organiser|attendee` and the answer; then, only when present, their "Last
+met …" line, "in N of the threads", "last wrote <ago>:" with the fenced
+subject and the fenced last words, and "open ask: yes (see Open asks)" — the ask itself is said once, in
 "Open asks", not repeated here; "+N more" past eight. Then the numbered threads, each with its
 last message as an age from `now` (`briefAgo`: "3 hours ago", "2 days ago"),
-and each section. After the storylines and before the invite, **Materials
+and each section. Every label is capped at 120 characters (`labelCap`)
+before it is fenced: file names, thread and last subjects, the meeting's
+subject, storyline titles, attendee and people names. After the storylines and before the invite, **Materials
 sent ahead, numbered ("you" is the owner):** — per material `[n] (<state>)`
-and a fenced `name · sender · day` (the name capped at 120, `labelCap`), then
+and a fenced `name · sender · day`, then
 its fenced digest (summary, then its facts one per line), its text fenced as
 `material_text`, and its pre-fenced passages. Digests, text and passages
 share a budget of 10000 (`materialsBudget`), fences included, where a block
@@ -1175,11 +1182,13 @@ material first: its digest, then its text whole when it fits, else — while
 more than 1000 is left (`minTextHead`) — its head cut at a word to what is
 left (a partial head beats "not shown"). Round 2: the passages, with what is
 left, for every material whose text was not written whole and uncut (a text
-under `materialTextCap − 50` written whole is the whole document, and its
-passages would be duplicates). Each block is tried on its own, so a later,
+written whole that the gatherer did not cut — `BriefMaterial.textCut`, set
+when the squeezed words ran past `materialTextCap` — is the whole document,
+and its passages would be duplicates). Each block is tried on its own, so a later,
 smaller one may still fit. A digest at its caps is about 1.7k, so one file's
-digest and whole 6000-character text, plus a second's digest and the head of
-its text, fit; a third is named only. The state word is the app's and
+digest and whole 6000-character text fit, plus a second's digest, and the
+head of its text when the digests are short of their caps; a third is named
+only. The state word is the app's and
 sits OUTSIDE the fence, so a file name cannot pose as one: `read` only when a
 digest, text or passage was actually written for that file, `unread` when its
 text was never read, `not shown` when it was read but nothing of it is in the
@@ -1193,13 +1202,14 @@ about 3.4k tokens), a realistic dense answer about 8k characters (2.0–2.1k
 tokens), and a truncated answer is invalid JSON — a failed brief retried on
 the same inputs — so the budget sits over the realistic answer, and a test
 holds the caps' sum / 4 within 1.2 × `maxTokens`. Worst case in, measured by
-the size guard in `meeting_brief_task_test` (every cap full, 120-character
-subjects): about 35.0k characters with the 3.9k system prompt — six threads
-(~9.3k with their two 600-character snippets), four asks (~1.9k), two
-storylines (~1.2k), materials 10k plus six name lines (~11.1k), eight people
-(~5.7k), the invite 0.7k and the headers — about 11.7k tokens at three
-characters a token, plus the 2.7k answer: about 14.4k, inside the 16384
-context. The guard holds it at 35000.
+the size guard in `meeting_brief_task_test` (every cap full, every label 300
+characters of `&<>`, so each costs its full escaped 120): about 37.0k
+characters (37012) with the 3.9k system prompt — six threads with their two
+600-character snippets, four asks, two storylines, the materials' 10k plus
+six name lines, eight people, fifteen attendee names, the invite 0.7k and
+the headers — about 12.3k tokens at three characters a token, plus the 2.7k
+answer: about 15.0k, inside the 16384 context. The guard holds it at 37800
+(the measurement plus 2%).
 
 The schema (v3) is flat and in THIS order, which is the order the grammar
 makes the model write: `evidence` (one sentence — what the meeting is for and
@@ -1234,10 +1244,12 @@ for the faces that still draw one.
 `calendar`, entity = event id) re-reads the event (missing → skipped
 `gone`), gathers (ineligible → skipped with its word, no call) — and when
 the gather reports unlisted files and a `fetchDetails` closure is wired
-(the provider's: the mail sync's `ensureMessageBody` per id, which lists the
-files AND queues their `attachment_text`), fetches them ONCE and gathers
-again, never looping; a failed fetch is traced by its type and the first
-gather stands — and returns
+(the provider's: the mail sync's `ensureMessageBody` per id through
+`MeetingBriefHandler.fetchEach`, which lists the files AND queues their
+`attachment_text`), fetches them ONCE and gathers again, never looping; a
+failed id is traced by its type and costs only itself, so the meeting is
+gathered again whenever any fetch completed, and the first gather stands
+only when none did — and returns
 without a call when the stored brief is `ready` with the same hash — unless
 the row's payload is `{"asked":true}` (`BriefRequest`, Regenerate's), which
 always writes. Every one of those decisions is made on the LIGHT gather
@@ -1247,8 +1259,8 @@ passages) runs only once a call will be made, so a waiting or unchanged
 brief costs store reads and nothing more. **Queueing the unqueued**: when
 the gather reports `unqueued` files (listed, `pending`, no `attachment_text`
 row), the handler `enqueueWork`s their text once (INSERT OR IGNORE, so a
-second ask changes nothing; activity `queued_text: n`), and those whose mail
-is young enough count as pending for this run. **Waiting for the files**:
+second ask changes nothing; activity `queued_text: n`), and they count as
+pending for this run, whatever the mail's age: their reading starts now. **Waiting for the files**:
 after the (possibly second) gather,
 when a material is still pending AND no ready brief is stored AND the meeting
 starts more than 20 minutes from now (`pendingGrace`), it writes `skipped`
@@ -1269,8 +1281,9 @@ rows decode (above). The activity detail carries `threads`, `asks`,
 `materials`, `questions` and `people` counts and `text_chars` (the
 characters of the materials' text the message actually carried —
 `MeetingBriefTask.materialTextCharsWritten`, the same spend as the message —
-not what was gathered), `queued_text` when it queued any, and `fetched` (how many unlisted messages it fetched)
-when it fetched any. An empty headline is an `LlmFormatException`.
+not what was gathered), `queued_text` when it queued any, and `fetched`
+(how many unlisted messages the fetch completed, failures not counted) when
+it asked for any. An empty headline is an `LlmFormatException`.
 A dead server (`LlmUnavailableException` and its subclasses) propagates and
 PARKS the kind like a draft, writing nothing; any other failure writes
 `failed` and rethrows, so the worker's retry-once-then-error policy applies.
@@ -1333,8 +1346,8 @@ way included), and walks the meetings soonest first, timed before all-day:
   keeps the old hash) is not queued again until the brief ages or the inputs
   move again. A `materials_pending` row is queued when the text lands (the
   hash moves); when the light gather says nothing is being read any more
-  though the hash did not move (the text work gave up, or the mail aged past
-  2 hours), once per stored row (`_endedFor`, in memory, keyed by its
+  though the hash did not move (the text work gave up, or the file has been
+  read for longer than 2 hours), once per stored row (`_endedFor`, in memory, keyed by its
   `generated_at`, so a handler that throws before writing does not buy a
   queue every pass); and once more on the same hash when the meeting comes
   inside the 20-minute grace, so it is briefed with what is read rather than

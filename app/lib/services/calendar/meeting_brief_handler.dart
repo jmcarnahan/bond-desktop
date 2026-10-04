@@ -87,10 +87,31 @@ class MeetingBriefHandler extends WorkHandler {
 
   /// Fetches the detail of mail messages whose files nobody has listed yet,
   /// listing them and queueing their text — the sync's body fetch, handed in
-  /// as a closure because `services/` never reads a provider. Null (tests,
-  /// or no sync wired) briefs from what is listed.
-  final Future<void> Function(String source, List<String> messageIds)?
+  /// as a closure because `services/` never reads a provider — and says how
+  /// many it fetched. It is expected never to throw ([fetchEach] keeps one
+  /// failed id from costing the rest). Null (tests, or no sync wired)
+  /// briefs from what is listed.
+  final Future<int> Function(String source, List<String> messageIds)?
       _fetchDetails;
+
+  /// Runs [one] for each of [ids], a failure costing only its own id, and
+  /// says how many completed: the shape [_fetchDetails] is built on, so a
+  /// 502 on the second invite still leaves the first's files listed and
+  /// gathered again.
+  static Future<int> fetchEach(
+      List<String> ids, Future<void> Function(String id) one) async {
+    var fetched = 0;
+    for (final id in ids) {
+      try {
+        await one(id);
+        fetched++;
+      } on Object catch (e) {
+        debugPrint('MeetingBriefHandler: no detail for one message '
+            '(${e.runtimeType})');
+      }
+    }
+    return fetched;
+  }
 
   /// How close to its start a meeting is briefed with whatever of its files
   /// has been read, rather than waiting for the rest.
@@ -138,8 +159,10 @@ class MeetingBriefHandler extends WorkHandler {
     // triaged — is fetched ONCE and the meeting gathered again, so this
     // brief already names the file. Its text and digest arrive later through
     // the attachment lane and move the hash. Never a loop: whatever the
-    // second gather finds is what the brief is written from, and a failed
-    // fetch is the first gather's answer.
+    // second gather finds is what the brief is written from. One failed id
+    // costs only itself; the meeting is gathered again whenever any fetch
+    // completed, and only a fetch that fetched nothing keeps the first
+    // gather's answer.
     final fetch = _fetchDetails;
     if (fetch != null &&
         gathered is BriefEligible &&
@@ -148,14 +171,18 @@ class MeetingBriefHandler extends WorkHandler {
       for (final u in gathered.unlisted) {
         (bySource[u.source] ??= []).add(u.messageId);
       }
-      try {
-        for (final MapEntry(key: source, value: ids) in bySource.entries) {
-          await fetch(source, ids);
+      var fetched = 0;
+      for (final MapEntry(key: source, value: ids) in bySource.entries) {
+        try {
+          fetched += await fetch(source, ids);
+        } on Object catch (e) {
+          debugPrint(
+              'MeetingBriefHandler: no detail fetch (${e.runtimeType})');
         }
-        _log.note({'fetched': gathered.unlisted.length});
+      }
+      _log.note({'fetched': fetched});
+      if (fetched > 0) {
         gathered = await _gatherer.gather(event, now: now, passages: false);
-      } on Object catch (e) {
-        debugPrint('MeetingBriefHandler: no detail fetch (${e.runtimeType})');
       }
     }
     final BriefInput light;
@@ -172,7 +199,8 @@ class MeetingBriefHandler extends WorkHandler {
     // A file listed with no text work at all (`ensureBodiesFor` lists files
     // and queues nothing) would stay `pending` for good. It is queued here,
     // once — the queue ignores a second ask — and counts as being read for
-    // this run when its mail is young enough to wait for.
+    // this run: its reading starts now, whatever the mail's age, and the next
+    // gather times it from the work row's `created_at`.
     if (unqueued.isNotEmpty) {
       final queued =
           await _gatherer.queueText([for (final u in unqueued) u.material]);

@@ -23,7 +23,9 @@ import 'time_format.dart';
 /// but the one sentence that says the files sent ahead are still being read
 /// (the event panel is where the other states say why). The panel draws the
 /// headline, the same body in the same order with every point, and the
-/// Generated line.
+/// Generated line. The compact briefing is [BondType.body] on purpose,
+/// larger than the row's glance above it: the catch-up is read, the glance
+/// is scanned.
 ///
 /// The states, in the order they win:
 /// 0. declined or cancelled ([eligible] false with that reason) — even over

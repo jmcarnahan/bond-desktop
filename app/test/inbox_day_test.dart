@@ -846,9 +846,10 @@ void main() {
     testWidgets('a meeting waiting for its files says so in the agenda; one '
         'that has started does not', (tester) async {
       final nowUtc = DateTime.now().toUtc();
-      // The last minute of today, so it is ahead of the clock and on
-      // today's pane at any hour but that minute.
-      final ahead = la.localDateTime(la.dateOf(nowUtc), 23, 59).toUtc();
+      // Tomorrow at 10:00: ahead of the clock at any hour, on tomorrow's
+      // pane.
+      final ahead =
+          la.localDateTime(la.dateOf(nowUtc).addDays(1), 10, 0).toUtc();
       final started = nowUtc.subtract(const Duration(minutes: 10));
       CalendarEvent meeting(String id, String subject, DateTime start) =>
           CalendarEvent(
@@ -882,14 +883,17 @@ void main() {
 
       await tester.tap(find.text('Day'));
       await pumps(tester);
+      expect(find.byKey(DayPane.briefNoteKeyFor('evt-started')), findsNothing,
+          reason: 'no brief is coming for a meeting under way');
+
+      await tester.tap(find.textContaining(RegExp(r'^Tomorrow · ')).first);
+      await pumps(tester);
       final note = find.byKey(DayPane.briefNoteKeyFor('evt-pending'));
       expect(note, findsOneWidget);
       expect(tester.widget<Text>(note).data,
           'Reading the files sent ahead — brief coming.');
       expect(find.byKey(DayPane.briefToggleKeyFor('evt-pending')), findsNothing);
       expect(find.byKey(DayPane.briefTeaserKeyFor('evt-pending')), findsNothing);
-      expect(find.byKey(DayPane.briefNoteKeyFor('evt-started')), findsNothing,
-          reason: 'no brief is coming for a meeting under way');
     });
 
     /// A meeting under way now (on today's pane at any hour, and still ahead

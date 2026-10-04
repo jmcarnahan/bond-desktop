@@ -561,6 +561,31 @@ void main() {
       expect(await plan(after: const Duration(minutes: 3)), 0);
     });
 
+    test('the wait ends once the work row is two hours old', () async {
+      await seedPendingDeck();
+      await calendar.upsertEvents([
+        meeting('evt-1', startsIn: const Duration(hours: 5)),
+      ], syncRun: 'run-1');
+      expect(await plan(), 1, reason: 'no row yet');
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'ineligible:materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+
+      // The mail is past two hours by now, but its text work was asked for
+      // only an hour after it arrived: still being read.
+      expect(await plan(after: const Duration(minutes: 110)), 0,
+          reason: 'the work row is not two hours old yet');
+      // The work row passes two hours with the text still pending: the hash
+      // has not moved, and the wait is over.
+      expect(await plan(after: const Duration(minutes: 125)), 1);
+      expect(await status('evt-1'), 'pending');
+    });
+
     test('a cleared table gathers at once', () async {
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
       await readyBrief('evt-1', hash: await currentHash('evt-1'));

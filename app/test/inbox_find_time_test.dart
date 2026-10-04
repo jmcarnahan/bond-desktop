@@ -942,6 +942,8 @@ void main() {
       // week's Monday–Sunday (`findTimeWindowLabel`). On a Sunday, tomorrow
       // is next week's Monday, so Next week covers the Monday AFTER that and
       // the pill names the date instead — the same rule, from the real clock.
+      // The rule itself is pinned on fixed dates in `find_time_search_test`
+      // ('a week pill whose Friday has gone says the date it now means').
       final then = day.addDays(7);
       final nextMonday = today.addDays(1 - today.weekday).addDays(7);
       final inNextWeek = !then.isBefore(nextMonday) &&

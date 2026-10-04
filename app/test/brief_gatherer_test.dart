@@ -768,7 +768,13 @@ void main() {
       expect(text.length, lessThanOrEqualTo(BriefGatherer.materialTextCap));
       expect(text.length, greaterThan(BriefGatherer.materialTextCap - 5));
       expect(text, endsWith('word'), reason: 'cut at a word');
+      expect(input.materials.single.textCut, isTrue);
       expect(BriefGatherer.materialTextCap, 6000);
+
+      // A short file is whole, and says so.
+      await store.setAttachmentText('email', 'm-c-1', 'a-deck',
+          status: 'done', text: 'Tier B is 12k.');
+      expect((await eligible(meeting())).materials.single.textCut, isFalse);
 
       final light =
           await gatherer.gather(meeting(), now: now, passages: false)
@@ -822,11 +828,19 @@ void main() {
       expect(g.unqueued, isEmpty, reason: 'it was queued; it gave up');
     });
 
-    test('a file older than two hours is not waited for', () async {
+    test('a file read for more than two hours is not waited for', () async {
       await conversation('c-1', ago: const Duration(hours: 3));
       await message('m-c-1', 'c-1', ago: const Duration(hours: 3));
       await attach('m-c-1', 'a-deck', name: 'deck.pptx');
       await queueText('m-c-1', 'a-deck');
+      // Mail three hours old whose text work was only just asked for: the
+      // reading is young, so it is waited for.
+      expect((await eligible(meeting())).materialsPending, isTrue);
+      // Its text work asked for three hours ago as well: not any more.
+      await db.customStatement(
+          "UPDATE work_items SET created_at = ? "
+          "WHERE task_kind = 'attachment_text'",
+          [stampAgo(const Duration(hours: 3))]);
       expect((await eligible(meeting())).materialsPending, isFalse);
       expect(BriefGatherer.pendingMaxAge, const Duration(hours: 2));
 
@@ -1129,14 +1143,12 @@ void main() {
         ),
       ], syncRun: 'run-1');
 
-      // A consumer host, joined here so no literal reads as an address.
-      const gmail = 'gmail.com';
       final input = await eligible(meeting(
         organizerAddress: dana,
         attendees: const [
           Attendee(name: 'Me', address: owner),
           Attendee(name: 'Dana Lee', address: dana, response: 'accepted'),
-          Attendee(name: 'Kim', address: 'kim@$gmail'),
+          Attendee(name: 'Kim', address: 'kim@gmail.example'),
         ],
       ));
       expect([for (final p in input.people) p.name], ['Dana Lee', 'Kim'],
@@ -1222,22 +1234,24 @@ void main() {
       expect(briefOrgOf('dana@mail.fabrikam.com'), 'fabrikam');
       expect(briefOrgOf('sam@contoso.co.uk'), 'contoso');
       expect(briefOrgOf('sam@eu.contoso.com.au'), 'contoso');
-      // The consumer services are named as HOSTS and joined to a local part
-      // here, so no literal in the repo reads as somebody's address.
-      for (final host in [
-        'gmail.com',
-        'googlemail.com',
-        'outlook.com',
-        'hotmail.co.uk',
-        'live.com',
-        'yahoo.com',
-        'icloud.com',
-        'me.com',
-        'proton.me',
-        'protonmail.com',
-        'aol.com',
+      // M365's routing domain names the tenant before its `mail`.
+      expect(briefOrgOf('x@contoso.mail.onmicrosoft.com'), 'contoso');
+      // Only the org label is read, so `.example` hosts reach the consumer
+      // branch as the real ones do.
+      for (final address in [
+        'a@gmail.example',
+        'a@googlemail.example',
+        'a@outlook.example',
+        'a@hotmail.example',
+        'a@live.example',
+        'a@yahoo.example',
+        'a@icloud.example',
+        'a@me.example',
+        'a@proton.example',
+        'a@protonmail.example',
+        'a@aol.example',
       ]) {
-        expect(briefOrgOf('a@$host'), '', reason: host);
+        expect(briefOrgOf(address), '', reason: address);
       }
       const googleCalendar = 'group.calendar.google.com';
       expect(briefOrgOf('c_123@$googleCalendar'), '');

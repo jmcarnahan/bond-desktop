@@ -3565,6 +3565,31 @@ RETURNING *
     return rows.isEmpty ? null : rows.first.data['status'] as String?;
   }
 
+  /// One work row's status and the `created_at` it was queued under, or null
+  /// when the queue has never held it.
+  ///
+  /// The brief's wait reads it: how long a file has been BEING READ is
+  /// measured from the row's `created_at`, which [enqueueWork] fixes at the
+  /// first ask and a second ask leaves alone.
+  Future<({String status, String createdAt})?> workRowOf(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT status, created_at FROM work_items '
+          'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+          variables: _args([kind, source, entityId]),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    return (
+      status: rows.first.data['status'] as String,
+      createdAt: rows.first.data['created_at'] as String,
+    );
+  }
+
   /// Takes one kind's PENDING rows for [entityId] off the queue, and says how
   /// many it deleted.
   ///

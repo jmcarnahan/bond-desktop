@@ -288,6 +288,7 @@ void main() {
         ]);
         await store.setAttachmentText('email', 'm-1', 'a-quote',
             status: 'done', text: 'The quote.');
+        return ids.length;
       },
     );
 
@@ -337,6 +338,105 @@ void main() {
     final row = (await calendar.brief('evt-1'))!;
     expect(row.status, EventBrief.ready);
     expect(row.brief!.materialRefs, isEmpty);
+  });
+
+  test('one failed fetch costs only its own message: the other\'s file is '
+      'gathered again and briefed', () async {
+    await seedEvent();
+    await seedThread();
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm-2',
+      'conversation_key': 'c-1',
+      'direction': 'inbound',
+      'from_name': 'Dana',
+      'from_address': dana,
+      'received_at': MessageStore.isoStamp(
+          now.subtract(const Duration(minutes: 90))),
+      'body_text': 'And the terms.',
+      'triage_status': 'done',
+      'has_attachments': 1,
+    });
+    await flagUnlisted();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+      // The provider's shape: one id at a time through `fetchEach`, and
+      // m-2's fetch fails as a 502 would.
+      fetchDetails: (source, ids) =>
+          MeetingBriefHandler.fetchEach(ids, (id) async {
+        if (id == 'm-2') throw StateError('Bad gateway');
+        await store.upsertAttachments('email', id, [
+          {
+            'attachment_id': 'a-quote',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'quote.pdf',
+            'content_type': 'application/pdf',
+            'is_inline': 0,
+          },
+        ]);
+        await store.setAttachmentText('email', id, 'a-quote',
+            status: 'done', text: 'The quote.');
+      }),
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect(llm.userMessages.single, contains('quote.pdf'),
+        reason: 'm-1 fetched, so the meeting was gathered again');
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    expect(jsonDecode(rows.single['detail_json'] as String),
+        containsPair('fetched', 1));
+  });
+
+  test('an invite sent two days ago whose file is only now being read is '
+      'waited for', () async {
+    await seedEvent();
+    // The owner's own invite, two days old: well past the two-hour backstop
+    // if it were measured from the mail.
+    await seedThread(ago: const Duration(days: 2));
+    await flagUnlisted();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      clock: () => now,
+      // What `ensureMessageBody` does: lists the file and queues its text,
+      // which nothing has read yet.
+      fetchDetails: (source, ids) async {
+        await store.upsertAttachments('email', 'm-1', [
+          {
+            'attachment_id': 'a-pricing',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'pricing.pdf',
+            'content_type': 'application/pdf',
+            'is_inline': 0,
+          },
+        ]);
+        await store.enqueueWork('attachment_text', 'email',
+            attachmentEntityId('m-1', 'a-pricing'));
+        return ids.length;
+      },
+    );
+
+    await briefs.run(item('evt-1'));
+
+    expect(llm.calls, isEmpty);
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.skipped);
+    expect(row.skipReason, 'materials_pending');
   });
 
   group('waiting for the files', () {

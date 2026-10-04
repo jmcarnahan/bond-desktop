@@ -102,20 +102,38 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
   /// or a financial deck runs near two characters a token, and at 14k raw
   /// characters such a block overflowed the 16k context. A digest at its
   /// caps is about 1.7k, so one file's digest and whole text (6000,
-  /// [BriefGatherer.materialTextCap]) plus a second's digest and the head
-  /// of its text fit, and a third is named. Worst case, the whole prompt is
-  /// about 33.5k characters (the size guard in `meeting_brief_task_test`
-  /// pins it): about 11.2k tokens at three characters a token, plus the
-  /// answer's [maxTokens], inside 16384.
+  /// [BriefGatherer.materialTextCap]) fit, plus a second's digest, and the
+  /// head of its text when the digests are short of their caps; a third is
+  /// named. Worst case, the whole prompt is about 37.0k characters (the
+  /// size guard in `meeting_brief_task_test` pins it): about 12.3k tokens
+  /// at three characters a token, plus the answer's [maxTokens], inside
+  /// 16384.
   static const int materialsBudget = 10000;
 
   /// A text that does not fit whole is written as its head while more than
   /// this much budget is left: a partial head beats "not shown".
   static const int minTextHead = 1000;
 
-  /// File names and a person's last subject in the user message: a 255-char
-  /// file name times six is budget the materials could use.
+  /// Every label in the user message — file names, thread and last
+  /// subjects, the meeting's subject, storyline titles, attendee and people
+  /// names — as the fence WRITES it ([_label]): a 255-char file name times
+  /// six is budget the materials could use.
   static const int labelCap = 120;
+
+  /// [s] cut so its fenced form is at most [labelCap] characters: the fence
+  /// writes `&` as five and `<` and `>` as four, so an `&`-dense subject cut
+  /// by length alone would cost four times a plain one.
+  static String _label(String s) {
+    var cost = 0;
+    var end = 0;
+    for (var i = 0; i < s.length; i++) {
+      final unit = s.codeUnitAt(i);
+      cost += unit == 0x26 ? 5 : (unit == 0x3c || unit == 0x3e ? 4 : 1);
+      if (cost > labelCap) break;
+      end = i + 1;
+    }
+    return capRunes(s, end);
+  }
 
   @override
   String get systemPrompt => _meetingBriefSystemPrompt;
@@ -266,14 +284,17 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
   @override
   String buildUserMessage(BriefInput input) {
     final e = input.event;
-    final subject = e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim();
+    final subject = e.subject.trim().isEmpty
+        ? '(no subject)'
+        : _label(e.subject.trim());
     final buffer = StringBuffer();
     if (input.nowLocal.isNotEmpty) buffer.writeln('Now: ${input.nowLocal}');
     buffer
       ..writeln('Meeting: ${input.whenLocal}')
       ..writeln(wrapUntrusted('meeting_subject', subject))
       ..writeln('With:')
-      ..writeln(wrapUntrusted('attendees', input.attendees.join(', ')));
+      ..writeln(wrapUntrusted(
+          'attendees', [for (final a in input.attendees) _label(a)].join(', ')));
     if (input.lastMet != null) buffer.writeln('${input.lastMet}.');
 
     if (input.people.isNotEmpty) {
@@ -282,11 +303,16 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
         ..writeln('People, numbered, the organiser first:');
       for (var i = 0; i < input.people.length; i++) {
         final p = input.people[i];
-        // The organisation, role and answer are the app's words (the org is
-        // a DNS label, letters and digits only), so they sit outside the
-        // fence; the name is the invite's and is fenced.
-        buffer.writeln('[${i + 1}] ${wrapUntrusted('person_name', p.name)} · '
-            '${p.org.isEmpty ? 'no organisation known' : p.org} · '
+        // The name is the invite's and the org a DNS label whoever owns the
+        // domain chose (`x@ignore-prior-rules.example`), so both go in the
+        // fence; "no organisation known", the role and the answer are the
+        // app's words and sit outside it.
+        final who = [
+          _label(p.name),
+          if (p.org.isNotEmpty) p.org,
+        ].join(' · ');
+        buffer.writeln('[${i + 1}] ${wrapUntrusted('person', who)} · '
+            '${p.org.isEmpty ? 'no organisation known · ' : ''}'
             '${p.isOrganizer ? 'organiser' : 'attendee'} · ${p.response}');
         if (p.lastMet != null) buffer.writeln('${p.lastMet}.');
         if (p.threadCount > 0) {
@@ -294,7 +320,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
         }
         if (p.lastInboundAgo.isNotEmpty) {
           buffer.writeln('last wrote ${p.lastInboundAgo}: '
-              '${wrapUntrusted('subject', capRunes(p.lastSubject, labelCap))}');
+              '${wrapUntrusted('subject', _label(p.lastSubject))}');
           if (p.lastWords.isNotEmpty) buffer.writeln(p.lastWords);
         }
         // The ask itself is in "Open asks" below, fenced; said twice it
@@ -321,7 +347,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
           ..writeln('[${i + 1}] ${_stateWords(t.state)} · last message '
               '${ago.isEmpty ? t.lastAt : ago}'
               '${t.ranked ? ' · marked urgent or important' : ''}')
-          ..writeln(wrapUntrusted('subject', t.subject));
+          ..writeln(wrapUntrusted('subject', _label(t.subject)));
         for (final snippet in t.snippets) {
           buffer.writeln(snippet);
         }
@@ -335,7 +361,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
       for (final a in input.openAsks) {
         buffer
           ..writeln('- a ${a.intent} in thread [${a.threadIndex + 1}], from:')
-          ..writeln(wrapUntrusted('person', a.person))
+          ..writeln(wrapUntrusted('person', _label(a.person)))
           ..writeln(a.ask);
       }
     }
@@ -360,7 +386,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
         ..writeln('Storylines these threads belong to:');
       for (final s in input.storylines) {
         buffer
-          ..writeln(wrapUntrusted('storyline_title', s.title))
+          ..writeln(wrapUntrusted('storyline_title', _label(s.title)))
           ..writeln(s.summary);
       }
     }
@@ -384,7 +410,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
             ? 'unread'
             : (written.isEmpty ? 'not shown' : 'read');
         buffer.writeln('[${i + 1}] ($state) ${wrapUntrusted('material', [
-              capRunes(m.name, labelCap),
+              _label(m.name),
               if (m.sender.isNotEmpty) m.sender,
               if (m.date.isNotEmpty) m.date,
             ].join(' · '))}');
@@ -449,7 +475,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
       if (fits(textBlock)) {
         write(textBlock);
         textChars += text.length;
-        whole[i] = text.length < BriefGatherer.materialTextCap - 50;
+        whole[i] = !m.textCut;
         continue;
       }
       final left = materialsBudget - spent;

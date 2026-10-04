@@ -1014,7 +1014,8 @@ that bite.
     attachments that are not images (the owner's own: sender `you`),
     newest first, the newest copy per lowercased name, ≤ 6, each with its
     digest, its TEXT (`attachmentTextOf` for a `done` file, cut at a word
-    to `materialTextCap` 6000, raw — the task fences it) and ≤ 2 passages
+    to `materialTextCap` 6000, raw — the task fences it; `textCut` says it
+    was cut) and ≤ 2 passages
     from ONE scoped `chunkKnn` (attachment ids, then the exact
     `(messageId, attachmentId)` pair). The planner gathers with
     `passages: false`, the LIGHT gather: no text, no people, no embedding
@@ -1025,7 +1026,8 @@ that bite.
   - People (`BriefPerson`, handler's gather only): the organiser first,
     then the attendees' order (a deliberate departure from D14), the cap
     ≤ `maxPeople` 8 after (+`peopleMore`), `briefOrgOf` (the label before
-    the public suffix; the tenant for `*.onmicrosoft.com`; '' for a
+    the public suffix; the tenant for `*.onmicrosoft.com`, past a
+    routing `mail` label; '' for a
     consumer domain or an IP), the answer only on the
     owner's own organiser copy ("response not known" elsewhere), their own
     last met, threads they are in, their newest inbound's `askOwnWords` cut
@@ -1034,14 +1036,16 @@ that bite.
     `BriefOther`.
   - Waiting for the files: `BriefInput.materialsPending` — a material
     `text_status == 'pending'` AND its `attachment_text` work row
-    (`workStatusOf`, entity `attachmentEntityId(msg, att)`) `pending` or
-    `processing` AND its mail younger than `BriefGatherer.pendingMaxAge`
-    (2 h). There is NO `error` `text_status`: a text work row that gave up
+    (`workRowOf`, entity `attachmentEntityId(msg, att)`) `pending` or
+    `processing` AND being read for less than `BriefGatherer.pendingMaxAge`
+    (2 h, from the later of the mail's `received_at` and the work row's
+    `created_at`, so an old invite's freshly fetched file is waited for).
+    There is NO `error` `text_status`: a text work row that gave up
     leaves the attachment row `pending` forever, so the work row is the
     rule. A `pending` file with no work row (`ensureBodiesFor` queues none)
     is `BriefEligible.unqueued`; the handler `queueText`s it once (INSERT OR
-    IGNORE, `queued_text: n`) and waits on it when young. The handler
-    decides on the LIGHT gather (`passages: false`) and runs the full one
+    IGNORE, `queued_text: n`) and waits on it (its reading starts now). The
+    handler decides on the LIGHT gather (`passages: false`) and runs the full one
     only before a call. Pending AND no ready brief AND the start more than
     `MeetingBriefHandler.pendingGrace` (20 min) away AND nobody asked for
     it (`BriefRequest(asked: true)`, Regenerate, never waits): skipped
@@ -1054,8 +1058,11 @@ that bite.
     (the owner's sent invite: its detail runs only on a thread open) is
     `BriefEligible.unlisted` (≤ 4). The handler's `fetchDetails` (the
     sync's `ensureMessageBody`, which lists the files AND queues their text;
-    `ensureBodiesFor` queues none) runs ONCE, then it gathers again; a
-    failed fetch keeps the first gather. Never a loop.
+    `ensureBodiesFor` queues none) runs ONCE through
+    `MeetingBriefHandler.fetchEach` (one failed id costs only itself; the
+    closure returns the count and never throws), then it gathers again
+    whenever any fetch completed (`fetched: n`, the real count); a fetch
+    that fetched nothing keeps the first gather. Never a loop.
   - The task is v3, evidence first, dense, second person ("you", never
     "the owner"): `evidence, headline (≤ 320), briefing[] (≤ 6 × 320),
     people[{name, line}] (≤ 8, line 220), materials[{file, points[]}] (≤ 4
@@ -1067,16 +1074,21 @@ that bite.
     material index outside the list is dropped, never -1. `MeetingBrief`
     writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,
     and `BriefMaterialOut.takeaway` (the points joined) is kept for old
-    readers; the faces draw the points. The user message has a People block after `With:`
-    ("open ask: yes (see Open asks)", never the ask again); file names and
-    last subjects capped at 120 (`labelCap`). The materials' digest +
-    `material_text` + passages share `materialsBudget` 10000, a block
-    costing its length PLUS its digit count, in two rounds (`_spend`):
-    digest then text (whole, else a word-cut head while > 1000 is left),
-    then passages only for a material whose text was not written whole and
-    uncut. `materialTextCharsWritten` runs the same spend for the activity
-    row's `text_chars`. The size guard in `meeting_brief_task_test` holds a
-    maximal prompt at ≤ 35000 characters (~35.0k measured). A material line
+    readers; the faces draw the points. The user message has a People
+    block after `With:` (the fenced `name · org`, the org being a domain
+    owner's words; "open ask: yes (see Open asks)", never the ask again);
+    every label (file names, thread and last subjects, the meeting's
+    subject, storyline titles, attendee and people names) is capped at 120
+    AS ESCAPED (`labelCap`, `_label`: the fence writes `&` as five). The
+    materials' digest + `material_text` + passages share `materialsBudget`
+    10000, a block costing its length PLUS its digit count, in two rounds
+    (`_spend`): digest then text (whole, else a word-cut head while > 1000
+    is left), then passages only for a material whose text was not written
+    whole and uncut (`!textCut`, never a length guess).
+    `materialTextCharsWritten` runs the same spend for the activity row's
+    `text_chars`. The size guard in `meeting_brief_task_test` holds a
+    maximal prompt (every label 300 characters of `&<>`) at ≤ 37800
+    characters (37012 measured, plus 2%). A material line
     puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
     block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the

@@ -2195,13 +2195,13 @@ final meetingBriefHandlerProvider = Provider<MeetingBriefHandler>((ref) {
     // invite) gets its detail before the brief: `ensureMessageBody` lists the
     // files AND queues their `attachment_text`, which `ensureBodiesFor` does
     // not, and fetches even when a body is stored. Mail only; `ref.read` at
-    // the call, never `watch`, as the triage queue's `ensureBody` does.
+    // the call, never `watch`, as the triage queue's `ensureBody` does. One
+    // id's failure (`ensureMessageBody` rethrows a transient one) costs only
+    // that id: `fetchEach` catches per id and counts the rest.
     fetchDetails: (source, ids) async {
-      if (source != 'email') return;
+      if (source != 'email') return 0;
       final sync = ref.read(syncServiceProvider);
-      for (final id in ids) {
-        await sync.ensureMessageBody(id);
-      }
+      return MeetingBriefHandler.fetchEach(ids, sync.ensureMessageBody);
     },
   );
 });

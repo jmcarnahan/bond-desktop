@@ -8,7 +8,7 @@ import 'package:bond_inbox/services/calendar/event_view.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:bond_inbox/widgets/day_pane.dart';
 import 'package:bond_inbox/widgets/event_panel.dart';
-import 'package:bond_inbox/widgets/linked_text.dart';
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -366,33 +366,50 @@ void main() {
     expect(threads, ['teams/19:meeting_x@thread.v2', 'email/conv-a']);
   });
 
+  /// The spans of the drawn invite body that carry a tap recognizer.
+  List<TextSpan> linkedSpansOfBody(WidgetTester tester) {
+    final paragraph = tester.widget<RichText>(find
+        .descendant(
+          of: find.byKey(EventPanelBody.bodyPreviewKey),
+          matching: find.byType(RichText),
+        )
+        .first);
+    final linked = <TextSpan>[];
+    paragraph.text.visitChildren((span) {
+      if (span is TextSpan && span.recognizer != null) linked.add(span);
+      return true;
+    });
+    return linked;
+  }
+
   testWidgets("the invite body's web addresses open through the host",
       (tester) async {
     // A Teams invite's "Join:" line is a bare URL in the body text; it must
     // be a link, and only the host's guarded launcher opens it.
-    const body = 'Join: https://teams.example.com/l/meetup-join/fictional\n'
-        'Meeting ID: 221 756 307';
+    const url = 'https://teams.example.com/l/meetup-join/fictional';
+    const body = 'Join: $url\nMeeting ID: 221 756 307';
     final opened = <String>[];
     await pumpBody(tester, EventLookup.found(meeting(bodyPreview: body)),
         onOpenLink: opened.add);
     expect(find.text('From the invite'), findsOneWidget);
-    final shown = tester
-        .widget<LinkedText>(find.byKey(EventPanelBody.bodyPreviewKey));
-    expect(shown.text, body);
-    expect(shown.onOpenLink, isNotNull);
-    shown.onOpenLink!(
-        Uri.parse('https://teams.example.com/l/meetup-join/fictional'));
-    expect(opened, ['https://teams.example.com/l/meetup-join/fictional']);
+
+    // The rendered span, not the widget's callback: a Join line drawn with
+    // no recognizer would be the dead text this test exists to catch.
+    final linked = linkedSpansOfBody(tester);
+    expect(linked, hasLength(1));
+    (linked.single.recognizer! as TapGestureRecognizer).onTap!();
+    expect(opened, [url]);
   });
 
   testWidgets('the invite body never opens a non-web scheme', (tester) async {
     const body = 'Dial msteams://l/meetup-join/fictional or javascript:void(0)';
-    await pumpBody(tester, EventLookup.found(meeting(bodyPreview: body)));
-    final shown = tester
-        .widget<LinkedText>(find.byKey(EventPanelBody.bodyPreviewKey));
-    expect(shown.text, body);
-    expect(linkTargetOf('msteams://l/meetup-join/fictional'), isNull);
-    expect(linkTargetOf('javascript:void(0)'), isNull);
+    final opened = <String>[];
+    await pumpBody(tester, EventLookup.found(meeting(bodyPreview: body)),
+        onOpenLink: opened.add);
+    expect(find.textContaining('msteams://l/meetup-join/fictional',
+            findRichText: true),
+        findsOneWidget);
+    expect(linkedSpansOfBody(tester), isEmpty);
   });
 
   testWidgets('the brief and actions slots render only when given',

@@ -117,6 +117,21 @@ void main() {
 
       expect((await db.customSelect('SELECT * FROM work_items').get()).length, 3);
     });
+
+    test('workRowOf reads the status and the first ask\'s created_at',
+        () async {
+      expect(await store.workRowOf('extract', 'email', 'm1'), isNull);
+      await store.enqueueWork('extract', 'email', 'm1');
+      await db.customStatement(
+          "UPDATE work_items SET created_at = '2026-09-01T00:00:00.000000Z'");
+      await store.writeWork('extract', 'email', 'm1', status: 'processing');
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      final row = await store.workRowOf('extract', 'email', 'm1');
+      expect(row?.status, 'processing');
+      expect(row?.createdAt, '2026-09-01T00:00:00.000000Z',
+          reason: 'a second ask leaves the first stamp alone');
+    });
   });
 
   group('nextPendingWork', () {
