@@ -274,7 +274,9 @@ the brief planner), the 50 newest `suggested` drafts with a `calendar.slots`
 record are read, the mirror once over all their slots, and every one with a
 slot that has begun or that a mirror event now blocks — `slotGone`, the Day
 column's hard overlap: timed, not cancelled, not declined, `busy`, `oof` or no
-word; `tentative`, `free` and `workingElsewhere` block nothing — is deleted
+word; a tentative hold the owner did not answer blocks nothing; a Maybe
+ANSWER, like busy, makes the slot stale; `free` and `workingElsewhere` block
+nothing — is deleted
 (only while still `suggested`, checked in the DELETE) and its `draft` work row
 re-queued with the payload it ran with (`workPayload`: an asked-for press and
 its pinned ids survive, so the redraft is not skipped by the gates the press

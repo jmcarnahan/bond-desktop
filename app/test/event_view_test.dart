@@ -234,6 +234,83 @@ void main() {
     });
   });
 
+  group('standingOf', () {
+    CalendarEvent ev(String status,
+            {String showAs = 'busy',
+            bool organiser = false,
+            bool? requested,
+            bool cancelled = false}) =>
+        CalendarEvent(
+          id: 'e',
+          responseStatus: status,
+          showAs: showAs,
+          isOrganizer: organiser,
+          responseRequested: requested,
+          isCancelled: cancelled,
+        );
+
+    test('every standing, read once', () {
+      expect(standingOf(ev('accepted', cancelled: true)),
+          EventStanding.cancelled);
+      expect(standingOf(ev('none', organiser: true, cancelled: true)),
+          EventStanding.cancelled);
+      expect(standingOf(ev('none', organiser: true)), EventStanding.organizer);
+      expect(standingOf(ev('organizer')), EventStanding.organizer);
+      expect(standingOf(ev('accepted')), EventStanding.accepted);
+      expect(standingOf(ev('tentativelyAccepted')), EventStanding.tentative);
+      expect(standingOf(ev('accepted', showAs: 'tentative')),
+          EventStanding.tentative);
+      expect(standingOf(ev('declined')), EventStanding.declined);
+      expect(standingOf(ev('notResponded')), EventStanding.unanswered);
+      expect(standingOf(ev('none')), EventStanding.unanswered);
+      expect(standingOf(ev('notResponded', requested: false)),
+          EventStanding.noAnswerNeeded);
+    });
+
+    test('an invite owed an answer is unanswered though Outlook shows it '
+        'tentative; one asking no answer and shown tentative is a Maybe', () {
+      expect(standingOf(ev('notResponded', showAs: 'tentative')),
+          EventStanding.unanswered);
+      expect(standingOf(ev('none', showAs: 'tentative', requested: false)),
+          EventStanding.tentative);
+    });
+
+    test('case and spaces do not matter', () {
+      expect(standingOf(ev(' DECLINED ')), EventStanding.declined);
+      expect(standingOf(ev('TentativelyAccepted')), EventStanding.tentative);
+      expect(standingOf(ev('accepted', showAs: ' Tentative')),
+          EventStanding.tentative);
+    });
+
+    test('standingWord for each', () {
+      expect(standingWord(EventStanding.cancelled), 'Cancelled');
+      expect(standingWord(EventStanding.organizer), 'Yours');
+      expect(standingWord(EventStanding.accepted), 'Accepted');
+      expect(standingWord(EventStanding.tentative), 'Maybe');
+      expect(standingWord(EventStanding.unanswered), 'Not answered');
+      expect(standingWord(EventStanding.declined), 'Declined');
+      expect(standingWord(EventStanding.noAnswerNeeded), '');
+    });
+
+    test('a Maybe only by showAs: the panel line says what was answered', () {
+      expect(responseLine(ev('accepted', showAs: 'tentative')),
+          'You accepted');
+      expect(responseLine(ev('none', showAs: 'tentative', requested: false)),
+          'No answer needed');
+      expect(responseLine(ev('notResponded', showAs: 'tentative')),
+          "You haven't answered");
+      expect(responseLine(ev('tentativelyAccepted', showAs: 'tentative')),
+          'You said maybe');
+    });
+
+    test('a tentative hold: a Maybe, or anything shown tentative', () {
+      expect(isTentativeHold(ev('tentativelyAccepted')), isTrue);
+      expect(isTentativeHold(ev('notResponded', showAs: 'tentative')), isTrue);
+      expect(isTentativeHold(ev('accepted')), isFalse);
+      expect(isTentativeHold(ev('notResponded')), isFalse);
+    });
+  });
+
   group('eventWhenLine', () {
     test('timed today, tomorrow and later', () {
       expect(

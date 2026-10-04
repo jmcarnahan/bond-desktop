@@ -387,6 +387,55 @@ void main() {
     expect(find.byType(SidePanelHost), findsNothing);
   });
 
+  testWidgets('a clash: both rows carry the strip, a chip opens the other '
+      "meeting beside, and the panel's clash row opens the first again",
+      (tester) async {
+    final today = la.dateOf(DateTime.now().toUtc());
+    final start = la.localDateTime(today, 12, 0).toUtc();
+    await CalendarStore(db).upsertEvents([
+      CalendarEvent(
+        id: 'evt-1',
+        subject: 'Contoso planning',
+        startUtc: start,
+        endUtc: start.add(const Duration(hours: 1)),
+        responseStatus: 'accepted',
+        showAs: 'busy',
+      ),
+      CalendarEvent(
+        id: 'evt-2',
+        subject: 'Fabrikam sync',
+        startUtc: start.add(const Duration(minutes: 30)),
+        endUtc: start.add(const Duration(minutes: 90)),
+        responseStatus: 'accepted',
+        showAs: 'busy',
+      ),
+    ], syncRun: 'run-1');
+    await pumpScreen(tester);
+    Finder inSide(Finder f) =>
+        find.descendant(of: find.byType(SidePanelHost), matching: f);
+
+    await tester.tap(find.text('Day'));
+    await pumps(tester);
+    expect(find.byKey(DayPane.clashKeyFor('evt-1')), findsOneWidget);
+    expect(find.byKey(DayPane.clashKeyFor('evt-2')), findsOneWidget);
+
+    await tester.tap(find.byKey(DayPane.clashChipKeyFor('evt-1', 'evt-2')));
+    await pumps(tester);
+    expect(find.byType(SidePanelHost), findsOneWidget);
+    expect(inSide(find.text('Fabrikam sync')), findsOneWidget);
+
+    final back = inSide(find.byKey(EventPanelBody.overlapRowKeyFor(0)));
+    expect(
+        find.descendant(
+            of: back, matching: find.textContaining('Contoso planning')),
+        findsOneWidget);
+    await tester.tap(back);
+    await pumps(tester);
+    expect(inSide(find.text('Contoso planning')), findsOneWidget);
+    // Opened on top of the clashing meeting, so the ✕'s back comes home.
+    expect(find.byKey(SidePanelHost.backKey), findsOneWidget);
+  });
+
   testWidgets('a day row in the list column moves the pane', (tester) async {
     await pumpScreen(tester);
     await tester.tap(find.text('Day'));

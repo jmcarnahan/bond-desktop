@@ -2026,12 +2026,16 @@ void main() {
     final now = DateTime.utc(2026, 9, 29, 16);
     const today = CalendarDate(2026, 9, 29);
 
-    CalendarEvent meeting(String id, String subject, int startHourUtc) =>
+    // Accepted by default: an unanswered meeting's row says 'RSVP owed'.
+    CalendarEvent meeting(String id, String subject, int startHourUtc,
+            {String responseStatus = 'accepted', String showAs = 'busy'}) =>
         CalendarEvent(
           id: id,
           subject: subject,
           startUtc: DateTime.utc(2026, 9, 29, startHourUtc),
           endUtc: DateTime.utc(2026, 9, 29, startHourUtc, 30),
+          responseStatus: responseStatus,
+          showAs: showAs,
         );
 
     Future<void> pumpRail(
@@ -2092,6 +2096,20 @@ void main() {
       await tester.pump();
       expect(opened, ['m1']);
       expect(sections, isNot(contains(RailSection.day)));
+    });
+
+    testWidgets('Today rows say Maybe and RSVP owed', (tester) async {
+      await pumpRail(tester, todayMeetings: [
+        meeting('yes', 'Standup with Fabrikam', 17),
+        meeting('maybe', 'Contoso review', 18,
+            responseStatus: 'tentativelyAccepted'),
+        meeting('owed', 'Northwind kickoff', 19,
+            responseStatus: 'notResponded', showAs: 'tentative'),
+      ]);
+      expect(find.text('10:00 AM · Standup with Fabrikam'), findsOneWidget);
+      expect(find.text('11:00 AM · Contoso review · Maybe'), findsOneWidget);
+      expect(find.text('12:00 PM · Northwind kickoff · RSVP owed'),
+          findsOneWidget);
     });
 
     testWidgets('without an event handler the row goes to the Day stop',

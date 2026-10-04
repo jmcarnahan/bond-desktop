@@ -9,6 +9,7 @@ import '../services/calendar/overlaps.dart';
 import '../theme/tokens.dart';
 import 'clock_tick.dart';
 import 'day_pane.dart' show DayPane;
+import 'event_standing_style.dart';
 import 'linked_text.dart';
 
 /// One meeting, read beside whatever named it: when it is, whether to join,
@@ -42,6 +43,7 @@ class EventPanelBody extends StatelessWidget {
     required this.onOpenLink,
     required this.onOpenThread,
     this.onOpenStoryline,
+    this.onOpenEvent,
     this.onOpenSettings,
     this.brief,
     this.actions,
@@ -65,6 +67,10 @@ class EventPanelBody extends StatelessWidget {
 
   static Key linkKeyFor(String source, String conversationKey) =>
       ValueKey('event-panel-link-$source-$conversationKey');
+
+  /// The key of the [i]th row of the clash list under [overlapKey], hard
+  /// overlaps first.
+  static Key overlapRowKeyFor(int i) => ValueKey('event-panel-overlap-$i');
 
   static Key attendeeKeyFor(String address) =>
       ValueKey('event-panel-attendee-$address');
@@ -91,6 +97,10 @@ class EventPanelBody extends StatelessWidget {
 
   /// Opens a link's storyline. Null draws no storyline chips.
   final void Function(String storylineId)? onOpenStoryline;
+
+  /// Opens another event — a clashing meeting — in this same side panel;
+  /// null leaves the clash rows inert.
+  final void Function(String eventId)? onOpenEvent;
 
   /// Where the scope-missing sentence's button goes. Null draws no button.
   final VoidCallback? onOpenSettings;
@@ -176,11 +186,42 @@ class EventPanelBody extends StatelessWidget {
         child: Text(text, style: BondType.label),
       );
 
+  /// One clashing meeting under the '⚠ overlaps' heading — subject and
+  /// time, 'maybe' for a soft one — opening it in this panel when the host
+  /// can.
+  Widget _clashRow(int i, CalendarEvent other, {required bool soft}) {
+    final open = onOpenEvent;
+    final text = Text(
+      clashLabel(zone, other, soft: soft),
+      style: BondType.small.copyWith(
+        color: soft ? BondColors.inkMuted : BondColors.inkSecondary,
+      ),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+    final padded = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: text,
+    );
+    if (open == null) return KeyedSubtree(key: overlapRowKeyFor(i), child: padded);
+    return InkWell(
+      key: overlapRowKeyFor(i),
+      onTap: () => open(other.id),
+      borderRadius: BondRadii.smAll,
+      hoverColor: BondColors.faintGround,
+      child: padded,
+    );
+  }
+
   Widget _found(CalendarEvent event, List<CalendarEvent> occurrences) {
     final shown = displayOccurrence(event, occurrences, now.toUtc(), zone);
     final when = eventWhenLine(shown, zone: zone, today: today);
     final series = isSeriesEvent(event) || isSeriesEvent(shown);
-    final overlap = overlaps == null ? null : overlapLine(overlaps!);
+    // Hard overlaps first; all-day banners are not overlaps.
+    final clashes = [
+      for (final e in overlaps?.hard ?? const <CalendarEvent>[]) (e, false),
+      for (final e in overlaps?.soft ?? const <CalendarEvent>[]) (e, true),
+    ];
     final tally = attendeeTally(shown);
     final organiser = shown.organizerName.trim().isNotEmpty
         ? shown.organizerName.trim()
@@ -232,18 +273,27 @@ class EventPanelBody extends StatelessWidget {
         else if (organiser.isNotEmpty)
           Text('Organised by $organiser', style: _muted),
         const SizedBox(height: BondSpacing.s8),
-        Text(responseLine(shown), key: responseKey, style: BondType.small),
+        Text(
+          responseLine(shown),
+          key: responseKey,
+          style: BondType.small.copyWith(
+            color: bondToneColors[toneOfStanding(standingOf(shown))]!
+                .foreground,
+          ),
+        ),
         if (actions != null) ...[
           const SizedBox(height: BondSpacing.s8),
           actions!,
         ],
-        if (overlap != null) ...[
+        if (clashes.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s4),
           Text(
-            overlap,
+            '⚠ overlaps',
             key: overlapKey,
-            style: BondType.caption.copyWith(color: BondColors.attention),
+            style: BondType.caption.copyWith(color: BondColors.error),
           ),
+          for (final (i, (other, soft)) in clashes.indexed)
+            _clashRow(i, other, soft: soft),
         ],
         if (shown.attendees.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s16),

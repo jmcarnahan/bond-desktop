@@ -7,10 +7,14 @@ import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/command/command_planner.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
+import 'package:bond_inbox/services/calendar/event_view.dart'
+    show EventStanding;
 import 'package:bond_inbox/services/calendar/overlaps.dart';
 import 'package:bond_inbox/widgets/command_plan_card.dart';
 import 'package:bond_inbox/widgets/day_grid.dart' show GridSpan;
 import 'package:bond_inbox/widgets/day_pane.dart';
+import 'package:bond_inbox/widgets/event_actions.dart';
+import 'package:bond_inbox/widgets/event_standing_style.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -52,6 +56,8 @@ void main() {
     String organizerName = '',
     String organizerAddress = '',
     String seriesMasterId = '',
+    String showAs = 'busy',
+    bool isOrganizer = false,
   }) =>
       CalendarEvent(
         id: id,
@@ -66,7 +72,8 @@ void main() {
         organizerName: organizerName,
         organizerAddress: organizerAddress,
         seriesMasterId: seriesMasterId,
-        showAs: 'busy',
+        showAs: showAs,
+        isOrganizer: isOrganizer,
       );
 
   Future<void> pumpPane(
@@ -374,7 +381,7 @@ void main() {
     });
 
     testWidgets(
-        'the overlap line and the cancelled caption; a declined meeting draws '
+        'the clash strip and the cancelled caption; a declined meeting draws '
         'no row', (tester) async {
       await pumpPane(tester, events: [
         timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20),
@@ -386,8 +393,13 @@ void main() {
             responseStatus: 'declined'),
       ]);
 
-      expect(find.text('⚠ overlaps Budget review'), findsOneWidget);
-      expect(find.text('⚠ overlaps Planning'), findsOneWidget);
+      // Each side's strip names the other meeting, with its time.
+      expect(find.byKey(DayPane.clashKeyFor('a')), findsOneWidget);
+      expect(find.byKey(DayPane.clashKeyFor('b')), findsOneWidget);
+      expect(find.text('⚠ overlaps'), findsNWidgets(2));
+      expect(find.text('Budget review · 1:30–2:00 PM'), findsOneWidget);
+      expect(find.text('Planning · 1:00–2:00 PM'), findsOneWidget);
+      expect(find.byKey(DayPane.clashKeyFor('c')), findsNothing);
       expect(find.text('Cancelled'), findsOneWidget);
       final struck = tester.widget<Text>(find.text('Offsite prep'));
       expect(struck.style?.decoration, TextDecoration.lineThrough);
@@ -790,6 +802,210 @@ void main() {
       );
       expect(find.text(DayPane.offlineText), findsOneWidget);
       expect(find.text('No invites to answer.'), findsOneWidget);
+    });
+  });
+
+  group('standing and clashes', () {
+    Color barOf(WidgetTester tester, String id) {
+      final box = tester.widget<Container>(
+          find.byKey(DayPane.standingBarKeyFor(id)));
+      final border = (box.decoration! as BoxDecoration).border! as Border;
+      expect(border.left.width, 3);
+      return border.left.color;
+    }
+
+    testWidgets('the standing bar: accepted, maybe, not-answered and '
+        'cancelled rows carry different bar colours', (tester) async {
+      await pumpPane(tester, events: [
+        timed('yes', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 17)),
+        timed('maybe', 'Fabrikam review', DateTime.utc(2026, 9, 29, 18),
+            responseStatus: 'tentativelyAccepted'),
+        timed('owed', 'Northwind sync', DateTime.utc(2026, 9, 29, 19),
+            responseStatus: 'notResponded'),
+        timed('off', 'Offsite prep', DateTime.utc(2026, 9, 29, 20),
+            isCancelled: true),
+      ]);
+      expect(barOf(tester, 'yes'), standingBarColor(EventStanding.accepted));
+      expect(
+          barOf(tester, 'maybe'), standingBarColor(EventStanding.tentative));
+      expect(
+          barOf(tester, 'owed'), standingBarColor(EventStanding.unanswered));
+      expect(
+          barOf(tester, 'off'), standingBarColor(EventStanding.cancelled));
+      expect(barOf(tester, 'yes'), isNot(barOf(tester, 'maybe')));
+      expect(barOf(tester, 'yes'), isNot(barOf(tester, 'owed')));
+      expect(barOf(tester, 'maybe'), isNot(barOf(tester, 'owed')));
+    });
+
+    testWidgets('a Maybe meeting says Maybe', (tester) async {
+      await pumpPane(tester, events: [
+        timed('yes', 'Contoso kickoff', DateTime.utc(2026, 9, 29, 17)),
+        timed('maybe', 'Fabrikam review', DateTime.utc(2026, 9, 29, 18),
+            responseStatus: 'tentativelyAccepted'),
+      ]);
+      expect(
+          find.descendant(
+              of: find.byKey(DayPane.meetingRowKeyFor('maybe')),
+              matching: find.text('Maybe')),
+          findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byKey(DayPane.meetingRowKeyFor('yes')),
+              matching: find.text('Maybe')),
+          findsNothing);
+    });
+
+    testWidgets('the clash strip names each overlapping meeting, hard before '
+        'soft, and a chip opens the other meeting and not the row',
+        (tester) async {
+      final opened = <String>[];
+      await pumpPane(tester, onOpenEvent: opened.add, events: [
+        timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20),
+            length: const Duration(hours: 1)),
+        // The soft one starts first, and is still named after the hard one.
+        timed('s', 'Fabrikam review', DateTime.utc(2026, 9, 29, 20),
+            responseStatus: 'tentativelyAccepted'),
+        timed('h', 'Budget review', DateTime.utc(2026, 9, 29, 20, 30)),
+      ]);
+      final strip = find.byKey(DayPane.clashKeyFor('a'));
+      expect(strip, findsOneWidget);
+      final hard = find.byKey(DayPane.clashChipKeyFor('a', 'h'));
+      final soft = find.byKey(DayPane.clashChipKeyFor('a', 's'));
+      expect(find.descendant(of: hard, matching: find.text(
+          'Budget review · 1:30–2:00 PM')), findsOneWidget);
+      expect(find.descendant(of: soft, matching: find.text(
+          'Fabrikam review · 1:00–1:30 PM · maybe')), findsOneWidget);
+      final children = tester.widget<Wrap>(strip).children;
+      final keys = [for (final c in children) c.key];
+      expect(keys.indexOf(DayPane.clashChipKeyFor('a', 'h')),
+          lessThan(keys.indexOf(DayPane.clashChipKeyFor('a', 's'))));
+
+      await tester.tap(hard);
+      await tester.pump();
+      expect(opened, ['h']);
+      await tester.tap(soft);
+      await tester.pump();
+      expect(opened, ['h', 's']);
+    });
+
+    testWidgets('a cancelled meeting beside an accepted one: no strip on '
+        'either side', (tester) async {
+      await pumpPane(tester, events: [
+        timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20)),
+        timed('c', 'Offsite prep', DateTime.utc(2026, 9, 29, 20),
+            isCancelled: true),
+      ]);
+      expect(find.byKey(DayPane.clashKeyFor('a')), findsNothing);
+      expect(find.byKey(DayPane.clashKeyFor('c')), findsNothing);
+      expect(find.text('⚠ overlaps'), findsNothing);
+    });
+
+    testWidgets('a soft chip says why: maybe for a Maybe answer, not answered '
+        'for an invite still owed one', (tester) async {
+      await pumpPane(tester, events: [
+        timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20),
+            length: const Duration(hours: 1)),
+        timed('m', 'Fabrikam review', DateTime.utc(2026, 9, 29, 20),
+            responseStatus: 'tentativelyAccepted'),
+        timed('o', 'Northwind kickoff', DateTime.utc(2026, 9, 29, 20, 30),
+            responseStatus: 'notResponded', showAs: 'tentative'),
+      ]);
+      expect(
+          find.descendant(
+              of: find.byKey(DayPane.clashChipKeyFor('a', 'm')),
+              matching: find.text('Fabrikam review · 1:00–1:30 PM · maybe')),
+          findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byKey(DayPane.clashChipKeyFor('a', 'o')),
+              matching: find.text(
+                  'Northwind kickoff · 1:30–2:00 PM · not answered')),
+          findsOneWidget);
+    });
+
+    final starts = <CalendarWrite>[];
+    Widget realActions(CalendarEvent e) => EventActions(
+          compact: true,
+          target: e,
+          shown: e,
+          zone: CalendarZone.tryNamed('America/Los_Angeles')!,
+          clock: () => now,
+          today: today,
+          start: (write,
+                  {required summary,
+                  required doneMessage,
+                  mayEmail = const []}) =>
+              starts.add(write),
+        );
+    testWidgets('an accepted meeting with a clash shows Maybe and No with Yes '
+        'chosen', (tester) async {
+      starts.clear();
+      await pumpPane(tester, meetingActions: realActions, events: [
+        timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20),
+            length: const Duration(hours: 1)),
+        timed('b', 'Budget review', DateTime.utc(2026, 9, 29, 20, 30)),
+      ]);
+      final row = find.byKey(DayPane.meetingRowKeyFor('a'));
+      final yes = find.descendant(
+          of: row, matching: find.byKey(EventActions.yesKey));
+      expect(yes, findsOneWidget);
+      expect(tester.widget(yes), isA<FilledButton>());
+      expect(tester.widget<ButtonStyleButton>(yes).onPressed, isNull);
+      final maybe = find.descendant(
+          of: row, matching: find.byKey(EventActions.maybeKey));
+      expect(tester.widget<ButtonStyleButton>(maybe).onPressed, isNotNull);
+      final no = find.descendant(
+          of: row, matching: find.byKey(EventActions.noKey));
+      expect(tester.widget<ButtonStyleButton>(no).onPressed, isNotNull);
+      expect(find.byKey(EventActions.dismissKey), findsNothing);
+      // The other side of the clash is an accepted meeting too: its own row.
+      expect(
+          find.descendant(
+              of: find.byKey(DayPane.meetingRowKeyFor('b')),
+              matching: find.byKey(EventActions.yesKey)),
+          findsOneWidget);
+      expect(find.text('RSVP owed'), findsNothing);
+      await tester.tap(maybe);
+      await tester.pump();
+      expect(starts.single.eventId, 'a');
+    });
+
+    testWidgets("an organiser's clashing meeting shows the strip and no "
+        'actions', (tester) async {
+      final built = <String>[];
+      await pumpPane(
+        tester,
+        meetingActions: (e) {
+          built.add(e.id);
+          return Text('Yes ${e.id}');
+        },
+        events: [
+          timed('mine', 'Planning', DateTime.utc(2026, 9, 29, 20),
+              length: const Duration(hours: 1),
+              responseStatus: 'organizer', isOrganizer: true),
+          timed('b', 'Budget review', DateTime.utc(2026, 9, 29, 20, 30)),
+        ],
+      );
+      expect(find.byKey(DayPane.clashKeyFor('mine')), findsOneWidget);
+      expect(built, ['b']);
+    });
+
+    testWidgets('an ended clashing meeting shows no actions', (tester) async {
+      final built = <String>[];
+      await pumpPane(
+        tester,
+        meetingActions: (e) {
+          built.add(e.id);
+          return Text('Yes ${e.id}');
+        },
+        events: [
+          timed('a', 'Standup', now.subtract(const Duration(hours: 1))),
+          timed('b', 'Sync', now.subtract(const Duration(minutes: 50))),
+        ],
+      );
+      expect(find.byKey(DayPane.clashKeyFor('a')), findsOneWidget);
+      expect(find.byKey(DayPane.clashKeyFor('b')), findsOneWidget);
+      expect(built, isEmpty);
     });
   });
 

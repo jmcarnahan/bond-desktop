@@ -443,12 +443,35 @@ is not on the day at all — the owner said no, and Outlook removes it from the
 calendar anyway; the local apply marks it declined at once, so the row leaves
 before the write returns. A cancelled meeting stays, struck through with a
 `Cancelled` caption, because a meeting that silently vanished is one somebody
-turns up to. Each meeting's
-overlap line comes from `overlapsForEvent` against that same day's events,
-which skips cancelled, declined, free and workingElsewhere. A timed event sits
+turns up to. Every meeting row wears its standing (`standingOf`): a 3-px bar
+down the left of its body (`DayPane.standingBarKeyFor(id)`) in
+`standingBarColor` — the grid tiles' palette, so a Maybe is the same colour
+in both faces; an unanswered or cancelled bar is muted, the buttons or the
+caption doing the talking — and a `Maybe` caption for a tentative meeting
+(accepted, yours and no-answer-needed stay quiet). Each meeting's
+overlaps come from `overlapsForEvent` against that same day's events,
+which skips cancelled, declined, free and workingElsewhere; a cancelled
+meeting has no overlaps of its own either. A tentative hold — a Maybe answer,
+or anything Outlook shows as tentative, which is how an unanswered invite
+sits (`isTentativeHold`) — is a soft overlap; the rest are hard. A timed event sits
 on every local date it touches, from the date of its start through the date of
 the instant just before its end; an all-day event on every date in
 `[startDate, endDate)`.
+
+A meeting that overlaps another carries a **clash strip**
+(`DayPane.clashKeyFor(id)`) in place of the old one-line summary: `⚠ overlaps`
+and one chip per clashing meeting — hard first, then soft (muted, ending
+` · maybe` for a Maybe, ` · not answered` for an invite still owed an answer,
+` · tentative` otherwise) — labelled `subject · time` (`clashLabel`), keyed
+`clashChipKeyFor(id, otherId)`; a chip opens THAT meeting beside, and its
+press is the chip's, never the row's open. The word is overlap or clash,
+never "conflict" (that is an etag rejection here). For a meeting the owner
+attends (`canRespond`) the compact answer buttons stay on a clashing row even
+after answering — the current answer drawn as chosen — so one side can be
+stepped down to Maybe or declined from the row; an organiser's clashing row
+shows the strip and no buttons (the panel has Move and Cancel), and an ended
+one shows none. The invite rows and the meeting card keep the one-line
+`overlapLine`.
 
 Times print on the display zone's wall clock (`zone.toLocal`, never
 `DateTime.toLocal()`), in the house 12-hour style: `10:00–10:30 AM`,
@@ -461,7 +484,8 @@ event beside ([Events, invite cards and people](#events-invite-cards-and-people)
 An unanswered meeting's row (`MeetingItem.needsResponse`) carries the compact
 Yes / Maybe / No / Dismiss under its text, through the host's `meetingActions`
 builder (one `CalendarWriteFlow` per event, `agenda-write-<id>`, no series
-folding — the row IS the occurrence); the 'RSVP owed' chip gives way to the
+folding — the row IS the occurrence), as does an attended meeting with a
+clash (above); the 'RSVP owed' chip gives way to the
 buttons and is drawn only when no builder is given. A press inside is the
 button's, never the row's open. Rows are keyed `DayPane.meetingRowKeyFor(id)`.
 
@@ -522,7 +546,9 @@ the pane stop at the mirror's window, thirty days back and 120 ahead.
 
 The Inbox stack's **Today** section sits under Needs You: up to three timed
 meetings still ahead today — not cancelled, not declined, not ended
-(`remainingToday`) — each with its countdown, then `Invites · N`. It shows
+(`remainingToday`) — each with its countdown, its label ending ` · Maybe`
+for a tentative meeting or ` · RSVP owed` for one still owed an answer — then
+`Invites · N`. It shows
 only while the calendar is `available` or `unavailable`, so a launch does not
 grow the section and then lose it.
 
@@ -561,9 +587,31 @@ in-memory.
 
 - **Tiles.** A timed event is a tile at its instants on the display zone's
   clock, titled by its subject (plain text) with its range when there is
-  room. Tentative is a lighter fill with a fainter bar, cancelled is grey and
-  struck through, and a hard overlap turns the tile's left bar to the
-  attention colour. A declined event draws no tile.
+  room. A tile wears the owner's standing — `standingOf`
+  (`app/lib/services/calendar/event_standing.dart`, re-exported by
+  `event_view.dart`), the ONE reader of `responseStatus`/`showAs` — in the
+  one palette every calendar face shares (`toneOfStanding`,
+  `standingBarColor`, `standingFillColor` in
+  `app/lib/widgets/event_standing_style.dart`):
+
+  | Standing | Tile |
+  | --- | --- |
+  | accepted, yours, no answer needed | primary fill, primary bar |
+  | maybe — a tentative answer, or an accepted meeting shown `tentative` | attention tint, attention bar |
+  | maybe — asks no answer and is shown `tentative` | attention tint, attention bar |
+  | not answered (Outlook pencils such an invite in as `tentative`; it is still not answered) | faint fill, thin primary border, muted bar — the agenda row carries the buttons |
+  | cancelled | grey, struck through |
+  | declined | no tile |
+
+  A hard overlap turns the bar the ERROR colour (never attention, which is a
+  Maybe's) and puts '⚠ ' before the title; a soft one (the other side is a
+  tentative hold) only the '⚠ '. So the marks are asymmetric: next to an
+  accepted meeting, the Maybe tile's bar turns the error colour (the accepted
+  one is a hard overlap for it) while the accepted tile only gets the '⚠ ' —
+  a soft clash marks the side that is not firm. Overlapping tiles are laid **side by side**
+  (`MultiDayBodyConfiguration(eventLayoutStrategy:
+  EventLayoutStrategy.sideBySide())`), dividing the column instead of
+  covering each other, so a clash shows as two tiles.
 - **The all-day header** holds all-day events, the day's **deadlines** (`Due ·
   subject · the sender's words`) and **returns** (`Back: subject`), taken by
   `rangeMarkers(from, toExclusive)`, which shares its one private rule with
@@ -778,7 +826,14 @@ The panel holds: when (`Tomorrow · Wednesday, Sep 30 · 10:00–10:30 AM`, or
 `All day · …`) with a live countdown; Join (emphasised from fifteen minutes
 before the start, absent once it has ended, when cancelled, or with no link);
 **Open in Outlook** (`web_link`); where; who organised it; your own answer
-(`You accepted`, `You haven't answered`, …); the overlap line; the attendees
+(`You accepted`, `You haven't answered`, …; `responseLine` reads the standing,
+and says "You said maybe" only for a tentative ANSWER; the line wears the
+standing's tone colour, `toneOfStanding`); the clash list — `⚠ overlaps`
+(`overlapKey`) then one row per clashing meeting, hard first, `subject · time`
+(a soft one ending ` · maybe`, ` · not answered` or ` · tentative`), keyed `EventPanelBody.overlapRowKeyFor(i)`, each
+opening that meeting in the same side panel on top of this one through
+`onOpenEvent` (the host's `_openEvent(id, push: true)`, so Back returns;
+null leaves the rows inert); the attendees
 with their answers under a tally; the conversations linked to the
 event; and the invite's own text (untrusted — never HTML; drawn through
 `LinkedText`, so a web address in it, a Teams invite's "Join:" line, is a

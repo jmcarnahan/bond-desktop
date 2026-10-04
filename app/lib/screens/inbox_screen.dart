@@ -8442,6 +8442,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenThread: (source, key) =>
             _openThreadBeside(source, key, push: true),
         onOpenStoryline: _selectStoryline,
+        // A clashing meeting opens on top of this one, so ✕ comes back.
+        onOpenEvent: (id) => _openEvent(id, push: true),
         onOpenSettings: _openSettings,
         brief: _briefFor(shown, zone: zoneRead, now: now),
         actions: shown == null || zoneRead == null

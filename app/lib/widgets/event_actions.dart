@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/calendar_models.dart';
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/event_standing.dart';
 import '../services/calendar/write_rules.dart';
 import '../theme/tokens.dart';
 import 'calendar_write_flow.dart' show WriteStarter;
@@ -221,9 +222,11 @@ class _EventActionsState extends State<EventActions> {
       );
 
   Widget _rsvpRow() {
-    final status = _target.responseStatus.trim();
-    Widget answer(Key key, String label, RsvpResponse r, String current) {
-      if (status == current) {
+    // The chosen button follows what the owner ANSWERED, not the standing:
+    // an accepted meeting the calendar shows tentative is still a Yes.
+    final answered = answerOf(_target);
+    Widget answer(Key key, String label, RsvpResponse r, EventAnswer current) {
+      if (answered == current) {
         // Already the answer: shown as chosen, and not pressable twice.
         return FilledButton.tonal(key: key, onPressed: null, child: Text(label));
       }
@@ -235,10 +238,12 @@ class _EventActionsState extends State<EventActions> {
     }
 
     return _buttons([
-      answer(EventActions.yesKey, 'Yes', RsvpResponse.accept, 'accepted'),
+      answer(EventActions.yesKey, 'Yes', RsvpResponse.accept,
+          EventAnswer.accepted),
       answer(EventActions.maybeKey, 'Maybe', RsvpResponse.tentative,
-          'tentativelyAccepted'),
-      answer(EventActions.noKey, 'No', RsvpResponse.decline, 'declined'),
+          EventAnswer.tentative),
+      answer(EventActions.noKey, 'No', RsvpResponse.decline,
+          EventAnswer.declined),
       // The quiet decline: never with the typed note, which only a sent
       // answer can carry.
       if (_target.needsResponse)

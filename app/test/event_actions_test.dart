@@ -40,6 +40,7 @@ void main() {
     String eventType = '',
     bool? allowNewTimeProposals,
     String responseStatus = 'none',
+    String showAs = 'busy',
     String organizerAddress = '',
   }) =>
       CalendarEvent(
@@ -52,6 +53,7 @@ void main() {
         eventType: eventType,
         allowNewTimeProposals: allowNewTimeProposals,
         responseStatus: responseStatus,
+        showAs: showAs,
         startUtc: DateTime.utc(2026, 10, 7, 17),
         endUtc: DateTime.utc(2026, 10, 7, 18),
       );
@@ -163,6 +165,28 @@ void main() {
         (tester) async {
       await pump(tester, target: meeting(responseStatus: 'accepted'));
       expect(enabled(tester, EventActions.yesKey), isFalse);
+      expect(enabled(tester, EventActions.maybeKey), isTrue);
+      expect(enabled(tester, EventActions.noKey), isTrue);
+    });
+
+    testWidgets(
+        'the chosen button follows the answer, not the standing: an accepted '
+        'meeting shown tentative is still a chosen Yes; a Maybe answer '
+        'chooses Maybe whatever the case', (tester) async {
+      await pump(tester,
+          target: meeting(responseStatus: 'accepted', showAs: 'tentative'));
+      expect(enabled(tester, EventActions.yesKey), isFalse);
+      expect(enabled(tester, EventActions.maybeKey), isTrue);
+
+      await pump(tester,
+          target: meeting(responseStatus: 'TentativelyAccepted'));
+      expect(enabled(tester, EventActions.yesKey), isTrue);
+      expect(enabled(tester, EventActions.maybeKey), isFalse);
+
+      // An invite Outlook pencilled in as tentative chooses nothing.
+      await pump(tester,
+          target: meeting(responseStatus: 'notResponded', showAs: 'tentative'));
+      expect(enabled(tester, EventActions.yesKey), isTrue);
       expect(enabled(tester, EventActions.maybeKey), isTrue);
       expect(enabled(tester, EventActions.noKey), isTrue);
     });

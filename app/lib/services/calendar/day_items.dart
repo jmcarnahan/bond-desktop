@@ -8,6 +8,7 @@ import '../decision/stored_decision.dart';
 import '../deadline_parse.dart';
 import 'calendar_sync.dart' show CalendarAvailability;
 import 'calendar_zone.dart';
+import 'event_standing.dart';
 import 'overlaps.dart';
 
 /// The Day stop's arithmetic: what one day holds, in what order, and every
@@ -95,8 +96,7 @@ final class NowMarker extends DayItem {
 
 // ── which days an event is on ──────────────────────────────────────────
 
-bool _declined(CalendarEvent e) =>
-    e.responseStatus.trim().toLowerCase() == 'declined';
+bool _declined(CalendarEvent e) => standingOf(e) == EventStanding.declined;
 
 /// Whether [e] is a commitment at all: not cancelled, not declined. The same
 /// two tests the overlap maths skips on, so a count and an overlap line can
@@ -848,4 +848,26 @@ String? overlapLine(Overlaps o) {
   final subject =
       first.subject.trim().isEmpty ? '(no subject)' : first.subject.trim();
   return '⚠ overlaps $subject${total > 1 ? ' +${total - 1}' : ''}';
+}
+
+/// One clashing meeting as the agenda's clash chip and the panel's clash row
+/// both name it — "Budget review · 10:00–10:30 AM". A [soft] overlap says
+/// why it is soft, from [other]'s standing: ' · maybe' for a Maybe,
+/// ' · not answered' for an invite still owed an answer (Outlook pencils it
+/// in as tentative — the owner has said nothing), ' · tentative' for the
+/// rest. The time is left off when [other] has no instants.
+String clashLabel(CalendarZone zone, CalendarEvent other,
+    {required bool soft}) {
+  final subject =
+      other.subject.trim().isEmpty ? '(no subject)' : other.subject.trim();
+  final s = other.startUtc, e = other.endUtc;
+  final time = s != null && e != null ? ' · ${formatEventRange(zone, s, e)}' : '';
+  final why = !soft
+      ? ''
+      : switch (standingOf(other)) {
+          EventStanding.tentative => ' · maybe',
+          EventStanding.unanswered => ' · not answered',
+          _ => ' · tentative',
+        };
+  return '$subject$time$why';
 }

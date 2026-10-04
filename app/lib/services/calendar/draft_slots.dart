@@ -11,6 +11,7 @@ import '../backend/calendar_errors.dart';
 import 'ask_hints.dart';
 import 'ask_reader.dart';
 import 'calendar_zone.dart';
+import 'event_standing.dart';
 import 'find_time.dart';
 import 'overlaps.dart' show FreeSlot, Overlaps, findOverlaps;
 import 'scheduling_ask.dart';
@@ -242,16 +243,20 @@ List<FreeSlot> draftSlotsOf(Object? calendar) {
 /// Whether [slot] can no longer be offered: it has begun by [now], or its
 /// [overlaps] with the mirror ([findOverlaps]) hold a `hard` one — a timed
 /// event, not cancelled, not declined, shown busy, out of office or with no
-/// word at all. A `tentative` event is the Day column's soft overlap — said,
-/// never refused — so it blocks nothing here; nor do `free` and
-/// `workingElsewhere`.
+/// word at all — or a Maybe: a soft overlap whose standing is
+/// [EventStanding.tentative] (a Maybe answer, or a slot the owner shows
+/// tentative), which the free-slot walk would not offer either. An
+/// unanswered invite's pencilled `tentative` hold blocks nothing — the owner
+/// did not answer it — nor do `free` and `workingElsewhere`.
 ///
 /// ONE rule for both ends: a draft never offers such a slot
 /// ([draftSlotsFor], on the overlaps its search computed), and a draft
 /// offering one is redrafted (`DraftSlotRefresher`, on one mirror read per
 /// pass) — so a fresh draft cannot be stale on arrival.
 bool slotGone(FreeSlot slot, Overlaps overlaps, {required DateTime now}) =>
-    !slot.startUtc.isAfter(now.toUtc()) || overlaps.hard.isNotEmpty;
+    !slot.startUtc.isAfter(now.toUtc()) ||
+    overlaps.hard.isNotEmpty ||
+    overlaps.soft.any((x) => standingOf(x) == EventStanding.tentative);
 
 /// [slots] less those [slotGone] names, on one mirror read over their span:
 /// what an Improve keeps of a stored draft's times.

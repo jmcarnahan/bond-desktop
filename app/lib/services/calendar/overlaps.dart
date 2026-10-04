@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show immutable;
 import '../../models/calendar_models.dart';
 import 'ask_hours.dart';
 import 'calendar_zone.dart';
+import 'event_standing.dart';
 
 /// Does this slot clash, and when is the person actually free?
 ///
@@ -24,8 +25,10 @@ import 'calendar_zone.dart';
 ///   day.
 /// - **`free` and `workingElsewhere`** are, by Outlook's own definition, not
 ///   busy.
-/// - **`tentative` is a SOFT overlap** — worth saying out loud, not worth
-///   refusing a booking over.
+/// - **A tentative hold is a SOFT overlap** — a Maybe answer, or anything
+///   Outlook shows as tentative, which is how an unanswered invite sits
+///   ([isTentativeHold]): worth saying out loud, not worth refusing a booking
+///   over.
 /// - **Touching ends do not overlap.** A 3:00–4:00 and a 4:00–5:00 are a normal
 ///   afternoon, not a clash; see [instantsOverlap].
 /// - **An event never overlaps itself.** The event being MOVED is ignored by
@@ -71,8 +74,8 @@ class Overlaps {
   /// runs into. These are a real clash.
   final List<CalendarEvent> hard;
 
-  /// `tentative` timed events the slot runs into: said out loud, never a
-  /// refusal.
+  /// Maybe timed events the slot runs into — a `tentative` showAs or a
+  /// tentative answer ([isTentativeHold]): said out loud, never a refusal.
   final List<CalendarEvent> soft;
 
   /// All-day events on the slot's day(s). Mentioned, never blocking.
@@ -96,9 +99,10 @@ class Overlaps {
 /// Whether [event] is on the person's day at all: not cancelled, not
 /// declined. Shared by the overlap check and the free-slot walk so the two
 /// can never disagree about what counts.
-bool _counts(CalendarEvent event) =>
-    !event.isCancelled &&
-    event.responseStatus.trim().toLowerCase() != 'declined';
+bool _counts(CalendarEvent event) => switch (standingOf(event)) {
+      EventStanding.cancelled || EventStanding.declined => false,
+      _ => true,
+    };
 
 String _showAs(CalendarEvent event) => event.showAs.trim().toLowerCase();
 
@@ -159,7 +163,7 @@ Overlaps findOverlaps(
     final e = event.endUtc;
     if (s == null || e == null) continue;
     if (!instantsOverlap(s, e, startUtc, endUtc)) continue;
-    if (showAs == 'tentative') {
+    if (isTentativeHold(event)) {
       soft.add(event);
     } else {
       hard.add(event);
@@ -177,12 +181,15 @@ Overlaps findOverlaps(
 ///
 /// [event] is ignored by id, so passing the whole day (itself included) is
 /// fine. An all-day event has no slot to clash with, so it returns an empty
-/// [Overlaps]; so does a timed event whose instants could not be read.
+/// [Overlaps]; so does a timed event whose instants could not be read, and a
+/// cancelled or declined one — it is not on the day, so it clashes with
+/// nothing, just as nothing clashes with it.
 Overlaps overlapsForEvent(
   CalendarEvent event,
   Iterable<CalendarEvent> others, {
   CalendarZone? zone,
 }) {
+  if (!_counts(event)) return const Overlaps();
   final s = event.startUtc;
   final e = event.endUtc;
   if (event.isAllDay || s == null || e == null) return const Overlaps();
@@ -247,7 +254,8 @@ class FreeSlot {
 /// and 16:30 — three buttons for one gap while the 17:00 slot goes unsaid.
 ///
 /// **What blocks.** Timed events that are not cancelled, not declined, and
-/// not `free`/`workingElsewhere`. `tentative` BLOCKS by default, unlike
+/// not `free`/`workingElsewhere`. A Maybe ([isTentativeHold]) BLOCKS by
+/// default, unlike
 /// the reference rules' free-slot walk (which offers a slot whenever no
 /// HARD overlap was found): a slot offered here may be sent to
 /// other people as an invite, and offering a time the owner has tentatively
@@ -456,7 +464,7 @@ List<(DateTime, DateTime)> _busySpans(
     if (event.isAllDay || !_counts(event)) continue;
     final showAs = _showAs(event);
     if (_nonBlockingShowAs.contains(showAs)) continue;
-    if (showAs == 'tentative' && !tentativeBlocks) continue;
+    if (!tentativeBlocks && isTentativeHold(event)) continue;
     final s = event.startUtc;
     final e = event.endUtc;
     if (s == null || e == null) continue;

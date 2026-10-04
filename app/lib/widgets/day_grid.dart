@@ -7,10 +7,12 @@ import 'package:kalender/kalender.dart';
 import '../models/calendar_models.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
+import '../services/calendar/event_standing.dart';
 import '../services/calendar/overlaps.dart';
 import '../services/calendar/write_rules.dart';
 import '../theme/tokens.dart';
 import 'day_pane.dart' show DayPane;
+import 'event_standing_style.dart';
 
 /// How much of the calendar the grid shows at once.
 enum GridSpan { day, week }
@@ -235,9 +237,10 @@ class _GridTile extends KalenderEvent {
     required this.title,
     this.eventId = '',
     this.item,
-    this.tentative = false,
+    this.standing = EventStanding.noAnswerNeeded,
     this.cancelled = false,
     this.overlap = false,
+    this.softOverlap = false,
     this.movable = false,
     this.caption = '',
   });
@@ -246,9 +249,17 @@ class _GridTile extends KalenderEvent {
   final String title;
   final String eventId;
   final DayItem? item;
-  final bool tentative;
+  /// Where the owner stands on the meeting ([standingOf]); the fill and the
+  /// bar wear it. Markers keep the default.
+  final EventStanding standing;
   final bool cancelled;
+
+  /// A HARD overlap: the bar turns the error colour and the title gets '⚠'.
   final bool overlap;
+
+  /// A SOFT overlap only (the other side is a tentative hold): the '⚠', not
+  /// the bar.
+  final bool softOverlap;
   final bool movable;
 
   /// A proposal's second line ("Proposed") under its subject.
@@ -263,9 +274,10 @@ class _GridTile extends KalenderEvent {
         title: title,
         eventId: eventId,
         item: item,
-        tentative: tentative,
+        standing: standing,
         cancelled: cancelled,
         overlap: overlap,
+        softOverlap: softOverlap,
         movable: movable,
         caption: caption,
       );
@@ -279,16 +291,17 @@ class _GridTile extends KalenderEvent {
         other.title == title &&
         other.eventId == eventId &&
         other.item == item &&
-        other.tentative == tentative &&
+        other.standing == standing &&
         other.cancelled == cancelled &&
         other.overlap == overlap &&
+        other.softOverlap == softOverlap &&
         other.movable == movable &&
         other.caption == caption;
   }
 
   @override
   int get hashCode => Object.hash(super.hashCode, kind, title, eventId, item,
-      tentative, cancelled, overlap, movable, caption);
+      standing, cancelled, overlap, softOverlap, movable, caption);
 }
 
 class _DayGridState extends State<DayGrid> {
@@ -402,12 +415,10 @@ class _DayGridState extends State<DayGrid> {
     final tiles = <KalenderEvent>[];
     for (final e in widget.events) {
       if (e.isSeriesMaster) continue;
-      final status = e.responseStatus.trim().toLowerCase();
+      final standing = standingOf(e);
       // A declined meeting is not drawn: the owner said no, and Outlook
       // takes it off the calendar anyway.
-      if (status == 'declined') continue;
-      final tentative =
-          status == 'tentativelyaccepted' || e.showAs.trim().toLowerCase() == 'tentative';
+      if (standing == EventStanding.declined) continue;
       if (e.isAllDay) {
         final start = e.startDate;
         if (start == null) continue;
@@ -422,8 +433,8 @@ class _DayGridState extends State<DayGrid> {
           kind: _TileKind.event,
           title: e.subject,
           eventId: e.id,
-          tentative: tentative,
-          cancelled: e.isCancelled,
+          standing: standing,
+          cancelled: standing == EventStanding.cancelled,
         ));
         continue;
       }
@@ -433,6 +444,7 @@ class _DayGridState extends State<DayGrid> {
       // [canMove] already refuses a cancelled event and a series master;
       // timed is the grid's own rule (an all-day drag is out of this round).
       final movable = !widget.locked && canMove(e) && e.isTimed;
+      final overlaps = overlapsForEvent(e, widget.events, zone: zone);
       tiles.add(_GridTile(
         id: 'event:${e.id}',
         start: s,
@@ -447,9 +459,10 @@ class _DayGridState extends State<DayGrid> {
         kind: _TileKind.event,
         title: e.subject,
         eventId: e.id,
-        tentative: tentative,
-        cancelled: e.isCancelled,
-        overlap: overlapsForEvent(e, widget.events, zone: zone).hard.isNotEmpty,
+        standing: standing,
+        cancelled: standing == EventStanding.cancelled,
+        overlap: overlaps.hard.isNotEmpty,
+        softOverlap: overlaps.soft.isNotEmpty,
         movable: movable,
       ));
     }
@@ -708,13 +721,18 @@ class _DayGridState extends State<DayGrid> {
         fill = BondColors.neutralTint;
         bar = BondColors.primary;
       case _TileKind.event:
-        fill = BondColors.primary
-            .withValues(alpha: event.tentative ? 0.08 : 0.18);
+        // The standing's colours, the same palette as the agenda row; a
+        // hard overlap takes the bar in the error colour, distinct from a
+        // Maybe's attention.
+        fill = standingFillColor(event.standing);
         bar = event.overlap
-            ? BondColors.attention
-            : event.tentative
-                ? BondColors.primary.withValues(alpha: 0.4)
-                : BondColors.primary;
+            ? BondColors.error
+            : standingBarColor(event.standing);
+        if (event.standing == EventStanding.unanswered) {
+          // Not yet the owner's: a thin primary edge round a faint fill.
+          border = Border.all(
+              color: BondColors.primary.withValues(alpha: 0.5), width: 1);
+        }
         if (event.cancelled) {
           fill = BondColors.neutralTint;
           bar = BondColors.inkMuted;
@@ -722,8 +740,11 @@ class _DayGridState extends State<DayGrid> {
     }
 
     final struck = event.cancelled;
+    final clash = event.overlap || event.softOverlap;
     final title = Text(
-      event.kind == _TileKind.event ? _subject(event.title) : event.title,
+      event.kind == _TileKind.event
+          ? '${clash ? '⚠ ' : ''}${_subject(event.title)}'
+          : event.title,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: BondType.caption.copyWith(
@@ -908,8 +929,14 @@ class _DayGridState extends State<DayGrid> {
           snapToTimeIndicator: false,
         ),
         multiDayTileComponents: tiles,
-        multiDayBodyConfiguration:
-            const MultiDayBodyConfiguration(minimumTileHeight: 20),
+        // Side by side: overlapping tiles divide the column instead of
+        // covering each other, so a clash is visible as two tiles —
+        // kalender's default `overlap()` strategy draws them on top of
+        // each other. Day and week share this one body configuration.
+        multiDayBodyConfiguration: const MultiDayBodyConfiguration(
+          minimumTileHeight: 20,
+          eventLayoutStrategy: EventLayoutStrategy.sideBySide(),
+        ),
       ),
     ),
     );

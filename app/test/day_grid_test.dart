@@ -3,6 +3,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/reminder_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/day_items.dart';
+import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/day_grid.dart';
 import 'package:bond_inbox/widgets/day_pane.dart' show DayPane;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
@@ -323,6 +324,133 @@ void main() {
     expect(find.text('Vendor pitch'), findsNothing);
     expect(find.byKey(DayGrid.tileKeyFor('declined-day')), findsNothing);
     await unmount(tester);
+  });
+
+  group('the standing and the clashes', () {
+    CalendarEvent invited(String id, String subject, DateTime start,
+            {String response = 'accepted',
+            String showAs = 'busy',
+            bool cancelled = false}) =>
+        CalendarEvent(
+          id: id,
+          subject: subject,
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 1)),
+          responseStatus: response,
+          responseRequested: true,
+          isCancelled: cancelled,
+          organizerName: 'Dana Fabrikam',
+          organizerAddress: 'dana@fabrikam.com',
+          showAs: showAs,
+        );
+
+    BoxDecoration decorationOf(WidgetTester tester, String id) =>
+        tester.widget<Container>(find.byKey(DayGrid.tileKeyFor(id))).decoration
+            as BoxDecoration;
+
+    /// The tile's 3-px standing bar, at its left edge.
+    Color? barOf(WidgetTester tester, String id) => tester
+        .widget<Container>(find.descendant(
+          of: find.byKey(DayGrid.tileKeyFor(id)),
+          matching: find.byWidgetPredicate((w) =>
+              w is Container &&
+              w.constraints?.minWidth == 3 &&
+              w.constraints?.maxWidth == 3),
+        ))
+        .color;
+
+    String titleOf(WidgetTester tester, String id) => tester
+        .widgetList<Text>(find.descendant(
+            of: find.byKey(DayGrid.tileKeyFor(id)), matching: find.byType(Text)))
+        .first
+        .data!;
+
+    testWidgets(
+        'tiles carry the standing: accepted, maybe, not-answered and '
+        'cancelled tiles differ in fill or bar', (tester) async {
+      await pumpGrid(tester, events: [
+        invited('yes', 'Fabrikam sync', DateTime.utc(2026, 10, 7, 15)),
+        invited('maybe', 'Contoso lunch', DateTime.utc(2026, 10, 7, 17),
+            response: 'tentativelyAccepted'),
+        // Outlook pencils an unanswered invite in as tentative: it is still
+        // not answered, not a Maybe.
+        invited('owed', 'Northwind review', DateTime.utc(2026, 10, 7, 19),
+            response: 'notResponded', showAs: 'tentative'),
+        invited('gone', 'Acme standup', DateTime.utc(2026, 10, 7, 21),
+            cancelled: true),
+      ]);
+
+      final looks = {
+        for (final id in ['yes', 'maybe', 'owed', 'gone'])
+          id: (decorationOf(tester, id).color, barOf(tester, id)),
+      };
+      expect(looks.values.toSet(), hasLength(4));
+      // The not-yet-answered edge is the only border; the clash bar is
+      // nobody's here.
+      expect(decorationOf(tester, 'owed').border, isNotNull);
+      expect(decorationOf(tester, 'yes').border, isNull);
+      expect(decorationOf(tester, 'maybe').border, isNull);
+      for (final id in looks.keys) {
+        expect(barOf(tester, id), isNot(BondColors.error));
+        expect(titleOf(tester, id), isNot(startsWith('⚠')));
+      }
+      await unmount(tester);
+    });
+
+    testWidgets(
+        "a hard overlap's bar is the error colour and its title starts with "
+        '⚠; a soft one keeps its bar', (tester) async {
+      await pumpGrid(tester, events: [
+        // Hard both ways: two accepted meetings, 8:00 and 8:30.
+        invited('a', 'Fabrikam sync', DateTime.utc(2026, 10, 7, 15)),
+        invited('b', 'Contoso review', DateTime.utc(2026, 10, 7, 15, 30)),
+        // 12:00 accepted against a 12:30 Maybe: soft for the accepted one
+        // (the other side is a Maybe), hard for the Maybe.
+        invited('firm', 'Northwind call', DateTime.utc(2026, 10, 7, 19)),
+        invited('soft', 'Acme lunch', DateTime.utc(2026, 10, 7, 19, 30),
+            response: 'tentativelyAccepted'),
+        // The control: alone at 15:00.
+        invited('alone', 'Adventure Works demo', DateTime.utc(2026, 10, 7, 22)),
+      ]);
+
+      expect(barOf(tester, 'a'), BondColors.error);
+      expect(barOf(tester, 'b'), BondColors.error);
+      expect(titleOf(tester, 'a'), startsWith('⚠ '));
+      expect(titleOf(tester, 'b'), startsWith('⚠ '));
+
+      expect(titleOf(tester, 'firm'), startsWith('⚠ '));
+      expect(barOf(tester, 'firm'), barOf(tester, 'alone'));
+      expect(barOf(tester, 'soft'), BondColors.error);
+
+      expect(titleOf(tester, 'alone'), isNot(startsWith('⚠')));
+      expect(barOf(tester, 'alone'), isNot(BondColors.error));
+      await unmount(tester);
+    });
+
+    testWidgets(
+        'two overlapping tiles are laid side by side: both are there and '
+        'their rects do not intersect', (tester) async {
+      final opened = <String>[];
+      await pumpGrid(tester, onOpenEvent: opened.add, events: [
+        invited('a', 'Fabrikam sync', DateTime.utc(2026, 10, 7, 17)),
+        invited('b', 'Contoso review', DateTime.utc(2026, 10, 7, 17, 30)),
+      ]);
+
+      final a = find.byKey(DayGrid.tileKeyFor('a'));
+      final b = find.byKey(DayGrid.tileKeyFor('b'));
+      expect(a, findsOneWidget);
+      expect(b, findsOneWidget);
+      final ra = tester.getRect(a);
+      final rb = tester.getRect(b);
+      expect(ra.overlaps(rb), isFalse, reason: '$ra vs $rb');
+      // Each is hit-testable at its own centre: a tap opens that one.
+      await tester.tapAt(ra.center);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tapAt(rb.center);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(opened, ['a', 'b']);
+      await unmount(tester);
+    });
   });
 
   testWidgets('a deadline sits in the header and its tap opens the item',

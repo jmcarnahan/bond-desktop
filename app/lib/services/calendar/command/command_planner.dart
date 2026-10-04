@@ -7,7 +7,8 @@ import '../../backend/calendar_errors.dart';
 import '../calendar_writes.dart';
 import '../calendar_zone.dart';
 import '../day_items.dart' show formatEventRange, formatEventTime, shortDate;
-import '../event_view.dart' show isSeriesEvent, lastMetLabel, nextMeetingLabel;
+import '../event_view.dart'
+    show EventStanding, isSeriesEvent, lastMetLabel, nextMeetingLabel, standingOf;
 import '../find_time.dart' show FindTimeEmpty, findTimeEmptyFallback;
 import '../overlaps.dart';
 import '../when_resolver.dart';
@@ -739,7 +740,11 @@ class CommandPlanner {
     if (last.isAfter(day.addDays(6))) last = day.addDays(6);
     var events = [
       for (final e in await _eventsOn(day, last, zone))
-        if (!e.isCancelled && e.responseStatus != 'declined') e,
+        if (switch (standingOf(e)) {
+          EventStanding.cancelled || EventStanding.declined => false,
+          _ => true,
+        })
+          e,
     ];
     // "What's on tomorrow afternoon": the part narrows the timed rows.
     if (w.part != null && w.rangeEnd == null && w.time == null) {

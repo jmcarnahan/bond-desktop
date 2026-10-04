@@ -6,8 +6,10 @@ import 'package:bond_inbox/services/calendar/day_items.dart'
     show offlineCaption;
 import 'package:bond_inbox/services/calendar/event_view.dart';
 import 'package:bond_inbox/services/calendar/overlaps.dart';
+import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/day_pane.dart';
 import 'package:bond_inbox/widgets/event_panel.dart';
+import 'package:bond_inbox/widgets/event_standing_style.dart';
 import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -68,6 +70,7 @@ void main() {
     void Function(String, String)? onOpenThread,
     void Function(String)? onOpenStoryline,
     VoidCallback? onOpenSettings,
+    void Function(String)? onOpenEvent,
     VoidCallback? onRetry,
     Widget? brief,
     Widget? actions,
@@ -88,6 +91,7 @@ void main() {
           onOpenThread: onOpenThread ?? (_, _) {},
           onOpenStoryline: onOpenStoryline,
           onOpenSettings: onOpenSettings,
+          onOpenEvent: onOpenEvent,
           onRetry: onRetry,
           brief: brief,
           actions: actions,
@@ -112,7 +116,9 @@ void main() {
     expect(find.text(offlineCaption), findsNothing);
   });
 
-  testWidgets('the when line, standing, tally and overlap', (tester) async {
+  testWidgets('the when line, standing, tally and the clash list: one row per '
+      'overlapping meeting, hard first, tapping one opens it', (tester) async {
+    final opened = <String>[];
     await pumpBody(
       tester,
       EventLookup.found(meeting(attendees: const [
@@ -128,16 +134,39 @@ void main() {
           startUtc: DateTime.utc(2026, 9, 29, 17),
           endUtc: DateTime.utc(2026, 9, 29, 18),
         ),
+      ], soft: [
+        CalendarEvent(
+          id: 'm',
+          subject: 'Fabrikam review',
+          startUtc: DateTime.utc(2026, 9, 29, 16, 45),
+          endUtc: DateTime.utc(2026, 9, 29, 17, 15),
+          responseStatus: 'tentativelyAccepted',
+        ),
       ]),
+      onOpenEvent: opened.add,
     );
 
     expect(textOf(tester, EventPanelBody.whenKey),
         'Today · Tuesday, Sep 29 · 10:00–10:30 AM');
     expect(textOf(tester, EventPanelBody.responseKey), 'You accepted');
+    // The line wears the standing's colour, as the agenda bar does.
+    expect(
+        tester.widget<Text>(find.byKey(EventPanelBody.responseKey)).style!.color,
+        bondToneColors[toneOfStanding(EventStanding.accepted)]!.foreground);
     // An attendee's copy: definite answers only, no "of N".
     expect(textOf(tester, EventPanelBody.tallyKey), '1 accepted · Ana declined');
-    expect(textOf(tester, EventPanelBody.overlapKey),
-        '⚠ overlaps Budget review');
+    expect(textOf(tester, EventPanelBody.overlapKey), '⚠ overlaps');
+    String rowText(int i) => tester
+        .widget<Text>(find.descendant(
+            of: find.byKey(EventPanelBody.overlapRowKeyFor(i)),
+            matching: find.byType(Text)))
+        .data!;
+    expect(rowText(0), 'Budget review · 10:00–11:00 AM');
+    expect(rowText(1), 'Fabrikam review · 9:45–10:15 AM · maybe');
+    expect(find.byKey(EventPanelBody.overlapRowKeyFor(2)), findsNothing);
+    await tester.tap(find.byKey(EventPanelBody.overlapRowKeyFor(1)));
+    await tester.tap(find.byKey(EventPanelBody.overlapRowKeyFor(0)));
+    expect(opened, ['m', 'b']);
     expect(find.text('Room 4B'), findsOneWidget);
     expect(find.text('Organised by Dana Ortiz'), findsOneWidget);
   });

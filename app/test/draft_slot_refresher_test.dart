@@ -76,7 +76,8 @@ void main() {
         }).encode(),
       );
 
-  Future<void> event(String id, DateTime start, {String showAs = 'busy'}) =>
+  Future<void> event(String id, DateTime start,
+          {String showAs = 'busy', String responseStatus = 'none'}) =>
       calendar.upsertEvents([
         CalendarEvent(
           id: id,
@@ -84,6 +85,7 @@ void main() {
           startUtc: start,
           endUtc: start.add(half),
           showAs: showAs,
+          responseStatus: responseStatus,
         ),
       ], syncRun: 'run-1');
 
@@ -130,12 +132,26 @@ void main() {
     await event('maybe', thuTwo, showAs: 'tentative');
     await event('away', thuTen.add(const Duration(days: 1)), showAs: 'oof');
     expect(await refresh(), 0,
-        reason: 'tentative is the Day column\'s soft overlap: said, never '
-            'refused');
+        reason: 'an unanswered invite\'s tentative hold is the Day column\'s '
+            'soft overlap: said, never refused');
 
     await draft('m3', starts: [thuTen.add(const Duration(days: 1))]);
     expect(await refresh(), 1);
     expect(await store.getDraftForMessage('email', 'm3'), isNull);
+  });
+
+  test('a Maybe answer on a covering meeting stales the slot; an unanswered '
+      'tentative-shown invite does not', () async {
+    await draft('m1', starts: [thuTen]);
+    await draft('m2', starts: [thuTwo]);
+    await event('owed', thuTen, showAs: 'tentative',
+        responseStatus: 'notResponded');
+    expect(await refresh(), 0, reason: 'the owner has not answered it');
+
+    await event('maybe', thuTwo, responseStatus: 'tentativelyAccepted');
+    expect(await refresh(), 1);
+    expect(await store.getDraftForMessage('email', 'm2'), isNull);
+    expect(await store.getDraftForMessage('email', 'm1'), isNotNull);
   });
 
   test('a meeting ending as the slot starts does not overlap it', () async {

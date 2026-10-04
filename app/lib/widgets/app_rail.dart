@@ -8,6 +8,7 @@ import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
+import '../services/calendar/event_view.dart' show EventStanding, standingOf, standingWord;
 import '../services/decision/needs_you_predicate.dart';
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
@@ -1015,7 +1016,8 @@ class _AppRailState extends State<AppRail> {
           if (e.startUtc != null) ...[
             _calendarRow(
               label: '${formatEventTime(zone, e.startUtc!)} · '
-                  '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}',
+                  '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}'
+                  '${_standingSuffix(e)}',
               selected: false,
               onTap: widget.onOpenEvent != null
                   ? () => widget.onOpenEvent!(e.id)
@@ -1045,6 +1047,16 @@ class _AppRailState extends State<AppRail> {
       placeholder: 'Nothing else today',
     );
   }
+
+  /// What a Today row adds after its subject: ' · Maybe' for a tentative
+  /// meeting, ' · RSVP owed' for one still owed an answer, else nothing.
+  /// 'RSVP owed' is the agenda chip's word, not `standingWord`'s 'Not
+  /// answered': the row is asking for the answer, as the chip does.
+  static String _standingSuffix(CalendarEvent e) => switch (standingOf(e)) {
+        EventStanding.tentative => ' · ${standingWord(EventStanding.tentative)}',
+        EventStanding.unanswered => ' · RSVP owed',
+        _ => '',
+      };
 
   /// A brief's glance under its Today meeting row, indented to the row's
   /// label, in the placeholder's muted ink.

@@ -981,6 +981,33 @@ that bite.
     ''/`none`/`notResponded` over a stored answer; `_applyLocally` notes the
     write BEFORE `setResponseStatus`. A test of a lagging page goes through
     `syncNow(force:)`, never `upsertEvents` alone.
+- **Standing (the clean-up round, 2026-10):**
+  - `standingOf(e)` (`services/calendar/event_standing.dart`, re-exported by
+    `event_view.dart`) is the ONE reader of `responseStatus`/`showAs` for
+    every face and for the overlap maths — never compare the strings
+    elsewhere. Order: cancelled → organizer (`isOwnersEvent`, which lives
+    there now) → the ANSWER (`answerOf`: accepted / tentative / declined) →
+    unanswered (`needsResponse`) → `showAs: tentative` → noAnswerNeeded.
+    **Unanswered wins over "shown tentative"**: Outlook puts every
+    unanswered invite on the calendar as tentative, so reading `showAs`
+    first would call every open invite a Maybe. `isTentativeHold(e)` (a
+    Maybe standing OR `showAs` tentative) is the soft-overlap predicate and
+    `tentativeBlocks`' rule; a Maybe ANSWER is a soft overlap now.
+  - The chosen (disabled) answer button follows the ANSWER (`answerOf`),
+    not the standing. `responseLine` reads the standing; its seven strings
+    are unchanged.
+  - The palette is `widgets/event_standing_style.dart` (`toneOfStanding`,
+    `standingBarColor`, `standingFillColor`): organizer/accepted → primary,
+    Maybe → attention, unanswered/declined/cancelled → neutral (bar
+    `inkMuted`). A hard clash turns a tile's bar the ERROR colour (not
+    attention — that is Maybe's) and prefixes '⚠'; a soft one only the '⚠'.
+    `theme/` never imports `services/`; the style file is in widgets for
+    that reason.
+  - Grid tiles overlap side by side through
+    `MultiDayBodyConfiguration(eventLayoutStrategy:
+    EventLayoutStrategy.sideBySide())` — the view factories do not take it.
+  - The word is overlap or clash, never "conflict" (`CalendarEventChanged`,
+    an etag rejection, owns that word).
 - **The UI write path:**
   - `CalendarWriteFlow` is the ONE write state machine. The panel, cards,
     grid, command card and Find a time all go through it (or through

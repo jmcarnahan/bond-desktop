@@ -22,7 +22,7 @@ import '../llm/prompt_guard.dart';
 import 'ask_words.dart' show askOwnWords, capAtWord;
 import 'calendar_zone.dart';
 import 'day_items.dart' show formatEventRange;
-import 'event_view.dart' show lastMetLabel;
+import 'event_view.dart' show EventStanding, lastMetLabel, standingOf;
 
 /// Why a meeting gets no brief (D6). [wire] is the word a stored row and an
 /// activity row carry — an enum word, never anything about the meeting.
@@ -665,7 +665,7 @@ BriefIneligibility? briefQuickCheck(
   bool asked = false,
 }) {
   if (e.isCancelled) return BriefIneligibility.cancelled;
-  if (e.responseStatus.trim().toLowerCase() == 'declined') {
+  if (standingOf(e) == EventStanding.declined) {
     return BriefIneligibility.declined;
   }
   final start = briefStartOf(e, zone);
