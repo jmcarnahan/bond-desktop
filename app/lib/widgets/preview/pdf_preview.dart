@@ -45,8 +45,29 @@ class PdfrxRenderer implements PdfRenderer {
         sourceName: sourceName,
         params: const PdfViewerParams(
           backgroundColor: BondColors.previewGround,
+          errorBannerBuilder: _unreadable,
         ),
       );
+}
+
+/// What a document pdfium refused draws: one muted sentence, inside the
+/// panel's own tree. pdfrx's default banner is a `SelectionArea`, which asks
+/// for a `MaterialLocalizations` this app never supplies and threw a red box
+/// over the whole panel in its place.
+Widget _unreadable(
+  BuildContext context,
+  Object error,
+  StackTrace? stackTrace,
+  PdfDocumentRef documentRef,
+) {
+  debugPrint('pdf viewer refused the file: $error');
+  return Center(
+    child: Text(
+      'This PDF could not be read. Save it to open it elsewhere.',
+      style: BondType.caption.copyWith(color: BondColors.inkMuted),
+      textAlign: TextAlign.center,
+    ),
+  );
 }
 
 class _PdfrxDoc implements PdfPreviewDoc {

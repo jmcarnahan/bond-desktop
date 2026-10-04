@@ -283,6 +283,17 @@ class CalendarSync {
   static const Duration mailboxRefresh = Duration(hours: 24);
   static const Duration writeGuardSpan = Duration(minutes: 10);
 
+  /// How long after this app's own answer any other answer the page carries
+  /// for that event is disbelieved (`none`/`notResponded`, or the answer it
+  /// replaced): Graph's delta can lag the answer by a few
+  /// seconds; two minutes is a belt, not a window. The write guard covers only
+  /// pages requested while the write was in the air; the forced sync after a
+  /// write starts after it, so this is what keeps its pages from putting the
+  /// invite back. An organiser's update inside those two minutes that truly
+  /// reset the answer to notResponded is disbelieved, and stays so until the
+  /// event changes again or a full run reads it; accepted as a belt.
+  static const Duration answerHold = Duration(minutes: 2);
+
   /// `sync_state`'s key for the one calendar this mirrors.
   static const String _source = 'calendar';
   static const String _folder = 'primary';
@@ -575,16 +586,20 @@ class CalendarSync {
       }
       pages += 1;
 
-      final guarded = _writtenSince(requested);
-      final held = {
-        for (final e in page.events)
-          if (guarded.contains(e.id)) e.id,
-      };
       // The whole page is one transaction behind the generation check, the
       // sweep included. `upsertEvents` opens its own transaction inside this
       // one, which drift runs as a savepoint.
       final applied = await db.transaction(() async {
         await _checkRun(state.run);
+        // Read inside the transaction, as late as possible: a write that
+        // notes itself while this page waited for the transaction is still
+        // seen, so its answer is not overwritten.
+        final guarded = _writtenSince(requested);
+        final keepAnswerFor = _writtenSince(requested.subtract(answerHold));
+        final held = {
+          for (final e in page.events)
+            if (guarded.contains(e.id)) e.id,
+        };
         var next = state;
         if (sent.isEmpty &&
             DateTime.tryParse(page.windowStart) != null &&
@@ -596,6 +611,7 @@ class CalendarSync {
           page.events,
           syncRun: next.run,
           skipIds: guarded,
+          keepAnswerFor: keepAnswerFor,
         );
         // The app's own write is not overwritten, but it IS in this run: the
         // re-tag is what keeps a sweep long after the guard's span from

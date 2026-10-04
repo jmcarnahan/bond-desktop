@@ -16,6 +16,9 @@
 /// model has read it.
 library;
 
+import '../../models/message_models.dart'
+    show Conversation, ConversationState;
+
 /// The slider's range and default.
 abstract final class NeedsYouTuning {
   /// Fitted on the golden set, keep-only needs_you of 76. On the v2 model
@@ -38,6 +41,34 @@ abstract final class NeedsYouTuning {
 
 /// Whether a message with probability [p] needs the owner at [threshold].
 bool needsYouAt(double? p, double threshold) => p != null && p >= threshold;
+
+/// THE predicate the two halves of the live inbox partition on: Needs You is
+/// everything this returns true for, and every live thread it returns false
+/// for is what is left over — the rows People's rooms are built from.
+/// One function rather than a filter in each, because two filters that were
+/// meant to be complements are two filters that will eventually disagree — and
+/// the symptom is mail in both sections, or in neither.
+///
+/// Three tests: nothing deferred to Later, which is the whole point of Later;
+/// nothing already closed; and the thread's needs-you probability
+/// ([Conversation.needsYouP], the decision model's highest p over the kept
+/// inbound the owner has not answered) at or above [threshold], the owner's
+/// slider ([needsYouAt]). Nothing else gates: not triage's ask, not the
+/// thread's `needs_reply` state, not the attention score, which only ORDERS
+/// the rows (`needsYouRows` in `app_rail.dart`). An undecided thread (a null probability) needs
+/// nobody until the model has read it.
+///
+/// The store spells the same rule once in SQL for the tile and the Needs You
+/// filter, over the same probability expression, so the rail and the tile
+/// cannot count different threads.
+bool isNeedsYou(
+  Conversation c, {
+  double threshold = NeedsYouTuning.defaultThreshold,
+}) {
+  if (c.bucket == 'later') return false;
+  if (c.state == ConversationState.done) return false;
+  return needsYouAt(c.needsYouP, threshold);
+}
 
 /// [needsYouAt] as a SQL condition over [column].
 ///

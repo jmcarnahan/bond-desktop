@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -41,8 +42,11 @@ void main() {
     int isRead = 0,
     String? createdAt = createdAfterArm,
     String? receivedAt = receivedRecently,
+    String? deadline,
+    String? sourceMetaJson,
   }) async {
     await store.upsertMessage({
+      'source_meta_json': ?sourceMetaJson,
       'source': source,
       'source_message_id': id,
       'conversation_key': key,
@@ -53,6 +57,18 @@ void main() {
       'triage_status': triageStatus,
       'created_at': createdAt,
     });
+    if (deadline != null) {
+      // Triage's column, written straight so the row stays pending.
+      await db.customUpdate(
+        'UPDATE messages SET deadline = ? WHERE source = ? '
+        'AND source_message_id = ?',
+        variables: [
+          Variable.withString(deadline),
+          Variable.withString(source),
+          Variable.withString(id),
+        ],
+      );
+    }
   }
 
   Future<int> admit() => store.admitNotifyCandidates(
@@ -197,6 +213,28 @@ void main() {
 
       final open = await store.openNotifyCandidates();
       expect(open.map((r) => r['source_message_id']), ['m-2']);
+    });
+  });
+
+  group('meeting deadlines', () {
+    test("a meeting message's stored deadline reads null on both notify "
+        "paths; a plain mail's is kept", () async {
+      // The text model read the invite's own meeting time as a deadline.
+      await seedMessage('m-invite',
+          deadline: 'Sunday 2pm',
+          sourceMetaJson: '{"meeting": "meetingRequest"}');
+      await seedMessage('m-plain', key: 'conv-2', deadline: 'Friday');
+      await admit();
+
+      expect((await store.notifyRowFor('email', 'm-invite'))!['deadline'],
+          isNull);
+      expect((await store.notifyRowFor('email', 'm-plain'))!['deadline'],
+          'Friday');
+      final open = {
+        for (final r in await store.openNotifyCandidates())
+          r['source_message_id']: r['deadline'],
+      };
+      expect(open, {'m-invite': null, 'm-plain': 'Friday'});
     });
   });
 

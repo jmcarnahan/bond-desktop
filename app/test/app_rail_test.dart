@@ -2026,12 +2026,16 @@ void main() {
     final now = DateTime.utc(2026, 9, 29, 16);
     const today = CalendarDate(2026, 9, 29);
 
-    CalendarEvent meeting(String id, String subject, int startHourUtc) =>
+    // Accepted by default: an unanswered meeting's row says 'RSVP owed'.
+    CalendarEvent meeting(String id, String subject, int startHourUtc,
+            {String responseStatus = 'accepted', String showAs = 'busy'}) =>
         CalendarEvent(
           id: id,
           subject: subject,
           startUtc: DateTime.utc(2026, 9, 29, startHourUtc),
           endUtc: DateTime.utc(2026, 9, 29, startHourUtc, 30),
+          responseStatus: responseStatus,
+          showAs: showAs,
         );
 
     Future<void> pumpRail(
@@ -2040,6 +2044,7 @@ void main() {
       bool calendarShown = true,
       bool todayShown = true,
       List<CalendarEvent> todayMeetings = const [],
+      Map<String, String> todayGlances = const {},
       int invitesCount = 0,
       List<(CalendarDate, DaySummary)> dayRows = const [],
       CalendarDate? selectedDay,
@@ -2064,6 +2069,7 @@ void main() {
         calendarShown: calendarShown,
         todayShown: todayShown,
         todayMeetings: todayMeetings,
+        todayGlances: todayGlances,
         calendarZone: CalendarZone.tryNamed('America/Los_Angeles')!,
         now: now,
         invitesCount: invitesCount,
@@ -2090,6 +2096,20 @@ void main() {
       await tester.pump();
       expect(opened, ['m1']);
       expect(sections, isNot(contains(RailSection.day)));
+    });
+
+    testWidgets('Today rows say Maybe and RSVP owed', (tester) async {
+      await pumpRail(tester, todayMeetings: [
+        meeting('yes', 'Standup with Fabrikam', 17),
+        meeting('maybe', 'Contoso review', 18,
+            responseStatus: 'tentativelyAccepted'),
+        meeting('owed', 'Northwind kickoff', 19,
+            responseStatus: 'notResponded', showAs: 'tentative'),
+      ]);
+      expect(find.text('10:00 AM · Standup with Fabrikam'), findsOneWidget);
+      expect(find.text('11:00 AM · Contoso review · Maybe'), findsOneWidget);
+      expect(find.text('12:00 PM · Northwind kickoff · RSVP owed'),
+          findsOneWidget);
     });
 
     testWidgets('without an event handler the row goes to the Day stop',
@@ -2131,6 +2151,29 @@ void main() {
       expect(tester.getTopLeft(find.text('NEEDS YOU')).dy, lessThan(todayY));
       expect(
           tester.getTopLeft(find.text('DRAFTS & SENT')).dy, greaterThan(todayY));
+    });
+
+    testWidgets('a glance under a meeting row', (tester) async {
+      await pumpRail(
+        tester,
+        todayMeetings: [
+          meeting('m1', 'Standup with Fabrikam', 17),
+          meeting('m2', 'Design review', 18),
+        ],
+        todayGlances: const {'m1': 'Dana is waiting on the quote.'},
+      );
+
+      final glance = find.byKey(AppRail.todayGlanceKeyFor('m1'));
+      expect(glance, findsOneWidget);
+      expect(tester.widget<Text>(glance).data, 'Dana is waiting on the quote.');
+      expect(tester.widget<Text>(glance).maxLines, 2);
+      expect(find.byKey(AppRail.todayGlanceKeyFor('m2')), findsNothing);
+      // Under its own row, above the next one.
+      final y = tester.getTopLeft(glance).dy;
+      expect(tester.getTopLeft(find.text('10:00 AM · Standup with Fabrikam')).dy,
+          lessThan(y));
+      expect(tester.getTopLeft(find.text('11:00 AM · Design review')).dy,
+          greaterThan(y));
     });
 
     testWidgets('the countdown shows inside the hour', (tester) async {

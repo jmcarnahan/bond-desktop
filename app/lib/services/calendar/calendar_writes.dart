@@ -49,13 +49,22 @@ final class RespondToEvent extends CalendarWrite {
     this.comment,
     this.proposeStartUtc,
     this.proposeEndUtc,
+    this.sendResponse = true,
   });
 
   @override
   final String eventId;
   final RsvpResponse response;
 
-  /// A note to the organiser; sent only because every RSVP here sends.
+  /// false is Dismiss: a decline that tells the organiser nothing — only ever
+  /// with [RsvpResponse.decline], never with a comment or a proposal (Graph
+  /// refuses both without a response).
+  final bool sendResponse;
+
+  /// A Dismiss: the quiet decline.
+  bool get quiet => !sendResponse;
+
+  /// A note to the organiser; only with a sent answer.
   final String? comment;
 
   /// A proposed new time, both ends or neither; only with tentative or
@@ -312,9 +321,10 @@ abstract interface class CalendarWriter {
 /// Confirm whenever anyone gets email, always before destroying a meeting,
 /// and always before an answer (D5).
 ///
-/// An RSVP is named outright rather than left to [p]: every answer here is
-/// sent, so every answer emails the organiser, and whether the confirm shows
-/// must not hinge on the dry run happening to list them. A create with
+/// An RSVP is named outright rather than left to [p]: every sent answer
+/// emails the organiser, and whether the confirm shows must not hinge on the
+/// dry run happening to list them; a Dismiss emails nobody and still waits,
+/// because the owner asked for the confirm. A create with
 /// anyone on it is named outright for the same reason: an invite sends mail
 /// the moment it is written, and one read out of typed words (the Day
 /// command bar) must never go out on the strength of the server's notifies
@@ -519,14 +529,24 @@ class CalendarWrites implements CalendarWriter {
   }) async {
     switch (write) {
       case RespondToEvent():
+        assert(
+          write.sendResponse ||
+              (write.response == RsvpResponse.decline &&
+                  write.comment == null &&
+                  write.proposeStartUtc == null &&
+                  write.proposeEndUtc == null),
+          'a quiet answer is a bare decline',
+        );
         final comment = write.comment?.trim();
         return _backend.respond(
           write.eventId,
           response: write.response.name,
-          comment: comment == null || comment.isEmpty ? null : comment,
-          sendResponse: true,
-          proposedStartUtc: write.proposeStartUtc,
-          proposedEndUtc: write.proposeEndUtc,
+          comment: !write.sendResponse || comment == null || comment.isEmpty
+              ? null
+              : comment,
+          sendResponse: write.sendResponse,
+          proposedStartUtc: write.sendResponse ? write.proposeStartUtc : null,
+          proposedEndUtc: write.sendResponse ? write.proposeEndUtc : null,
           dryRun: dryRun,
         );
       case MoveEvent():
@@ -609,6 +629,10 @@ class CalendarWrites implements CalendarWriter {
           RsvpResponse.tentative => 'tentativelyAccepted',
           RsvpResponse.decline => 'declined',
         };
+        // Noted BEFORE the status is stored, so a sync page applied in
+        // between already sees the guard; the occurrences, known only from
+        // the store's answer, are noted after it too.
+        _sync.noteWrite(write.eventId);
         final ids = await _calendar.setResponseStatus(write.eventId, status);
         ids.forEach(_sync.noteWrite);
       case CancelMeeting():
@@ -681,6 +705,7 @@ class CalendarWrites implements CalendarWriter {
           'outcome': outcome,
           'notified': notified,
           if (isUndo) 'undo': true,
+          if (write is RespondToEvent && write.quiet) 'quiet': true,
         },
       );
 

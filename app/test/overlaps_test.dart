@@ -85,15 +85,17 @@ void main() {
       expect(findOverlaps(events, at(wed, 15), at(wed, 16)).isEmpty, isTrue);
     });
 
-    test('busy is hard, tentative is soft', () {
+    test('busy is hard; a tentative showAs OR a Maybe answer is soft', () {
       final events = [
         timed('busy', at(wed, 15), at(wed, 16)),
         timed('maybe', at(wed, 15, 30), at(wed, 16, 30), showAs: 'tentative'),
+        timed('said-maybe', at(wed, 15), at(wed, 15, 30),
+            response: 'tentativelyAccepted', showAs: 'busy'),
         timed('oof', at(wed, 14), at(wed, 18), showAs: 'oof'),
       ];
       final o = findOverlaps(events, at(wed, 15), at(wed, 16));
       expect(ids(o.hard), ['busy', 'oof']);
-      expect(ids(o.soft), ['maybe']);
+      expect(ids(o.soft), ['maybe', 'said-maybe']);
       expect(o.allDayNotes, isEmpty);
       expect(o.isEmpty, isFalse);
     });
@@ -157,6 +159,27 @@ void main() {
       final o = overlapsForEvent(me, [me, other]);
       expect(o.hard, isEmpty);
       expect(ids(o.soft), ['other']);
+    });
+
+    test('a cancelled or declined event has no overlaps of its own', () {
+      final busy = timed('busy', at(wed, 15), at(wed, 16));
+      final off = timed('off', at(wed, 15), at(wed, 16), cancelled: true);
+      final no = timed('no', at(wed, 15), at(wed, 16), response: 'declined');
+      expect(overlapsForEvent(off, [busy, off, no]).isEmpty, isTrue);
+      expect(overlapsForEvent(no, [busy, off, no]).isEmpty, isTrue);
+      // And neither counts against the meeting that is still on.
+      expect(overlapsForEvent(busy, [busy, off, no]).isEmpty, isTrue);
+    });
+
+    test('a free or working-elsewhere event wears no clash of its own', () {
+      final busy = timed('busy', at(wed, 15), at(wed, 16));
+      final free = timed('free', at(wed, 15), at(wed, 16), showAs: 'free');
+      final away = timed('away', at(wed, 15), at(wed, 16),
+          showAs: 'workingElsewhere');
+      expect(overlapsForEvent(free, [busy, free, away]).isEmpty, isTrue);
+      expect(overlapsForEvent(away, [busy, free, away]).isEmpty, isTrue);
+      // The busy meeting sees nothing back from either.
+      expect(overlapsForEvent(busy, [busy, free, away]).isEmpty, isTrue);
     });
 
     test('an all-day event has no slot and returns empty', () {

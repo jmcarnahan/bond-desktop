@@ -915,6 +915,61 @@ void main() {
       );
     });
 
+    test('the detail fetch keeps the message\'s web link', () async {
+      // The MCP backend maps `read_email`'s `web_link` onto this key; m1 has
+      // nothing else in the blob, so the link alone must write it. An empty
+      // link stores none.
+      graph.details['m1'] = () => jsonOk({
+            'id': 'm1',
+            'uniqueBody': {'contentType': 'text', 'content': 'See below.'},
+            'webLink': ' https://outlook.example.com/x ',
+          });
+      graph.details['m2'] = () => jsonOk({
+            'id': 'm2',
+            'uniqueBody': {'contentType': 'text', 'content': 'No link.'},
+            'internetMessageHeaders': [
+              {'name': 'X-Mailer', 'value': 'Outlook'},
+            ],
+            'webLink': '  ',
+          });
+
+      await sync.ensureBodies('conv-1');
+
+      final linked = await messageRow('m1');
+      expect(
+        (jsonDecode(linked['source_meta_json'] as String) as Map)['web_link'],
+        'https://outlook.example.com/x',
+      );
+      expect(Message.fromRow(linked).webLink, 'https://outlook.example.com/x');
+
+      final plain = await messageRow('m2');
+      final blob =
+          jsonDecode(plain['source_meta_json'] as String) as Map<String, dynamic>;
+      expect(blob.containsKey('web_link'), isFalse);
+      expect(Message.fromRow(plain).webLink, isNull);
+    });
+
+    test('a web link is only ever an http(s) address', () {
+      String? linkOf(Object? link) => Message(
+            id: 'w',
+            outbound: false,
+            sourceMetaJson: jsonEncode({'web_link': ?link}),
+          ).webLink;
+      expect(linkOf('https://outlook.example.com/x'),
+          'https://outlook.example.com/x');
+      expect(linkOf('http://outlook.example.com/x'),
+          'http://outlook.example.com/x');
+      expect(linkOf('mailto:a@example.com'), isNull);
+      expect(linkOf('javascript:alert(1)'), isNull);
+      expect(linkOf(null), isNull, reason: 'missing');
+      expect(Message(id: 'w', outbound: false).webLink, isNull);
+      expect(
+        Message(id: 'bad', outbound: false, sourceMetaJson: '{not json')
+            .webLink,
+        isNull,
+      );
+    });
+
     /// An M365 notification whose entire content is one linked banner. Every
     /// anchor here has no label but the image, and an image that is not `cid:`
     /// is dropped, so the honest conversion of this message is no text at all.

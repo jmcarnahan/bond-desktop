@@ -1,16 +1,23 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/attachments/attachment_policy.dart'
+    show attachmentEntityId;
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/meeting_brief_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_embed_server.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 
@@ -106,8 +113,13 @@ void main() {
     return json;
   }
 
-  Future<void> seedThread() async {
-    final at = MessageStore.isoStamp(now.subtract(const Duration(hours: 2)));
+  /// Dana's thread, its message [eventId]'s invite: the meeting's own mail,
+  /// so a file on it is a material.
+  Future<void> seedThread({
+    Duration ago = const Duration(hours: 2),
+    String eventId = 'evt-1',
+  }) async {
+    final at = MessageStore.isoStamp(now.subtract(ago));
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': 'c-1',
@@ -129,10 +141,13 @@ void main() {
       'received_at': at,
       'body_text': 'Can you send the quote before we meet?',
       'triage_status': 'done',
+      'source_meta_json':
+          jsonEncode({'meeting': 'meetingRequest', 'event_id': eventId}),
     });
   }
 
   const answer = {
+    'evidence': 'A renewal call; Dana is waiting on the quote.',
     'headline': 'Dana is waiting on the quote.',
     'points': [
       {'text': 'The quote is owed.', 'thread': 1},
@@ -140,6 +155,8 @@ void main() {
     'open_asks': [
       {'person': 'Dana', 'ask': 'Send the quote', 'thread': 1},
     ],
+    'materials': [],
+    'questions': ['Is the price final?'],
     'prep': ['Have the quote ready'],
   };
 
@@ -152,7 +169,7 @@ void main() {
 
     expect(llm.schemas, ['meeting_brief']);
     expect(llm.temperatures, [0.2]);
-    expect(llm.budgets['meeting_brief'], 700);
+    expect(llm.budgets['meeting_brief'], 2700);
     final row = (await calendar.brief('evt-1'))!;
     expect(row.status, EventBrief.ready);
     expect(row.inputsHash, isNot(startsWith(EventBrief.ineligiblePrefix)));
@@ -163,6 +180,521 @@ void main() {
     expect((ref.source, ref.conversationKey, ref.subject),
         ('email', 'c-1', 'Fabrikam renewal'));
     expect(stored, 1);
+  });
+
+  test('the stored brief carries its material refs and the activity counts '
+      'them, the people and the text', () async {
+    await seedEvent();
+    await seedThread();
+    await store.upsertAttachments('email', 'm-1', [
+      {
+        'attachment_id': 'a-quote',
+        'ordinal': 0,
+        'kind': 'file',
+        'name': 'quote.pdf',
+        'content_type': 'application/pdf',
+        'is_inline': 0,
+      },
+    ]);
+    await store.setAttachmentText('email', 'm-1', 'a-quote',
+        status: 'done', text: 'Tier B is 12k a year.');
+    final llm = ScriptedLlm(answers: {
+      'meeting_brief': {
+        ...answer,
+        'materials': [
+          {
+            'file': 1,
+            'points': ['Tier B is 12k a year.'],
+          },
+          {
+            'file': 2,
+            'points': ['There is no second file.'],
+          },
+        ],
+      },
+    });
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect(llm.userMessages.single,
+        contains('Materials sent ahead, numbered ("you" is the owner):'));
+    expect(llm.userMessages.single, contains('Tier B is 12k a year.'),
+        reason: "the file's text reaches the model");
+    expect(llm.userMessages.single, contains('People, numbered, the organiser '
+        'first:'));
+    final brief = (await calendar.brief('evt-1'))!.brief!;
+    expect(brief.evidence, 'A renewal call; Dana is waiting on the quote.');
+    expect(brief.questions, ['Is the price final?']);
+    expect(brief.materials.single.file, 0,
+        reason: 'the number past the list is dropped');
+    final ref = brief.materialAt(0)!;
+    expect((ref.source, ref.messageId, ref.attachmentId, ref.name),
+        ('email', 'm-1', 'a-quote', 'quote.pdf'));
+
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    final detail =
+        jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
+    expect(detail['materials'], 1);
+    expect(detail['other_files'], 0);
+    expect(detail['questions'], 1);
+    expect(detail['threads'], 1);
+    expect(detail['people'], 1);
+    expect(detail['text_chars'], 'Tier B is 12k a year.'.length);
+  });
+
+  test('a file on other mail with Dana is no material: the activity counts '
+      'it as another file, and the model is told it was not sent for this '
+      'meeting', () async {
+    await seedEvent();
+    // Another meeting's invite: address-matched, not this meeting's mail.
+    await seedThread(eventId: 'evt-other');
+    await store.upsertAttachments('email', 'm-1', [
+      {
+        'attachment_id': 'a-deck',
+        'ordinal': 0,
+        'kind': 'file',
+        'name': 'northwind-deck.pdf',
+        'content_type': 'application/pdf',
+        'is_inline': 0,
+      },
+    ]);
+    await store.setAttachmentText('email', 'm-1', 'a-deck',
+        status: 'done', text: 'Northwind pricing.');
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    final msg = llm.userMessages.single;
+    expect(msg, isNot(contains('Materials sent ahead')));
+    expect(msg, isNot(contains('Northwind pricing.')),
+        reason: "another meeting's file is named, never read");
+    expect(msg, contains('Files on other threads with these people (NOT sent '
+        'for this meeting):'));
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    final detail =
+        jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
+    expect(detail['materials'], 0);
+    expect(detail['other_files'], 1);
+    expect(detail['text_chars'], 0);
+  });
+
+  /// m-1 flagged as carrying a file nobody has listed yet.
+  Future<void> flagUnlisted() => db.customStatement(
+      "UPDATE messages SET has_attachments = 1 WHERE source_message_id = 'm-1'");
+
+  test('unlisted attachments are fetched once before the brief is written',
+      () async {
+    await seedEvent();
+    await seedThread();
+    await flagUnlisted();
+    final fetched = <(String, List<String>)>[];
+    final llm = ScriptedLlm(answers: {
+      'meeting_brief': {
+        ...answer,
+        'materials': [
+          {
+            'file': 1,
+            'points': ['The quote is attached.'],
+          },
+        ],
+      },
+    });
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+      // The detail fetch lists the file, as the sync's would, and here its
+      // text is read at once: a file still pending would make the brief
+      // wait (the pending tests below).
+      fetchDetails: (source, ids) async {
+        fetched.add((source, ids));
+        await store.upsertAttachments('email', 'm-1', [
+          {
+            'attachment_id': 'a-quote',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'quote.pdf',
+            'content_type': 'application/pdf',
+            'is_inline': 0,
+          },
+        ]);
+        await store.setAttachmentText('email', 'm-1', 'a-quote',
+            status: 'done', text: 'The quote.');
+        return ids.length;
+      },
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect([for (final (source, ids) in fetched) '$source:${ids.join(',')}'],
+        ['email:m-1']);
+    expect(llm.userMessages.single, contains('quote.pdf'),
+        reason: 'the second gather sees the file the fetch listed');
+    final brief = (await calendar.brief('evt-1'))!.brief!;
+    expect(brief.materialAt(0)?.name, 'quote.pdf');
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    final detail =
+        jsonDecode(rows.single['detail_json'] as String) as Map<String, Object?>;
+    expect(detail['fetched'], 1);
+    expect(detail['materials'], 1);
+
+    // Listed now: the next run fetches nothing.
+    await briefs.run(item('evt-1', asked: true));
+    expect(fetched, hasLength(1));
+  });
+
+  test('a failing fetch still writes the brief', () async {
+    await seedEvent();
+    await seedThread();
+    await flagUnlisted();
+    var calls = 0;
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      clock: () => now,
+      fetchDetails: (source, ids) async {
+        calls++;
+        throw StateError('Graph is down');
+      },
+    );
+
+    await briefs.run(item('evt-1'));
+
+    expect(calls, 1, reason: 'asked once, never retried in the run');
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.ready);
+    expect(row.brief!.materialRefs, isEmpty);
+  });
+
+  test('one failed fetch costs only its own message: the other\'s file is '
+      'gathered again and briefed', () async {
+    await seedEvent();
+    await seedThread();
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm-2',
+      'conversation_key': 'c-1',
+      'direction': 'inbound',
+      'from_name': 'Dana',
+      'from_address': dana,
+      'received_at': MessageStore.isoStamp(
+          now.subtract(const Duration(minutes: 90))),
+      'body_text': 'And the terms.',
+      'triage_status': 'done',
+      'has_attachments': 1,
+    });
+    await flagUnlisted();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+      // The provider's shape: one id at a time through `fetchEach`, and
+      // m-2's fetch fails as a 502 would.
+      fetchDetails: (source, ids) =>
+          MeetingBriefHandler.fetchEach(ids, (id) async {
+        if (id == 'm-2') throw StateError('Bad gateway');
+        await store.upsertAttachments('email', id, [
+          {
+            'attachment_id': 'a-quote',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'quote.pdf',
+            'content_type': 'application/pdf',
+            'is_inline': 0,
+          },
+        ]);
+        await store.setAttachmentText('email', id, 'a-quote',
+            status: 'done', text: 'The quote.');
+      }),
+    );
+
+    await briefs.run(item('evt-1'));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect(llm.userMessages.single, contains('quote.pdf'),
+        reason: 'm-1 fetched, so the meeting was gathered again');
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    expect(jsonDecode(rows.single['detail_json'] as String),
+        containsPair('fetched', 1));
+  });
+
+  test('an invite sent two days ago whose file is only now being read is '
+      'waited for', () async {
+    await seedEvent();
+    // The owner's own invite, two days old: well past the two-hour backstop
+    // if it were measured from the mail.
+    await seedThread(ago: const Duration(days: 2));
+    await flagUnlisted();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      clock: () => now,
+      // What `ensureMessageBody` does: lists the file and queues its text,
+      // which nothing has read yet.
+      fetchDetails: (source, ids) async {
+        await store.upsertAttachments('email', 'm-1', [
+          {
+            'attachment_id': 'a-pricing',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'pricing.pdf',
+            'content_type': 'application/pdf',
+            'is_inline': 0,
+          },
+        ]);
+        await store.enqueueWork('attachment_text', 'email',
+            attachmentEntityId('m-1', 'a-pricing'));
+        return ids.length;
+      },
+    );
+
+    await briefs.run(item('evt-1'));
+
+    expect(llm.calls, isEmpty);
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.skipped);
+    expect(row.skipReason, 'materials_pending');
+  });
+
+  group('waiting for the files', () {
+    /// A file listed on m-1 and not read yet; with [queue], its text work
+    /// is queued, which is what "being read" means.
+    Future<void> attachPending({
+      String id = 'a-deck',
+      String name = 'deck.pptx',
+      int ordinal = 0,
+      bool queue = true,
+    }) async {
+      await store.upsertAttachments('email', 'm-1', [
+        {
+          'attachment_id': id,
+          'ordinal': ordinal,
+          'kind': 'file',
+          'name': name,
+          'content_type': 'application/pdf',
+          'is_inline': 0,
+        },
+      ]);
+      if (queue) {
+        await store.enqueueWork(
+            'attachment_text', 'email', attachmentEntityId('m-1', id));
+      }
+    }
+
+    // The thread's mail is an hour old in this group: inside the wait's
+    // age cap (`BriefGatherer.pendingMaxAge`).
+    Future<void> seedYoungThread() =>
+        seedThread(ago: const Duration(hours: 1));
+
+    test('pending files and no brief yet: a skipped materials_pending row, '
+        'no model call', () async {
+      await seedEvent();
+      await seedYoungThread();
+      await attachPending();
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+      final log = ActivityLog(store);
+      final briefs = MeetingBriefHandler(
+        calendar,
+        gatherer,
+        client: () => llm,
+        activityLog: log,
+        clock: () => now,
+        onStored: () => stored++,
+      );
+
+      await briefs.run(item('evt-1'));
+      await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+      expect(llm.calls, isEmpty);
+      final row = (await calendar.brief('evt-1'))!;
+      expect(row.status, EventBrief.skipped);
+      expect(row.skipReason, 'materials_pending');
+      expect(stored, 1);
+      final rows = [
+        for (final r in await store.recentActivity())
+          if (r['kind'] == 'meeting_brief') r,
+      ];
+      expect(jsonDecode(rows.single['detail_json'] as String),
+          containsPair('reason', 'materials_pending'));
+
+      // The text lands: the next run writes the brief.
+      await store.setAttachmentText('email', 'm-1', 'a-deck',
+          status: 'done', text: 'Two tiers.');
+      await briefs.run(item('evt-1'));
+      expect(llm.calls, hasLength(1));
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.ready);
+    });
+
+    test('a file that will never be read is not pending', () async {
+      await seedEvent();
+      await seedYoungThread();
+      await attachPending();
+      await store.setAttachmentText('email', 'm-1', 'a-deck',
+          status: 'skipped');
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+
+      await handler(llm).run(item('evt-1'));
+
+      expect(llm.calls, hasLength(1));
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.ready);
+    });
+
+    test('pending files inside the grace are briefed with what is read',
+        () async {
+      await seedEvent(startsIn: const Duration(minutes: 15));
+      await seedYoungThread();
+      await attachPending();
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+
+      await handler(llm).run(item('evt-1'));
+
+      expect(llm.calls, hasLength(1));
+      expect(llm.userMessages.single, contains('(unread)'));
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.ready);
+    });
+
+    test('an asked-for brief does not wait for the files', () async {
+      await seedEvent();
+      await seedYoungThread();
+      await attachPending();
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+
+      await handler(llm).run(item('evt-1', asked: true));
+
+      expect(llm.calls, hasLength(1));
+      expect(llm.userMessages.single, contains('(unread)'));
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.ready);
+    });
+
+    test('pending files over a ready brief: the brief is rewritten anyway',
+        () async {
+      await seedEvent();
+      await seedYoungThread();
+      await attachPending();
+      await seedReady('evt-1');
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+
+      await handler(llm).run(item('evt-1'));
+
+      expect(llm.calls, hasLength(1));
+      final row = (await calendar.brief('evt-1'))!;
+      expect(row.status, EventBrief.ready);
+      expect(row.brief!.headline, 'Dana is waiting on the quote.');
+    });
+  
+    test('an unqueued file is queued once and waited for', () async {
+      await seedEvent();
+      await seedYoungThread();
+      await attachPending(queue: false);
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+      final log = ActivityLog(store);
+      final briefs = MeetingBriefHandler(
+        calendar,
+        gatherer,
+        client: () => llm,
+        activityLog: log,
+        clock: () => now,
+      );
+      final entity = attachmentEntityId('m-1', 'a-deck');
+      expect(await store.workStatusOf('attachment_text', 'email', entity),
+          isNull);
+
+      await briefs.run(item('evt-1'));
+      await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+      expect(await store.workStatusOf('attachment_text', 'email', entity),
+          'pending');
+      expect(llm.calls, isEmpty);
+      expect((await calendar.brief('evt-1'))!.skipReason, 'materials_pending');
+      final rows = [
+        for (final r in await store.recentActivity())
+          if (r['kind'] == 'meeting_brief') r,
+      ];
+      expect(jsonDecode(rows.single['detail_json'] as String),
+          containsPair('queued_text', 1));
+
+      // Queued now: the next run finds a work row, queues nothing more and
+      // still waits; once the text work gives up, it briefs.
+      await briefs.run(item('evt-1'));
+      expect(llm.calls, isEmpty);
+      await db.customStatement("UPDATE work_items SET status = 'error' "
+          "WHERE task_kind = 'attachment_text'");
+      await briefs.run(item('evt-1'));
+      expect(llm.calls, hasLength(1));
+      expect((await calendar.brief('evt-1'))!.status, EventBrief.ready);
+    });
+
+    test('a waiting brief costs no embedding and no text read', () async {
+      await seedEvent();
+      await seedYoungThread();
+      await attachPending();
+      await attachPending(id: 'a-memo', name: 'memo.pdf', ordinal: 1);
+      await store.setAttachmentText('email', 'm-1', 'a-memo',
+          status: 'done', text: 'The memo.');
+      final counting = _CountingStore(db);
+      final server = FakeEmbedServer();
+      final briefs = MeetingBriefHandler(
+        calendar,
+        BriefGatherer(
+          counting,
+          calendar,
+          ownerAddress: () async => owner,
+          zone: () => CalendarZone.tryNamed('America/Los_Angeles')!,
+          embeddings: server.client,
+        ),
+        client: () => ScriptedLlm.never(),
+        clock: () => now,
+      );
+
+      await briefs.run(item('evt-1'));
+
+      expect((await calendar.brief('evt-1'))!.skipReason, 'materials_pending');
+      expect(server.calls, 0);
+      expect(counting.textReads, 0);
+      expect(counting.chunkChecks, 0);
+    });
   });
 
   test('an ineligible meeting is skipped with its reason, and no call',
@@ -208,6 +740,64 @@ void main() {
 
     await h.run(item('evt-1', asked: true));
     expect(llm.callsFor('meeting_brief'), 2);
+  });
+
+  test('an asked request briefs a meeting next week', () async {
+    await seedEvent(startsIn: const Duration(days: 7));
+    await seedThread();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+    );
+
+    await briefs.run(item('evt-1', asked: true));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect(llm.callsFor('meeting_brief'), 1);
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.ready);
+    expect(row.brief!.headline, 'Dana is waiting on the quote.');
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    expect(jsonDecode(rows.single['detail_json'] as String),
+        containsPair('asked', true));
+  });
+
+  test('an asked request briefs a meeting with no mail', () async {
+    await seedEvent();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+
+    await handler(llm).run(item('evt-1', asked: true));
+
+    expect(llm.callsFor('meeting_brief'), 1);
+    expect(llm.userMessages.single, contains('Threads: none.'));
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.ready);
+    expect(row.brief!.points.single.thread, -1,
+        reason: 'there is no thread for the point to name');
+    expect(stored, 1);
+  });
+
+  test('a planner request for the same meetings is skipped too_far / no_mail',
+      () async {
+    await seedEvent(id: 'evt-far', startsIn: const Duration(days: 7));
+    await seedEvent(id: 'evt-quiet');
+    final llm = ScriptedLlm.never();
+    final h = handler(llm);
+
+    await h.run(item('evt-far'));
+    await h.run(item('evt-quiet'));
+
+    expect((await calendar.brief('evt-far'))!.skipReason, 'too_far');
+    expect((await calendar.brief('evt-quiet'))!.skipReason, 'no_mail');
+    expect(llm.calls, isEmpty);
   });
 
   test('the request payload reads asked only for a literal true', () {
@@ -304,6 +894,38 @@ void main() {
         h.run(item('evt-1')), throwsA(isA<BriefOwnerUnknown>()));
     expect(await calendar.brief('evt-1'), isNull);
     expect(llm.calls, isEmpty);
+  });
+
+  test("the provider's gatherer has no zone until the display zone resolves: "
+      'an asked brief is retried, never dated in UTC', () async {
+    await seedEvent();
+    await seedThread();
+    final zone = Completer<CalendarZone>();
+    final container = ProviderContainer(overrides: [
+      dbProvider.overrideWithValue(db),
+      calendarZoneProvider.overrideWith((ref) => zone.future),
+    ]);
+    addTearDown(container.dispose);
+    final provided = container.read(briefGathererProvider);
+    expect(provided.zoneNow, throwsA(isA<BriefZoneUnknown>()));
+
+    final unknown = BriefGatherer(
+      store,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: provided.zoneNow,
+    );
+    final llm = ScriptedLlm.never();
+    final h = MeetingBriefHandler(calendar, unknown,
+        client: () => llm, clock: () => now);
+    await expectLater(h.run(item('evt-1', asked: true)),
+        throwsA(isA<BriefZoneUnknown>()));
+    expect(await calendar.brief('evt-1'), isNull);
+    expect(llm.calls, isEmpty);
+
+    zone.complete(CalendarZone.tryNamed('America/Los_Angeles')!);
+    await container.read(calendarZoneProvider.future);
+    expect(provided.zoneNow().iana, 'America/Los_Angeles');
   });
 
   test("a series master is briefed as its next occurrence, under the "
@@ -433,4 +1055,33 @@ class _IdleDraft extends WorkHandler {
 
   @override
   Future<void> run(Map<String, Object?> item) async {}
+}
+
+/// A store that counts the heavy gather's reads: a file's text and the
+/// chunk check before an embedding.
+class _CountingStore extends MessageStore {
+  _CountingStore(super.db);
+
+  int textReads = 0;
+  int chunkChecks = 0;
+
+  @override
+  Future<String?> attachmentTextOf(
+    String source,
+    String sourceMessageId,
+    String attachmentId,
+  ) {
+    textReads++;
+    return super.attachmentTextOf(source, sourceMessageId, attachmentId);
+  }
+
+  @override
+  Future<bool> hasAttachmentChunks(
+    String source, {
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+  }) async {
+    chunkChecks++;
+    return true;
+  }
 }

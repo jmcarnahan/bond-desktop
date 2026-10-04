@@ -2,29 +2,40 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:intl/intl.dart' show DateFormat;
 
 import '../../models/calendar_models.dart';
+import '../llm/ask_read_task.dart' show AskMeal, AskRead;
 import 'ask_hours.dart';
+import 'ask_words.dart';
 import 'calendar_zone.dart';
 import 'day_items.dart' show shortDate;
+import 'phrase_guard.dart';
 import 'when_resolver.dart';
 
 export 'ask_hours.dart' show AskHours;
+export 'ask_words.dart' show askHintsCap, askOwnWords, capAtWord;
 
 /// What a scheduling ask's own words say about the time it wants
 /// (docs/pipeline/14-calendar.md "Find a time"): "could we grab dinner on
 /// Friday?" is Friday evening for an hour and a half, not three working-hours
 /// slots.
 ///
-/// Pure, and never a model: the day, a part of the day, a clock time and a
-/// length come from [resolveWhen] (the command bar's grammar, read as a
-/// question), and the meal and social words are a closed list here. Nothing
-/// read here changes [DayPart]'s bounds, which are the command bar's.
+/// Pure, and never calls a model: the day, a part of the day, a clock time
+/// and a length come from [resolveWhen] (the command bar's grammar, read as
+/// a question), and the meal and social words are a closed list here. The
+/// model's reading ([readAskHintsFromRead]) is phrases it copied, resolved
+/// here by the same rules. Nothing read here changes [DayPart]'s bounds,
+/// which are the command bar's.
 
 /// What [readAskHints] found. Every field may be null; [any] says whether
 /// anything was.
 @immutable
 class AskHints {
-  /// The day the ask named, never in the past.
+  /// The day the ask named, never in the past: the first of [days].
   final CalendarDate? day;
+
+  /// Every day the ask named, sorted, never in the past: one for a single
+  /// day, several for alternatives the model read ("Tuesday or Thursday").
+  /// [day] is `days.firstOrNull` for every reader, by construction.
+  final List<CalendarDate> days;
 
   /// The hours to look in on every searched day.
   final AskHours? hours;
@@ -41,17 +52,19 @@ class AskHints {
   /// null when no hours were read.
   final String? timeWords;
 
-  const AskHints(
-      {this.day, this.hours, this.minutes, this.said, this.timeWords});
+  const AskHints({
+    this.day,
+    this.days = const [],
+    this.hours,
+    this.minutes,
+    this.said,
+    this.timeWords,
+  });
 
   static const AskHints none = AskHints();
 
   bool get any => day != null || hours != null || minutes != null;
 }
-
-/// How much of an ask is read: its opening lines carry the time; a long
-/// quoted history below them only adds other people's dates.
-const int askHintsCap = 600;
 
 /// One meal or social word: its hours and its usual length.
 typedef _Meal = ({String word, RegExp re, AskHours hours, int minutes});
@@ -108,37 +121,6 @@ String _partWord(DayPart p) => switch (p) {
       DayPart.lunch => 'lunch',
     };
 
-/// A year as a reply header writes it: after a comma or a slash ("Sep 29,
-/// 2026", "29/09/2026"), or opening an ISO date ("2026-09-29") — never a
-/// clock time such as "at 1930".
-const String _year = r'(?:(?:,\s*|/)(?:19|20)\d\d\b|\b(?:19|20)\d\d-\d\d)';
-
-/// Where a quoted reply starts: "On Mon, Sep 28, 2026 at 3:15 PM Dana
-/// (dana@…) wrote:" (which a client may wrap over two lines), an Outlook
-/// "-----Original Message-----", or a header block — a "From:" line with a
-/// "Sent:", "Date:" or "To:" line within the two under it, either possibly
-/// quoted with ">". Everything after it is the thread's history, whose
-/// dates are not this ask's.
-///
-/// Each form is held to what only a header has, because the cut drops
-/// everything below it: an "On … wrote:" needs a [_year], a "<" or an "@"
-/// in its line or two ("On second thought, Friday dinner works." above
-/// somebody's "… wrote:" is the ask, not its history), and a lone "From:
-/// tomorrow on I am free" line is a sentence.
-final RegExp _quoteStart = RegExp(
-    r'(^|\n)[ \t]*>?[ \t]*(?:'
-    'On\\s[^\\n]*(?:$_year|<|@)[^\\n]*(?:\\n[^\\n]*)?wrote:'
-    '|On\\s[^\\n]*\\n[^\\n]*(?:$_year|<|@)[^\\n]*wrote:'
-    r'|-{2,}\s*Original Message\s*-{2,}'
-    r'|From:[^\n]*\n(?:[^\n]*\n)?[ \t]*>?[ \t]*(?:Sent|Date|To):)',
-    caseSensitive: false);
-
-/// [body] up to its first quoted-reply header ([_quoteStart]).
-String _ownWords(String body) {
-  final m = _quoteStart.firstMatch(body);
-  return m == null ? body : body.substring(0, m.start);
-}
-
 /// How far outside a meal's hours a time it names may sit and still be
 /// that meal's: "dinner at 4" is a reach, "drinks at midnight" is not drinks
 /// hours at all.
@@ -148,7 +130,7 @@ const int _mealReachMinutes = 120;
 /// hours and a length, at [now] in [zone].
 ///
 /// - **Only the ask's own words**: the body is cut at its first quoted-reply
-///   header ([_quoteStart]), so a date in the history ("On Mon … at 3:15 PM
+///   header ([askOwnWords]), so a date in the history ("On Mon … at 3:15 PM
 ///   Dana wrote:") never wins.
 /// - **When it was said**: relative words ("tomorrow", a bare weekday) are
 ///   read against [sentAt], the message's own time, when the host has it,
@@ -193,21 +175,9 @@ AskHints readAskHints({
   DateTime? sentAt,
 }) {
   final text =
-      _cap('${subject.trim()}. ${_ownWords(body).trim()}', askHintsCap);
+      capAtWord('${subject.trim()}. ${askOwnWords(body).trim()}', askHintsCap);
   final w = resolveWhen(text,
       now: sentAt ?? now, zone: zone, mode: WhenMode.question);
-  final today = zone.dateOf(now.toUtc());
-  final weekday = w.dayMention == DayMention.weekday;
-
-  CalendarDate? day = w.rangeEnd == null ? w.day : null;
-  if (day != null && day.isBefore(today)) {
-    if (!weekday) {
-      day = null;
-    } else {
-      final delta = (day.weekday - today.weekday + 7) % 7;
-      day = today.addDays(delta);
-    }
-  }
 
   _Meal? meal;
   var mealAt = -1;
@@ -220,19 +190,167 @@ AskHints readAskHints({
     }
   }
 
+  return _hintsFrom(
+    dayReads: [w],
+    timeRead: w,
+    duration: w.duration,
+    meal: meal,
+    now: now,
+    zone: zone,
+  );
+}
+
+/// The model's reading of an ask, re-resolved by the same rules as
+/// [readAskHints] (docs/pipeline/14-calendar.md "Reading the ask").
+///
+/// The model (`ask_read`) only COPIED phrases out of [subject] and [body];
+/// it never computed a day or a time. Here each phrase is checked and read
+/// by the same Dart the rules use:
+///
+/// - **Not asking**: `asks_for_time` false is [AskHints.none], whatever
+///   phrases came with it.
+/// - **The literal guard**: a `when`, `time` or `duration` phrase is kept
+///   only when it is in the ask's own words on word boundaries
+///   ([findPhrase]); anything else is the model's own wording, or
+///   invented, and is dropped. A meal is kept only when that meal's own
+///   word matches the text (the closed list [readAskHints] scans), so
+///   "dinner" read into a message that never says it is no meal. The text
+///   is the subject and the whole of the body's own words, not cut at
+///   [askHintsCap]: the model read up to `askReadCap`.
+/// - **Days**: each kept `when` phrase is resolved ON ITS OWN as a question
+///   at [sentAt] (else [now]), so "Tuesday or Thursday" is two days, and a
+///   day the sender ruled out is not read at all when the model did not
+///   copy it. The day rules are [readAskHints]'s: a past weekday rolls to
+///   its next occurrence, a past relative day or date is dropped, a week is
+///   not a day, and today too late rolls or drops.
+/// - **Hours and length**: the kept `time` phrase through [resolveWhen], a
+///   kept `duration` phrase through [parseDuration]; with no `time` phrase,
+///   the first `when` phrase that itself carries a time or a part of the
+///   day ("Friday at 3pm") gives the hours, so nothing is lost when the
+///   model folds the time into the day. The meal and hour rules are
+///   [readAskHints]'s, through the one core.
+///
+/// Nothing kept at all is [AskHints.none]. The [AskRead] is stored as
+/// phrases, never dates, so a reading made last week is re-resolved against
+/// today here.
+AskHints readAskHintsFromRead({
+  required AskRead read,
+  required String subject,
+  required String body,
+  required DateTime now,
+  required CalendarZone zone,
+  DateTime? sentAt,
+}) {
+  if (!read.asksForTime) return AskHints.none;
+  final text = '${subject.trim()}. ${askOwnWords(body).trim()}';
+  String? kept(String phrase) {
+    final t = phrase.trim();
+    return findPhrase(text, t) == null ? null : t;
+  }
+
+  WhenResolution resolve(String phrase) => resolveWhen(phrase,
+      now: sentAt ?? now, zone: zone, mode: WhenMode.question);
+
+  final whens = [
+    for (final p in read.when)
+      if (kept(p) case final k?) resolve(k),
+  ];
+  final timePhrase = kept(read.time);
+  final durationPhrase = kept(read.duration);
+  final meal = read.meal == AskMeal.none
+      ? null
+      : _meals
+          .where((m) => m.word == read.meal.wire && m.re.hasMatch(text))
+          .firstOrNull;
+
+  if (whens.isEmpty &&
+      timePhrase == null &&
+      durationPhrase == null &&
+      meal == null) {
+    return AskHints.none;
+  }
+
+  final timeRead = timePhrase != null
+      ? resolve(timePhrase)
+      : whens.where((r) => r.time != null || r.part != null).firstOrNull ??
+          resolve('');
+  final named = durationPhrase == null ? null : parseDuration(durationPhrase);
+  return _hintsFrom(
+    dayReads: [
+      for (final r in whens)
+        if (r.day != null) r,
+    ],
+    timeRead: timeRead,
+    duration: named ?? timeRead.duration,
+    meal: meal,
+    now: now,
+    zone: zone,
+  );
+}
+
+/// Which reading of an ask stands: the [model]'s when it read something,
+/// or when the [rules] read nothing either; else the [rules]'.
+///
+/// ONE rule for the Day column and the draft: a model reading with nothing
+/// in it never erases a day the rules found. The decision model already
+/// called this an ask, so the model reading nobody asking — or the literal
+/// guard dropping every phrase it copied — is the riskiest answer to act
+/// on. A null [model] (no reading) is the rules'. [byModel] says which won.
+({AskHints hints, bool byModel}) chooseAskHints({
+  required AskHints rules,
+  required AskHints? model,
+}) {
+  if (model != null && (model.any || !rules.any)) {
+    return (hints: model, byModel: true);
+  }
+  return (hints: rules, byModel: false);
+}
+
+/// The rules both readers share: the days out of [dayReads] (each may carry
+/// one), the hours out of [timeRead] next to [meal], the length out of
+/// [duration], judged at [now] in [zone]. [readAskHints] documents every
+/// rule; this is where they live, once.
+AskHints _hintsFrom({
+  required List<WhenResolution> dayReads,
+  required WhenResolution timeRead,
+  required Duration? duration,
+  required _Meal? meal,
+  required DateTime now,
+  required CalendarZone zone,
+}) {
+  final today = zone.dateOf(now.toUtc());
+
+  // Each day read, with whether it was said as a weekday (only a weekday
+  // recurs).
+  final picked = <(CalendarDate, bool)>[];
+  for (final w in dayReads) {
+    final weekday = w.dayMention == DayMention.weekday;
+    var day = w.rangeEnd == null ? w.day : null;
+    if (day == null) continue;
+    if (day.isBefore(today)) {
+      if (!weekday) continue;
+      final delta = (day.weekday - today.weekday + 7) % 7;
+      day = today.addDays(delta);
+    }
+    picked.add((day, weekday));
+  }
+
   AskHours? hours;
   String? what;
   String? timeWords;
   int? rangeMinutes;
   // What is left of a window cut at midnight; null when it was not cut.
   int? cutWindow;
-  var t = w.time;
+  var t = timeRead.time;
   final m = meal;
   var shifted = false;
   // A meal says which half of the day a bare hour means: 7 next to
   // "dinner" is 19:00. Breakfast keeps its morning — 8 + 12 is no
   // breakfast hour — and "coffee at 4am" keeps the am it was given.
-  if (t != null && m != null && w.timeForm == TimeForm.bare && t.$1 < 12) {
+  if (t != null &&
+      m != null &&
+      timeRead.timeForm == TimeForm.bare &&
+      t.$1 < 12) {
     final pm = (t.$1 + 12) * 60 + t.$2;
     if (pm >= m.hours.startInMinutes - 60 && pm <= m.hours.endInMinutes + 60) {
       t = (t.$1 + 12, t.$2);
@@ -242,7 +360,7 @@ AskHints readAskHints({
   // A bare or named time far outside the meal's hours is not the meal's
   // ("drinks 10pm to midnight" reads midnight last): the meal's hours stand.
   // A time with am/pm or on a 24-hour clock is the person's own word.
-  if (t != null && m != null && w.timeForm != TimeForm.marked) {
+  if (t != null && m != null && timeRead.timeForm != TimeForm.marked) {
     final at = t.$1 * 60 + t.$2;
     if (at < m.hours.startInMinutes - _mealReachMinutes ||
         at > m.hours.endInMinutes + _mealReachMinutes) {
@@ -251,7 +369,7 @@ AskHints readAskHints({
   }
   if (t != null) {
     final start = t.$1 * 60 + t.$2;
-    final et = w.endTime;
+    final et = timeRead.endTime;
     var end = start + 120;
     if (et != null) {
       var e = et.$1 * 60 + et.$2;
@@ -281,13 +399,13 @@ AskHints readAskHints({
     hours = m.hours;
     what = m.word;
     timeWords = 'for ${m.word}';
-  } else if (w.part case final part?) {
+  } else if (timeRead.part case final part?) {
     hours = AskHours.fromDayPart(part);
     what = _partWord(part);
     timeWords = part == DayPart.endOfDay ? 'at end of day' : 'in the $what';
   }
 
-  final named = w.duration?.inMinutes;
+  final named = duration?.inMinutes;
   var minutes = named != null && named > 0
       ? named
       : rangeMinutes ?? meal?.minutes;
@@ -303,39 +421,34 @@ AskHints readAskHints({
   // close — now plus its length past the close — the arithmetic
   // `findTimeWindowUtc` judges a week by. Only a weekday recurs: "tonight"
   // and "Oct 9" each named that one day, so they are dropped rather than
-  // rolled. With no hours, today stands.
+  // rolled. With no hours, today stands. Judged for each day read.
   final h = hours;
   final length = Duration(
       minutes: (minutes ?? 1) < 1 ? 1 : (minutes ?? 1));
-  if (day != null && day == today && h != null) {
-    final close =
-        zone.localDateTime(day, h.endHour, h.endMinute).toUtc();
-    if (now.toUtc().add(length).isAfter(close)) {
-      day = weekday ? day.addDays(7) : null;
+  final days = <CalendarDate>{};
+  for (final (day, weekday) in picked) {
+    if (day == today && h != null) {
+      final close =
+          zone.localDateTime(day, h.endHour, h.endMinute).toUtc();
+      if (now.toUtc().add(length).isAfter(close)) {
+        if (weekday) days.add(day.addDays(7));
+        continue;
+      }
     }
+    days.add(day);
   }
+  final sorted = days.toList()..sort();
 
   final bits = [
-    if (day != null) shortDate(day),
+    if (sorted.isNotEmpty) sorted.map(shortDate).join(' or '),
     ?what,
   ];
   return AskHints(
-    day: day,
+    day: sorted.firstOrNull,
+    days: List.unmodifiable(sorted),
     hours: hours,
     minutes: minutes,
     said: bits.isEmpty ? null : 'Asked for: ${bits.join(' · ')}',
     timeWords: timeWords,
   );
-}
-
-/// [s] cut to at most [max] UTF-16 units, back to the last whitespace
-/// before the cap so a word is never halved ("at 11pm" never reads "at 1"),
-/// and so never through a surrogate pair either. `brief_gatherer.dart`'s
-/// `capRunes` cuts mid-word, which a resolver cannot afford.
-String _cap(String s, int max) {
-  if (s.length <= max) return s;
-  final space = s.lastIndexOf(RegExp(r'\s'), max);
-  if (space > 0) return s.substring(0, space);
-  final last = s.codeUnitAt(max - 1);
-  return s.substring(0, last >= 0xD800 && last <= 0xDBFF ? max - 1 : max);
 }

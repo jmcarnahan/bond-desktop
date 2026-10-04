@@ -82,6 +82,8 @@ class ActivityLogPanel extends StatefulWidget {
     'calendar_command': 'Calendar command',
     'find_time': 'Find a time',
     'scheduling_ask': 'Scheduling ask',
+    'ask_read': 'Ask reading',
+    'reminder': 'Reminder',
     'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
@@ -113,18 +115,34 @@ class ActivityLogPanel extends StatefulWidget {
     'processing': 'Processing',
   };
 
+  /// A reminder's kind (`ReminderKind.wire`), in words.
+  static const Map<String, String> _reminderKinds = {
+    'reply_by': 'reply by',
+    'follow_up': 'follow up',
+    'deadline': 'deadline',
+    'custom': 'reminder',
+  };
+
+  /// Why a reminder was completed, in words.
+  static const Map<String, String> _reminderReasons = {
+    'reply': 'answered',
+    'done': 'thread done',
+    'owner': 'by you',
+  };
+
   /// Why a brief was skipped, in words. The row carries only the enum word
   /// (`BriefIneligibility.wire`, or `unchanged`), never anything about the
   /// meeting.
   static const Map<String, String> _briefSkips = {
     'past': 'already started',
-    'too_far': 'more than 36 hours away',
+    'too_far': 'not today or tomorrow',
     'no_others': 'nobody else invited',
     'cancelled': 'cancelled',
     'declined': 'declined',
     'no_mail': 'no recent mail with these people',
     'too_many': 'too many people',
     'gone': 'no longer on the calendar',
+    'materials_pending': 'reading the files sent ahead',
     'unchanged': 'nothing new since the last one',
   };
 
@@ -239,6 +257,29 @@ class ActivityLogPanel extends StatefulWidget {
       }
     }
 
+    // A reminder placed in, completed in or taken out of To Do, by its
+    // action — enum words only, never a title, a thread or a time. Its one
+    // error row is the follow-up's flag, which never fails the reminder, so
+    // it reads as what did not happen rather than as "Reminder failed".
+    if (e.kind == 'reminder') {
+      switch (detail['action']) {
+        case 'create':
+          final kind = _reminderKinds[detail['kind']] ?? 'reminder';
+          return 'Reminder set in To Do ($kind)';
+        // Aged out by the reconcile, with no To Do call: the task may still
+        // be open there, so it is not "done".
+        case 'complete' when detail['reason'] == 'expired':
+          return 'Reminder — no longer tracked (30 days past)';
+        case 'complete':
+          final why = _reminderReasons[detail['reason']];
+          return why == null ? 'Reminder done' : 'Reminder done — $why';
+        case 'cancel':
+          return 'Reminder cancelled';
+        case 'flag' when e.status == 'error':
+          return 'Could not flag the mail';
+      }
+    }
+
     switch (e.status) {
       case 'parked':
         final reason = _reason(detail['reason']);
@@ -287,6 +328,13 @@ class ActivityLogPanel extends StatefulWidget {
         ]);
         return parts.isEmpty ? label : '$label — $parts';
       case 'draft':
+        // The stale-times redraft's one row per pass: how many replies are
+        // being written again because the times they offered are gone.
+        if (detail['reason'] == 'slots_stale') {
+          final count = e.count ?? 0;
+          return 'Redrafting $count ${count == 1 ? 'reply' : 'replies'} '
+              '— their times are gone';
+        }
         final chars = detail['chars'];
         final written = chars is num
             ? 'Draft written — ${chars.toInt()} chars'
@@ -469,6 +517,8 @@ class ActivityLogPanel extends StatefulWidget {
       // never the meeting's subject.
       case 'calendar_write':
         final action = detail['action'];
+        // A Dismiss: the decline that told the organiser nothing.
+        final quiet = action == 'decline' && detail['quiet'] == true;
         final notified = detail['notified'];
         final emailed = notified is num && notified > 0
             ? ' · emailed ${notified.toInt()}'
@@ -478,6 +528,7 @@ class ActivityLogPanel extends StatefulWidget {
           // decline or say maybe, so naming which would claim one it never
           // gave. Each names its object, as the success lines do.
           final verb = switch (action) {
+            _ when quiet => 'dismiss an invitation',
             'accept' || 'tentative' || 'decline' => 'answer a meeting',
             'propose' => 'propose a new time',
             'move' => 'move an event',
@@ -495,6 +546,7 @@ class ActivityLogPanel extends StatefulWidget {
         final phrase = detail['undo'] == true
             ? 'Undid a change'
             : switch (action) {
+                _ when quiet => 'Dismissed an invitation',
                 'accept' => 'Accepted a meeting',
                 'tentative' => 'Said maybe to a meeting',
                 'decline' => 'Declined a meeting',
@@ -543,7 +595,34 @@ class ActivityLogPanel extends StatefulWidget {
         final n = slots is num ? slots.toInt() : 0;
         final from = detail['source'];
         final where = from is String && from.isNotEmpty ? ' ($from)' : '';
+        // The owner's free times appended to a draft answering an ask.
+        if (action == 'draft') {
+          return 'Times offered in a draft · $n '
+              '${n == 1 ? 'slot' : 'slots'}$where';
+        }
         return '$label — $n ${n == 1 ? 'slot' : 'slots'}$where';
+      // The model's reading of a scheduling ask (`ask_read`): how many days
+      // it copied, or that nobody asked for a time — a count and an enum
+      // word, never a phrase. The Day column's verdict on a reading is
+      // booleans: whether it agreed with the rules', replaced them, or left
+      // them standing.
+      case 'ask_read':
+        if (detail['agree'] == true) {
+          return 'The model read the ask the way the rules did';
+        }
+        if (detail['applied'] == true) {
+          return "The model's reading replaced the rules'";
+        }
+        if (detail['applied'] == false && detail['agree'] == false) {
+          return "The rules' reading stood";
+        }
+        if (detail['status'] == 'none') return 'Read an ask · no time asked';
+        final when = detail['when'];
+        if (when is! num) return label;
+        final n = when.toInt();
+        return n == 0
+            ? 'Read an ask · no day named'
+            : 'Read an ask · $n ${n == 1 ? 'day' : 'days'}';
       // The owner's word on a scheduling ask, one row per label written or
       // taken back, by its origin — an enum word, never the thread.
       case 'scheduling_ask':

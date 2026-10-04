@@ -8,6 +8,7 @@ import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../services/calendar/calendar_zone.dart';
 import '../services/calendar/day_items.dart';
+import '../services/calendar/event_view.dart' show EventStanding, standingOf, standingWord;
 import '../services/decision/needs_you_predicate.dart';
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/profile_photos.dart';
@@ -23,6 +24,11 @@ import 'processing_hint.dart';
 import 'scheduling_ask_rows.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
+
+// [isNeedsYou] moved to the predicate's own file so a service (the reminder
+// planner) can ask it without importing a widget; re-exported here for the
+// widgets and tests that have always found it beside [needsYouRows].
+export '../services/decision/needs_you_predicate.dart' show isNeedsYou;
 
 /// The app's destinations, and the icon rail's vocabulary.
 ///
@@ -93,36 +99,6 @@ String _stripReplyPrefixes(String subject) {
     out = out.substring(match.end);
   }
   return out.trim();
-}
-
-/// Whether one thread is the user's to answer.
-///
-/// THE predicate the two halves of the live inbox partition on: Needs You is
-/// everything this returns true for, and every live thread it returns false
-/// for is what is left over — the rows People's rooms are built from.
-/// One function rather than a filter in each, because two filters that were
-/// meant to be complements are two filters that will eventually disagree — and
-/// the symptom is mail in both sections, or in neither.
-///
-/// Three tests: nothing deferred to Later, which is the whole point of Later;
-/// nothing already closed; and the thread's needs-you probability
-/// ([Conversation.needsYouP], the decision model's highest p over the kept
-/// inbound the owner has not answered) at or above [threshold], the owner's
-/// slider ([needsYouAt]). Nothing else gates: not triage's ask, not the
-/// thread's `needs_reply` state, not the attention score, which only ORDERS
-/// the rows ([needsYouRows]). An undecided thread (a null probability) needs
-/// nobody until the model has read it.
-///
-/// The store spells the same rule once in SQL for the tile and the Needs You
-/// filter, over the same probability expression, so the rail and the tile
-/// cannot count different threads.
-bool isNeedsYou(
-  Conversation c, {
-  double threshold = NeedsYouTuning.defaultThreshold,
-}) {
-  if (c.bucket == 'later') return false;
-  if (c.state == ConversationState.done) return false;
-  return needsYouAt(c.needsYouP, threshold);
 }
 
 /// What the user is on the hook for, loudest first — [isNeedsYou], sorted.
@@ -512,6 +488,11 @@ class AppRail extends StatefulWidget {
   /// What is still ahead today, at most three (`remainingToday`).
   final List<CalendarEvent> todayMeetings;
 
+  /// Brief glances by event id, each drawn under its Today meeting row so
+  /// the morning look at the rail already says where each meeting stands.
+  /// Model output, so plain text.
+  final Map<String, String> todayGlances;
+
   /// The display zone the Today rows' times are read in. Null draws no
   /// meeting rows: a time printed in the wrong zone is worse than none.
   final CalendarZone? calendarZone;
@@ -599,6 +580,7 @@ class AppRail extends StatefulWidget {
     this.calendarShown = false,
     this.todayShown = false,
     this.todayMeetings = const [],
+    this.todayGlances = const {},
     this.calendarZone,
     this.now,
     this.invitesCount = 0,
@@ -615,6 +597,10 @@ class AppRail extends StatefulWidget {
 
   /// Fixed: the rail is a landmark, not a resizable pane.
   static const double width = 260;
+
+  /// The key of a Today meeting's brief glance.
+  static Key todayGlanceKeyFor(String eventId) =>
+      ValueKey('today-glance-$eventId');
 
   @override
   State<AppRail> createState() => _AppRailState();
@@ -1027,10 +1013,11 @@ class _AppRailState extends State<AppRail> {
     final rows = <Widget>[
       if (zone != null)
         for (final e in widget.todayMeetings.take(3))
-          if (e.startUtc != null)
+          if (e.startUtc != null) ...[
             _calendarRow(
               label: '${formatEventTime(zone, e.startUtc!)} · '
-                  '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}',
+                  '${e.subject.trim().isEmpty ? '(no subject)' : e.subject.trim()}'
+                  '${_standingSuffix(e)}',
               selected: false,
               onTap: widget.onOpenEvent != null
                   ? () => widget.onOpenEvent!(e.id)
@@ -1043,6 +1030,9 @@ class _AppRailState extends State<AppRail> {
                 ),
               ),
             ),
+            if ((widget.todayGlances[e.id] ?? '').isNotEmpty)
+              _todayGlance(e.id, widget.todayGlances[e.id]!),
+          ],
       if (widget.invitesCount > 0)
         _calendarRow(
           label: 'Invites · ${widget.invitesCount}',
@@ -1055,6 +1045,36 @@ class _AppRailState extends State<AppRail> {
       label: 'Today',
       rows: rows,
       placeholder: 'Nothing else today',
+    );
+  }
+
+  /// What a Today row adds after its subject: ' · Maybe' for a tentative
+  /// meeting, ' · RSVP owed' for one still owed an answer, else nothing.
+  /// 'RSVP owed' is the agenda chip's word, not `standingWord`'s 'Not
+  /// answered': the row is asking for the answer, as the chip does.
+  static String _standingSuffix(CalendarEvent e) => switch (standingOf(e)) {
+        EventStanding.tentative => ' · ${standingWord(EventStanding.tentative)}',
+        EventStanding.unanswered => ' · RSVP owed',
+        _ => '',
+      };
+
+  /// A brief's glance under its Today meeting row, indented to the row's
+  /// label, in the placeholder's muted ink.
+  Widget _todayGlance(String id, String glance) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s12 + BondSpacing.s8,
+        0,
+        BondSpacing.s12 + BondSpacing.s8,
+        BondSpacing.s4,
+      ),
+      child: Text(
+        glance,
+        key: AppRail.todayGlanceKeyFor(id),
+        style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
   }
 

@@ -42,6 +42,7 @@ void main() {
     String organizerAddress = 'dana@contoso.com',
     List<Attendee> attendees = const [],
     String changeKey = 'ck-1',
+    String showAs = '',
   }) =>
       CalendarEvent(
         id: id,
@@ -56,6 +57,7 @@ void main() {
         organizerAddress: organizerAddress,
         attendees: attendees,
         changeKey: changeKey,
+        showAs: showAs,
       );
 
   CalendarEvent allDay(
@@ -115,6 +117,135 @@ void main() {
       expect(written, 1);
       expect((await calendar.event('evt-1'))!.changeKey, 'ck-1');
       expect(await calendar.event('evt-2'), isNotNull);
+    });
+
+    test(
+        "upsertEvents keeps a fresh answer over a page's notResponded or the "
+        'answer it replaced; applies an agreeing page; an id not in '
+        'keepAnswerFor is overwritten', () async {
+      await calendar.upsertEvents(
+        [
+          timed('evt-1', start: inHours(3), responseStatus: 'accepted'),
+          timed('evt-2', start: inHours(4), responseStatus: 'accepted'),
+          timed('evt-3', start: inHours(5), responseStatus: 'declined'),
+          timed('evt-4', start: inHours(6), responseStatus: 'accepted'),
+          timed('evt-5', start: inHours(7), responseStatus: 'accepted'),
+        ],
+        syncRun: 'run-a',
+      );
+      // The app changes its answers: Accepted → Maybe from a clash row.
+      await calendar.setResponseStatus('evt-4', 'tentativelyAccepted');
+      await calendar.setResponseStatus('evt-5', 'tentativelyAccepted');
+      // A lagging page: still unanswered, or still the old answer.
+      final written = await calendar.upsertEvents(
+        [
+          timed('evt-1',
+              start: inHours(3),
+              responseStatus: 'notResponded',
+              changeKey: 'ck-2'),
+          timed('evt-2', start: inHours(4), responseStatus: 'notResponded'),
+          timed('evt-3', start: inHours(5), responseStatus: 'Declined'),
+          timed('evt-4', start: inHours(6), responseStatus: 'accepted'),
+          timed('evt-5', start: inHours(7), responseStatus: 'accepted'),
+        ],
+        syncRun: 'run-b',
+        keepAnswerFor: {'evt-1', 'evt-3', 'evt-4'},
+      );
+
+      expect(written, 5);
+      final one = (await calendar.event('evt-1'))!;
+      expect(one.responseStatus, 'accepted');
+      expect(one.changeKey, 'ck-2');
+      // Not answered here lately: the page is believed.
+      expect((await calendar.event('evt-2'))!.responseStatus, 'notResponded');
+      // A page that agrees (whatever its case) is applied.
+      expect((await calendar.event('evt-3'))!.responseStatus, 'Declined');
+      // The replaced answer on a held page is disbelieved...
+      expect((await calendar.event('evt-4'))!.responseStatus,
+          'tentativelyAccepted');
+      // ...and believed for an id not in keepAnswerFor.
+      expect((await calendar.event('evt-5'))!.responseStatus, 'accepted');
+
+      // Once the page catches up with the Maybe, it is applied.
+      await calendar.upsertEvents(
+        [
+          timed('evt-4',
+              start: inHours(6),
+              responseStatus: 'tentativelyAccepted',
+              changeKey: 'ck-3'),
+        ],
+        syncRun: 'run-c',
+        keepAnswerFor: {'evt-4'},
+      );
+      final four = (await calendar.event('evt-4'))!;
+      expect(four.responseStatus, 'tentativelyAccepted');
+      expect(four.changeKey, 'ck-3');
+    });
+
+    test(
+        "upsertEvents keepAnswerFor: the stored show_as rides with the kept "
+        'answer; an agreeing page brings its own', () async {
+      await calendar.upsertEvents(
+        [
+          timed('evt-1',
+              start: inHours(3),
+              responseStatus: 'notResponded',
+              showAs: 'tentative'),
+          timed('evt-2',
+              start: inHours(4),
+              responseStatus: 'notResponded',
+              showAs: 'tentative'),
+        ],
+        syncRun: 'run-a',
+      );
+      await calendar.setResponseStatus('evt-1', 'accepted');
+      await calendar.setResponseStatus('evt-2', 'accepted');
+      // A lagging page: still unanswered and still pencilled in.
+      await calendar.upsertEvents(
+        [
+          timed('evt-1',
+              start: inHours(3),
+              responseStatus: 'notResponded',
+              showAs: 'tentative'),
+          // A page that has caught up with the answer is applied whole.
+          timed('evt-2',
+              start: inHours(4), responseStatus: 'accepted', showAs: 'oof'),
+        ],
+        syncRun: 'run-b',
+        keepAnswerFor: {'evt-1', 'evt-2'},
+      );
+      final one = (await calendar.event('evt-1'))!;
+      expect(one.responseStatus, 'accepted');
+      expect(one.showAs, 'busy');
+      expect((await calendar.event('evt-2'))!.showAs, 'oof');
+    });
+
+    test(
+        'an accept moves a tentative show_as to busy, a maybe to tentative, '
+        'a free one is left alone', () async {
+      await calendar.upsertEvents(
+        [
+          timed('evt-1', start: inHours(3), showAs: 'tentative'),
+          timed('evt-2', start: inHours(4), showAs: 'busy'),
+          timed('evt-3', start: inHours(5), showAs: 'free'),
+          timed('evt-4', start: inHours(6), showAs: 'tentative'),
+          timed('evt-5', start: inHours(7), showAs: 'Tentative'),
+        ],
+        syncRun: 'run-a',
+      );
+      await calendar.setResponseStatus('evt-1', 'accepted');
+      await calendar.setResponseStatus('evt-2', 'tentativelyAccepted');
+      await calendar.setResponseStatus('evt-3', 'accepted');
+      await calendar.setResponseStatus('evt-4', 'declined');
+      await calendar.setResponseStatus('evt-5', 'accepted');
+      Future<String> showAs(String id) async =>
+          (await calendar.event(id))!.showAs;
+      expect(await showAs('evt-1'), 'busy');
+      expect(await showAs('evt-2'), 'tentative');
+      expect(await showAs('evt-3'), 'free');
+      expect(await showAs('evt-4'), 'tentative');
+      expect(await showAs('evt-5'), 'busy');
+      expect((await calendar.event('evt-1'))!.responseStatus, 'accepted');
     });
 
     test('deleteEvents ignores ids it never stored', () async {
@@ -307,6 +438,8 @@ void main() {
       await calendar.upsertEvents([
         timed('owed', start: inHours(5)),
         timed('owed-soon', start: inHours(1), responseStatus: 'notResponded'),
+        // The status is compared case-insensitively.
+        timed('owed-upper', start: inHours(7), responseStatus: 'NotResponded'),
         timed('asked-explicitly', start: inHours(6), responseRequested: true),
         timed('no-reply-wanted', start: inHours(5), responseRequested: false),
         timed('accepted', start: inHours(5), responseStatus: 'accepted'),
@@ -320,8 +453,13 @@ void main() {
 
       final owed = await calendar.invitesOwed(nowUtc: now, today: today);
       final ids = [for (final e in owed) e.id];
-      expect(ids.toSet(),
-          {'owed', 'owed-soon', 'asked-explicitly', 'all-day-today'});
+      expect(ids.toSet(), {
+        'owed',
+        'owed-soon',
+        'owed-upper',
+        'asked-explicitly',
+        'all-day-today',
+      });
       // Soonest first: today's all-day event sorts at its UTC midnight.
       expect(ids.first, 'all-day-today');
       expect(ids.indexOf('owed-soon'), lessThan(ids.indexOf('owed')));
@@ -353,6 +491,12 @@ void main() {
             attendees: const [sam],
             organizerAddress: '',
             responseStatus: 'declined'),
+        // Compared case-insensitively: still declined.
+        timed('declined-upper-with-sam',
+            start: inHours(1.25),
+            attendees: const [sam],
+            organizerAddress: '',
+            responseStatus: 'Declined'),
         timed('cancelled-with-sam',
             start: inHours(1.5),
             attendees: const [sam],
@@ -554,8 +698,7 @@ void main() {
       expect((row.status, row.inputsHash), (EventBrief.ready, 'h2'));
     });
 
-    test('briefsFor reads many; deleteBriefsExcept keeps only the named',
-        () async {
+    test('briefsFor reads many', () async {
       for (final id in ['a', 'b', 'c']) {
         await calendar.putBrief(
           eventId: id,
@@ -566,9 +709,49 @@ void main() {
       }
       expect((await calendar.briefsFor(['a', 'c', 'nope'])).keys.toSet(),
           {'a', 'c'});
-      expect(await calendar.deleteBriefsExcept(['b']), 2);
-      expect((await calendar.briefsFor(['a', 'b', 'c'])).keys, ['b']);
-      expect(await calendar.deleteBriefsExcept(const []), 1);
+    });
+
+    test('deleteBriefsOfEndedEvents: gone and ended briefs go, a future one '
+        'stays (timed and all-day)', () async {
+      final today = CalendarDate(now.year, now.month, now.day);
+      await calendar.upsertEvents([
+        timed('ended', start: inHours(-2), end: inHours(-1)),
+        // Ends exactly now: over.
+        timed('ends-now', start: inHours(-1), end: now),
+        timed('under-way', start: inHours(-1), end: inHours(1)),
+        timed('next-month', start: inHours(24 * 30)),
+        // Yesterday's all-day event ends (exclusive) today: over.
+        allDay('yesterday', today.addDays(-1)),
+        allDay('today', today),
+        allDay('next-week', today.addDays(7)),
+      ], syncRun: 'run-1');
+      const ids = [
+        'ended',
+        'ends-now',
+        'under-way',
+        'next-month',
+        'yesterday',
+        'today',
+        'next-week',
+        'gone',
+      ];
+      for (final id in ids) {
+        await calendar.putBrief(
+          eventId: id,
+          inputsHash: 'h',
+          status: EventBrief.ready,
+          briefJson: '{"headline":"Kept."}',
+          generatedAt: calendarStamp(now),
+        );
+      }
+      expect(
+          await calendar.deleteBriefsOfEndedEvents(nowUtc: now, today: today),
+          4);
+      expect((await calendar.briefsFor(ids)).keys.toSet(),
+          {'under-way', 'next-month', 'today', 'next-week'});
+      expect(
+          await calendar.deleteBriefsOfEndedEvents(nowUtc: now, today: today),
+          0);
     });
   });
 

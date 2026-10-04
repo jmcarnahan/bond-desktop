@@ -563,6 +563,61 @@ void main() {
       expect(said('later'), 'Scheduling ask');
     });
 
+    test('times offered in a draft: how many slots and from where; a skip '
+        'by its enum word', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'find_time',
+          detail: const {
+            'action': 'draft',
+            'source': 'graph',
+            'slots': 3,
+            'people': 1,
+            'window': 'this_week',
+            'graph_calls': 1,
+            'read': 'rules',
+          },
+        )),
+        'Times offered in a draft · 3 slots (graph)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'find_time',
+          detail: const {'action': 'draft', 'source': 'local', 'slots': 1},
+        )),
+        'Times offered in a draft · 1 slot (local)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'find_time',
+          status: 'skipped',
+          detail: const {'action': 'draft', 'reason': 'transient'},
+        )),
+        'Find a time skipped — transient',
+      );
+    });
+
+    test('the stale-times redraft: how many replies, never which', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'draft',
+          status: 'requeued',
+          count: 2,
+          detail: const {'reason': 'slots_stale'},
+        )),
+        'Redrafting 2 replies — their times are gone',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'draft',
+          status: 'requeued',
+          count: 1,
+          detail: const {'reason': 'slots_stale'},
+        )),
+        'Redrafting 1 reply — their times are gone',
+      );
+    });
+
     test('a meeting brief: written from how many threads, skipped with its '
         'reason in words, or failed', () {
       expect(
@@ -610,6 +665,14 @@ void main() {
           detail: const {'reason': 'too_many'},
         )),
         'Meeting brief — skipped (too many people)',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'materials_pending'},
+        )),
+        'Meeting brief — skipped (reading the files sent ahead)',
       );
       // Over a ready brief the old one stands, and the sentence says so.
       expect(
@@ -838,6 +901,67 @@ void main() {
       expect(ActivityLogPanel.kindLabel('find_time'), 'Find a time');
     });
 
+    test('an ask reading says how many days it read, or that nobody asked, '
+        'in counts and enum words', () {
+      String row(Map<String, Object?> detail, {String status = 'ok'}) =>
+          ActivityLogPanel.describe(
+              _event(kind: 'ask_read', status: status, detail: detail));
+      expect(row({'status': 'ready', 'when': 2, 'meal': 'none'}),
+          'Read an ask · 2 days');
+      expect(row({'status': 'ready', 'when': 1, 'meal': 'dinner'}),
+          'Read an ask · 1 day');
+      expect(row({'status': 'ready', 'when': 0, 'meal': 'coffee'}),
+          'Read an ask · no day named');
+      expect(row({'status': 'none', 'when': 0, 'meal': 'none'}),
+          'Read an ask · no time asked');
+      // The Day column's verdict: booleans only.
+      expect(row({'applied': false, 'agree': true, 'cached': true}),
+          'The model read the ask the way the rules did');
+      expect(row({'applied': true, 'agree': false, 'cached': false}),
+          "The model's reading replaced the rules'");
+      expect(row({'applied': false, 'agree': false, 'cached': false}),
+          "The rules' reading stood");
+      // An error takes the general sentence, with its type only.
+      expect(row({'error': 'LlmFormatException'}, status: 'error'),
+          'Ask reading failed — LlmFormatException');
+      expect(ActivityLogPanel.kindLabel('ask_read'), 'Ask reading');
+    });
+
+    test('a reminder says what happened to it in To Do, in enum words only',
+        () {
+      String row(Map<String, Object?> detail, {String status = 'ok'}) =>
+          ActivityLogPanel.describe(
+              _event(kind: 'reminder', status: status, detail: detail));
+      expect(
+          row({'action': 'create', 'kind': 'reply_by', 'created_from': 'bar',
+              'flagged': false, 'linked': true}),
+          'Reminder set in To Do (reply by)');
+      expect(
+          row({'action': 'create', 'kind': 'follow_up', 'created_from': 'send',
+              'flagged': true, 'linked': false}),
+          'Reminder set in To Do (follow up)');
+      expect(
+          row({'action': 'create', 'kind': 'deadline', 'created_from': 'auto',
+              'flagged': false, 'linked': false}),
+          'Reminder set in To Do (deadline)');
+      expect(row({'action': 'complete', 'kind': 'follow_up', 'reason': 'reply'}),
+          'Reminder done — answered');
+      expect(row({'action': 'complete', 'kind': 'reply_by', 'reason': 'done'}),
+          'Reminder done — thread done');
+      expect(row({'action': 'complete', 'kind': 'custom', 'reason': 'owner'}),
+          'Reminder done — by you');
+      expect(
+          row({'action': 'complete', 'kind': 'follow_up', 'reason': 'expired'}),
+          'Reminder — no longer tracked (30 days past)');
+      expect(row({'action': 'cancel', 'kind': 'reply_by'}),
+          'Reminder cancelled');
+      // The follow-up's flag never fails the reminder, so its one error row
+      // reads as what did not happen.
+      expect(row({'action': 'flag', 'kind': 'follow_up'}, status: 'error'),
+          'Could not flag the mail');
+      expect(ActivityLogPanel.kindLabel('reminder'), 'Reminder');
+    });
+
     test('a calendar write says what it did and how many it emailed', () {
       String write(String action,
               {String status = 'ok',
@@ -879,6 +1003,23 @@ void main() {
           "Calendar — couldn't answer a meeting (transient)");
       expect(write('create', status: 'failed', outcome: 'scope_missing'),
           "Calendar — couldn't create an event (scope_missing)");
+    });
+
+    test("a quiet decline reads as a dismissed invitation", () {
+      String write({String status = 'ok', String outcome = 'ok'}) =>
+          ActivityLogPanel.describe(_event(
+            kind: 'calendar_write',
+            status: status,
+            detail: {
+              'action': 'decline',
+              'outcome': outcome,
+              'notified': 0,
+              'quiet': true,
+            },
+          ));
+      expect(write(), 'Calendar — Dismissed an invitation');
+      expect(write(status: 'failed', outcome: 'transient'),
+          "Calendar — couldn't dismiss an invitation (transient)");
     });
 
     test('one changed file reads as one file', () {

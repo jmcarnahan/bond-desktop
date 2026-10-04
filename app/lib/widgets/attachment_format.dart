@@ -187,6 +187,9 @@ String? _glyphForExtension(String extension) {
       '🖼',
     'eml' || 'msg' => '✉',
     'zip' || '7z' || 'rar' => '🗜',
+    // An Internet shortcut is a link whatever its type says — Gmail calls its
+    // Drive-link shortcut `application/pdf`.
+    'url' || 'webloc' => '🔗',
     _ => null,
   };
 }

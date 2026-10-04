@@ -362,6 +362,11 @@ String writeSummary(
   String one(String verb) =>
       when.isEmpty ? '$verb $subject' : '$verb $subject · $when';
   switch (w) {
+    case RespondToEvent() when w.quiet:
+      const tail = ' — declines without telling the organiser';
+      return series
+          ? 'Dismiss every meeting in $subject$tail'
+          : '${one('Dismiss')}$tail';
     case RespondToEvent():
       final verb = switch (w.response) {
         RsvpResponse.accept => 'Accept',
@@ -403,6 +408,8 @@ String writeDoneMessage(
   final subject = _quoted(shown?.subject ?? '');
   final what = series ? 'every meeting in $subject' : subject;
   switch (w) {
+    case RespondToEvent() when w.quiet:
+      return 'Dismissed $what — nobody was told.';
     case RespondToEvent():
       if (w.proposes) return 'Proposed a new time for $subject.';
       return switch (w.response) {
@@ -461,7 +468,7 @@ String emailedSuffix(
 /// — the fallback [emailedLine] and [emailedSuffix] use when a write that
 /// confirms anyway came back from its dry run naming nobody:
 ///
-/// - an answer (and a proposal) goes to the organiser;
+/// - an answer (and a proposal) goes to the organiser; a Dismiss to nobody;
 /// - a create goes to the people on it;
 /// - a cancel or a delete goes to the event's guests: not rooms, not the
 ///   organiser's own address (the [eventRoleOf] rule);
@@ -477,7 +484,7 @@ List<String> mayEmailFor(CalendarWrite w, {CalendarEvent? event}) {
 
   switch (w) {
     case RespondToEvent():
-      add(event?.organizerAddress ?? '');
+      if (w.sendResponse) add(event?.organizerAddress ?? '');
     case CreateEvent():
       w.attendees.forEach(add);
     case CancelMeeting():
@@ -496,8 +503,10 @@ List<String> mayEmailFor(CalendarWrite w, {CalendarEvent? event}) {
   return out.toList();
 }
 
-/// The confirm button: it names a destructive write rather than "Send".
+/// The confirm button: it names a destructive write, and a Dismiss, rather
+/// than "Send" — a Dismiss sends nothing.
 String confirmLabelFor(CalendarWrite w) => switch (w) {
+      RespondToEvent(quiet: true) => 'Dismiss',
       DeleteEvent() => 'Delete',
       CancelMeeting() => 'Cancel meeting',
       _ => 'Send',

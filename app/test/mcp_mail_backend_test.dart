@@ -447,6 +447,33 @@ void main() {
       expect(detail['calendarEventId'], 'e');
     });
 
+    test('web_link is kept as webLink; empty is omitted', () async {
+      final linked = _FakeMcp({
+        'read_email': [
+          {
+            'body_text': 'hi',
+            'web_link': 'https://outlook.office365.com/owa/?ItemID=m1',
+          },
+        ],
+      });
+      expect(
+        (await McpMailBackend(linked).getMessageDetail('m1'))['webLink'],
+        'https://outlook.office365.com/owa/?ItemID=m1',
+      );
+
+      for (final row in <Map<String, dynamic>>[
+        {'body_text': 'hi'},
+        {'body_text': 'hi', 'web_link': ''},
+        {'body_text': 'hi', 'web_link': null},
+      ]) {
+        final detail =
+            await McpMailBackend(_FakeMcp({'read_email': [row]}))
+                .getMessageDetail('m1');
+        expect(detail.containsKey('webLink'), isFalse,
+            reason: '$row has no link');
+      }
+    });
+
     test('the meeting kind and event id land on the stored row', () async {
       final db = testDb();
       addTearDown(db.close);
@@ -466,6 +493,7 @@ void main() {
             'has_attachments': false,
             'meeting_message_type': 'meetingAccepted',
             'event_id': 'evt-contoso-1',
+            'web_link': 'https://outlook.office365.com/owa/?ItemID=m1',
           },
         ],
       });
@@ -477,6 +505,8 @@ void main() {
           (await store.loadThread('c1', sources: const ['email'])).single;
       expect(row.meetingMessageType, 'meetingAccepted');
       expect(row.meetingEventId, 'evt-contoso-1');
+      // The link a To Do reminder carries back to the mail.
+      expect(row.webLink, 'https://outlook.office365.com/owa/?ItemID=m1');
       // A detail fetch does not gate on its own — triage does, and the
       // one-shots re-gate stored rows — so what is pinned here is that the
       // stored kind is the one the response rule reads.

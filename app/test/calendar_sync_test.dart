@@ -891,6 +891,65 @@ void main() {
       await sync.syncNow();
       expect((await calendar.event('mine'))!.changeKey, 'newer');
     });
+
+    test('a page seconds after an answer cannot put notResponded back; three '
+        'minutes later it can', () async {
+      CalendarEvent invite(String changeKey) => CalendarEvent(
+            id: 'inv',
+            subject: 'Candidate review',
+            startUtc: t0.add(const Duration(days: 1)),
+            endUtc: t0.add(const Duration(days: 1, minutes: 30)),
+            responseStatus: 'notResponded',
+            changeKey: changeKey,
+          );
+      await calendar.upsertEvents([invite('ck-1')], syncRun: 'old-run');
+      final sync = build();
+      // What `_applyLocally` does after a Yes, in its order: note the write
+      // FIRST, then store the answer (calendar_writes_test pins the order).
+      // The forced sync that follows is requested AFTER the note, so the
+      // write guard does not hold its pages; the answer hold does.
+      sync.noteWrite('inv');
+      await calendar.setResponseStatus('inv', 'accepted');
+      clock = clock.add(const Duration(seconds: 5));
+      backend.steps.add(CalendarSyncPage(events: [invite('ck-2')], cursor: 'd1'));
+      await sync.syncNow(force: true);
+
+      final held = (await calendar.event('inv'))!;
+      expect(held.responseStatus, 'accepted');
+      // The rest of the row is the page's.
+      expect(held.changeKey, 'ck-2');
+
+      clock = clock.add(const Duration(minutes: 3));
+      backend.steps.add(CalendarSyncPage(events: [invite('ck-3')], cursor: 'd2'));
+      await sync.syncNow(force: true);
+
+      expect((await calendar.event('inv'))!.responseStatus, 'notResponded');
+    });
+
+    test('a page seconds after Accepted → Maybe cannot put accepted back',
+        () async {
+      CalendarEvent meeting(String changeKey) => CalendarEvent(
+            id: 'mtg',
+            subject: 'Planning sync',
+            startUtc: t0.add(const Duration(days: 1)),
+            endUtc: t0.add(const Duration(days: 1, minutes: 30)),
+            responseStatus: 'accepted',
+            changeKey: changeKey,
+          );
+      await calendar.upsertEvents([meeting('ck-1')], syncRun: 'old-run');
+      final sync = build();
+      // A clash row's Maybe, in `_applyLocally`'s order.
+      sync.noteWrite('mtg');
+      await calendar.setResponseStatus('mtg', 'tentativelyAccepted');
+      clock = clock.add(const Duration(seconds: 5));
+      backend.steps
+          .add(CalendarSyncPage(events: [meeting('ck-2')], cursor: 'd1'));
+      await sync.syncNow(force: true);
+
+      final held = (await calendar.event('mtg'))!;
+      expect(held.responseStatus, 'tentativelyAccepted');
+      expect(held.changeKey, 'ck-2');
+    });
   });
 
   group('mailbox settings', () {

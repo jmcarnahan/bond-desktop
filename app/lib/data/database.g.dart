@@ -20507,6 +20507,927 @@ class DecisionLabelsCompanion extends UpdateCompanion<DecisionLabel> {
   }
 }
 
+class Reminders extends Table with TableInfo<Reminders, ReminderRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  Reminders(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL PRIMARY KEY',
+  );
+  static const VerificationMeta _kindMeta = const VerificationMeta('kind');
+  late final GeneratedColumn<String> kind = GeneratedColumn<String>(
+    'kind',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _conversationKeyMeta = const VerificationMeta(
+    'conversationKey',
+  );
+  late final GeneratedColumn<String> conversationKey = GeneratedColumn<String>(
+    'conversation_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _anchorMessageIdMeta = const VerificationMeta(
+    'anchorMessageId',
+  );
+  late final GeneratedColumn<String> anchorMessageId = GeneratedColumn<String>(
+    'anchor_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _remindAtMeta = const VerificationMeta(
+    'remindAt',
+  );
+  late final GeneratedColumn<String> remindAt = GeneratedColumn<String>(
+    'remind_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _dueDateMeta = const VerificationMeta(
+    'dueDate',
+  );
+  late final GeneratedColumn<String> dueDate = GeneratedColumn<String>(
+    'due_date',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _createdFromMeta = const VerificationMeta(
+    'createdFrom',
+  );
+  late final GeneratedColumn<String> createdFrom = GeneratedColumn<String>(
+    'created_from',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _todoListIdMeta = const VerificationMeta(
+    'todoListId',
+  );
+  late final GeneratedColumn<String> todoListId = GeneratedColumn<String>(
+    'todo_list_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _todoTaskIdMeta = const VerificationMeta(
+    'todoTaskId',
+  );
+  late final GeneratedColumn<String> todoTaskId = GeneratedColumn<String>(
+    'todo_task_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _flagMessageIdMeta = const VerificationMeta(
+    'flagMessageId',
+  );
+  late final GeneratedColumn<String> flagMessageId = GeneratedColumn<String>(
+    'flag_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _doneAtMeta = const VerificationMeta('doneAt');
+  late final GeneratedColumn<String> doneAt = GeneratedColumn<String>(
+    'done_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    kind,
+    source,
+    conversationKey,
+    anchorMessageId,
+    title,
+    remindAt,
+    dueDate,
+    status,
+    createdFrom,
+    todoListId,
+    todoTaskId,
+    flagMessageId,
+    createdAt,
+    updatedAt,
+    doneAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'reminders';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ReminderRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('kind')) {
+      context.handle(
+        _kindMeta,
+        kind.isAcceptableOrUnknown(data['kind']!, _kindMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_kindMeta);
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('conversation_key')) {
+      context.handle(
+        _conversationKeyMeta,
+        conversationKey.isAcceptableOrUnknown(
+          data['conversation_key']!,
+          _conversationKeyMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_conversationKeyMeta);
+    }
+    if (data.containsKey('anchor_message_id')) {
+      context.handle(
+        _anchorMessageIdMeta,
+        anchorMessageId.isAcceptableOrUnknown(
+          data['anchor_message_id']!,
+          _anchorMessageIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_titleMeta);
+    }
+    if (data.containsKey('remind_at')) {
+      context.handle(
+        _remindAtMeta,
+        remindAt.isAcceptableOrUnknown(data['remind_at']!, _remindAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_remindAtMeta);
+    }
+    if (data.containsKey('due_date')) {
+      context.handle(
+        _dueDateMeta,
+        dueDate.isAcceptableOrUnknown(data['due_date']!, _dueDateMeta),
+      );
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_statusMeta);
+    }
+    if (data.containsKey('created_from')) {
+      context.handle(
+        _createdFromMeta,
+        createdFrom.isAcceptableOrUnknown(
+          data['created_from']!,
+          _createdFromMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_createdFromMeta);
+    }
+    if (data.containsKey('todo_list_id')) {
+      context.handle(
+        _todoListIdMeta,
+        todoListId.isAcceptableOrUnknown(
+          data['todo_list_id']!,
+          _todoListIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('todo_task_id')) {
+      context.handle(
+        _todoTaskIdMeta,
+        todoTaskId.isAcceptableOrUnknown(
+          data['todo_task_id']!,
+          _todoTaskIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('flag_message_id')) {
+      context.handle(
+        _flagMessageIdMeta,
+        flagMessageId.isAcceptableOrUnknown(
+          data['flag_message_id']!,
+          _flagMessageIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('done_at')) {
+      context.handle(
+        _doneAtMeta,
+        doneAt.isAcceptableOrUnknown(data['done_at']!, _doneAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  ReminderRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ReminderRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      kind: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}kind'],
+      )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      conversationKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}conversation_key'],
+      )!,
+      anchorMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}anchor_message_id'],
+      )!,
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      )!,
+      remindAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}remind_at'],
+      )!,
+      dueDate: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}due_date'],
+      )!,
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      createdFrom: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_from'],
+      )!,
+      todoListId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}todo_list_id'],
+      )!,
+      todoTaskId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}todo_task_id'],
+      )!,
+      flagMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}flag_message_id'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      doneAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}done_at'],
+      ),
+    );
+  }
+
+  @override
+  Reminders createAlias(String alias) {
+    return Reminders(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ReminderRow extends DataClass implements Insertable<ReminderRow> {
+  final String id;
+  final String kind;
+
+  /// reply_by | follow_up | deadline | custom
+  final String source;
+  final String conversationKey;
+  final String anchorMessageId;
+  final String title;
+  final String remindAt;
+
+  /// isoStamp UTC
+  final String dueDate;
+
+  /// yyyy-mm-dd in the owner's zone
+  final String status;
+
+  /// active | done | cancelled
+  final String createdFrom;
+
+  /// bar | send | auto
+  final String todoListId;
+  final String todoTaskId;
+  final String flagMessageId;
+  final String createdAt;
+  final String updatedAt;
+  final String? doneAt;
+  const ReminderRow({
+    required this.id,
+    required this.kind,
+    required this.source,
+    required this.conversationKey,
+    required this.anchorMessageId,
+    required this.title,
+    required this.remindAt,
+    required this.dueDate,
+    required this.status,
+    required this.createdFrom,
+    required this.todoListId,
+    required this.todoTaskId,
+    required this.flagMessageId,
+    required this.createdAt,
+    required this.updatedAt,
+    this.doneAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['kind'] = Variable<String>(kind);
+    map['source'] = Variable<String>(source);
+    map['conversation_key'] = Variable<String>(conversationKey);
+    map['anchor_message_id'] = Variable<String>(anchorMessageId);
+    map['title'] = Variable<String>(title);
+    map['remind_at'] = Variable<String>(remindAt);
+    map['due_date'] = Variable<String>(dueDate);
+    map['status'] = Variable<String>(status);
+    map['created_from'] = Variable<String>(createdFrom);
+    map['todo_list_id'] = Variable<String>(todoListId);
+    map['todo_task_id'] = Variable<String>(todoTaskId);
+    map['flag_message_id'] = Variable<String>(flagMessageId);
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    if (!nullToAbsent || doneAt != null) {
+      map['done_at'] = Variable<String>(doneAt);
+    }
+    return map;
+  }
+
+  RemindersCompanion toCompanion(bool nullToAbsent) {
+    return RemindersCompanion(
+      id: Value(id),
+      kind: Value(kind),
+      source: Value(source),
+      conversationKey: Value(conversationKey),
+      anchorMessageId: Value(anchorMessageId),
+      title: Value(title),
+      remindAt: Value(remindAt),
+      dueDate: Value(dueDate),
+      status: Value(status),
+      createdFrom: Value(createdFrom),
+      todoListId: Value(todoListId),
+      todoTaskId: Value(todoTaskId),
+      flagMessageId: Value(flagMessageId),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+      doneAt: doneAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(doneAt),
+    );
+  }
+
+  factory ReminderRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ReminderRow(
+      id: serializer.fromJson<String>(json['id']),
+      kind: serializer.fromJson<String>(json['kind']),
+      source: serializer.fromJson<String>(json['source']),
+      conversationKey: serializer.fromJson<String>(json['conversation_key']),
+      anchorMessageId: serializer.fromJson<String>(json['anchor_message_id']),
+      title: serializer.fromJson<String>(json['title']),
+      remindAt: serializer.fromJson<String>(json['remind_at']),
+      dueDate: serializer.fromJson<String>(json['due_date']),
+      status: serializer.fromJson<String>(json['status']),
+      createdFrom: serializer.fromJson<String>(json['created_from']),
+      todoListId: serializer.fromJson<String>(json['todo_list_id']),
+      todoTaskId: serializer.fromJson<String>(json['todo_task_id']),
+      flagMessageId: serializer.fromJson<String>(json['flag_message_id']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+      doneAt: serializer.fromJson<String?>(json['done_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'kind': serializer.toJson<String>(kind),
+      'source': serializer.toJson<String>(source),
+      'conversation_key': serializer.toJson<String>(conversationKey),
+      'anchor_message_id': serializer.toJson<String>(anchorMessageId),
+      'title': serializer.toJson<String>(title),
+      'remind_at': serializer.toJson<String>(remindAt),
+      'due_date': serializer.toJson<String>(dueDate),
+      'status': serializer.toJson<String>(status),
+      'created_from': serializer.toJson<String>(createdFrom),
+      'todo_list_id': serializer.toJson<String>(todoListId),
+      'todo_task_id': serializer.toJson<String>(todoTaskId),
+      'flag_message_id': serializer.toJson<String>(flagMessageId),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+      'done_at': serializer.toJson<String?>(doneAt),
+    };
+  }
+
+  ReminderRow copyWith({
+    String? id,
+    String? kind,
+    String? source,
+    String? conversationKey,
+    String? anchorMessageId,
+    String? title,
+    String? remindAt,
+    String? dueDate,
+    String? status,
+    String? createdFrom,
+    String? todoListId,
+    String? todoTaskId,
+    String? flagMessageId,
+    String? createdAt,
+    String? updatedAt,
+    Value<String?> doneAt = const Value.absent(),
+  }) => ReminderRow(
+    id: id ?? this.id,
+    kind: kind ?? this.kind,
+    source: source ?? this.source,
+    conversationKey: conversationKey ?? this.conversationKey,
+    anchorMessageId: anchorMessageId ?? this.anchorMessageId,
+    title: title ?? this.title,
+    remindAt: remindAt ?? this.remindAt,
+    dueDate: dueDate ?? this.dueDate,
+    status: status ?? this.status,
+    createdFrom: createdFrom ?? this.createdFrom,
+    todoListId: todoListId ?? this.todoListId,
+    todoTaskId: todoTaskId ?? this.todoTaskId,
+    flagMessageId: flagMessageId ?? this.flagMessageId,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    doneAt: doneAt.present ? doneAt.value : this.doneAt,
+  );
+  ReminderRow copyWithCompanion(RemindersCompanion data) {
+    return ReminderRow(
+      id: data.id.present ? data.id.value : this.id,
+      kind: data.kind.present ? data.kind.value : this.kind,
+      source: data.source.present ? data.source.value : this.source,
+      conversationKey: data.conversationKey.present
+          ? data.conversationKey.value
+          : this.conversationKey,
+      anchorMessageId: data.anchorMessageId.present
+          ? data.anchorMessageId.value
+          : this.anchorMessageId,
+      title: data.title.present ? data.title.value : this.title,
+      remindAt: data.remindAt.present ? data.remindAt.value : this.remindAt,
+      dueDate: data.dueDate.present ? data.dueDate.value : this.dueDate,
+      status: data.status.present ? data.status.value : this.status,
+      createdFrom: data.createdFrom.present
+          ? data.createdFrom.value
+          : this.createdFrom,
+      todoListId: data.todoListId.present
+          ? data.todoListId.value
+          : this.todoListId,
+      todoTaskId: data.todoTaskId.present
+          ? data.todoTaskId.value
+          : this.todoTaskId,
+      flagMessageId: data.flagMessageId.present
+          ? data.flagMessageId.value
+          : this.flagMessageId,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      doneAt: data.doneAt.present ? data.doneAt.value : this.doneAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ReminderRow(')
+          ..write('id: $id, ')
+          ..write('kind: $kind, ')
+          ..write('source: $source, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('anchorMessageId: $anchorMessageId, ')
+          ..write('title: $title, ')
+          ..write('remindAt: $remindAt, ')
+          ..write('dueDate: $dueDate, ')
+          ..write('status: $status, ')
+          ..write('createdFrom: $createdFrom, ')
+          ..write('todoListId: $todoListId, ')
+          ..write('todoTaskId: $todoTaskId, ')
+          ..write('flagMessageId: $flagMessageId, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('doneAt: $doneAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    kind,
+    source,
+    conversationKey,
+    anchorMessageId,
+    title,
+    remindAt,
+    dueDate,
+    status,
+    createdFrom,
+    todoListId,
+    todoTaskId,
+    flagMessageId,
+    createdAt,
+    updatedAt,
+    doneAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ReminderRow &&
+          other.id == this.id &&
+          other.kind == this.kind &&
+          other.source == this.source &&
+          other.conversationKey == this.conversationKey &&
+          other.anchorMessageId == this.anchorMessageId &&
+          other.title == this.title &&
+          other.remindAt == this.remindAt &&
+          other.dueDate == this.dueDate &&
+          other.status == this.status &&
+          other.createdFrom == this.createdFrom &&
+          other.todoListId == this.todoListId &&
+          other.todoTaskId == this.todoTaskId &&
+          other.flagMessageId == this.flagMessageId &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt &&
+          other.doneAt == this.doneAt);
+}
+
+class RemindersCompanion extends UpdateCompanion<ReminderRow> {
+  final Value<String> id;
+  final Value<String> kind;
+  final Value<String> source;
+  final Value<String> conversationKey;
+  final Value<String> anchorMessageId;
+  final Value<String> title;
+  final Value<String> remindAt;
+  final Value<String> dueDate;
+  final Value<String> status;
+  final Value<String> createdFrom;
+  final Value<String> todoListId;
+  final Value<String> todoTaskId;
+  final Value<String> flagMessageId;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<String?> doneAt;
+  final Value<int> rowid;
+  const RemindersCompanion({
+    this.id = const Value.absent(),
+    this.kind = const Value.absent(),
+    this.source = const Value.absent(),
+    this.conversationKey = const Value.absent(),
+    this.anchorMessageId = const Value.absent(),
+    this.title = const Value.absent(),
+    this.remindAt = const Value.absent(),
+    this.dueDate = const Value.absent(),
+    this.status = const Value.absent(),
+    this.createdFrom = const Value.absent(),
+    this.todoListId = const Value.absent(),
+    this.todoTaskId = const Value.absent(),
+    this.flagMessageId = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.doneAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  RemindersCompanion.insert({
+    required String id,
+    required String kind,
+    required String source,
+    required String conversationKey,
+    this.anchorMessageId = const Value.absent(),
+    required String title,
+    required String remindAt,
+    this.dueDate = const Value.absent(),
+    required String status,
+    required String createdFrom,
+    this.todoListId = const Value.absent(),
+    this.todoTaskId = const Value.absent(),
+    this.flagMessageId = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.doneAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       kind = Value(kind),
+       source = Value(source),
+       conversationKey = Value(conversationKey),
+       title = Value(title),
+       remindAt = Value(remindAt),
+       status = Value(status),
+       createdFrom = Value(createdFrom),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<ReminderRow> custom({
+    Expression<String>? id,
+    Expression<String>? kind,
+    Expression<String>? source,
+    Expression<String>? conversationKey,
+    Expression<String>? anchorMessageId,
+    Expression<String>? title,
+    Expression<String>? remindAt,
+    Expression<String>? dueDate,
+    Expression<String>? status,
+    Expression<String>? createdFrom,
+    Expression<String>? todoListId,
+    Expression<String>? todoTaskId,
+    Expression<String>? flagMessageId,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<String>? doneAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (kind != null) 'kind': kind,
+      if (source != null) 'source': source,
+      if (conversationKey != null) 'conversation_key': conversationKey,
+      if (anchorMessageId != null) 'anchor_message_id': anchorMessageId,
+      if (title != null) 'title': title,
+      if (remindAt != null) 'remind_at': remindAt,
+      if (dueDate != null) 'due_date': dueDate,
+      if (status != null) 'status': status,
+      if (createdFrom != null) 'created_from': createdFrom,
+      if (todoListId != null) 'todo_list_id': todoListId,
+      if (todoTaskId != null) 'todo_task_id': todoTaskId,
+      if (flagMessageId != null) 'flag_message_id': flagMessageId,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (doneAt != null) 'done_at': doneAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  RemindersCompanion copyWith({
+    Value<String>? id,
+    Value<String>? kind,
+    Value<String>? source,
+    Value<String>? conversationKey,
+    Value<String>? anchorMessageId,
+    Value<String>? title,
+    Value<String>? remindAt,
+    Value<String>? dueDate,
+    Value<String>? status,
+    Value<String>? createdFrom,
+    Value<String>? todoListId,
+    Value<String>? todoTaskId,
+    Value<String>? flagMessageId,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<String?>? doneAt,
+    Value<int>? rowid,
+  }) {
+    return RemindersCompanion(
+      id: id ?? this.id,
+      kind: kind ?? this.kind,
+      source: source ?? this.source,
+      conversationKey: conversationKey ?? this.conversationKey,
+      anchorMessageId: anchorMessageId ?? this.anchorMessageId,
+      title: title ?? this.title,
+      remindAt: remindAt ?? this.remindAt,
+      dueDate: dueDate ?? this.dueDate,
+      status: status ?? this.status,
+      createdFrom: createdFrom ?? this.createdFrom,
+      todoListId: todoListId ?? this.todoListId,
+      todoTaskId: todoTaskId ?? this.todoTaskId,
+      flagMessageId: flagMessageId ?? this.flagMessageId,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      doneAt: doneAt ?? this.doneAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (kind.present) {
+      map['kind'] = Variable<String>(kind.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (conversationKey.present) {
+      map['conversation_key'] = Variable<String>(conversationKey.value);
+    }
+    if (anchorMessageId.present) {
+      map['anchor_message_id'] = Variable<String>(anchorMessageId.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (remindAt.present) {
+      map['remind_at'] = Variable<String>(remindAt.value);
+    }
+    if (dueDate.present) {
+      map['due_date'] = Variable<String>(dueDate.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (createdFrom.present) {
+      map['created_from'] = Variable<String>(createdFrom.value);
+    }
+    if (todoListId.present) {
+      map['todo_list_id'] = Variable<String>(todoListId.value);
+    }
+    if (todoTaskId.present) {
+      map['todo_task_id'] = Variable<String>(todoTaskId.value);
+    }
+    if (flagMessageId.present) {
+      map['flag_message_id'] = Variable<String>(flagMessageId.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (doneAt.present) {
+      map['done_at'] = Variable<String>(doneAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('RemindersCompanion(')
+          ..write('id: $id, ')
+          ..write('kind: $kind, ')
+          ..write('source: $source, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('anchorMessageId: $anchorMessageId, ')
+          ..write('title: $title, ')
+          ..write('remindAt: $remindAt, ')
+          ..write('dueDate: $dueDate, ')
+          ..write('status: $status, ')
+          ..write('createdFrom: $createdFrom, ')
+          ..write('todoListId: $todoListId, ')
+          ..write('todoTaskId: $todoTaskId, ')
+          ..write('flagMessageId: $flagMessageId, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('doneAt: $doneAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class CalendarEvents extends Table
     with TableInfo<CalendarEvents, CalendarEventRow> {
   @override
@@ -22549,6 +23470,429 @@ class EventBriefsCompanion extends UpdateCompanion<EventBriefRow> {
   }
 }
 
+class AskReadings extends Table with TableInfo<AskReadings, AskReadingRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  AskReadings(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _readJsonMeta = const VerificationMeta(
+    'readJson',
+  );
+  late final GeneratedColumn<String> readJson = GeneratedColumn<String>(
+    'read_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _modelMeta = const VerificationMeta('model');
+  late final GeneratedColumn<String> model = GeneratedColumn<String>(
+    'model',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _readAtMeta = const VerificationMeta('readAt');
+  late final GeneratedColumn<String> readAt = GeneratedColumn<String>(
+    'read_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    status,
+    readJson,
+    model,
+    readAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'ask_readings';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AskReadingRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_statusMeta);
+    }
+    if (data.containsKey('read_json')) {
+      context.handle(
+        _readJsonMeta,
+        readJson.isAcceptableOrUnknown(data['read_json']!, _readJsonMeta),
+      );
+    }
+    if (data.containsKey('model')) {
+      context.handle(
+        _modelMeta,
+        model.isAcceptableOrUnknown(data['model']!, _modelMeta),
+      );
+    }
+    if (data.containsKey('read_at')) {
+      context.handle(
+        _readAtMeta,
+        readAt.isAcceptableOrUnknown(data['read_at']!, _readAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_readAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {source, sourceMessageId};
+  @override
+  AskReadingRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AskReadingRow(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      readJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}read_json'],
+      ),
+      model: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}model'],
+      )!,
+      readAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}read_at'],
+      )!,
+    );
+  }
+
+  @override
+  AskReadings createAlias(String alias) {
+    return AskReadings(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class AskReadingRow extends DataClass implements Insertable<AskReadingRow> {
+  final String source;
+  final String sourceMessageId;
+  final String status;
+
+  /// ready | none
+  final String? readJson;
+
+  /// AskRead.toJson(): the copied PHRASES, never a date
+  final String model;
+  final String readAt;
+  const AskReadingRow({
+    required this.source,
+    required this.sourceMessageId,
+    required this.status,
+    this.readJson,
+    required this.model,
+    required this.readAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || readJson != null) {
+      map['read_json'] = Variable<String>(readJson);
+    }
+    map['model'] = Variable<String>(model);
+    map['read_at'] = Variable<String>(readAt);
+    return map;
+  }
+
+  AskReadingsCompanion toCompanion(bool nullToAbsent) {
+    return AskReadingsCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      status: Value(status),
+      readJson: readJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(readJson),
+      model: Value(model),
+      readAt: Value(readAt),
+    );
+  }
+
+  factory AskReadingRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AskReadingRow(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      status: serializer.fromJson<String>(json['status']),
+      readJson: serializer.fromJson<String?>(json['read_json']),
+      model: serializer.fromJson<String>(json['model']),
+      readAt: serializer.fromJson<String>(json['read_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'status': serializer.toJson<String>(status),
+      'read_json': serializer.toJson<String?>(readJson),
+      'model': serializer.toJson<String>(model),
+      'read_at': serializer.toJson<String>(readAt),
+    };
+  }
+
+  AskReadingRow copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? status,
+    Value<String?> readJson = const Value.absent(),
+    String? model,
+    String? readAt,
+  }) => AskReadingRow(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    status: status ?? this.status,
+    readJson: readJson.present ? readJson.value : this.readJson,
+    model: model ?? this.model,
+    readAt: readAt ?? this.readAt,
+  );
+  AskReadingRow copyWithCompanion(AskReadingsCompanion data) {
+    return AskReadingRow(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      status: data.status.present ? data.status.value : this.status,
+      readJson: data.readJson.present ? data.readJson.value : this.readJson,
+      model: data.model.present ? data.model.value : this.model,
+      readAt: data.readAt.present ? data.readAt.value : this.readAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AskReadingRow(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('status: $status, ')
+          ..write('readJson: $readJson, ')
+          ..write('model: $model, ')
+          ..write('readAt: $readAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(source, sourceMessageId, status, readJson, model, readAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AskReadingRow &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.status == this.status &&
+          other.readJson == this.readJson &&
+          other.model == this.model &&
+          other.readAt == this.readAt);
+}
+
+class AskReadingsCompanion extends UpdateCompanion<AskReadingRow> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> status;
+  final Value<String?> readJson;
+  final Value<String> model;
+  final Value<String> readAt;
+  final Value<int> rowid;
+  const AskReadingsCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.status = const Value.absent(),
+    this.readJson = const Value.absent(),
+    this.model = const Value.absent(),
+    this.readAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AskReadingsCompanion.insert({
+    required String source,
+    required String sourceMessageId,
+    required String status,
+    this.readJson = const Value.absent(),
+    this.model = const Value.absent(),
+    required String readAt,
+    this.rowid = const Value.absent(),
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       status = Value(status),
+       readAt = Value(readAt);
+  static Insertable<AskReadingRow> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? status,
+    Expression<String>? readJson,
+    Expression<String>? model,
+    Expression<String>? readAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (status != null) 'status': status,
+      if (readJson != null) 'read_json': readJson,
+      if (model != null) 'model': model,
+      if (readAt != null) 'read_at': readAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AskReadingsCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? status,
+    Value<String?>? readJson,
+    Value<String>? model,
+    Value<String>? readAt,
+    Value<int>? rowid,
+  }) {
+    return AskReadingsCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      status: status ?? this.status,
+      readJson: readJson ?? this.readJson,
+      model: model ?? this.model,
+      readAt: readAt ?? this.readAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (readJson.present) {
+      map['read_json'] = Variable<String>(readJson.value);
+    }
+    if (model.present) {
+      map['model'] = Variable<String>(model.value);
+    }
+    if (readAt.present) {
+      map['read_at'] = Variable<String>(readAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AskReadingsCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('status: $status, ')
+          ..write('readJson: $readJson, ')
+          ..write('model: $model, ')
+          ..write('readAt: $readAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -22695,6 +24039,15 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   );
   late final MessageDecisions messageDecisions = MessageDecisions(this);
   late final DecisionLabels decisionLabels = DecisionLabels(this);
+  late final Reminders reminders = Reminders(this);
+  late final Index ixRemindersThread = Index(
+    'ix_reminders_thread',
+    'CREATE INDEX ix_reminders_thread ON reminders (source, conversation_key, status)',
+  );
+  late final Index ixRemindersAt = Index(
+    'ix_reminders_at',
+    'CREATE INDEX ix_reminders_at ON reminders (status, remind_at)',
+  );
   late final CalendarEvents calendarEvents = CalendarEvents(this);
   late final Index ixCalendarEventsStartUtc = Index(
     'ix_calendar_events_start_utc',
@@ -22705,6 +24058,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'CREATE INDEX ix_calendar_events_start_date ON calendar_events (start_date)',
   );
   late final EventBriefs eventBriefs = EventBriefs(this);
+  late final AskReadings askReadings = AskReadings(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -22768,10 +24122,14 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     ixConvLabelsLabel,
     messageDecisions,
     decisionLabels,
+    reminders,
+    ixRemindersThread,
+    ixRemindersAt,
     calendarEvents,
     ixCalendarEventsStartUtc,
     ixCalendarEventsStartDate,
     eventBriefs,
+    askReadings,
   ];
 }
 
@@ -32360,6 +33718,418 @@ typedef $DecisionLabelsProcessedTableManager =
       DecisionLabel,
       PrefetchHooks Function()
     >;
+typedef $RemindersCreateCompanionBuilder =
+    RemindersCompanion Function({
+      required String id,
+      required String kind,
+      required String source,
+      required String conversationKey,
+      Value<String> anchorMessageId,
+      required String title,
+      required String remindAt,
+      Value<String> dueDate,
+      required String status,
+      required String createdFrom,
+      Value<String> todoListId,
+      Value<String> todoTaskId,
+      Value<String> flagMessageId,
+      required String createdAt,
+      required String updatedAt,
+      Value<String?> doneAt,
+      Value<int> rowid,
+    });
+typedef $RemindersUpdateCompanionBuilder =
+    RemindersCompanion Function({
+      Value<String> id,
+      Value<String> kind,
+      Value<String> source,
+      Value<String> conversationKey,
+      Value<String> anchorMessageId,
+      Value<String> title,
+      Value<String> remindAt,
+      Value<String> dueDate,
+      Value<String> status,
+      Value<String> createdFrom,
+      Value<String> todoListId,
+      Value<String> todoTaskId,
+      Value<String> flagMessageId,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<String?> doneAt,
+      Value<int> rowid,
+    });
+
+class $RemindersFilterComposer extends Composer<_$BondDatabase, Reminders> {
+  $RemindersFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get anchorMessageId => $composableBuilder(
+    column: $table.anchorMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get remindAt => $composableBuilder(
+    column: $table.remindAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get dueDate => $composableBuilder(
+    column: $table.dueDate,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdFrom => $composableBuilder(
+    column: $table.createdFrom,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get todoListId => $composableBuilder(
+    column: $table.todoListId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get todoTaskId => $composableBuilder(
+    column: $table.todoTaskId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get flagMessageId => $composableBuilder(
+    column: $table.flagMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get doneAt => $composableBuilder(
+    column: $table.doneAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $RemindersOrderingComposer extends Composer<_$BondDatabase, Reminders> {
+  $RemindersOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get anchorMessageId => $composableBuilder(
+    column: $table.anchorMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get remindAt => $composableBuilder(
+    column: $table.remindAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get dueDate => $composableBuilder(
+    column: $table.dueDate,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdFrom => $composableBuilder(
+    column: $table.createdFrom,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get todoListId => $composableBuilder(
+    column: $table.todoListId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get todoTaskId => $composableBuilder(
+    column: $table.todoTaskId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get flagMessageId => $composableBuilder(
+    column: $table.flagMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get doneAt => $composableBuilder(
+    column: $table.doneAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $RemindersAnnotationComposer extends Composer<_$BondDatabase, Reminders> {
+  $RemindersAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get kind =>
+      $composableBuilder(column: $table.kind, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get anchorMessageId => $composableBuilder(
+    column: $table.anchorMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get remindAt =>
+      $composableBuilder(column: $table.remindAt, builder: (column) => column);
+
+  GeneratedColumn<String> get dueDate =>
+      $composableBuilder(column: $table.dueDate, builder: (column) => column);
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get createdFrom => $composableBuilder(
+    column: $table.createdFrom,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get todoListId => $composableBuilder(
+    column: $table.todoListId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get todoTaskId => $composableBuilder(
+    column: $table.todoTaskId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get flagMessageId => $composableBuilder(
+    column: $table.flagMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get doneAt =>
+      $composableBuilder(column: $table.doneAt, builder: (column) => column);
+}
+
+class $RemindersTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          Reminders,
+          ReminderRow,
+          $RemindersFilterComposer,
+          $RemindersOrderingComposer,
+          $RemindersAnnotationComposer,
+          $RemindersCreateCompanionBuilder,
+          $RemindersUpdateCompanionBuilder,
+          (ReminderRow, BaseReferences<_$BondDatabase, Reminders, ReminderRow>),
+          ReminderRow,
+          PrefetchHooks Function()
+        > {
+  $RemindersTableManager(_$BondDatabase db, Reminders table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $RemindersFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $RemindersOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $RemindersAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> kind = const Value.absent(),
+                Value<String> source = const Value.absent(),
+                Value<String> conversationKey = const Value.absent(),
+                Value<String> anchorMessageId = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<String> remindAt = const Value.absent(),
+                Value<String> dueDate = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String> createdFrom = const Value.absent(),
+                Value<String> todoListId = const Value.absent(),
+                Value<String> todoTaskId = const Value.absent(),
+                Value<String> flagMessageId = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<String?> doneAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => RemindersCompanion(
+                id: id,
+                kind: kind,
+                source: source,
+                conversationKey: conversationKey,
+                anchorMessageId: anchorMessageId,
+                title: title,
+                remindAt: remindAt,
+                dueDate: dueDate,
+                status: status,
+                createdFrom: createdFrom,
+                todoListId: todoListId,
+                todoTaskId: todoTaskId,
+                flagMessageId: flagMessageId,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                doneAt: doneAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String kind,
+                required String source,
+                required String conversationKey,
+                Value<String> anchorMessageId = const Value.absent(),
+                required String title,
+                required String remindAt,
+                Value<String> dueDate = const Value.absent(),
+                required String status,
+                required String createdFrom,
+                Value<String> todoListId = const Value.absent(),
+                Value<String> todoTaskId = const Value.absent(),
+                Value<String> flagMessageId = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<String?> doneAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => RemindersCompanion.insert(
+                id: id,
+                kind: kind,
+                source: source,
+                conversationKey: conversationKey,
+                anchorMessageId: anchorMessageId,
+                title: title,
+                remindAt: remindAt,
+                dueDate: dueDate,
+                status: status,
+                createdFrom: createdFrom,
+                todoListId: todoListId,
+                todoTaskId: todoTaskId,
+                flagMessageId: flagMessageId,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                doneAt: doneAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $RemindersProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      Reminders,
+      ReminderRow,
+      $RemindersFilterComposer,
+      $RemindersOrderingComposer,
+      $RemindersAnnotationComposer,
+      $RemindersCreateCompanionBuilder,
+      $RemindersUpdateCompanionBuilder,
+      (ReminderRow, BaseReferences<_$BondDatabase, Reminders, ReminderRow>),
+      ReminderRow,
+      PrefetchHooks Function()
+    >;
 typedef $CalendarEventsCreateCompanionBuilder =
     CalendarEventsCompanion Function({
       required String id,
@@ -33285,6 +35055,226 @@ typedef $EventBriefsProcessedTableManager =
       EventBriefRow,
       PrefetchHooks Function()
     >;
+typedef $AskReadingsCreateCompanionBuilder =
+    AskReadingsCompanion Function({
+      required String source,
+      required String sourceMessageId,
+      required String status,
+      Value<String?> readJson,
+      Value<String> model,
+      required String readAt,
+      Value<int> rowid,
+    });
+typedef $AskReadingsUpdateCompanionBuilder =
+    AskReadingsCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> status,
+      Value<String?> readJson,
+      Value<String> model,
+      Value<String> readAt,
+      Value<int> rowid,
+    });
+
+class $AskReadingsFilterComposer extends Composer<_$BondDatabase, AskReadings> {
+  $AskReadingsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get readJson => $composableBuilder(
+    column: $table.readJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get readAt => $composableBuilder(
+    column: $table.readAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $AskReadingsOrderingComposer
+    extends Composer<_$BondDatabase, AskReadings> {
+  $AskReadingsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get readJson => $composableBuilder(
+    column: $table.readJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get readAt => $composableBuilder(
+    column: $table.readAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $AskReadingsAnnotationComposer
+    extends Composer<_$BondDatabase, AskReadings> {
+  $AskReadingsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get readJson =>
+      $composableBuilder(column: $table.readJson, builder: (column) => column);
+
+  GeneratedColumn<String> get model =>
+      $composableBuilder(column: $table.model, builder: (column) => column);
+
+  GeneratedColumn<String> get readAt =>
+      $composableBuilder(column: $table.readAt, builder: (column) => column);
+}
+
+class $AskReadingsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          AskReadings,
+          AskReadingRow,
+          $AskReadingsFilterComposer,
+          $AskReadingsOrderingComposer,
+          $AskReadingsAnnotationComposer,
+          $AskReadingsCreateCompanionBuilder,
+          $AskReadingsUpdateCompanionBuilder,
+          (
+            AskReadingRow,
+            BaseReferences<_$BondDatabase, AskReadings, AskReadingRow>,
+          ),
+          AskReadingRow,
+          PrefetchHooks Function()
+        > {
+  $AskReadingsTableManager(_$BondDatabase db, AskReadings table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $AskReadingsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $AskReadingsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $AskReadingsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> readJson = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                Value<String> readAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AskReadingsCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                status: status,
+                readJson: readJson,
+                model: model,
+                readAt: readAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String source,
+                required String sourceMessageId,
+                required String status,
+                Value<String?> readJson = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                required String readAt,
+                Value<int> rowid = const Value.absent(),
+              }) => AskReadingsCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                status: status,
+                readJson: readJson,
+                model: model,
+                readAt: readAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $AskReadingsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      AskReadings,
+      AskReadingRow,
+      $AskReadingsFilterComposer,
+      $AskReadingsOrderingComposer,
+      $AskReadingsAnnotationComposer,
+      $AskReadingsCreateCompanionBuilder,
+      $AskReadingsUpdateCompanionBuilder,
+      (
+        AskReadingRow,
+        BaseReferences<_$BondDatabase, AskReadings, AskReadingRow>,
+      ),
+      AskReadingRow,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -33347,8 +35337,12 @@ class $BondDatabaseManager {
       $MessageDecisionsTableManager(_db, _db.messageDecisions);
   $DecisionLabelsTableManager get decisionLabels =>
       $DecisionLabelsTableManager(_db, _db.decisionLabels);
+  $RemindersTableManager get reminders =>
+      $RemindersTableManager(_db, _db.reminders);
   $CalendarEventsTableManager get calendarEvents =>
       $CalendarEventsTableManager(_db, _db.calendarEvents);
   $EventBriefsTableManager get eventBriefs =>
       $EventBriefsTableManager(_db, _db.eventBriefs);
+  $AskReadingsTableManager get askReadings =>
+      $AskReadingsTableManager(_db, _db.askReadings);
 }

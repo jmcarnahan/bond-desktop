@@ -23,6 +23,7 @@ import '../services/llm/model_probe.dart';
 // re-exports them; the placement enum is not re-exported.
 import '../services/llm/model_slots.dart'
     show MachineTier, ModelPlacement, boxDecideId, managedGenerativeIdFor;
+import '../services/reminders/tasks_availability.dart';
 import '../widgets/settings_screen.dart';
 
 /// Whether an older build left Needs You rules text in `needs_you_rules`. The
@@ -278,6 +279,13 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       replySendMarksDone: prefs.replySendMarksDone,
       onReplySendMarksDoneChanged: (on) =>
           unawaited(notifier.setReplySendMarksDone(on)),
+      remindDeadlines: prefs.remindDeadlines,
+      onRemindDeadlinesChanged: (on) =>
+          unawaited(notifier.setRemindDeadlines(on)),
+      // Until the grant is read the switch reads as available: a caption that
+      // flickers in for a beat would say something not yet known.
+      tasksAvailability: ref.watch(tasksAvailabilityProvider).valueOrNull ??
+          TasksAvailability.available,
       // The owner's label vocabulary. The list is state, the writers are the
       // notifier's own — rename answers the bool the inline refusal reads,
       // and the other two say their failures through [labelsError].

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,7 +10,13 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
-import '../models/calendar_models.dart' show CalendarDate, CalendarEvent, MailboxSettings;
+import '../models/calendar_models.dart'
+    show
+        BriefMaterialRef,
+        CalendarDate,
+        CalendarEvent,
+        MailboxSettings,
+        MeetingBrief;
 import '../models/context_models.dart' show ContextScopeKind;
 import '../models/draft_provenance.dart';
 import '../models/label_models.dart';
@@ -17,6 +24,8 @@ import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/people_sort.dart';
 import '../models/person.dart';
+import '../models/reminder_models.dart'
+    show Reminder, ReminderKind, ReminderOrigin;
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
@@ -47,7 +56,17 @@ import '../services/attachments/file_dialogs.dart';
 import '../services/attachments/html_open.dart';
 import '../services/attachments/xlsx_reader.dart';
 import '../services/backend/backend_types.dart';
-import '../services/calendar/ask_hints.dart' show AskHints, readAskHints;
+import '../services/backend/tasks_errors.dart'
+    show TasksScopeMissing, TasksUnavailable;
+import '../services/calendar/ask_words.dart' show askOwnWords;
+import '../services/reminders/business_days.dart' show nextBusinessDaysAt;
+import '../services/reminders/remind_choices.dart';
+import '../services/reminders/reminder_service.dart'
+    show ReminderPast, ReminderRequest;
+import '../services/reminders/tasks_availability.dart';
+import '../services/calendar/ask_hints.dart'
+    show AskHints, readAskHints, readAskHintsFromRead;
+import '../services/calendar/ask_reader.dart' show AskReading;
 import '../services/calendar/brief_gatherer.dart' show briefQuickCheck;
 import '../services/calendar/meeting_brief_handler.dart' show BriefRequest;
 import '../services/calendar/calendar_sync.dart' show CalendarSyncStatus;
@@ -68,12 +87,14 @@ import '../services/calendar/find_time.dart'
     show
         FindTimeResult,
         FindTimeWindow,
+        askWindowFor,
         findTimeReplyLine,
         findTimeSubject,
         findTimeWindowLabels,
         findTimeWindowUtc,
         searchFindTime;
-import '../services/calendar/scheduling_ask.dart' show schedulingAskKey;
+import '../services/calendar/scheduling_ask.dart'
+    show otherAddresses, otherPeople, ownerAddressesOf, schedulingAskKey;
 import '../services/calendar/overlaps.dart'
     show FreeSlot, Overlaps, overlapsForEvent;
 import '../services/calendar/when_resolver.dart' show WhenResolution;
@@ -149,6 +170,7 @@ import '../widgets/sort_menu.dart';
 import '../widgets/source_filter.dart';
 import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
+import '../widgets/thread_action_bar.dart' show ReminderPill, ThreadActionBar;
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
 import '../widgets/triage_intents.dart';
@@ -379,6 +401,32 @@ class InboxScreen extends ConsumerStatefulWidget {
   final AttachmentBytes? attachmentBytes;
   final FileDialogs? fileDialogs;
 
+  /// How long an ask's first search waits for the model's reading
+  /// (`ask_read`) before it runs on the rules' — inside the one read in
+  /// flight, so every caller waits the same once. A reading that lands later
+  /// still refines the row and searches once more.
+  static const Duration askReadWait = Duration(seconds: 4);
+
+  /// A test's shorter [askReadWait]; null in the app. Set it in the test
+  /// body and clear it in a tear-down.
+  @visibleForTesting
+  static Duration? askReadWaitOverride;
+
+  /// How long a send waits for the follow-up it asked for before the toast
+  /// goes up without it. A slower To Do still lands the reminder on its own
+  /// (its revision bump puts it on the Day); a slower failure says so then.
+  static const Duration followUpWait = Duration(seconds: 5);
+
+  /// A test's shorter [followUpWait]; null in the app. Set it in the test
+  /// body and clear it in a tear-down.
+  @visibleForTesting
+  static Duration? followUpWaitOverride;
+
+  /// A test's shorter [askResultLifetime], so a reopen takes the staleness
+  /// path without a clock; null in the app. Cleared in a tear-down.
+  @visibleForTesting
+  static Duration? askResultLifetimeOverride;
+
   const InboxScreen({
     super.key,
     this.onSignedOut,
@@ -468,7 +516,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// day only means anything on the Day stop — and deliberately NOT by
   /// [_select] and the other openers that leave the stop in place, so
   /// closing a thread opened from a Day row lands back on the same day.
+  ///
+  /// Every write goes through [_setSelectedDay], which also closes the
+  /// briefs opened under the last day's meetings.
   CalendarDate? _selectedDay;
+
+  /// The agenda's meetings whose brief is open under their row, by event id.
+  /// A view state of one day, so a new day starts with every brief closed.
+  final Set<String> _expandedBriefs = {};
 
   /// Whether the Day stop is showing the invites owed rather than a day.
   bool _showingInvites = false;
@@ -498,7 +553,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   CalendarZone? _lastGridZone;
 
   /// The move a grid drop asked for, while its write is in flight: the grid
-  /// draws it as the ghost tile, "Moving here…", beside the tile that stays
+  /// draws it as the ghost tile, "Move here?" over "Send or Cancel above"
+  /// (the confirm strip's buttons), beside the tile that stays
   /// where the store has it. Cleared by the flow's `onIdle`; drawn only while
   /// the flow says busy, so a flow that went away mid-write leaves no ghost.
   ({String id, DateTime startUtc, DateTime endUtc})? _gridMove;
@@ -708,6 +764,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// set as [_showingActivityLog] and the three selections above: one thing
   /// in the pane, and every setter clears the rest.
   bool _showingSettings = false;
+
+  /// Each reply box's follow-up choice, by [_stageKey]: read by [_send] at
+  /// the moment of a composer's send and forgotten once it went.
+  final Map<String, FollowUpChoice> _followUps = {};
+
+  /// The poll's reminder pass in flight ([_tendReminders]), so a second
+  /// poll landing on it joins it rather than reconciling twice.
+  Future<void>? _tending;
 
   /// Whether the main pane is showing the New message screen. The same
   /// exclusive set again: composing is not a section, and it clears whatever
@@ -1243,6 +1307,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _notePulling(mail: false);
       // Un-awaited, as everywhere: the calendar never holds up this pass.
       if (mounted) _syncCalendar(force: forceCalendar);
+      // Beside it, on the same rule: To Do's reminders are reconciled and
+      // the deadline ones planned without the mail ever waiting on them.
+      if (mounted) unawaited(_tendReminders());
     }
     if (!mounted) return;
     final selected = _selectedId;
@@ -1365,7 +1432,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// One calendar sync tick, fire-and-forget. What it found reaches the
   /// calendar's readers through the sync's own publisher
   /// ([calendarOutcomePublisher]), as a write's forced read does; this only
-  /// plans briefs off it.
+  /// plans briefs and redrafts stale offered times off it.
   ///
   /// Never awaited by [_refresh] and never on `ConversationsNotifier.load`:
   /// a slow or failing calendar must not hold up or break the mail. The sync
@@ -1379,10 +1446,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (!mounted) return;
         // Briefs are planned only off a sync that completed, and only while
         // the models may run; the plan itself is store reads, and its pump
-        // is the draft lane's, so nothing here waits on a model.
+        // is the draft lane's, so nothing here waits on a model. Drafts whose
+        // offered times went stale are redrafted on the same rule: a redraft
+        // needs the draft lane, which runs only while processing is on.
         if (outcome.status == CalendarSyncStatus.synced &&
             ref.read(processingProvider)) {
           unawaited(_planBriefs());
+          unawaited(_refreshDraftSlots());
         }
       } on Object catch (e) {
         debugPrint('calendar sync was not run: $e');
@@ -1390,13 +1460,57 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }());
   }
 
+  /// The poll's reminder pass: [ReminderService.reconcile] (rows whose
+  /// thread was answered or closed are completed, follow-ups re-anchored on
+  /// their Sent Items copy), then the deadline planner over the loaded list.
+  /// Both do nothing while To Do is unavailable.
+  ///
+  /// Single-flight: a poll that lands while one runs gets the same future.
+  /// Skipped until the zone has resolved (the planner's 09:00 is a wall
+  /// time). Everything is caught here and traced by type only — an
+  /// exception's text can carry an endpoint — so nothing escapes the poll's
+  /// `finally`; a lost grant reaches the owner through the mail load, which
+  /// meets the same `ReconsentRequired`.
+  Future<void> _tendReminders() {
+    final running = _tending;
+    if (running != null) return running;
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) return Future<void>.value();
+    // Read once, before the awaits, and captured (app/CLAUDE.md).
+    final revision = ref.read(reminderRevisionProvider.notifier);
+    final service = ref.read(reminderServiceProvider);
+    final planner = ref.read(reminderPlannerProvider);
+    final threshold = ref.read(appPrefsProvider).needsYouThreshold;
+    final loaded = ref.read(conversationsProvider);
+    final conversations = loaded is ConversationsLoaded
+        ? loaded.conversations
+        : const <Conversation>[];
+    final pass = () async {
+      try {
+        final changed = await service.reconcile();
+        final planned = await planner.plan(
+          zone: zone,
+          needsYouThreshold: threshold,
+          conversations: conversations,
+        );
+        if (changed > 0 || planned > 0) revision.state++;
+      } on Object catch (e) {
+        debugPrint('reminders were not tended: ${e.runtimeType}');
+      }
+    }();
+    _tending = pass;
+    return pass.whenComplete(() => _tending = null);
+  }
+
   /// Queues the briefs the calendar now makes due and wakes the draft lane
   /// when it queued any. Fire-and-forget off [_syncCalendar]; a failure is a
   /// trace and never reaches the mail.
   Future<void> _planBriefs() async {
     try {
-      final zone =
-          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc();
+      // No zone yet, no pass: "tomorrow" is a local day, and UTC's tomorrow
+      // is not the owner's.
+      final zone = ref.read(calendarZoneProvider).valueOrNull;
+      if (zone == null) return;
       final queued = await ref
           .read(briefPlannerProvider)
           .plan(now: DateTime.now(), zone: zone);
@@ -1405,6 +1519,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       unawaited(ref.read(draftWorkerProvider).pump());
     } on Object catch (e) {
       debugPrint('briefs were not planned: ${e.runtimeType}');
+    }
+  }
+
+  /// Re-queues the untouched drafts whose offered times are gone (past, or
+  /// now busy on the mirror) and wakes the draft lane when it re-queued any;
+  /// the open thread's draft is re-read at once, as [_refresh] does, so a
+  /// deleted suggestion leaves the composer now. Fire-and-forget off
+  /// [_syncCalendar]; a failure is a trace and never reaches the mail.
+  Future<void> _refreshDraftSlots() async {
+    try {
+      final zone =
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc();
+      final requeued = await ref
+          .read(draftSlotRefresherProvider)
+          .refresh(now: DateTime.now(), zone: zone);
+      if (!mounted || requeued == 0) return;
+      unawaited(ref.read(draftWorkerProvider).pump());
+      final selected = _selectedId;
+      if (selected != null) {
+        ref
+            .read(draftProvider(
+              (source: _selectedSource ?? 'email', conversationKey: selected),
+            ).notifier)
+            .load();
+      }
+      ref.read(draftsInboxProvider.notifier).load();
+      await _reloadOpenThread();
+    } on Object catch (e) {
+      debugPrint('stale draft times were not checked: ${e.runtimeType}');
     }
   }
 
@@ -1857,7 +2000,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // snapshots its own pile — see [_pileAtSessionStart].
       _resetPileProgress();
       _section = section;
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       if (section != RailSection.day) _forgetCommand();
       _selectedId = null;
@@ -1883,7 +2026,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _clearOverlays();
       _section = RailSection.people;
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       _forgetCommand();
       _selectedRoomKey = key;
@@ -1903,7 +2046,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _clearOverlays();
       _section = RailSection.archive;
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       _forgetCommand();
       _archiveTab = ArchiveTab.later;
@@ -1914,6 +2057,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedRoomKey = null;
     });
   }
+
+  /// The one writer of [_selectedDay], called inside a `setState`: a brief
+  /// opened under one day's meeting is not left open under the next day's.
+  void _setSelectedDay(CalendarDate? day) {
+    if (day != _selectedDay) _expandedBriefs.clear();
+    _selectedDay = day;
+  }
+
+  /// Opens or closes one agenda meeting's brief under its row.
+  void _toggleBrief(String eventId) => setState(() {
+        if (!_expandedBriefs.remove(eventId)) _expandedBriefs.add(eventId);
+      });
 
   /// Opens one day on the Day stop. The section moves with it, for
   /// [_selectLaterDay]'s reason: backing out of whatever opens next lands on
@@ -1944,7 +2099,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _clearOverlays();
       }
       _section = RailSection.day;
-      _selectedDay = day == today ? null : day;
+      _setSelectedDay(day == today ? null : day);
       _showingInvites = false;
       _selectedId = null;
       _selectedSource = null;
@@ -3563,7 +3718,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _find = text;
       _section = sectionForLabelFind(_section);
-      _selectedDay = null;
+      _setSelectedDay(null);
       _showingInvites = false;
       if (_section != RailSection.day) _forgetCommand();
     });
@@ -4319,6 +4474,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       calendarShown: calendar.shown,
       todayShown: calendar.todayShown,
       todayMeetings: calendar.todayMeetings,
+      todayGlances: calendar.todayGlances,
       calendarZone: calendar.zone,
       now: calendar.now,
       invitesCount: calendar.invites,
@@ -4336,9 +4492,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       askCallbacks: SchedulingAskCallbacks(
         onToggle: _toggleAsk,
         onMinutes: (source, key, minutes) =>
-            _changeAsk(source, key, (e) => e.minutes = minutes),
-        onWindow: (source, key, window) =>
-            _changeAsk(source, key, (e) => e.window = window),
+            _changeAsk(source, key, (e) => e
+              ..minutes = minutes
+              ..pickedMinutes = true),
+        onWindow: (source, key, window) => _changeAsk(source, key, (e) => e
+          ..window = window
+          ..pickedWindow = true),
         onPickSlot: (source, key, slot) =>
             unawaited(_pickAskSlot(source, key, slot)),
         onPutInReply: (source, key) =>
@@ -4362,6 +4521,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     DateTime now,
     CalendarDate? today,
     List<CalendarEvent> todayMeetings,
+    Map<String, String> todayGlances,
     List<(CalendarDate, DaySummary)> dayRows,
     int invites,
   }) _railCalendar(List<Conversation> conversations) {
@@ -4377,6 +4537,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         now: now,
         today: null,
         todayMeetings: const [],
+        todayGlances: const {},
         dayRows: const [],
         invites: 0,
       );
@@ -4395,6 +4556,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       today: today,
       todayMeetings:
           remainingToday(events: upcoming, nowUtc: now.toUtc(), zone: zone),
+      // The glances under those meetings, from the agenda's own read of the
+      // day's briefs; only while the Today section is drawn.
+      todayGlances: calendarShowsToday(availability)
+          ? {
+              for (final MapEntry(:key, :value)
+                  in (ref.watch(dayBriefsProvider(today)).valueOrNull ??
+                          const <String, MeetingBrief>{})
+                      .entries)
+                key: value.headline,
+            }
+          : const {},
       // The day rows are the Day stop's column and nobody else's, and they
       // are the one costly part of this — fifteen merges on every build — so
       // they are worked out only while that column is on screen. The Today
@@ -4408,6 +4580,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               invites: invites,
               now: now,
               zone: zone,
+              reminders: ref.watch(remindersProvider).valueOrNull ?? const [],
             )
           : const [],
       invites: invites.length,
@@ -5190,10 +5363,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // mirror is hidden (SDK mode, a missing scope) there is none to ask.
       commandBar: shows ? _commandBar(zone, today) : null,
       planCard: shows ? _commandCard(zone, today) : null,
-      briefHeadlines: shows
-          ? ref.watch(briefHeadlinesProvider(day)).valueOrNull ??
-              const <String, String>{}
-          : const <String, String>{},
+      briefs: shows
+          ? ref.watch(dayBriefsProvider(day)).valueOrNull ??
+              const <String, MeetingBrief>{}
+          : const <String, MeetingBrief>{},
+      briefsWaiting: shows
+          ? ref.watch(dayBriefsWaitingProvider(day)).valueOrNull ??
+              const <String>{}
+          : const <String>{},
+      expandedBriefs: _expandedBriefs,
+      onToggleBrief: _toggleBrief,
+      briefBody: (id) => _briefBody(id, now: now),
+      // The owner's To Do reminders, on the local day each fires; a row
+      // opens its thread through `onOpenConversation`.
+      reminders: ref.watch(remindersProvider).valueOrNull ?? const [],
       inviteActions: (entry) => CalendarWriteFlow(
         key: ValueKey('invite-write-${entry.event.id}'),
         writer: ref.read(calendarWritesProvider),
@@ -5207,6 +5390,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           // through its master's id; a single invite, and a lone owed
           // exception, answers itself (InviteEntry.answersSeries).
           respondId: entry.answersSeries ? entry.respondId : null,
+          zone: zone,
+          clock: DateTime.now,
+          today: today,
+          start: start,
+          busy: busy,
+          compact: true,
+        ),
+      ),
+      // An unanswered meeting is answered on its agenda row too. The row IS
+      // the occurrence, so there is no series folding here.
+      meetingActions: (e) => CalendarWriteFlow(
+        key: ValueKey('agenda-write-${e.id}'),
+        writer: ref.read(calendarWritesProvider),
+        onDone: _calendarWriteDone,
+        onFailed: _calendarWriteFailed,
+        builder: (context, start, busy) => EventActions(
+          key: ValueKey(e.id),
+          target: e,
+          shown: e,
+          respondId: null,
           zone: zone,
           clock: DateTime.now,
           today: today,
@@ -5262,6 +5465,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       conversations: conversations,
       now: now,
       zone: zone,
+      reminders: ref.watch(remindersProvider).valueOrNull ?? const [],
     );
     final pending = _gridMove;
     // A standing command proposal is the ghost too, whenever no drop is
@@ -5300,7 +5504,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ? GridProposal(
                 startUtc: pending.startUtc,
                 endUtc: pending.endUtc,
-                label: 'Moving here…',
+                label: 'Move here?',
+                caption: 'Send or Cancel above',
               )
             : commandGhost,
         locked: busy,
@@ -5327,6 +5532,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             case DeadlineItem(:final conversation):
             case ReturnItem(:final conversation):
               _select(conversation.id, source: conversation.source);
+            case ReminderItem(:final reminder):
+              _select(reminder.conversationKey, source: reminder.source);
             default:
               break;
           }
@@ -6026,28 +6233,245 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return _otherPeople(thread).isNotEmpty;
   }
 
-  /// [thread]'s other people with an address: the owner left out, a Teams
-  /// roster entry (no `@`) left out, each address once and lowercased. The
-  /// asks column searches and invites on it, and the thread bar's Find a
-  /// time offers itself only when it is non-empty.
-  List<({String name, String address})> _otherPeople(Conversation thread) {
-    final owner = _ownerRecord.address?.trim().toLowerCase();
-    final seen = <String>{};
-    return <({String name, String address})>[
-      for (final p in thread.participants)
-        if ((p.email ?? '').trim().isNotEmpty &&
-            p.email!.trim().toLowerCase() != owner &&
-            // A Teams roster entry is no address; a repeat is one person.
-            p.email!.contains('@') &&
-            seen.add(p.email!.trim().toLowerCase()))
-          // Lowercased, as the de-duplication above reads it: the search,
-          // the invite's attendees and the pills all key on the address.
-          (name: p.name ?? '', address: p.email!.trim().toLowerCase()),
+  // ── reminders ──────────────────────────────────────────────────────────
+
+  /// Whether To Do can carry a reminder now, watched in build: null while
+  /// the precheck runs, which offers the choices (a pick then meets the
+  /// service's own precheck).
+  TasksAvailability? _tasksAvailability() =>
+      ref.watch(tasksAvailabilityProvider).valueOrNull;
+
+  /// The thread bar's Remind me choices for [thread], every instant worked
+  /// out HERE from the clock and the display zone ([remindChoices]) — the
+  /// bar never reads either. Empty until the zone has resolved.
+  List<ReminderPill> _remindPillsFor(Conversation thread) {
+    final zone = ref.watch(calendarZoneProvider).valueOrNull;
+    if (zone == null) return const [];
+    final now = DateTime.now();
+    return [
+      for (final c in remindChoices(
+        now: now,
+        zone: zone,
+        deadlineDay: remindDeadlineDay(thread, now),
+      ))
+        ReminderPill(
+          label: c.label,
+          atUtc: c.atUtc,
+          key: ThreadActionBar.remindPillKeyFor(c.id),
+        ),
     ];
   }
 
+  /// A typed time under the pills, read at the moment it is typed
+  /// ([resolveRemindText]).
+  ReminderPill? _resolveRemind(String text) {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) return null;
+    final c = resolveRemindText(text, now: DateTime.now(), zone: zone);
+    if (c == null) return null;
+    return ReminderPill(
+      label: c.label,
+      atUtc: c.atUtc,
+      key: ThreadActionBar.remindPillKeyFor(c.id),
+    );
+  }
+
+  /// What a reminder that was not set says: the carrier's own sentence for
+  /// a missing permission or SDK mode (their `toString` IS it), the calendar
+  /// writes' reconnect sentence for a grant that needs signing in again, and
+  /// one plain line for anything else. By type only — an exception's text
+  /// can carry an endpoint.
+  static String _reminderFailure(Object e) => switch (e) {
+        TasksScopeMissing() || TasksUnavailable() || ReminderPast() =>
+          e.toString(),
+        ReconsentRequired() || NotSignedIn() =>
+          'Reconnect Microsoft in Settings, then try again. Nothing was set.',
+        _ => "Couldn't reach To Do. Nothing was set.",
+      };
+
+  /// What an Undo that did not cancel says: the same carrier and reconnect
+  /// sentences as [_reminderFailure], but the reminder STANDS — nothing was
+  /// undone. By type only.
+  static String _cancelFailure(Object e) => switch (e) {
+        TasksScopeMissing() || TasksUnavailable() => e.toString(),
+        ReconsentRequired() || NotSignedIn() =>
+          'Reconnect Microsoft in Settings, then try again. '
+              'The reminder stands.',
+        _ => "Couldn't reach To Do. The reminder stands.",
+      };
+
+  /// Remind me, picked on the thread bar: one To Do task at [atUtc] about
+  /// the thread's newest inbound message (its own words for the body, its
+  /// Outlook link when the detail fetch stored one). The toast's Undo
+  /// cancels it, task and row.
+  Future<void> _remind(
+    Conversation thread,
+    DateTime atUtc,
+    String label,
+  ) async {
+    final revision = ref.read(reminderRevisionProvider.notifier);
+    final service = ref.read(reminderServiceProvider);
+    try {
+      final messages = await ref
+          .read(messageStoreProvider)
+          .loadThread(thread.id, sources: [thread.source]);
+      Message? newest;
+      for (final m in messages.reversed) {
+        if (!m.outbound) {
+          newest = m;
+          break;
+        }
+      }
+      final subject = thread.subject?.trim() ?? '';
+      final words = newest?.bodyText ?? newest?.bodyPreview;
+      final own = words == null ? '' : askOwnWords(words).trim();
+      // A second Remind me on the thread MOVES the first: once the new one
+      // is set, the earlier bar reminder is cancelled (its task deleted), so
+      // the owner never holds two tasks for one thread. The new one first,
+      // so a create that fails leaves the old one standing. Follow-ups and
+      // the planner's deadline reminders are other kinds and stand.
+      final earlier = [
+        for (final r in await ref
+            .read(messageStoreProvider)
+            .remindersForThread(thread.source, thread.id))
+          if (r.isActive &&
+              r.kind == ReminderKind.replyBy &&
+              r.createdFrom == ReminderOrigin.bar)
+            r.id,
+      ];
+      final reminder = await service.create(ReminderRequest(
+        kind: ReminderKind.replyBy,
+        source: thread.source,
+        conversationKey: thread.id,
+        anchorMessageId: newest?.id ?? '',
+        title: 'Reply to ${replyToName(thread, newest)}: '
+            '${subject.isEmpty ? '(no subject)' : subject}',
+        remindAtUtc: atUtc,
+        createdFrom: ReminderOrigin.bar,
+        bodyText: own.isEmpty ? null : own,
+        anchorWebLink: newest?.webLink,
+        anchorGraphId: newest?.id,
+      ));
+      // Each cancel on its own: the new one IS set, so a cancel that
+      // throws must not reach the create's catch ("Nothing was set") — the
+      // old one stands and the toast still says the new one was set.
+      for (final id in earlier) {
+        try {
+          await service.cancel(id);
+        } on Object catch (e) {
+          debugPrint('earlier reminder was not cancelled: ${e.runtimeType}');
+        }
+      }
+      revision.state++;
+      if (!mounted) return;
+      _toast(
+        'Reminder set in To Do · $label',
+        cleared: 0,
+        onUndo: () => unawaited(_cancelReminder(reminder.id, revision)),
+      );
+    } on Object catch (e) {
+      if (e is! TasksScopeMissing && e is! TasksUnavailable) {
+        debugPrint('reminder was not set: ${e.runtimeType}');
+      }
+      if (mounted) _toast(_reminderFailure(e), cleared: 0, keepUndo: true);
+    }
+  }
+
+  /// The Undo of a reminder just set: the task deleted and the row
+  /// cancelled ([ReminderService.cancel], a no-op on a row no longer
+  /// active). [revision] was read before the act, as the bump that follows
+  /// an await must be.
+  Future<void> _cancelReminder(
+    String id,
+    StateController<int> revision,
+  ) async {
+    try {
+      await ref.read(reminderServiceProvider).cancel(id);
+      revision.state++;
+    } on Object catch (e) {
+      debugPrint('reminder was not cancelled: ${e.runtimeType}');
+      if (mounted) _toast(_cancelFailure(e), cleared: 0, keepUndo: true);
+    }
+  }
+
+  /// The follow-up a composer's send asked for, set right after the send
+  /// returned `sent` (the re-anchor onto the Sent Items copy is a time match
+  /// on the row's `created_at`). Anchored on the local echo [echoId] until
+  /// the copy lands; never flagged here, since an echo id is no Graph id.
+  /// Answers the toast's line ("Following up Thu 9:00 AM") and the reminder,
+  /// or the sentence saying why none was set. Nothing is set before the
+  /// zone has resolved: "two business days at 09:00" is a wall time, and
+  /// a UTC stand-in would ring at the wrong hour.
+  Future<({Reminder? reminder, String line})> _setFollowUp(
+    DraftTarget target,
+    FollowUpChoice choice, {
+    required String? echoId,
+    required StateController<int> revision,
+  }) async {
+    final zone = ref.read(calendarZoneProvider).valueOrNull;
+    if (zone == null) {
+      return (
+        reminder: null,
+        line: 'No follow-up set — the time zone is not known yet.',
+      );
+    }
+    try {
+      final at = nextBusinessDaysAt(
+        days: choice.businessDays,
+        from: DateTime.now(),
+        zone: zone,
+      );
+      final thread = _loadedRow(
+        (source: target.source, key: target.conversationKey),
+      );
+      final names = [
+        for (final p in thread == null ? const <({String name, String address})>[]
+            : _otherPeople(thread))
+          p.name.trim().isEmpty ? p.address : p.name.trim(),
+      ];
+      final subject = thread?.subject?.trim() ?? '';
+      final reminder = await ref.read(reminderServiceProvider).create(
+            ReminderRequest(
+              kind: ReminderKind.followUp,
+              source: target.source,
+              conversationKey: target.conversationKey,
+              anchorMessageId: echoId ?? '',
+              title: 'Waiting on '
+                  '${names.isEmpty ? 'a reply' : names.join(', ')}: '
+                  '${subject.isEmpty ? '(no subject)' : subject}',
+              remindAtUtc: at,
+              createdFrom: ReminderOrigin.send,
+              anchorGraphId: echoId,
+            ),
+          );
+      revision.state++;
+      return (
+        reminder: reminder,
+        line: 'Following up ${followUpWhen(at, zone)}',
+      );
+    } on Object catch (e) {
+      if (e is! TasksScopeMissing && e is! TasksUnavailable) {
+        debugPrint('follow-up was not set: ${e.runtimeType}');
+      }
+      return (reminder: null, line: _reminderFailure(e));
+    }
+  }
+
+  /// [thread]'s other people with an address, the owner left out
+  /// ([otherPeople], the one rule a draft's offered times share). The asks
+  /// column searches and invites on it, and the thread bar's Find a time
+  /// offers itself only when it is non-empty.
+  List<({String name, String address})> _otherPeople(Conversation thread) =>
+      otherPeople(thread, owner: _ownerAddresses);
+
   List<String> _otherAddresses(Conversation thread) =>
-      [for (final p in _otherPeople(thread)) p.address];
+      otherAddresses(thread, owner: _ownerAddresses);
+
+  /// The owner's addresses as [otherPeople] leaves them out — mail and
+  /// UPN ([ownerAddressesOf], the set a draft's search uses too); empty for
+  /// the first frames, before the account is read.
+  Set<String> get _ownerAddresses =>
+      ownerAddressesOf(_owner?.mail, _owner?.userPrincipalName);
 
   /// The loaded thread by its source and key, read rather than watched: the
   /// asks column's callbacks run outside build.
@@ -6373,7 +6797,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 readOn: entry.hintsDay,
                 today: zone.dateOf(now.toUtc())) ||
             (entry.result != null &&
-                askResultStale(entry.searchedAt, now)))) {
+                askResultStale(entry.searchedAt, now,
+                    lifetime: InboxScreen.askResultLifetimeOverride ??
+                        askResultLifetime)))) {
       entry.forgetReading();
     }
     setState(() {
@@ -6412,18 +6838,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         durationMinutes: entry.minutes,
         hints: entry.hints);
     final today = zone.dateOf(now.toUtc());
-    setState(() => _selectedDay = w.firstDay == today ? null : w.firstDay);
+    setState(() => _setSelectedDay(w.firstDay == today ? null : w.firstDay));
   }
 
-  /// A pill pressed: the new length or week, and the search again.
+  /// A pill pressed: the new length or week, and the search again. [change]
+  /// marks the field it set as the owner's ([_AskSearch.pickedMinutes],
+  /// [_AskSearch.pickedWindow]), so no reading — the rules' still in its
+  /// wait, or the model's later — seeds over it.
   void _changeAsk(
       String source, String key, void Function(_AskSearch e) change) {
     final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
-    // The owner's own choice: a hint read still out must not overwrite it.
-    setState(() {
-      change(entry);
-      entry.searched = true;
-    });
+    setState(() => change(entry));
     unawaited(_runAskSearch(source, key));
   }
 
@@ -6438,16 +6863,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final serial = ++entry.serial;
     setState(() => entry.busy = true);
     // The ask's own words, read once; the first search starts from them.
-    if (!entry.hintsRead) {
+    // The rules' words are in before the model's wait ends, so a search
+    // started in the wait (a pill pressed) waits too and seeds after it.
+    if (!entry.hintsRead || entry.hintsReading != null) {
       await _readAskHints(source, key);
       if (!mounted || serial != entry.serial) return;
       if (!entry.searched) {
-        entry.minutes = entry.hints?.minutes ?? entry.minutes;
-        if (entry.hints?.day != null) entry.window = FindTimeWindow.theirs;
+        _seedFromHints(entry);
+      } else {
+        // Their day with no day read any more is this week, which is what
+        // the pills now offer.
+        entry.window = askWindowFor(entry.window, entry.hints);
       }
-      // Their day with no day read any more is this week, which is what
-      // the pills now offer.
-      entry.window = askWindowFor(entry.window, entry.hints);
     }
     entry.searched = true;
     // Only an ask still open moves the pane: one folded during the hint
@@ -6475,20 +6902,44 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     });
   }
 
+  /// The first search's pills out of what the words said: their length,
+  /// their day when they named one, and this week when their day has gone
+  /// ([askWindowFor]). The first read and a model's reading that differs
+  /// ([_refineAskHints]) seed alike, and neither touches a pill the owner
+  /// pressed.
+  void _seedFromHints(_AskSearch entry) {
+    final hints = entry.hints;
+    if (!entry.pickedMinutes) {
+      entry.minutes = hints?.minutes ?? entry.minutes;
+    }
+    if (!entry.pickedWindow) {
+      entry.window = hints?.day != null
+          ? FindTimeWindow.theirs
+          : askWindowFor(entry.window, hints);
+    }
+  }
+
   /// Reads what the ask [source]/[key] says about the time — its NEWEST
   /// inbound message (the one the rule read), subject and body, else the
   /// preview — into its search entry, once. A row that cannot be read leaves
   /// no hints, and the search runs as it always did.
   ///
   /// One read at a time per ask: a second caller (the pane, a pill pressed
-  /// during the first search) awaits the one already out.
+  /// during the first search) awaits the one already out — including its
+  /// wait for the model ([InboxScreen.askReadWait]).
   Future<void> _readAskHints(String source, String key) {
     final entry = _askSearches.putIfAbsent('$source|$key', _AskSearch.new);
+    final reading = entry.hintsReading;
+    if (reading != null) return reading;
     if (entry.hintsRead) return Future.value();
-    return entry.hintsReading ??= _readAskHintsNow(source, key, entry)
+    return entry.hintsReading = _readAskHintsNow(source, key, entry)
         .whenComplete(() => entry.hintsReading = null);
   }
 
+  /// The rules' reading at once ([readAskHints]), so the row opens on it;
+  /// then the model's ([_refineAskHints]), waited for up to
+  /// [InboxScreen.askReadWait] so a quick answer seeds the first search.
+  /// A slower one goes on in the background ([_AskSearch.refining]).
   Future<void> _readAskHintsNow(
       String source, String key, _AskSearch entry) async {
     final zone = ref.read(calendarZoneProvider).valueOrNull;
@@ -6496,24 +6947,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         .read(schedulingAsksProvider)
         .valueOrNull?[schedulingAskKey(source, key)];
     AskHints? hints;
+    ({String subject, String body, DateTime? sentAt})? words;
     if (zone != null && messageId != null) {
       try {
         final row = await ref
             .read(messageStoreProvider)
             .getMessageRow(source, messageId);
         if (row != null) {
-          final body = (row['body_text'] as String?)?.trim();
+          final text = (row['body_text'] as String?)?.trim();
           // "Tomorrow" is the day after the message was SENT: its words are
           // read against its own stamp, and a day they named that has gone
           // is no day ([readAskHints]'s rule, against now).
           final sent = row['received_at'];
-          hints = readAskHints(
+          final read = (
             subject: row['subject'] as String? ?? '',
-            body: body == null || body.isEmpty
+            body: text == null || text.isEmpty
                 ? row['body_preview'] as String? ?? ''
-                : body,
-            now: DateTime.now(),
+                : text,
             sentAt: sent is String ? DateTime.tryParse(sent) : null,
+          );
+          words = read;
+          hints = readAskHints(
+            subject: read.subject,
+            body: read.body,
+            now: DateTime.now(),
+            sentAt: read.sentAt,
             zone: zone,
           );
         }
@@ -6526,8 +6984,118 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       ..hints = hints
       ..hintsMessageId = messageId
       ..hintsDay = zone?.dateOf(DateTime.now().toUtc())
-      ..hintsRead = true;
+      ..hintsRead = true
+      ..hintsSource = 'rules';
+    if (!mounted || zone == null || messageId == null || words == null) {
+      return;
+    }
+    // The row opens on the rules' words while the model reads.
+    setState(() {});
+    final id = '$source|$key';
+    late final Future<void> refining;
+    refining = _refineAskHints(source, key, entry,
+        messageId: messageId,
+        words: words,
+        zone: zone,
+        current: () =>
+            identical(entry.refining, refining) && _askSearches[id] == entry);
+    entry.refining = refining;
+    await refining.timeout(
+        InboxScreen.askReadWaitOverride ?? InboxScreen.askReadWait,
+        onTimeout: () {});
   }
+
+  /// The model's reading of the ask ([AskReader.readFor]), resolved by the
+  /// rules' own Dart ([readAskHintsFromRead]) and held against the rules'
+  /// reading on its days, hours and length. One `ask_read` row says whether
+  /// they agreed — booleans only. A reading that agrees changes nothing; one
+  /// that differs replaces the hints ([_AskSearch.hintsSource] `model`) and,
+  /// when the first search already ran on the rules, seeds the pills again
+  /// and searches ONCE more — or, for an ask folded since, drops the answer
+  /// so the next open searches on the model's reading.
+  ///
+  /// Nothing happens when the model could not be asked (null: off,
+  /// unavailable, a bad answer — the rules stand, quietly) or the entry
+  /// moved on: [current] false (it was forgotten, or a newer message made
+  /// it a new ask) or its words are another message's.
+  Future<void> _refineAskHints(
+    String source,
+    String key,
+    _AskSearch entry, {
+    required String messageId,
+    required ({String subject, String body, DateTime? sentAt}) words,
+    required CalendarZone zone,
+    required bool Function() current,
+  }) async {
+    final AskReading? reading;
+    try {
+      reading = await ref.read(askReaderProvider).readFor(source, messageId);
+    } on Object catch (e) {
+      debugPrint('scheduling ask: the model reading failed: ${e.runtimeType}');
+      return;
+    }
+    if (reading == null ||
+        !mounted ||
+        !current() ||
+        entry.hintsMessageId != messageId) {
+      return;
+    }
+    final model = readAskHintsFromRead(
+      read: reading.read,
+      subject: words.subject,
+      body: words.body,
+      now: DateTime.now(),
+      zone: zone,
+      sentAt: words.sentAt,
+    );
+    final rules = entry.hints ?? AskHints.none;
+    final agree = _sameHints(model, rules);
+    // The decision model already called this an ask: the model reading
+    // nobody asking is the riskiest answer to act on, so it never erases
+    // what the rules read.
+    final kept = !agree && !model.any && rules.any;
+    unawaited(ref
+        .read(activityLogProvider)
+        .record('ask_read',
+            source: source,
+            detail: {
+              'applied': !agree && !kept,
+              'agree': agree,
+              'cached': reading.fromCache,
+            })
+        .catchError((Object e) {
+      debugPrint('scheduling ask: the reading row failed: ${e.runtimeType}');
+    }));
+    if (agree || kept) return;
+    final ran = entry.searched && (entry.result != null || entry.busy);
+    setState(() {
+      entry
+        ..hints = model
+        ..hintsSource = 'model';
+      if (!ran) return;
+      // A pill the owner pressed stands: the search below runs on it.
+      _seedFromHints(entry);
+      if (!entry.expanded) {
+        // Folded since: its answer was the rules', and the next open
+        // ([_toggleAsk]) searches again when there is none.
+        entry
+          ..result = null
+          ..searchedAt = null
+          ..busy = false
+          ..serial += 1;
+      }
+    });
+    // Not yet searched: the search waiting on this read seeds from the
+    // model's hints itself.
+    if (ran && entry.expanded) unawaited(_runAskSearch(source, key));
+  }
+
+  /// Whether two readings would search alike: the same days, hours and
+  /// length. The words on the row ([AskHints.said]) do not count.
+  static bool _sameHints(AskHints a, AskHints b) =>
+      listEquals(a.days, b.days) &&
+      a.hours == b.hours &&
+      a.minutes == b.minutes;
 
   /// A slot picked in the asks column: the day it falls on, with the invite
   /// standing on it as the command bar's proposal — the card with who it
@@ -7655,6 +8223,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onFindTime: _canFindTime(selected)
           ? () => unawaited(_openFindTime(selected))
           : null,
+      // Remind me, on any open thread: one To Do task. Until To Do can
+      // carry it the strip says why (the carrier's sentence) and offers
+      // nothing to pick.
+      onRemind: (atUtc, label) => unawaited(_remind(selected, atUtc, label)),
+      remindPills: _remindPillsFor(selected),
+      resolveRemindText: _resolveRemind,
+      remindUnavailable: switch (_tasksAvailability()) {
+        final TasksAvailability a => tasksUnavailableSentence(a),
+        null => null,
+      },
+      onOpenConnectionSettings: _openSettings,
       // Opening a file always lands on the split, never on the full pane the
       // user may have left open for the last one. From the MAIN thread it is a
       // selection like any other and replaces whatever was beside; from the
@@ -7865,6 +8444,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenThread: (source, key) =>
             _openThreadBeside(source, key, push: true),
         onOpenStoryline: _selectStoryline,
+        // A clashing meeting opens on top of this one, so ✕ comes back.
+        onOpenEvent: (id) => _openEvent(id, push: true),
         onOpenSettings: _openSettings,
         brief: _briefFor(shown, zone: zoneRead, now: now),
         actions: shown == null || zoneRead == null
@@ -7930,8 +8511,67 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       now: now,
       onOpenThread: (source, key) =>
           _openThreadBeside(source, key, push: true),
+      onOpenMaterial: (material) => unawaited(_openMaterial(material)),
       onRegenerate: () => unawaited(_regenerateBrief(shown.id)),
+      // Offered only where a request would be honoured: the quick check with
+      // the horizon lifted must be clear, or a far-off block with nobody
+      // else would offer a button whose press ends as a skipped row. The
+      // owner's address (the gatherer's own `mail` then UPN) keeps their own
+      // attendee row from counting as somebody else; unknown, it does.
+      onWrite: briefQuickCheck(shown,
+                  owner: _owner?.mail ?? _owner?.userPrincipalName,
+                  now: nowUtc,
+                  zone: zone,
+                  asked: true) ==
+              null
+          ? () => unawaited(_regenerateBrief(shown.id))
+          : null,
     );
+  }
+
+  /// One agenda meeting's brief, opened under its row: the compact face — a
+  /// ready brief's body (the glance above it is the headline), or the files
+  /// sentence if the row turned pending under it. A row waiting on its files
+  /// has no chevron, so its note in the glance slot is what the agenda shows.
+  /// A [Consumer] so a new brief landing rebuilds this body and not the day.
+  Widget _briefBody(String eventId, {required DateTime now}) => Consumer(
+        builder: (context, ref, _) => BriefSection(
+          compact: true,
+          view: ref.watch(eventBriefProvider(eventId)).valueOrNull,
+          now: now,
+          onOpenThread: (source, key) =>
+              _openThreadBeside(source, key, push: true),
+          onOpenMaterial: (material) => unawaited(_openMaterial(material)),
+          onRegenerate: () => unawaited(_regenerateBrief(eventId)),
+        ),
+      );
+
+  static const String _materialGone = 'That file is no longer here.';
+
+  /// Opens a file a brief names, beside whatever is showing, from the row the
+  /// store holds now: the brief carries only the file's ids, so a file a
+  /// re-sync or Forget has since removed says so instead of opening empty.
+  /// No conversation key rides along: briefs read mail only, where the
+  /// message id is enough to fetch the file.
+  Future<void> _openMaterial(BriefMaterialRef material) async {
+    final Map<String, Object?>? row;
+    try {
+      row = await ref.read(messageStoreProvider).attachmentRow(
+            material.source,
+            material.messageId,
+            material.attachmentId,
+          );
+    } on Object catch (e) {
+      debugPrint('a brief\'s file could not be read: ${e.runtimeType}');
+      if (mounted) _toast(_materialGone);
+      return;
+    }
+    if (!mounted) return;
+    if (row == null) {
+      _toast(_materialGone);
+      return;
+    }
+    _openBeside(FilePanel(attachment: AttachmentRef.fromRow(row)), push: true);
   }
 
   /// The keys, read beside the list. No ⤢, for [_whyPanel]'s reason: a short
@@ -9061,7 +9701,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               return '$name is not in this chat, so a mention would not '
                   'reach them. Start a new chat to include them.';
             },
-      onSend: (body) => _send(target, body),
+      onSend: (body) => _send(target, body, fromComposer: true),
+      // Follow up if nobody replies: a mail reply this build really sends,
+      // while To Do can carry the reminder. The choice is held here and
+      // read by [_send]; the in-list box and the cards carry none.
+      followUp: _followUps[_stageKey(target)] ?? FollowUpChoice.none,
+      onFollowUpChanged: (choice) =>
+          setState(() => _followUps[_stageKey(target)] = choice),
+      followUpAvailable: target.source == 'email' &&
+          draft.capability == SendCapability.send &&
+          _tasksAvailability() == TasksAvailability.available,
       // Both sources, unconditionally. A chat is drafted through the same
       // queue and the same system prompt a mail is — only the channel's style
       // rules differ, and those ride in the user message — so Regenerate means
@@ -9190,16 +9839,72 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// pile is marked done through [_triageAndAdvance], so the reader lands on
   /// the next row and the progress line counts it; a thread from anywhere else
   /// is marked done in place and left open.
-  Future<void> _send(DraftTarget target, String body, {String? replyTo}) async {
+  ///
+  /// [fromComposer] is the docked reply box's send, the one place a
+  /// follow-up is chosen: when it sent and its box chose one, the To Do
+  /// reminder is set at once ([_setFollowUp]) and the toast says when it
+  /// fires, with an Undo that cancels the reminder only. With
+  /// `replySendMarksDone` on, the toast's Undo stays the done's, and the
+  /// follow-up is a line on it with no Undo of its own. A To Do slower than
+  /// [InboxScreen.followUpWait] does not hold the send: the toast goes up
+  /// without the line, and only a late failure says anything more.
+  Future<void> _send(
+    DraftTarget target,
+    String body, {
+    String? replyTo,
+    bool fromComposer = false,
+  }) async {
     // An explicit message outranks the pane's own caption: a card sends the
     // reply to the message it was drawn under, whatever the box above it was
     // pointed at. Failing that, only this pane's own override — a message
     // named in the thread beside must not steer a send from the main pane.
     final replyToId =
         replyTo ?? (_replyTo?.target == target ? _replyTo!.messageId : null);
-    final outcome = await ref
-        .read(draftProvider(target).notifier)
-        .send(body, replyTo: replyToId);
+    final drafts = ref.read(draftProvider(target).notifier);
+    // Read before the await, with the bump it will need (app/CLAUDE.md).
+    // A choice is honoured only while To Do can carry it: when the box's
+    // follow-up choices are hidden, a choice made earlier is dropped, not
+    // set behind the owner's back.
+    final tasksReady = ref.read(tasksAvailabilityProvider).valueOrNull ==
+        TasksAvailability.available;
+    if (fromComposer && !tasksReady) _followUps.remove(_stageKey(target));
+    final choice = fromComposer && tasksReady
+        ? _followUps[_stageKey(target)] ?? FollowUpChoice.none
+        : FollowUpChoice.none;
+    final revision = ref.read(reminderRevisionProvider.notifier);
+    final outcome = await drafts.send(body, replyTo: replyToId);
+    // Started right after the send, so the row's `created_at` is well
+    // inside the re-anchor's 15-minute match window (`echoMatchWindow`) of
+    // the Sent Items copy. Waited on only for [InboxScreen.followUpWait]: a
+    // To Do that answers later lands by itself (the revision bump inside
+    // [_setFollowUp]), and one that fails later toasts on its own.
+    ({Reminder? reminder, String line})? followUp;
+    if (outcome == SendOutcome.sent && choice != FollowUpChoice.none) {
+      final pending = _setFollowUp(
+        target,
+        choice,
+        echoId: drafts.lastEchoId,
+        revision: revision,
+      );
+      followUp = await pending
+          .then<({Reminder? reminder, String line})?>((f) => f)
+          .timeout(
+            InboxScreen.followUpWaitOverride ?? InboxScreen.followUpWait,
+            onTimeout: () => null,
+          );
+      if (followUp == null) {
+        unawaited(pending.then((late) {
+          if (late.reminder != null || !mounted) return;
+          _toast(
+            late.line.startsWith('No follow-up set')
+                ? late.line
+                : 'No follow-up set — ${late.line}',
+            cleared: 0,
+          );
+        }));
+      }
+    }
+    if (outcome == SendOutcome.sent) _followUps.remove(_stageKey(target));
     if (!mounted) return;
     // Anything but a failure means the named message has been answered, and a
     // caption that outlived its send would steer the NEXT one. A failure keeps
@@ -9236,12 +9941,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             final conversations = ref.read(conversationsProvider.notifier);
             final undo = await conversations.markDone(t.source, t.key);
             if (!mounted) return undo != null;
+            // The follow-up rides as a line; the one Undo stays the done's.
+            final also = followUp == null ? '' : ' ${followUp.line}';
             if (undo == null) {
-              _toast("Reply sent. Couldn't mark it done.");
+              _toast("Reply sent. Couldn't mark it done.$also");
               return false;
             }
             _toast(
-              'Reply sent · Marked done.',
+              followUp == null
+                  ? 'Reply sent · Marked done.'
+                  : 'Reply sent · Marked done ·$also',
               onUndo: () => unawaited(conversations.undoMarkDone(undo)),
             );
             return true;
@@ -9264,8 +9973,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           } else {
             await markDone(thread);
           }
-        } else {
+        } else if (followUp == null) {
           _toast('Reply sent.');
+        } else {
+          final reminder = followUp.reminder;
+          // Its Undo cancels the reminder and nothing else; the reply has
+          // gone. A follow-up that was not set says why, with no Undo.
+          _toast(
+            reminder == null
+                ? 'Reply sent. ${followUp.line}'
+                : 'Reply sent · ${followUp.line}',
+            cleared: 0,
+            onUndo: reminder == null
+                ? null
+                : () => unawaited(_cancelReminder(reminder.id, revision)),
+          );
         }
       case SendOutcome.savedToOutlook:
         _toast('Saved to your Outlook drafts.');
@@ -9918,10 +10640,12 @@ const String moveLeavesDay = 'A meeting stays on one day — pick a time inside 
 const Duration askResultLifetime = Duration(minutes: 30);
 
 /// Whether an ask's answer that landed at [searchedAt] is too old to show
-/// at [now] ([askResultLifetime]). An answer with no stamp is stale.
+/// at [now] ([lifetime], [askResultLifetime] unless a test shortens it).
+/// An answer with no stamp is stale.
 @visibleForTesting
-bool askResultStale(DateTime? searchedAt, DateTime now) =>
-    searchedAt == null || now.difference(searchedAt) > askResultLifetime;
+bool askResultStale(DateTime? searchedAt, DateTime now,
+        {Duration lifetime = askResultLifetime}) =>
+    searchedAt == null || now.difference(searchedAt) > lifetime;
 
 /// Whether an ask's words, read for the message [readFor] on the local date
 /// [readOn], must be read again: the asks now name a newer message
@@ -9934,16 +10658,6 @@ bool askHintsStale({
   required CalendarDate today,
 }) =>
     (newest != null && readFor != newest) || readOn != today;
-
-/// The window an ask's search runs over for the pill [chosen]: their day
-/// ([FindTimeWindow.theirs]) only while the words name a day — read again
-/// without one ("dinner tonight" once tonight has gone), it is this week,
-/// which is what the row's pills then offer.
-@visibleForTesting
-FindTimeWindow askWindowFor(FindTimeWindow chosen, AskHints? hints) =>
-    chosen == FindTimeWindow.theirs && hints?.day == null
-        ? FindTimeWindow.thisWeek
-        : chosen;
 
 /// The standing proposal's hand-off from the asks column or the grid — see
 /// [_InboxScreenState._proposal]. [name] and [attendees] are the blank
@@ -10013,16 +10727,35 @@ class _AskSearch {
   /// Bumped per search, so only the newest answer lands.
   int serial = 0;
 
+  /// Whose reading [hints] are: `rules` ([readAskHints], at once) or `model`
+  /// (the `ask_read` reading, when it differed). Nothing on screen shows it.
+  String hintsSource = 'rules';
+
+  /// The model's reading still out after the first search's wait, if any;
+  /// a forgotten reading nulls it, so its answer is dropped when it lands.
+  Future<void>? refining;
+
+  /// The owner pressed a length pill / a week pill
+  /// ([_InboxScreenState._changeAsk]): no reading seeds that field again —
+  /// not the rules' first seed when the pill went down during the model's
+  /// wait, not a model reading that lands later, not a reading after
+  /// [forgetReading]. The owner's pill wins, and any search more runs on it.
+  bool pickedMinutes = false;
+  bool pickedWindow = false;
+
   /// Forgets what was read and found — the words, the answer, any search
   /// still out (the serial moves) — and keeps the owner's own pills
-  /// ([minutes], [window], [searched]): what a new day or a stale answer
-  /// costs ([_InboxScreenState._toggleAsk]). A newer message is a new ask
-  /// and gets a new [_AskSearch] instead ([_InboxScreenState._askRow]).
+  /// ([minutes], [window], [searched], [pickedMinutes], [pickedWindow]):
+  /// what a new day or a stale answer costs ([_InboxScreenState._toggleAsk]).
+  /// A newer message is a new ask and gets a new [_AskSearch] instead
+  /// ([_InboxScreenState._askRow]).
   void forgetReading() {
     hints = null;
     hintsRead = false;
     hintsMessageId = null;
     hintsDay = null;
+    hintsSource = 'rules';
+    refining = null;
     result = null;
     searchedAt = null;
     busy = false;

@@ -12,6 +12,7 @@ import '../models/home_sort.dart';
 import '../models/label_models.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
+import '../models/reminder_models.dart';
 import '../models/storyline_models.dart';
 // The second thing this layer reads out of `services/`, on the same licence as
 // `conversation_state.dart` below: `chat_roster.dart` is arithmetic over rows
@@ -70,6 +71,10 @@ import '../services/search_fusion.dart';
 // the ingest strips a fresh one, and a second spelling of the pattern here is
 // how the two would come to disagree about what the tip looks like.
 import '../services/mail_body.dart';
+// And the ask reading's codec, on the same licence: `AskRead.fromJson` is
+// the task's own clamps over a map, so a stored reading decodes exactly as
+// the model's answer did ([askReading]).
+import '../services/llm/ask_read_task.dart' show AskRead;
 import '../services/mail_text.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
@@ -107,6 +112,18 @@ const String needsYouRulesKey = 'needs_you_rules';
 /// order, and this layer imports nothing above itself; `prefs_provider.dart`
 /// re-exports it for everything that reads or writes the setting.
 const String needsYouThresholdKey = 'needs_you_threshold';
+
+/// Whether a Needs You thread with a deadline gets a To Do reminder that
+/// morning (`AppPrefs.remindDeadlines`, on by default). A user preference, so
+/// `wipeAll` leaves it alone; declared beside the slider it works with and
+/// re-exported by `prefs_provider.dart`.
+const String remindDeadlinesKey = 'remind_deadlines';
+
+/// The id of the app's own To Do list ("Bond follow-ups"), found or created
+/// once per account by `ensure_list` and reused for every reminder, because
+/// the tool is find-then-create and not atomic. Per-person: `wipeAll` clears
+/// it with the account's other keys.
+const String todoListIdKey = 'todo_list_id';
 
 /// The oldest floor a bootstrap ever deliberately drained this source back to,
 /// one key per connector, ISO-8601 UTC.
@@ -1053,8 +1070,11 @@ WHERE source = ? AND conversation_key = ?
           // The newest one's and nobody else's: a date somebody named three
           // replies ago is history, and a Deadlines tab that surfaced it would
           // be listing threads whose deadline has already been answered. Off
-          // the `ni` join below, which is that message.
-          '  ni.deadline AS latest_deadline, '
+          // the `ni` join below, which is that message. A meeting message's
+          // time is the EVENT's to show (the agenda row, Invites), never a
+          // deadline: the text model has read an invite's meeting time as one.
+          '  CASE WHEN ${_meetingMessageSql('ni')} '
+          '    THEN NULL ELSE ni.deadline END AS latest_deadline, '
           // How many suggestions are waiting on this thread — and the message
           // it keys off is the SAME newest-inbound rule [getDraft] uses, on
           // purpose. A pending draft is the one the thread would actually
@@ -3548,6 +3568,31 @@ RETURNING *
     return rows.isEmpty ? null : rows.first.data['status'] as String?;
   }
 
+  /// One work row's status and the `created_at` it was queued under, or null
+  /// when the queue has never held it.
+  ///
+  /// The brief's wait reads it: how long a file has been BEING READ is
+  /// measured from the row's `created_at`, which [enqueueWork] fixes at the
+  /// first ask and a second ask leaves alone.
+  Future<({String status, String createdAt})?> workRowOf(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT status, created_at FROM work_items '
+          'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+          variables: _args([kind, source, entityId]),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    return (
+      status: rows.first.data['status'] as String,
+      createdAt: rows.first.data['created_at'] as String,
+    );
+  }
+
   /// Takes one kind's PENDING rows for [entityId] off the queue, and says how
   /// many it deleted.
   ///
@@ -3779,6 +3824,7 @@ RETURNING *
     'context_chunks',
     'message_decisions',
     'event_briefs',
+    'ask_readings',
   ];
 
   /// Every table a CONNECTOR or the user's own directory scan wrote.
@@ -3810,6 +3856,11 @@ RETURNING *
   /// here for the same reason — the owner's storyline and Needs You presses,
   /// which nothing re-derives (the next decision applies a Needs You label
   /// again). All three are still deleted by [wipeAll] — see
+  /// [_wipeTables]. `reminders` is here because each row points at a task in
+  /// the owner's Microsoft To Do: clearing it would orphan the task, and
+  /// nothing re-derives it. Unlike those three it also survives
+  /// [wipeAll] with the identity kept (**Forget everything and re-sync**) and
+  /// goes only on the full wipe (sign-out, `IdentityGuard`) — see
   /// [_wipeTables].
   static const List<String> keptTables = [
     'app_prefs',
@@ -3818,6 +3869,7 @@ RETURNING *
     'labels',
     'conversation_labels',
     'decision_labels',
+    'reminders',
   ];
 
   /// The five tables a wipe leaves alone although two of them are derived.
@@ -3908,6 +3960,16 @@ RETURNING *
         // deletes, and carries a title and charter, or a message and its
         // vector, taken from that mail.
         'decision_labels',
+        // The reminders go only with the person, unlike the labels: Forget
+        // everything and re-sync re-syncs the SAME mailbox, whose
+        // conversation keys are Graph ids and come back unchanged, so a row
+        // still names its thread — and a deleted row would orphan its To Do
+        // task, leave its follow-up uncompleted, and let the deadline
+        // planner make a duplicate task on the next poll. On the full wipe
+        // (sign-out, `IdentityGuard`) they go with [todoListIdKey]; their
+        // tasks stay in the owner's To Do, which is the owner's own list and
+        // not this mailbox's copy of anything.
+        if (!keepIdentity) 'reminders',
       ];
 
   /// Every row: a reset is not paced, the sync is. The cap [clearDerived]
@@ -4252,7 +4314,9 @@ FROM messages
   ///
   /// [keepIdentity] is the Settings action **Forget everything and re-sync**,
   /// which is this wipe with the person left in place: the sign-in, the two
-  /// texts they wrote and their standing sender rules survive, and the
+  /// texts they wrote and their standing sender rules survive, and so do
+  /// their reminders (each row is a task in their To Do, on a thread the
+  /// re-sync brings back under the same key) with the To Do list id; the
   /// mailbox does not. Everything else still goes, `sync_state` and both
   /// bootstrap floors included — the next poll has to fetch the lookback
   /// window again from nothing, which is exactly what that button promises.
@@ -4262,10 +4326,17 @@ FROM messages
         await db.customUpdate('DELETE FROM $table');
       }
       final keys = <String>[
-        // The three that describe one PERSON — the identity claim on these
-        // rows, and the two texts they wrote about themselves and their
-        // inbox. Kept only when the person is staying.
-        if (!keepIdentity) ...[dbOwnerKey, aboutMeKey, needsYouRulesKey],
+        // The four that describe one PERSON — the identity claim on these
+        // rows, the two texts they wrote about themselves and their inbox,
+        // and their To Do list. Kept only when the person is staying.
+        if (!keepIdentity) ...[
+          dbOwnerKey,
+          aboutMeKey,
+          needsYouRulesKey,
+          // The To Do list is the account's: the next person's list is
+          // found again by `ensure_list`, never this one's id reused.
+          todoListIdKey,
+        ],
         // The one-shot markers. Each says "this catch-up has already run
         // over these rows" — and the rows are about to be deleted, so on
         // the next account they would be a claim about a mailbox that was
@@ -4780,6 +4851,18 @@ FROM messages
             _args([sinceIso, localEchoPrefix, _localEchoPrefixEnd]),
       );
 
+  /// Whether the `messages` row aliased [alias] is a meeting message (its
+  /// `source_meta_json.meeting` names a type — `Message.meetingMessageType`;
+  /// Graph's `none` names none), as SQL. A blob that is null or invalid JSON
+  /// is not one, nor is a `meeting` that is not a string (the model ignores
+  /// those too); the CASEs guard `json_type`/`json_extract` for the reason
+  /// [_bodyStaleSql] gives.
+  static String _meetingMessageSql(String alias) =>
+      "CASE WHEN json_valid($alias.source_meta_json) "
+      "THEN CASE WHEN json_type($alias.source_meta_json, '\$.meeting') "
+      "= 'text' THEN lower(trim(json_extract($alias.source_meta_json, "
+      "'\$.meeting'))) ELSE '' END ELSE '' END NOT IN ('', 'none')";
+
   /// Whether a `messages` row carries the stale-body mark, as SQL. A blob that
   /// is null or invalid JSON carries no mark. A CASE and not an AND, because
   /// SQLite does not promise to skip the `json_extract` when `json_valid` is
@@ -5100,7 +5183,12 @@ FROM messages
           '    a.extraction_json AS extraction_json, '
           '    m.needs_action AS needs_action, '
           '    m.reply_expected AS reply_expected, '
-          '    m.deadline AS deadline, m.addressed_me AS addressed_me, '
+          // A meeting message's time is never a deadline (the conversations
+          // query's `latest_deadline` reads it the same way), so it never
+          // raises a thread's attention either.
+          '    CASE WHEN ${_meetingMessageSql('m')} '
+          '      THEN NULL ELSE m.deadline END AS deadline, '
+          '    m.addressed_me AS addressed_me, '
           '    m.needs_you_p AS needs_you_p, '
           '    ROW_NUMBER() OVER ('
           '      PARTITION BY m.source, m.conversation_key '
@@ -5691,6 +5779,108 @@ SELECT conversation_key FROM (
             .customSelect('SELECT * FROM decision_labels ORDER BY id')
             .get())
           row.data,
+      ];
+
+  // ── reminders ────────────────────────────────────────────────────────
+
+  /// Stores a reminder the service has just placed in To Do.
+  Future<void> insertReminder(Reminder reminder) async {
+    final row = reminder.toRow();
+    await db.customUpdate(
+      'INSERT INTO reminders (${row.keys.join(', ')}) '
+      'VALUES (${_placeholders(row.length)})',
+      variables: _args(row.values.toList()),
+    );
+  }
+
+  /// Moves one reminder on: its status, the To Do ids it gained, the message
+  /// it is anchored to or flagged on, when it was done. Only the fields
+  /// given are written, and [updatedAt] always is.
+  ///
+  /// A move to `done` or `cancelled` lands only on a row still `active`, so
+  /// a complete racing a cancel cannot flip a cancelled row to done or back.
+  /// Returns the rows written: 0 when [id] is gone or that move lost.
+  Future<int> updateReminder(
+    String id, {
+    ReminderStatus? status,
+    String? todoListId,
+    String? todoTaskId,
+    String? flagMessageId,
+    String? anchorMessageId,
+    String? doneAt,
+    required String updatedAt,
+  }) async {
+    final sets = <String, Object?>{
+      'status': ?status?.wire,
+      'todo_list_id': ?todoListId,
+      'todo_task_id': ?todoTaskId,
+      'flag_message_id': ?flagMessageId,
+      'anchor_message_id': ?anchorMessageId,
+      'done_at': ?doneAt,
+      'updated_at': updatedAt,
+    };
+    final ends = status == ReminderStatus.done ||
+        status == ReminderStatus.cancelled;
+    return db.customUpdate(
+      'UPDATE reminders SET ${sets.keys.map((k) => '$k = ?').join(', ')} '
+      "WHERE id = ?${ends ? " AND status = 'active'" : ''}",
+      variables: _args([...sets.values, id]),
+    );
+  }
+
+  /// Every active reminder, soonest first.
+  Future<List<Reminder>> activeReminders() => _reminders(
+        "SELECT * FROM reminders WHERE status = 'active' "
+        'ORDER BY remind_at, id',
+        const [],
+      );
+
+  /// Every reminder on one thread, whatever its status, newest first.
+  Future<List<Reminder>> remindersForThread(
+    String source,
+    String conversationKey,
+  ) =>
+      _reminders(
+        'SELECT * FROM reminders WHERE source = ? AND conversation_key = ? '
+        'ORDER BY created_at DESC, id',
+        [source, conversationKey],
+      );
+
+  /// The active reminders that fire in [startIso, endIsoExclusive), by
+  /// `remind_at` — what the Day timeline draws. Both bounds are `isoStamp`s.
+  Future<List<Reminder>> remindersBetween({
+    required String startIso,
+    required String endIsoExclusive,
+  }) =>
+      _reminders(
+        "SELECT * FROM reminders WHERE status = 'active' "
+        'AND remind_at >= ? AND remind_at < ? ORDER BY remind_at, id',
+        [startIso, endIsoExclusive],
+      );
+
+  Future<Reminder?> reminderById(String id) async =>
+      (await _reminders('SELECT * FROM reminders WHERE id = ?', [id]))
+          .firstOrNull;
+
+  /// Whether the thread already carries an active reminder (of [kind], when
+  /// given) — the planner's once-per-thread rule.
+  Future<bool> hasActiveReminder(
+    String source,
+    String conversationKey, {
+    ReminderKind? kind,
+  }) async {
+    final rows = await db.customSelect(
+      'SELECT 1 FROM reminders WHERE source = ? AND conversation_key = ? '
+      "AND status = 'active'${kind == null ? '' : ' AND kind = ?'} LIMIT 1",
+      variables: _args([source, conversationKey, ?kind?.wire]),
+    ).get();
+    return rows.isNotEmpty;
+  }
+
+  Future<List<Reminder>> _reminders(String sql, List<Object?> args) async => [
+        for (final row
+            in await db.customSelect(sql, variables: _args(args)).get())
+          Reminder.fromRow(row.data),
       ];
 
   // ── activity ─────────────────────────────────────────────────────────
@@ -8009,6 +8199,73 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
     return Map<String, Object?>.from(result.first.data);
   }
 
+  /// The generative model's stored reading of one scheduling ask
+  /// (`ask_readings`), or null when it was never read. [read] is the copied
+  /// phrases ([AskRead.fromJson]; null for a row with no JSON, which a
+  /// `none` row may be), never a date — the reader resolves it against
+  /// today.
+  Future<({String status, AskRead? read, String model, String readAt})?>
+      askReading(String source, String messageId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT status, read_json, model, read_at FROM ask_readings '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, messageId]),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    final r = rows.first;
+    AskRead? read;
+    final raw = r.read<String?>('read_json');
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final json = jsonDecode(raw);
+        if (json is Map<String, dynamic>) read = AskRead.fromJson(json);
+      } on FormatException {
+        read = null;
+      }
+    }
+    return (
+      status: r.read<String>('status'),
+      read: read,
+      model: r.read<String>('model'),
+      readAt: r.read<String>('read_at'),
+    );
+  }
+
+  /// Stores one ask's reading, replacing any earlier one for the message.
+  /// [status] is `ready` (phrases worth resolving) or `none` (not asking for
+  /// a time, or nothing copied).
+  Future<void> putAskReading({
+    required String source,
+    required String messageId,
+    required String status,
+    AskRead? read,
+    String model = '',
+    required String readAt,
+  }) async {
+    await db.customUpdate(
+      '''
+INSERT INTO ask_readings (
+  source, source_message_id, status, read_json, model, read_at
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(source, source_message_id) DO UPDATE SET
+  status = excluded.status,
+  read_json = excluded.read_json,
+  model = excluded.model,
+  read_at = excluded.read_at
+''',
+      variables: _args([
+        source,
+        messageId,
+        status,
+        read == null ? null : jsonEncode(read.toJson()),
+        model,
+        readAt,
+      ]),
+    );
+  }
+
   /// Every suggestion stored against this conversation's messages, whatever
   /// their status — the thread view decides which are still showable.
   ///
@@ -8204,6 +8461,65 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
       'DELETE FROM drafts WHERE source = ? AND reply_to_message_id = ?',
       variables: _args([source, messageId]),
     );
+  }
+
+  /// The `payload_json` of one work row, or null when there is no row or it
+  /// carries none. A `done` row keeps the payload it ran with, which is what
+  /// a re-queue that must not lose it (the stale-times redraft of an
+  /// asked-for draft) reads first.
+  Future<String?> workPayload(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT payload_json FROM work_items '
+          'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+          variables: _args([kind, source, entityId]),
+        )
+        .get();
+    return rows.isEmpty ? null : rows.first.data['payload_json'] as String?;
+  }
+
+  /// [deleteDraftForMessage] only while the draft is still `suggested`;
+  /// true when a row went. The stale-times redraft (`DraftSlotRefresher`)
+  /// reads its candidates first and deletes after, and an owner who started
+  /// typing in between has made the draft `edited` — their words are never
+  /// thrown away, so the status is checked in the DELETE itself.
+  Future<bool> deleteSuggestedDraft(String source, String messageId) async {
+    final gone = await db.customUpdate(
+      'DELETE FROM drafts WHERE source = ? AND reply_to_message_id = ? '
+      "AND status = 'suggested'",
+      variables: _args([source, messageId]),
+    );
+    return gone > 0;
+  }
+
+  /// The untouched drafts that offer free times (a `calendar.slots` record
+  /// in `context_json`, `draft_slots.dart`), newest first, at most [limit]:
+  /// what the stale-times redraft checks after a calendar sync. Only
+  /// `suggested` rows, and none whose record says `improved` — a draft the
+  /// owner edited, sent, dismissed or improved is never redrafted. `context_json` is read under `json_valid` inside a CASE,
+  /// which SQLite evaluates lazily (an AND it may reorder), so an unreadable
+  /// row is simply not a candidate rather than a malformed-JSON error.
+  Future<List<Map<String, Object?>>> draftsWithCalendarSlots({
+    int limit = 50,
+  }) async {
+    final rows = await db
+        .customSelect(
+          'SELECT source, conversation_key, reply_to_message_id, context_json '
+          "FROM drafts WHERE status = 'suggested' "
+          'AND CASE WHEN json_valid(context_json) '
+          "THEN json_extract(context_json, '\$.calendar.slots') IS NOT NULL "
+          "AND COALESCE(json_extract(context_json, '\$.calendar.improved'), 0) "
+          '= 0 '
+          'ELSE 0 END '
+          'ORDER BY updated_at DESC, reply_to_message_id DESC LIMIT ?',
+          variables: _args([limit]),
+        )
+        .get();
+    return [for (final r in rows) Map<String, Object?>.from(r.data)];
   }
 
   /// The message a reply would answer: the thread's newest inbound one.
@@ -8561,7 +8877,9 @@ RETURNING source_message_id
         .customSelect(
           '''
 SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
-  m.subject, m.from_name, m.summary, m.body_preview, m.urgency, m.deadline,
+  m.subject, m.from_name, m.summary, m.body_preview, m.urgency,
+  CASE WHEN ${_meetingMessageSql('m')} THEN NULL ELSE m.deadline END
+    AS deadline,
   m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
   m.triage_status, m.received_at,
   m.updated_at AS message_updated_at,
@@ -8613,7 +8931,9 @@ LIMIT ?
         .customSelect(
           '''
 SELECT m.subject, m.from_name, m.summary, m.body_preview, m.urgency,
-  m.deadline, m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
+  CASE WHEN ${_meetingMessageSql('m')} THEN NULL ELSE m.deadline END
+    AS deadline,
+  m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
   m.triage_status, m.received_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   c.last_outbound_at,

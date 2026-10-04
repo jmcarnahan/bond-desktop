@@ -67,11 +67,22 @@ class CalendarStore {
   /// `synced_at` = now. Ids in [skipIds] are NOT written: they are events
   /// this app wrote a moment ago, and a sync page that started before the
   /// write would put the old version back (the write-sequence guard).
+  ///
+  /// [keepAnswerFor]: ids this app answered within `CalendarSync.answerHold`:
+  /// when the stored answer is one of the owner's own ([_answers]), a page
+  /// that carries any other status — unanswered, or the answer it replaced
+  /// (Accepted → Maybe from a clash row) — keeps the stored answer; a page
+  /// that agrees is applied as is. A kept answer keeps the stored `show_as`
+  /// with it: [setResponseStatus] moved it with the answer, and the lagging
+  /// page's `tentative` would turn a fresh Yes back into a Maybe. The rest of
+  /// the row is the page's.
+  ///
   /// Returns the rows written.
   Future<int> upsertEvents(
     List<CalendarEvent> events, {
     required String syncRun,
     Set<String> skipIds = const {},
+    Set<String> keepAnswerFor = const {},
   }) async {
     final keep = [
       for (final e in events)
@@ -80,8 +91,22 @@ class CalendarStore {
     if (keep.isEmpty) return 0;
     final syncedAt = calendarStamp(DateTime.now());
     await db.transaction(() async {
+      final held = [
+        for (final e in keep)
+          if (keepAnswerFor.contains(e.id)) e.id,
+      ];
+      final stored = await _responseStatuses(held);
       for (final event in keep) {
         final row = event.toDbRow(syncRun: syncRun, syncedAt: syncedAt);
+        final answer = stored[event.id];
+        if (answer != null) {
+          final mine = answer.status.trim().toLowerCase();
+          if (_answers.contains(mine) &&
+              event.responseStatus.trim().toLowerCase() != mine) {
+            row['response_status'] = answer.status;
+            row['show_as'] = answer.showAs;
+          }
+        }
         await db.customUpdate(
           _upsertSql,
           variables: _args([for (final c in _columns) row[c]]),
@@ -89,6 +114,40 @@ class CalendarStore {
       }
     });
     return keep.length;
+  }
+
+  /// The owner's own answers, lower-cased, that a lagging page's different
+  /// status does not overwrite (see [upsertEvents]' `keepAnswerFor`).
+  static const Set<String> _answers = {
+    'accepted',
+    'tentativelyaccepted',
+    'declined',
+  };
+
+  /// The stored `response_status` and `show_as` of each of [ids] the mirror
+  /// holds, as stored. Chunked as [deleteEvents] is.
+  Future<Map<String, ({String status, String showAs})>> _responseStatuses(
+    List<String> ids,
+  ) async {
+    final out = <String, ({String status, String showAs})>{};
+    for (var i = 0; i < ids.length; i += 500) {
+      final end = i + 500 > ids.length ? ids.length : i + 500;
+      final chunk = ids.sublist(i, end);
+      final rows = await db
+          .customSelect(
+            'SELECT id, response_status, show_as FROM calendar_events '
+            'WHERE id IN (${_placeholders(chunk.length)})',
+            variables: _args(chunk),
+          )
+          .get();
+      for (final r in rows) {
+        out[r.data['id'] as String] = (
+          status: r.data['response_status'] as String? ?? '',
+          showAs: r.data['show_as'] as String? ?? '',
+        );
+      }
+    }
+    return out;
   }
 
   /// Deletes by id. Unknown ids are ignored: `sync_calendar`'s `removed` may
@@ -150,14 +209,24 @@ class CalendarStore {
   /// meeting in it, and the Day stop and the invites list read the
   /// occurrences, not the master. Returns the ids it touched, which the write
   /// guard notes so a page read before the answer cannot put "none" back.
+  ///
+  /// Outlook records the answer on the free/busy word; the mirror agrees at
+  /// once so no face reads a fresh Yes as a Maybe: `accepted` turns a
+  /// `tentative` show_as `busy` (`free`, `oof`, `workingElsewhere` and
+  /// `busy` are left alone), `tentativelyAccepted` makes it `tentative`, and
+  /// `declined` leaves it.
   Future<List<String>> setResponseStatus(String id, String status) {
     return db.transaction(() async {
       final ids = await _idsWithOccurrences(id);
       if (ids.isEmpty) return ids;
+      final answer = status.trim().toLowerCase();
       await db.customUpdate(
-        'UPDATE calendar_events SET response_status = ? '
+        'UPDATE calendar_events SET response_status = ?, show_as = CASE '
+        "WHEN ? = 'accepted' AND lower(show_as) = 'tentative' THEN 'busy' "
+        "WHEN ? = 'tentativelyaccepted' THEN 'tentative' "
+        'ELSE show_as END '
         'WHERE id = ? OR series_master_id = ?',
-        variables: _args([status, id, id]),
+        variables: _args([status, answer, answer, id, id]),
       );
       return ids;
     });
@@ -285,7 +354,7 @@ class CalendarStore {
         .customSelect(
           'SELECT * FROM calendar_events WHERE $_notMaster'
           ' AND (response_requested IS NULL OR response_requested = 1)'
-          " AND response_status IN ('none', 'notResponded')"
+          " AND lower(trim(response_status)) IN ('none', 'notresponded')"
           ' AND is_organizer = 0 AND is_cancelled = 0'
           ' AND ((is_all_day = 0 AND start_utc > ?)'
           '      OR (is_all_day = 1 AND start_date >= ?))',
@@ -347,7 +416,7 @@ class CalendarStore {
         .customSelect(
           'SELECT * FROM calendar_events WHERE $_notMaster'
           ' AND is_all_day = 0 AND start_utc IS NOT NULL AND end_utc IS NOT NULL'
-          " AND is_cancelled = 0 AND response_status <> 'declined'"
+          " AND is_cancelled = 0 AND lower(trim(response_status)) <> 'declined'"
           ' AND $where'
           ' AND (lower(organizer_address) IN ($places)'
           '      OR EXISTS (SELECT 1 FROM json_each(calendar_events.attendees_json)'
@@ -472,31 +541,25 @@ class CalendarStore {
     return out;
   }
 
-  /// Deletes every brief whose event is not in [keepIds] — the planner's
-  /// housekeeping, so the briefs of meetings that are over, moved out of the
-  /// window or gone from the mirror do not pile up. Returns rows deleted.
+  /// Deletes the briefs of meetings that are gone from the mirror or have
+  /// ended: a timed event whose end is at or before [nowUtc], an all-day event
+  /// whose exclusive end date is at or before [today]. A brief for a meeting
+  /// still ahead — however far — is kept: the planner's window is where
+  /// briefs are WRITTEN, not where they are allowed to live. Returns rows deleted.
   ///
-  /// Read-then-delete rather than one `NOT IN`: a chunked NOT IN would let
-  /// each chunk delete what another chunk keeps, and the table is small
-  /// enough that reading its ids costs nothing.
-  Future<int> deleteBriefsExcept(Iterable<String> keepIds) async {
-    final keep = keepIds.toSet();
-    final rows =
-        await db.customSelect('SELECT event_id FROM event_briefs').get();
-    final doomed = [
-      for (final r in rows)
-        if (!keep.contains(r.data['event_id'])) r.data['event_id'] as String,
-    ];
-    var deleted = 0;
-    for (var i = 0; i < doomed.length; i += 500) {
-      final end = i + 500 > doomed.length ? doomed.length : i + 500;
-      final chunk = doomed.sublist(i, end);
-      deleted += await db.customUpdate(
-        'DELETE FROM event_briefs '
-        'WHERE event_id IN (${_placeholders(chunk.length)})',
-        variables: _args(chunk),
+  /// `event_briefs` never holds a series master's id (the planner and the
+  /// handler key briefs by occurrence), so a master needs no case here. A
+  /// timed row with no `end_utc` reads as ended — `eventsBetween` never
+  /// lists one, so it never had a brief to lose.
+  Future<int> deleteBriefsOfEndedEvents({
+    required DateTime nowUtc,
+    required CalendarDate today,
+  }) =>
+      db.customUpdate(
+        'DELETE FROM event_briefs WHERE event_id NOT IN ('
+        'SELECT id FROM calendar_events WHERE '
+        '(is_all_day = 0 AND end_utc > ?) OR '
+        '(is_all_day = 1 AND end_date > ?))',
+        variables: _args([calendarStamp(nowUtc), today.toIso()]),
       );
-    }
-    return deleted;
-  }
 }

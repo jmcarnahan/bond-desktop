@@ -538,6 +538,32 @@ void main() {
       expect(await store.rebucketSender('a@x.com', bucket: 'later'), 0);
     });
 
+    test("a meeting message's deadline is read as none; a plain mail's is not",
+        () async {
+      await seedConversation('invite');
+      await seedConversation('plain');
+      await store.upsertMessage({
+        'source_message_id': 'm-invite',
+        'conversation_key': 'invite',
+        'direction': 'inbound',
+        'from_address': 'a@contoso.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'source_meta_json': '{"meeting": "meetingRequest", "event_id": "evt-1"}',
+      });
+      await seedMessage('plain', 'm-plain', from: 'b@contoso.com');
+      // The meeting's own time, read as a deadline by the text model: it must
+      // not raise the thread's attention.
+      await store.writeMessageText('email', 'm-invite',
+          summary: '', actionItems: const [], deadline: 'Sunday Oct 4, 2026 2pm');
+      await store.writeMessageText('email', 'm-plain',
+          summary: '', actionItems: const [], deadline: 'Friday');
+
+      final meta = await store.latestInboundMeta();
+
+      expect(meta['invite']!['deadline'], isNull);
+      expect(meta['plain']!['deadline'], 'Friday');
+    });
+
     test('an empty source list reads nothing rather than everything', () async {
       await seedConversation('c1');
       await seedMessage('c1', 'm1', from: 'a@x.com');

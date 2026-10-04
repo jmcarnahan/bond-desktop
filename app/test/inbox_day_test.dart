@@ -9,6 +9,8 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
     show
         Attendee,
+        BriefMaterialOut,
+        BriefMaterialRef,
         BriefPoint,
         BriefThreadRef,
         CalendarDate,
@@ -23,6 +25,8 @@ import 'package:bond_inbox/providers/draft_provider.dart' show DraftNotifier;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/models/person.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart'
+    show AccountInfo;
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
@@ -51,6 +55,8 @@ import 'package:bond_inbox/widgets/find_field.dart' show FindField, askDayLabel;
 import 'package:bond_inbox/widgets/meeting_card.dart' show MeetingCard;
 import 'package:bond_inbox/widgets/person_meeting_line.dart'
     show PersonMeetingLine;
+import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart'
+    show AttachmentPreviewPanel;
 import 'package:bond_inbox/widgets/side_panel.dart' show SidePanelHost;
 import 'package:bond_inbox/widgets/write_confirm_strip.dart'
     show WriteConfirmStrip;
@@ -61,6 +67,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_auth_session.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -158,6 +165,40 @@ class _RecordingWriter implements CalendarWriter {
           startUtc: DateTime.utc(2026, 1, 1, 17),
           endUtc: DateTime.utc(2026, 1, 1, 18)),
     );
+  }
+}
+
+/// A [_RecordingWriter] that moves the mirror as the real writer does after
+/// an answer: the row's response stored at once, then [onChanged] — the
+/// revision bump `calendarWritesProvider` wires — so the agenda reads again.
+class _AnsweringWriter extends _RecordingWriter {
+  _AnsweringWriter(this.calendar);
+
+  final CalendarStore calendar;
+
+  /// Set once the screen is up, from the test's own container.
+  void Function()? onChanged;
+
+  @override
+  Future<WriteOutcome> commit(
+    CalendarWrite write, {
+    WritePreview? preview,
+    bool isUndo = false,
+  }) async {
+    final outcome =
+        await super.commit(write, preview: preview, isUndo: isUndo);
+    if (write is RespondToEvent) {
+      await calendar.setResponseStatus(
+        write.eventId,
+        switch (write.response) {
+          RsvpResponse.accept => 'accepted',
+          RsvpResponse.tentative => 'tentativelyAccepted',
+          RsvpResponse.decline => 'declined',
+        },
+      );
+      onChanged?.call();
+    }
+    return outcome;
   }
 }
 
@@ -347,6 +388,55 @@ void main() {
     await tester.tap(find.byKey(SidePanelHost.closeKey));
     await pumps(tester);
     expect(find.byType(SidePanelHost), findsNothing);
+  });
+
+  testWidgets('a clash: both rows carry the strip, a chip opens the other '
+      "meeting beside, and the panel's clash row opens the first again",
+      (tester) async {
+    final today = la.dateOf(DateTime.now().toUtc());
+    final start = la.localDateTime(today, 12, 0).toUtc();
+    await CalendarStore(db).upsertEvents([
+      CalendarEvent(
+        id: 'evt-1',
+        subject: 'Contoso planning',
+        startUtc: start,
+        endUtc: start.add(const Duration(hours: 1)),
+        responseStatus: 'accepted',
+        showAs: 'busy',
+      ),
+      CalendarEvent(
+        id: 'evt-2',
+        subject: 'Fabrikam sync',
+        startUtc: start.add(const Duration(minutes: 30)),
+        endUtc: start.add(const Duration(minutes: 90)),
+        responseStatus: 'accepted',
+        showAs: 'busy',
+      ),
+    ], syncRun: 'run-1');
+    await pumpScreen(tester);
+    Finder inSide(Finder f) =>
+        find.descendant(of: find.byType(SidePanelHost), matching: f);
+
+    await tester.tap(find.text('Day'));
+    await pumps(tester);
+    expect(find.byKey(DayPane.clashKeyFor('evt-1')), findsOneWidget);
+    expect(find.byKey(DayPane.clashKeyFor('evt-2')), findsOneWidget);
+
+    await tester.tap(find.byKey(DayPane.clashChipKeyFor('evt-1', 'evt-2')));
+    await pumps(tester);
+    expect(find.byType(SidePanelHost), findsOneWidget);
+    expect(inSide(find.text('Fabrikam sync')), findsOneWidget);
+
+    final back = inSide(find.byKey(EventPanelBody.overlapRowKeyFor(0)));
+    expect(
+        find.descendant(
+            of: back, matching: find.textContaining('Contoso planning')),
+        findsOneWidget);
+    await tester.tap(back);
+    await pumps(tester);
+    expect(inSide(find.text('Contoso planning')), findsOneWidget);
+    // Opened on top of the clashing meeting, so the ✕'s back comes home.
+    expect(find.byKey(SidePanelHost.backKey), findsOneWidget);
   });
 
   testWidgets('a day row in the list column moves the pane', (tester) async {
@@ -838,6 +928,268 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('Write a brief in the panel requeues an asked brief',
+        (tester) async {
+      final today = la.dateOf(DateTime.now().toUtc());
+      // The day after tomorrow at 10:00: outside the briefs' box at any hour.
+      final start = la.localDateTime(today.addDays(2), 10, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-later',
+          subject: 'Northwind review',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          attendees: const [
+            Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+          ],
+        ),
+      ], syncRun: 'run-2');
+      await pumpScreen(tester, overrides: [
+        processingProvider.overrideWith((ref) => ProcessingNotifier(true)),
+      ]);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.byTooltip('Next day'));
+        await pumps(tester);
+      }
+      await tester.tap(find.text('Northwind review'));
+      await pumps(tester);
+      expect(
+          tester.widget<Text>(inSide(find.byKey(BriefSection.statusKey))).data,
+          BriefSection.tooFarText);
+
+      await tester.tap(inSide(find.byKey(BriefSection.writeKey)));
+      await pumps(tester);
+      // Queued (processing is on here, so the woken lane may already have
+      // claimed it — and failed, with no model in a test), marked asked.
+      expect(
+        await tester.runAsync(() =>
+            store.workStatusOf('meeting_brief', 'calendar', 'evt-later')),
+        isNotNull,
+      );
+      final queued = await tester.runAsync(() => db
+          .customSelect('SELECT payload_json FROM work_items '
+              "WHERE task_kind = 'meeting_brief' AND entity_id = 'evt-later'")
+          .getSingle());
+      expect(jsonDecode(queued!.data['payload_json'] as String),
+          {'asked': true});
+    });
+
+    testWidgets('a block with only the owner, two days out, offers no Write a '
+        'brief', (tester) async {
+      const me = 'jordan@contoso.com';
+      final today = la.dateOf(DateTime.now().toUtc());
+      final start = la.localDateTime(today.addDays(2), 10, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-focus',
+          subject: 'Focus block',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          // Not marked the organiser's copy, so the owner's own attendee row
+          // is the one name on it.
+          organizerAddress: me,
+          attendees: const [Attendee(name: 'Jordan Bond', address: me)],
+        ),
+      ], syncRun: 'run-2');
+      await pumpScreen(tester, overrides: [
+        authSessionProvider.overrideWithValue(FakeAuthSession(
+          signedIn: true,
+          account: const AccountInfo(displayName: 'Jordan Bond', mail: me),
+        )),
+      ]);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.byTooltip('Next day'));
+        await pumps(tester);
+      }
+      await tester.tap(find.text('Focus block'));
+      await pumps(tester);
+      expect(inSide(find.text('Focus block')), findsWidgets);
+      expect(inSide(find.byKey(BriefSection.writeKey)), findsNothing);
+    });
+
+    testWidgets('a meeting waiting for its files says so in the agenda; one '
+        'that has started does not', (tester) async {
+      final nowUtc = DateTime.now().toUtc();
+      // Tomorrow at 10:00: ahead of the clock at any hour, on tomorrow's
+      // pane.
+      final ahead =
+          la.localDateTime(la.dateOf(nowUtc).addDays(1), 10, 0).toUtc();
+      final started = nowUtc.subtract(const Duration(minutes: 10));
+      CalendarEvent meeting(String id, String subject, DateTime start) =>
+          CalendarEvent(
+            id: id,
+            subject: subject,
+            startUtc: start,
+            endUtc: start.add(const Duration(minutes: 30)),
+            responseStatus: 'accepted',
+            showAs: 'busy',
+            attendees: const [
+              Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+            ],
+          );
+      await CalendarStore(db).upsertEvents([
+        meeting('evt-pending', 'Fabrikam sync', ahead),
+        meeting('evt-started', 'Contoso review', started),
+      ], syncRun: 'run-2');
+      for (final id in ['evt-pending', 'evt-started']) {
+        await CalendarStore(db).putBrief(
+          eventId: id,
+          inputsHash: '${EventBrief.ineligiblePrefix}materials_pending',
+          status: EventBrief.skipped,
+          generatedAt: calendarStamp(DateTime.now()),
+        );
+      }
+      // Processing on: with it off no brief is coming and the agenda says
+      // nothing (the panel says why).
+      await pumpScreen(tester, overrides: [
+        processingProvider.overrideWith((ref) => ProcessingNotifier(true)),
+      ]);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byKey(DayPane.briefNoteKeyFor('evt-started')), findsNothing,
+          reason: 'no brief is coming for a meeting under way');
+
+      await tester.tap(find.textContaining(RegExp(r'^Tomorrow · ')).first);
+      await pumps(tester);
+      final note = find.byKey(DayPane.briefNoteKeyFor('evt-pending'));
+      expect(note, findsOneWidget);
+      expect(tester.widget<Text>(note).data,
+          'Reading the files sent ahead — brief coming.');
+      expect(find.byKey(DayPane.briefToggleKeyFor('evt-pending')), findsNothing);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('evt-pending')), findsNothing);
+    });
+
+    /// A meeting under way now (on today's pane at any hour, and still ahead
+    /// for the Today section), with a ready brief that names two files: one
+    /// stored on the invite's mail, one the store no longer holds.
+    Future<void> seedBriefWithMaterials() async {
+      await seedMeetingAndInvite();
+      await store.upsertAttachments('email', 'inv-m1', [
+        {
+          'attachment_id': 'att-deck',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Planning deck.pdf',
+          'content_type': 'application/pdf',
+          'size': 120 * 1024,
+        },
+      ]);
+      final start =
+          DateTime.now().toUtc().subtract(const Duration(minutes: 10));
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-brief',
+          subject: 'Fabrikam sync',
+          startUtc: start,
+          endUtc: start.add(const Duration(hours: 2)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          attendees: const [
+            Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+          ],
+        ),
+      ], syncRun: 'run-2');
+      const brief = MeetingBrief(
+        headline: 'Dana is waiting on the plan; the deck arrived.',
+        points: [BriefPoint(text: 'The planning invite is open.', thread: 0)],
+        materials: [
+          BriefMaterialOut(file: 0, takeaway: 'The deck proposes two phases.'),
+          BriefMaterialOut(file: 1, takeaway: 'The old sheet had the dates.'),
+        ],
+        questions: ['Which phase starts first?'],
+        threads: [
+          BriefThreadRef(
+            source: 'email',
+            conversationKey: 'c-inv',
+            subject: invite,
+          ),
+        ],
+        materialRefs: [
+          BriefMaterialRef(
+            source: 'email',
+            messageId: 'inv-m1',
+            attachmentId: 'att-deck',
+            name: 'Planning deck.pdf',
+          ),
+          BriefMaterialRef(
+            source: 'email',
+            messageId: 'inv-m1',
+            attachmentId: 'att-gone',
+            name: 'Old dates.xlsx',
+          ),
+        ],
+      );
+      await CalendarStore(db).putBrief(
+        eventId: 'evt-brief',
+        inputsHash: 'h',
+        status: EventBrief.ready,
+        briefJson: jsonEncode(brief.toJson()),
+        generatedAt: calendarStamp(DateTime.now()),
+      );
+    }
+
+    testWidgets('the agenda opens a brief inline and a material chip opens '
+        'the file panel', (tester) async {
+      await seedBriefWithMaterials();
+      await pumpScreen(tester);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      expect(find.byKey(DayPane.briefTeaserKeyFor('evt-brief')), findsOneWidget);
+      expect(find.text('1. Which phase starts first?'), findsNothing,
+          reason: 'closed until asked');
+
+      await tester.tap(find.byKey(DayPane.briefToggleKeyFor('evt-brief')));
+      await pumps(tester);
+      expect(find.text('1. Which phase starts first?'), findsOneWidget);
+      expect(find.text('• The deck proposes two phases.'), findsOneWidget);
+      expect(find.byType(SidePanelHost), findsNothing,
+          reason: 'the toggle opens the brief, not the event');
+
+      // A file the store no longer holds says so and opens nothing.
+      await tester.tap(find.byKey(BriefSection.materialKeyFor(1)));
+      await pumps(tester);
+      expect(find.text('That file is no longer here.'), findsOneWidget);
+      expect(find.byType(SidePanelHost), findsNothing);
+
+      await tester.tap(find.byKey(BriefSection.materialKeyFor(0)));
+      await pumps(tester);
+      expect(
+        find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(AttachmentPreviewPanel),
+        ),
+        findsOneWidget,
+      );
+
+      // Closing it again is the same toggle.
+      await tester.tap(find.byKey(DayPane.briefToggleKeyFor('evt-brief')));
+      await pumps(tester);
+      expect(find.text('1. Which phase starts first?'), findsNothing);
+    });
+
+    testWidgets('the Today section shows the glance', (tester) async {
+      await seedBriefWithMaterials();
+      // Home carries the Today section.
+      await pumpScreen(tester, section: RailSection.home);
+
+      final glance = find.byKey(AppRail.todayGlanceKeyFor('evt-brief'));
+      expect(glance, findsOneWidget);
+      expect(tester.widget<Text>(glance).data,
+          'Dana is waiting on the plan; the deck arrived.');
+    });
   });
 
   group('calendar writes in the screen', () {
@@ -1077,6 +1429,115 @@ void main() {
     });
   });
 
+  group('answered on the agenda', () {
+    // A minute from now, derived from the clock (the suite has no clock
+    // helper; the grid group derives its day the same way): ahead, so it is
+    // owed and its buttons draw (an ended meeting draws the chip). In the
+    // day's last minute that start is tomorrow, so the meeting starts five
+    // minutes ago instead — still on today and not ended, only not owed in
+    // Invites, which the count check allows for.
+    Future<DateTime> seedOwed() async {
+      final now = DateTime.now().toUtc();
+      final soon = now.add(const Duration(minutes: 1));
+      final start = la.dateOf(soon) == la.dateOf(now)
+          ? soon
+          : now.subtract(const Duration(minutes: 5));
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'owed-1',
+          subject: 'Fabrikam roadmap',
+          organizerName: 'Dana Contoso',
+          organizerAddress: 'dana@contoso.com',
+          isOrganizer: false,
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'notResponded',
+          responseRequested: true,
+          showAs: 'tentative',
+          attendees: const [
+            Attendee(name: 'Dana Contoso', address: 'dana@contoso.com'),
+            Attendee(name: 'Sam Fabrikam', address: 'sam@fabrikam.com'),
+          ],
+        ),
+      ], syncRun: 'run-1');
+      return start;
+    }
+
+    Future<_AnsweringWriter> pumpWithWriter(WidgetTester tester) async {
+      final writer = _AnsweringWriter(CalendarStore(db));
+      await pumpScreen(tester,
+          overrides: [calendarWritesProvider.overrideWithValue(writer)]);
+      final container = ProviderScope.containerOf(
+          tester.element(find.byType(InboxScreen)));
+      writer.onChanged =
+          () => container.read(calendarRevisionProvider.notifier).state++;
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      return writer;
+    }
+
+    Finder inRow(Finder f) => find.descendant(
+        of: find.byKey(DayPane.meetingRowKeyFor('owed-1')), matching: f);
+
+    testWidgets('an invite answered on the agenda keeps its row and loses its buttons',
+        (tester) async {
+      final start = await seedOwed();
+      final writer = await pumpWithWriter(tester);
+      final ahead = start.isAfter(DateTime.now().toUtc());
+
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed-1')), findsOneWidget);
+      expect(find.text('RSVP owed'), findsNothing);
+      if (ahead) expect(find.text('Invites · 1'), findsWidgets);
+
+      await tester.tap(inRow(find.byKey(EventActions.yesKey)));
+      await pumps(tester);
+      expect(writer.previewed.single, isA<RespondToEvent>());
+      expect(inRow(find.byType(WriteConfirmStrip)), findsOneWidget);
+      expect(writer.committed, isEmpty);
+
+      await tester.tap(inRow(find.byKey(WriteConfirmStrip.confirmKey)));
+      await pumps(tester);
+      final answer = writer.committed.single.write as RespondToEvent;
+      expect(answer.eventId, 'owed-1');
+      expect(answer.response, RsvpResponse.accept);
+      expect(answer.sendResponse, isTrue);
+
+      // An accepted meeting stays on the day; it no longer asks.
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed-1')), findsOneWidget);
+      expect(inRow(find.byKey(EventActions.yesKey)), findsNothing);
+      expect(find.text('Invites · 1'), findsNothing);
+    });
+
+    testWidgets(
+        'Dismiss on the agenda row: the strip reads Dismiss, the write is '
+        'quiet, and the row is gone', (tester) async {
+      await seedOwed();
+      final writer = await pumpWithWriter(tester);
+
+      await tester.tap(inRow(find.byKey(EventActions.dismissKey)));
+      await pumps(tester);
+      final strip = inRow(find.byType(WriteConfirmStrip));
+      expect(strip, findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byKey(WriteConfirmStrip.confirmKey),
+              matching: find.text('Dismiss')),
+          findsOneWidget);
+      expect(find.byKey(WriteConfirmStrip.emailsKey), findsNothing,
+          reason: 'a Dismiss emails nobody');
+      expect(writer.committed, isEmpty);
+
+      await tester.tap(find.byKey(WriteConfirmStrip.confirmKey));
+      await pumps(tester);
+      final quiet = writer.committed.single.write as RespondToEvent;
+      expect(quiet.response, RsvpResponse.decline);
+      expect(quiet.sendResponse, isFalse);
+      expect(quiet.comment, isNull);
+      expect(find.byKey(DayPane.meetingRowKeyFor('owed-1')), findsNothing);
+      expect(find.text('Fabrikam roadmap'), findsNothing);
+    });
+  });
+
   group('the grid in the screen', () {
     /// An own event (organiser, [guests] invited) at noon TOMORROW: a drop an
     /// hour down must land in the future whatever time the suite runs, or
@@ -1221,7 +1682,16 @@ void main() {
 
       // Where it would land, drawn beside the tile that has not moved.
       expect(find.byKey(DayGrid.proposalKey), findsOneWidget);
-      expect(find.text('Moving here…'), findsOneWidget);
+      // It says what it is: the move the strip above sends or cancels.
+      final ghost = find.byKey(DayGrid.proposalKey);
+      expect(
+          find.descendant(
+              of: ghost, matching: find.textContaining('Move here?')),
+          findsOneWidget);
+      expect(
+          find.descendant(
+              of: ghost, matching: find.textContaining('Send or Cancel above')),
+          findsOneWidget);
       expect(tester.widget<DayGrid>(find.byType(DayGrid)).locked, isTrue);
 
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);

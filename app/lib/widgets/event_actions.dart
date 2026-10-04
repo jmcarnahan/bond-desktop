@@ -4,14 +4,17 @@ import 'package:flutter/services.dart';
 import '../models/calendar_models.dart';
 import '../services/calendar/calendar_writes.dart';
 import '../services/calendar/calendar_zone.dart';
+import '../services/calendar/event_standing.dart';
 import '../services/calendar/write_rules.dart';
 import '../theme/tokens.dart';
 import 'calendar_write_flow.dart' show WriteStarter;
 
 /// The writes one event offers, by the owner's role in it
 /// (`write_rules.dart`): an attendee answers Yes / Maybe / No, adds a note
-/// and proposes a new time; an organiser with guests moves and cancels; an
-/// event of the owner's own moves and deletes.
+/// and proposes a new time — and, while the invite is still unanswered,
+/// Dismisses it: a decline that tells the organiser nothing; an organiser
+/// with guests moves and cancels; an event of the owner's own moves and
+/// deletes.
 ///
 /// Prop-only. The only state is which field is open and what is typed in it;
 /// every write goes through [start], which the host's [CalendarWriteFlow]
@@ -45,6 +48,7 @@ class EventActions extends StatefulWidget {
   static const Key yesKey = ValueKey('event-actions-yes');
   static const Key maybeKey = ValueKey('event-actions-maybe');
   static const Key noKey = ValueKey('event-actions-no');
+  static const Key dismissKey = ValueKey('event-actions-dismiss');
   static const Key addNoteKey = ValueKey('event-actions-add-note');
   static const Key noteFieldKey = ValueKey('event-actions-note');
   static const Key proposeKey = ValueKey('event-actions-propose');
@@ -72,7 +76,8 @@ class EventActions extends StatefulWidget {
   final WriteStarter start;
   final bool busy;
 
-  /// The meeting card and an invite row: Yes / Maybe / No only, and nothing
+  /// The meeting card, an invite row and an agenda row: Yes / Maybe / No
+  /// (and Dismiss while unanswered) only, and nothing
   /// at all for any other role.
   final bool compact;
 
@@ -217,9 +222,11 @@ class _EventActionsState extends State<EventActions> {
       );
 
   Widget _rsvpRow() {
-    final status = _target.responseStatus.trim();
-    Widget answer(Key key, String label, RsvpResponse r, String current) {
-      if (status == current) {
+    // The chosen button follows what the owner ANSWERED, not the standing:
+    // an accepted meeting the calendar shows tentative is still a Yes.
+    final answered = answerOf(_target);
+    Widget answer(Key key, String label, RsvpResponse r, EventAnswer current) {
+      if (answered == current) {
         // Already the answer: shown as chosen, and not pressable twice.
         return FilledButton.tonal(key: key, onPressed: null, child: Text(label));
       }
@@ -231,10 +238,23 @@ class _EventActionsState extends State<EventActions> {
     }
 
     return _buttons([
-      answer(EventActions.yesKey, 'Yes', RsvpResponse.accept, 'accepted'),
+      answer(EventActions.yesKey, 'Yes', RsvpResponse.accept,
+          EventAnswer.accepted),
       answer(EventActions.maybeKey, 'Maybe', RsvpResponse.tentative,
-          'tentativelyAccepted'),
-      answer(EventActions.noKey, 'No', RsvpResponse.decline, 'declined'),
+          EventAnswer.tentative),
+      answer(EventActions.noKey, 'No', RsvpResponse.decline,
+          EventAnswer.declined),
+      // The quiet decline: never with the typed note, which only a sent
+      // answer can carry.
+      if (_target.needsResponse)
+        OutlinedButton(
+          key: EventActions.dismissKey,
+          onPressed: widget.busy
+              ? null
+              : () => _go(RespondToEvent(_respondId, RsvpResponse.decline,
+                  sendResponse: false)),
+          child: const Text('Dismiss'),
+        ),
     ]);
   }
 

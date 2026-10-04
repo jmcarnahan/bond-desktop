@@ -50,6 +50,7 @@ is always the authority when they disagree.
 |---|-------|-----|-----|
 | 1 | Sync / ingest — Graph delta pull, upsert, enqueue downstream work | no | [01-sync-ingest.md](01-sync-ingest.md) |
 | 1b | Calendar mirror — the primary calendar over a rolling window, synced fire-and-forget after each mail load (MCP mode only); not a stage a message passes through | no | [14-calendar.md](14-calendar.md) |
+| 1c | Reminders — what the app reminds the owner of goes INTO Microsoft To Do (a task with a reminder; a flag on a sent mail for a follow-up); reconciled and planned on the poll beside the calendar sync (MCP mode only, dark until the To Do permission is consented); not a stage a message passes through | no | [15-reminders.md](15-reminders.md) |
 | 2 | Tier-1 gates — sender-only checks on delta fields | no | [02-gates.md](02-gates.md) |
 | 3 | Detail fetch (mail) — full body + headers | no | [02-gates.md](02-gates.md) |
 | 4 | Tier-2 gates — list/auto-generated header checks | no | [02-gates.md](02-gates.md) |
@@ -63,8 +64,9 @@ is always the authority when they disagree.
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap; every judgement is the decision model's (`member_of`, the `charter_specific` check; the sweep groups by cosine), the naming and the prose are generative | **yes** (names, refresh, recap) + decision model (membership, charter check) | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply gate** — the decision model's `reply_expected` probability, read from triage's stored row BEFORE any context is gathered; skipped outright when a person asked — see 07 | no§ | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself; lazy by policy — see 07 | **yes** | [07-replies.md](07-replies.md) |
-| 13b | **Pre-meeting briefs** (`meeting_brief`) — per MEETING, not per message: planned after each calendar sync the inbox runs (not the forced syncs after a write) for meetings in the next 36 h with people the owner has mail with, written on the draft lane after `draft` | **yes** | [14-calendar.md](14-calendar.md#briefs) |
+| 13b | **Pre-meeting briefs** (`meeting_brief`) — per MEETING, not per message: planned after each calendar sync the inbox runs (not the forced syncs after a write) for today's and tomorrow's meetings in the display zone with people the owner has mail with (or an invite thread of their own; a person's **Write a brief** lifts the day box and the mail rule for any future meeting; a brief lives until its meeting ends), + the text of the files sent on this meeting's own invite threads, theirs and the owner's own (files on other mail with the same people are named only, as not sent for this meeting) (with its digest and nearest passages; a thread's mail whose files are not listed yet is fetched once first, and a file still being read is waited for until 20 min before the start), and the people, written on the draft lane after `draft` | **yes** | [14-calendar.md](14-calendar.md#briefs) |
 | 13c | **Calendar commands** (`calendar_intent`) — per COMMAND, not per message: the Day bar's request read by lookup (lexicon, resolvers, people and event match); the generative model only on Enter, only when the rules could not finish, and only to copy phrases | on demand | [14-calendar.md](14-calendar.md#commands) |
+| 13d | **Ask reading** (`ask_read`) — per scheduling ASK, not per message: the ask's newest inbound message read for the days, hours and length it asks for; the rules read it at once, the generative model copies phrases that Dart re-resolves through the same rules; cached per message in `ask_readings` (the draft lane pre-warms it) | on demand | [14-calendar.md](14-calendar.md#reading-the-ask) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 15 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
 
@@ -163,6 +165,7 @@ labels, the scorer and the populations a number is quoted on — is described in
 | Improve a draft | Generative, or Cloud drafts when set and consented | `draft_improve` | `:8080` |
 | Pre-meeting brief | Generative (never Cloud drafts) | `meeting_brief` | `:8080` |
 | Calendar command (Enter only, when the rules could not finish) | Generative (never Cloud drafts) | `calendar_intent` | `:8080` |
+| Ask reading (a scheduling ask opened in the Day column; the draft lane pre-warms it) | Generative (never Cloud drafts) | `ask_read` | `:8080` |
 | Day-bar command action (only once a fitted head is adopted; live preview and Enter) | Decision | — (an Enter records `command_head`; the preview records nothing) | `:8083` |
 | Embeddings | Embeddings (not routed) | `embeddings` | `:8081` (`make embed`) |
 

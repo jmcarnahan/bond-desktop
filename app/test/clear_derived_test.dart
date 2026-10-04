@@ -12,6 +12,7 @@ import 'package:bond_inbox/data/keyword_index.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/data/vec_index.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/models/reminder_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
@@ -413,6 +414,13 @@ void main() {
       "model, generated_at) VALUES ('evt-1', 'h', 'ready', '{}', 'm', ?)",
       variables: args([fresh()]),
     );
+    // And one ask's reading by the model (derived): phrases, never a date.
+    await store.putAskReading(
+      source: 'email',
+      messageId: 'm-1',
+      status: 'none',
+      readAt: fresh(),
+    );
 
     // The owner's own vocabulary and one thread filed under it. Kept, like a
     // sender rule: the words are theirs, not the model's. `messages.label` is
@@ -443,6 +451,24 @@ void main() {
     await store.setPref(dbOwnerKey, 'ada@example.com');
     await store.setPref(aboutMeKey, 'An analyst in Denver');
     await store.setPref(needsYouRulesKey, 'Invoices always need me');
+    // A reminder placed in To Do, and the list it went to: kept by a clear
+    // (the task lives in the owner's To Do) and by Forget everything (the
+    // same person), deleted by the full wipe.
+    await store.setPref(todoListIdKey, 'list-1');
+    await store.insertReminder(Reminder(
+      id: 'r1',
+      kind: ReminderKind.replyBy,
+      source: 'email',
+      conversationKey: 'conv-1',
+      title: 'Reply to Dana: Invoice 4471',
+      remindAt: fresh(),
+      status: ReminderStatus.active,
+      createdFrom: ReminderOrigin.bar,
+      todoListId: 'list-1',
+      todoTaskId: 'task-1',
+      createdAt: fresh(),
+      updatedAt: fresh(),
+    ));
     await db.customUpdate(
       "INSERT INTO setup_state (\"key\", value, updated_at) "
       "VALUES ('setup', 'done', ?)",
@@ -470,9 +496,9 @@ void main() {
       expect(classified.toSet(), equals(declared));
       // Pairwise disjoint, which the set comparison above cannot see.
       expect(classified.length, classified.toSet().length);
-      expect(MessageStore.derivedTables, hasLength(18));
+      expect(MessageStore.derivedTables, hasLength(19));
       expect(MessageStore.syncedTables, hasLength(8));
-      expect(MessageStore.keptTables, hasLength(6));
+      expect(MessageStore.keptTables, hasLength(7));
     });
 
     test('name every retired clustering one-shot', () {
@@ -592,6 +618,10 @@ void main() {
       expect(await store.getPref('backend_mode'), 'sdk');
       expect(await store.getSenderPref('eric@example.com'), 'later');
       expect(await rows('setup_state'), 1);
+      // A reminder points at a task in the owner's To Do; clearing it would
+      // orphan the task, so it stays with the list it went to.
+      expect(await rows('reminders'), 1);
+      expect(await store.getPref(todoListIdKey), 'list-1');
     });
 
     test('keeps the owner\'s labels and the threads they are on', () async {
@@ -1332,6 +1362,26 @@ void main() {
       expect(await rows('calendar_events'), 0);
       expect(await store.getPref(calendarRunKey), isNull);
       expect(await store.getPref(calendarMailboxKey), isNull);
+      // The reminders and the To Do list stay with the person: see 'a wipe
+      // that keeps the identity keeps the reminders'.
+      expect(await store.getPref(todoListIdKey), 'list-1');
+    });
+
+    test('a wipe that keeps the identity keeps the reminders', () async {
+      await seedEverything();
+
+      await store.wipeAll(keepIdentity: true);
+
+      // Forget everything and re-sync re-syncs the same mailbox, whose keys
+      // are Graph ids: the row still names its thread when it comes back,
+      // and deleting it would orphan the task in To Do and let the planner
+      // make a duplicate on the next poll.
+      expect(await rows('reminders'), 1);
+      final kept = (await store.reminderById('r1'))!;
+      expect(kept.status, ReminderStatus.active);
+      expect(kept.conversationKey, 'conv-1');
+      expect(kept.todoTaskId, 'task-1');
+      expect(await store.getPref(todoListIdKey), 'list-1');
     });
 
     test('takes every one-shot marker with it, either way', () async {
@@ -1367,6 +1417,9 @@ void main() {
       expect(await store.getSenderPref('eric@example.com'), isNull);
       expect(await store.getPref('backend_mode'), 'sdk');
       expect(await rows('messages'), 0);
+      // The next account finds its own To Do list.
+      expect(await rows('reminders'), 0);
+      expect(await store.getPref(todoListIdKey), isNull);
     });
 
     test('takes the labels and their links, either way', () async {

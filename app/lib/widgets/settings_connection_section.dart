@@ -10,7 +10,7 @@ import 'chips.dart';
 import 'inline_alert.dart';
 import 'settings_section.dart';
 
-/// The four extended permissions, in the order they matter to the user:
+/// The five extended permissions, in the order they matter to the user:
 /// label, the bare scope each one is really asking about, and whether a
 /// fresh sign-in can actually obtain it. Teams cannot via a direct-Graph
 /// sign-in — the SDK path still leaves `Chat.Read` out of its request (see
@@ -20,11 +20,15 @@ import 'settings_section.dart';
 /// that cannot deliver. Calendar is the same case: only the MCP backend
 /// reads the calendar, and its `Calendars.ReadWrite` grant arrives through
 /// that same platform-side reconnect, so it is reported and never offered.
+/// To Do reminders are the same again (`Tasks.ReadWrite`, satisfied by no
+/// other grant), and the row reads as missing for everyone until the owner's
+/// consent round adds the scope on the platform side.
 const List<(String, String, bool)> microsoftPermissions = [
   ('Send mail', 'mail.send', true),
   ('Save drafts', 'mail.readwrite', true),
   ('Teams chats', 'chat.read', false),
   ('Calendar (read and write)', 'calendars.readwrite', false),
+  ('To Do reminders', 'tasks.readwrite', false),
 ];
 
 /// Which backend the app talks through, where, who is signed in to it, and

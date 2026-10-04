@@ -18,6 +18,7 @@ import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../data/setup_store.dart';
 import '../models/calendar_models.dart' show MailboxSettings;
+import '../models/reminder_models.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/ai_workers.dart';
@@ -33,8 +34,10 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/calendar_backend.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
+import '../services/backend/tasks_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/backend/unavailable_calendar_backend.dart';
+import '../services/calendar/ask_reader.dart';
 import '../services/calendar/brief_gatherer.dart';
 import '../services/calendar/brief_planner.dart';
 import '../services/calendar/calendar_sync.dart';
@@ -45,7 +48,11 @@ import '../services/calendar/command/command_lexicon.dart';
 import '../services/calendar/command/command_planner.dart';
 import '../services/calendar/command/command_router.dart';
 import '../services/calendar/command/decision_command_classifier.dart';
+import '../services/calendar/day_items.dart' show calendarShowsMirror;
+import '../services/calendar/draft_slot_refresher.dart';
+import '../services/calendar/draft_slots.dart';
 import '../services/calendar/meeting_brief_handler.dart';
+import '../services/calendar/scheduling_ask.dart' show ownerAddressesOf;
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
@@ -79,6 +86,7 @@ import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_calendar_backend.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_people_backend.dart';
+import '../services/mcp/mcp_tasks_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
 import '../services/models/managed_model_status.dart';
@@ -100,6 +108,9 @@ import '../services/pipeline_repair_service.dart';
 import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
+import '../services/reminders/reminder_planner.dart';
+import '../services/reminders/reminder_service.dart';
+import '../services/reminders/tasks_availability.dart';
 import '../services/restore_service.dart';
 import '../services/sample/sample_backends.dart';
 import '../services/sample/sample_data.dart';
@@ -1007,6 +1018,37 @@ final calendarBackendProvider = Provider<CalendarBackend>((ref) {
       : McpCalendarBackend(ref.watch(mcpStackProvider).client);
 });
 
+/// Microsoft To Do, the carrier for the app's reminders (D1/D7). MCP mode
+/// only, exactly as [calendarBackendProvider]: SDK mode's sign-in asks for no
+/// Tasks scope and the sample sandbox serves no To Do, so both get the backend
+/// whose every call says so.
+final tasksBackendProvider = Provider<TasksBackend>((ref) {
+  if (sampleModeOn) return const UnavailableTasksBackend();
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? const UnavailableTasksBackend()
+      : McpTasksBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Whether reminders can be set ([tasksPrecheck]): SDK mode and the sample
+/// sandbox are [TasksAvailability.sdkMode], an MCP grant without
+/// `tasks.readwrite` — every one until the owner's consent round — is
+/// [TasksAvailability.scopeMissing].
+///
+/// The grant is re-read after every calendar tick that published
+/// ([calendarAvailabilityProvider], [calendarRevisionProvider]), which is how
+/// a reconnect that adds the scope lights the feature up without a restart;
+/// `hasScope` caches `connection_status` for 30 s, so a re-read costs at
+/// most one status call.
+final tasksAvailabilityProvider = FutureProvider<TasksAvailability>((ref) {
+  if (sampleModeOn) return TasksAvailability.sdkMode;
+  ref.watch(calendarAvailabilityProvider);
+  ref.watch(calendarRevisionProvider);
+  final auth = ref.watch(authSessionProvider);
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return tasksPrecheck(mode == backendModeSdk, auth.hasScope);
+});
+
 /// The calendar mirror's sync. Unlike [teamsSyncProvider] the inbox's poll
 /// timer MAY reach it: this is Graph calendar, not the Teams messaging
 /// endpoints, and it throttles itself to [CalendarSync.throttle].
@@ -1180,6 +1222,20 @@ final calendarZoneProvider = FutureProvider<CalendarZone>((ref) async {
   final settings = await ref.watch(mailboxSettingsProvider.future);
   return resolveCalendarZone(mailboxIana: settings?.timeZoneIana);
 });
+
+/// The scheduling ask's reader by the generative model (`ask_read`): on
+/// demand, cached per message in `ask_readings`. The client and the zone are
+/// read at call time, so a prefs write or a zone that resolves later
+/// rebuilds nothing; until the zone resolves, a reading's clock lines say
+/// UTC.
+final askReaderProvider = Provider<AskReader>((ref) => AskReader(
+      store: ref.watch(messageStoreProvider),
+      client: () => ref.read(stageLlmClientProvider('ask_read')),
+      log: ref.watch(activityLogProvider),
+      zone: () =>
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc(),
+      enabled: askReadOn,
+    ));
 
 /// One chat client per pipeline stage. Constructing one opens nothing — the
 /// first call is what discovers whether a server is listening.
@@ -2033,6 +2089,25 @@ final draftHandlerProvider = Provider<DraftHandler>((ref) {
       standing: () => ref.read(appPrefsProvider).cloudDraftsStanding,
       ledger: ref.watch(cloudDraftLedgerProvider),
     ),
+    // A draft answering a scheduling ask ends with the owner's real free
+    // times, appended after the call (`draft_slots.dart`). The store, the
+    // backend and the reader are stable singletons; everything that moves
+    // with a sync tick — the hours, the zone, the account, the availability
+    // — is `read` inside a closure at the call, never watched, so a tick
+    // rebuilds no worker mid-drain.
+    calendar: DraftCalendar(
+      store: ref.watch(calendarStoreProvider),
+      backend: ref.watch(calendarBackendProvider),
+      mailbox: () => ref.read(mailboxSettingsProvider.future),
+      zone: () => ref.read(calendarZoneProvider.future),
+      reader: ref.watch(askReaderProvider),
+      ownerAddresses: () async {
+        final account = await ref.read(authSessionProvider).storedAccount;
+        return ownerAddressesOf(account?.mail, account?.userPrincipalName);
+      },
+      available: () =>
+          calendarShowsMirror(ref.read(calendarAvailabilityProvider)),
+    ),
   );
 });
 
@@ -2060,7 +2135,7 @@ final Provider<AiWorker> draftWorkerProvider = Provider<AiWorker>((ref) {
 });
 
 /// Bumped after every brief the handler stores and after a Regenerate, so an
-/// open event panel and the Day agenda's teasers re-read `event_briefs`.
+/// open event panel and the Day agenda's glances re-read `event_briefs`.
 final briefRevisionProvider = StateProvider<int>((ref) => 0);
 
 /// Ticks each time the draft lane reports on `meeting_brief` work — after
@@ -2079,9 +2154,12 @@ final briefWorkTickProvider = StreamProvider.autoDispose<int>((ref) {
 
 /// What a pre-meeting brief is written from. The owner's address is the
 /// sync's own lookup (`storedAccount`, `mail` then `userPrincipalName`); the
-/// zone is the calendar's display zone as last resolved, UTC until it has
-/// been. Both `read` inside closures, never `watch`: a zone or account change
-/// must not rebuild the draft lane mid-drain.
+/// zone is the calendar's display zone as last resolved; until it has been
+/// the closure throws [BriefZoneUnknown] (the worker retries the row), never
+/// UTC, whose "today and tomorrow" is not the owner's — the planner already
+/// waits for the zone, so only a queued or asked row can meet it. Both
+/// `read` inside closures, never `watch`: a zone or account change must not
+/// rebuild the draft lane mid-drain.
 final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
       ref.watch(messageStoreProvider),
       ref.watch(calendarStoreProvider),
@@ -2089,13 +2167,15 @@ final briefGathererProvider = Provider<BriefGatherer>((ref) => BriefGatherer(
             (account) => account?.mail ?? account?.userPrincipalName,
           ),
       zone: () {
+        CalendarZone? zone;
         try {
-          return ref.read(calendarZoneProvider).valueOrNull ??
-              CalendarZone.utc();
-        } catch (_) {
-          return CalendarZone.utc();
-        }
+          zone = ref.read(calendarZoneProvider).valueOrNull;
+        } catch (_) {}
+        return zone ?? (throw const BriefZoneUnknown());
       },
+      // The retriever's client: the materials' passages are searched the
+      // way a draft's are.
+      embeddings: ref.watch(embeddingsClientProvider),
     ));
 
 /// The `meeting_brief` handler, on the draft lane. Its client is the stage's
@@ -2113,6 +2193,18 @@ final meetingBriefHandlerProvider = Provider<MeetingBriefHandler>((ref) {
     client: () => client,
     activityLog: ref.watch(activityLogProvider),
     onStored: () => briefs.state++,
+    // A thread's mail whose files are not listed yet (the owner's own sent
+    // invite) gets its detail before the brief: `ensureMessageBody` lists the
+    // files AND queues their `attachment_text`, which `ensureBodiesFor` does
+    // not, and fetches even when a body is stored. Mail only; `ref.read` at
+    // the call, never `watch`, as the triage queue's `ensureBody` does. One
+    // id's failure (`ensureMessageBody` rethrows a transient one) costs only
+    // that id: `fetchEach` catches per id and counts the rest.
+    fetchDetails: (source, ids) async {
+      if (source != 'email') return 0;
+      final sync = ref.read(syncServiceProvider);
+      return MeetingBriefHandler.fetchEach(ids, sync.ensureMessageBody);
+    },
   );
 });
 
@@ -2122,6 +2214,52 @@ final briefPlannerProvider = Provider<BriefPlanner>((ref) => BriefPlanner(
       ref.watch(messageStoreProvider),
       ref.watch(calendarStoreProvider),
       ref.watch(briefGathererProvider),
+    ));
+
+/// Re-queues the untouched drafts whose offered times are gone; the inbox
+/// calls it beside [briefPlannerProvider] after a sync that completed while
+/// processing is on, and pumps the draft lane when it re-queued any.
+final draftSlotRefresherProvider =
+    Provider<DraftSlotRefresher>((ref) => DraftSlotRefresher(
+          store: ref.watch(messageStoreProvider),
+          calendar: ref.watch(calendarStoreProvider),
+          log: ref.watch(activityLogProvider),
+        ));
+
+/// The reminders carried by Microsoft To Do (D7/D8). Every input is read at
+/// call time — the display zone, the grant — so a sync or a reconnect
+/// rebuilds nothing; only a backend switch (a new [tasksBackendProvider])
+/// builds a new service.
+final reminderServiceProvider = Provider<ReminderService>((ref) =>
+    ReminderService(
+      store: ref.watch(messageStoreProvider),
+      backend: ref.watch(tasksBackendProvider),
+      zone: () =>
+          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc(),
+      log: ref.watch(activityLogProvider),
+      availability: () => ref.read(tasksAvailabilityProvider.future),
+    ));
+
+/// Bumped by whoever changes a reminder row (a create, an Undo, a reconcile
+/// that changed rows), so [remindersProvider] reads the table again.
+final reminderRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// The active reminders, soonest first — what the Day timeline draws.
+final remindersProvider =
+    FutureProvider.autoDispose<List<Reminder>>((ref) {
+  ref.watch(reminderRevisionProvider);
+  return ref.watch(messageStoreProvider).activeReminders();
+});
+
+/// The deadline planner: on the poll, after the reconcile. The owner's
+/// switch is read at call time (`ref.read`, never `watch`, so moving it
+/// rebuilds nothing mid-pass).
+final reminderPlannerProvider = Provider<ReminderPlanner>((ref) =>
+    ReminderPlanner(
+      store: ref.watch(messageStoreProvider),
+      service: ref.watch(reminderServiceProvider),
+      enabled: () => ref.read(appPrefsProvider).remindDeadlines,
+      availability: () => ref.read(tasksAvailabilityProvider.future),
     ));
 
 /// Who the owner is, from the account the sync signed in with.

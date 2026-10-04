@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/models/reminder_models.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart'
     show CalendarAvailability;
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
@@ -62,9 +63,125 @@ void main() {
             AllDayItem(:final event) => 'allday:${event.id}',
             DeadlineItem(:final conversation) => 'due:${conversation.id}',
             ReturnItem(:final conversation) => 'back:${conversation.id}',
+            ReminderItem(:final reminder) => 'remind:${reminder.id}',
             NowMarker() => 'now',
           },
       ];
+
+  Reminder reminder(
+    String id,
+    DateTime atUtc, {
+    ReminderStatus status = ReminderStatus.active,
+  }) =>
+      Reminder(
+        id: id,
+        kind: ReminderKind.replyBy,
+        source: 'email',
+        conversationKey: 'conv-$id',
+        title: 'Reply to Contoso: $id',
+        remindAt: atUtc.toIso8601String(),
+        status: status,
+        createdFrom: ReminderOrigin.bar,
+        createdAt: '2026-09-28T00:00:00.000000Z',
+        updatedAt: '2026-09-28T00:00:00.000000Z',
+      );
+
+  group('reminders', () {
+    test('an active reminder lands on its LOCAL day and ranks with the '
+        'returns by instant', () {
+      final items = buildDayItems(
+        day: today,
+        now: now,
+        zone: la,
+        events: [timed('m', DateTime.utc(2026, 9, 29, 18))],
+        conversations: const [
+          Conversation(
+            id: 'r1',
+            bucket: 'later',
+            snoozedUntil: '2026-09-29T18:00:00.000000Z',
+          ),
+        ],
+        reminders: [
+          // 11 AM Los Angeles.
+          reminder('am', DateTime.utc(2026, 9, 29, 18)),
+          // 00:30 Sep 30 UTC is 5:30 PM on the 29th in Los Angeles — its
+          // local day.
+          reminder('eve', DateTime.utc(2026, 9, 30, 0, 30)),
+          // 9 AM on the 30th: another day.
+          reminder('next', DateTime.utc(2026, 9, 30, 16)),
+          reminder('gone', DateTime.utc(2026, 9, 29, 17),
+              status: ReminderStatus.cancelled),
+        ],
+      );
+      expect(describe(items), [
+        'now',
+        // One instant: the meeting, then the return, then the reminder.
+        'meeting:m',
+        'back:r1',
+        'remind:am',
+        'remind:eve',
+      ]);
+    });
+
+    test('daySummary counts them and dayRowLabel says so', () {
+      final items = buildDayItems(
+        day: today.addDays(1),
+        now: now,
+        zone: la,
+        events: const [],
+        conversations: const [],
+        reminders: [
+          reminder('a', DateTime.utc(2026, 9, 30, 16)),
+          reminder('b', DateTime.utc(2026, 9, 30, 20)),
+        ],
+      );
+      final s = daySummary(
+          day: today.addDays(1), items: items, invites: const [], zone: la);
+      expect(s, const DaySummary(reminders: 2));
+      expect(s.isEmpty, isFalse);
+      expect(dayRowLabel(today.addDays(1), today, s),
+          'Tomorrow · 2 reminders');
+      expect(dayRowLabel(today, today, const DaySummary(reminders: 1)),
+          'Today · 1 reminder');
+    });
+
+    test('rangeMarkers carries them beside the returns, by instant', () {
+      const monday = CalendarDate(2026, 9, 28);
+      final got = rangeMarkers(
+        from: monday,
+        toExclusive: monday.addDays(7),
+        now: now,
+        zone: la,
+        conversations: const [
+          Conversation(id: 'back', bucket: 'later',
+              snoozedUntil: '2026-09-30T20:00:00.000000Z'),
+        ],
+        reminders: [
+          reminder('late', DateTime.utc(2026, 9, 30, 22)),
+          reminder('early', DateTime.utc(2026, 9, 30, 16)),
+          // Outside the week.
+          reminder('out', DateTime.utc(2026, 10, 6, 16)),
+        ],
+      );
+      expect(describe(got), ['remind:early', 'back:back', 'remind:late']);
+      expect((got.first as ReminderItem).atUtc, DateTime.utc(2026, 9, 30, 16));
+    });
+
+    test('upcomingDays gives a later day a row for a reminder alone', () {
+      final days = upcomingDays(
+        today: today,
+        now: now,
+        zone: la,
+        events: const [],
+        conversations: const [],
+        invites: const [],
+        reminders: [reminder('fri', DateTime.utc(2026, 10, 2, 16))],
+      );
+      expect([for (final (d, _) in days) d.toIso()],
+          ['2026-09-29', '2026-09-30', '2026-10-02']);
+      expect(days.last.$2, const DaySummary(reminders: 1));
+    });
+  });
 
   group('buildDayItems', () {
     test('all-day first, then deadlines, then timed rows by instant with the '
@@ -118,8 +235,11 @@ void main() {
       expect(describe(items), ['meeting:t']);
     });
 
-    test('deadlines: open threads whose showable deadline lands on the day',
-        () {
+    test(
+        'deadlines: open threads whose showable deadline lands on the day; a '
+        'thread the query left without a latestDeadline (a meeting message — '
+        'the rule is the store\'s, store_drafts_inbox_test pins it) draws no '
+        'Due row', () {
       const day = CalendarDate(2026, 10, 1);
       final items = buildDayItems(
         day: day,
@@ -137,6 +257,10 @@ void main() {
           // Plan-relative with no date in it: never shown, so never placed.
           Conversation(id: 'plan', latestDeadline: 'Day 1'),
           Conversation(id: 'none'),
+          // An invite whose meeting time the text model read as a deadline:
+          // the conversations query reads a meeting message's deadline as
+          // NULL, so it arrives here with none and draws no Due row.
+          Conversation(id: 'invite', subject: 'Candidate review'),
         ],
       );
       expect(describe(items), ['due:yes']);
@@ -228,7 +352,8 @@ void main() {
       expect(overlapLine(const Overlaps()), isNull);
     });
 
-    test('cancelled and declined meetings stay on the day', () {
+    test('a cancelled meeting stays on the day struck through; a declined one '
+        'is gone', () {
       final items = buildDayItems(
         day: today,
         now: now,
@@ -237,10 +362,19 @@ void main() {
           timed('gone', DateTime.utc(2026, 9, 29, 20), isCancelled: true),
           timed('no', DateTime.utc(2026, 9, 29, 21),
               responseStatus: 'declined'),
+          timed('a', DateTime.utc(2026, 9, 29, 21)),
+          timed('b', DateTime.utc(2026, 9, 29, 21, 15)),
         ],
         conversations: const [],
       );
-      expect(describe(items), ['now', 'meeting:gone', 'meeting:no']);
+      expect(
+          describe(items), ['now', 'meeting:gone', 'meeting:a', 'meeting:b']);
+      // The declined meeting never counted as a clash, and leaving the day
+      // does not change what the others overlap.
+      final a =
+          items.whereType<MeetingItem>().firstWhere((m) => m.event.id == 'a');
+      expect([for (final e in a.overlaps.hard) e.id], ['b']);
+      expect(a.overlaps.soft, isEmpty);
     });
 
     test('a DST day: 9:00 on Nov 1 in Los Angeles is 9:00', () {

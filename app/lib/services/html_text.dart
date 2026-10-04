@@ -439,9 +439,10 @@ String _documentText(String raw, {bool cap = false}) {
 /// (`&amp;lt;b&amp;gt;`) would be decoded twice inside an anchor and once
 /// outside one.
 ///
-/// C0 controls, because no mail body has one: [_mailText] strips all five from
-/// its input before it writes any of them, so a crafted body cannot forge a
-/// bracket, an ampersand or a quote level.
+/// C0 controls, because no mail or chat body has one: [_mailText] and the
+/// Teams chat converter (`stripChatHtml`) both strip all five from their input
+/// ([stripHeldMarks]) before they write any of them, so a crafted body cannot
+/// forge a bracket, an ampersand or a quote level.
 const String _quoteOpen = '\u0001';
 const String _quoteClose = '\u0002';
 const String _openMark = '\u0003';
@@ -450,6 +451,10 @@ const String _ampMark = '\u0005';
 
 final RegExp _mailMarks =
     RegExp('[$_quoteOpen$_quoteClose$_openMark$_closeMark$_ampMark]');
+
+/// [text] without any of the five marks, the first step of every converter
+/// that writes them (see [_mailMarks]).
+String stripHeldMarks(String text) => text.replaceAll(_mailMarks, '');
 
 final RegExp _mailImg = RegExp(r'<img\b[^<>]*>', caseSensitive: false);
 /// An anchor, whose body cannot run across a later `<a` or `</a`: an unclosed
@@ -506,7 +511,7 @@ String _attrOf(RegExp pattern, String tag) {
 }
 
 String _mailText(String raw) {
-  var text = _dropNonProse(raw.replaceAll(_mailMarks, ''));
+  var text = _dropNonProse(stripHeldMarks(raw));
   text = _foldSourceWhitespace(text);
 
   // Images before anchors, so a linked icon is an anchor with no label left
@@ -515,7 +520,7 @@ String _mailText(String raw) {
   // The cut comes here, once the scripts, the styles and the pictures are
   // gone, so a base64 chart costs the body nothing (see [htmlInputCap]).
   text = capHtmlInput(text);
-  text = text.replaceAllMapped(_mailAnchor, (m) => _anchorRun(m));
+  text = holdAnchorRuns(text);
 
   text = text
       .replaceAll(_mailQuoteOpen, '\n$_quoteOpen\n')
@@ -535,12 +540,24 @@ String _mailText(String raw) {
   text = decodeHtmlEntities(text);
   text = _normalizeWhitespace(text).replaceAll(RegExp(r' *\t *'), '\t');
 
-  text = text
-      .replaceAll(_openMark, '<')
-      .replaceAll(_closeMark, '>')
-      .replaceAll(_ampMark, '&');
+  text = releaseHeldMarks(text);
   return _applyQuotePrefixes(text);
 }
+
+/// [html] with every anchor replaced by its canonical `label <url>` run, the
+/// run's `&`, `<` and `>` held behind marks (see [_ampMark]) so a later tag
+/// strip and entity decode leave it be. [_mailText] and the Teams chat
+/// converter (`stripChatHtml`) share it; [releaseHeldMarks] undoes the hold.
+String holdAnchorRuns(String html) =>
+    html.replaceAllMapped(_mailAnchor, _anchorRun);
+
+/// [text] with every `&`, `<` and `>` a link run held behind its mark (see
+/// [_ampMark]) written back. The last step of any converter that used
+/// [holdAnchorRuns], after its tag strip and its entity decode.
+String releaseHeldMarks(String text) => text
+    .replaceAll(_openMark, '<')
+    .replaceAll(_closeMark, '>')
+    .replaceAll(_ampMark, '&');
 
 /// An inline picture becomes the `[cid:…]` token the transcript splices the
 /// real bytes onto; every other picture becomes nothing at all.

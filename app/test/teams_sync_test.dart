@@ -1837,6 +1837,123 @@ void main() {
       expect(stripChatHtml(''), '');
       expect(stripChatHtml('<div></div>'), '');
     });
+
+    test('a titled link keeps its address as a label run', () async {
+      expect(
+        stripChatHtml('<div>See <a href="https://docs.example.com/plan" '
+            'rel="noreferrer noopener" target="_blank" title="plan">the plan'
+            '</a> first.</div>'),
+        'See the plan <https://docs.example.com/plan> first.',
+      );
+    });
+
+    test('a link whose text is its address stays one address', () async {
+      expect(
+        stripChatHtml('<a href="https://docs.example.com/plan">'
+            'https://docs.example.com/plan</a>'),
+        'https://docs.example.com/plan',
+      );
+    });
+
+    test('a Teams meeting link with a title is clickable', () async {
+      // The run carries the target as `Uri.toString()` writes it, which
+      // upper-cases the hex of each escape (`%3a` → `%3A`): the same address
+      // (RFC 3986 §6.2.2.1), and nothing is decoded.
+      expect(
+        stripChatHtml('<a href="https://teams.example.com/l/meetup-join/'
+            '19%3ameeting_fictional%40thread.v2/0?context=%7b%7d">'
+            'Join the meeting now</a>'),
+        'Join the meeting now <https://teams.example.com/l/meetup-join/'
+        '19%3Ameeting_fictional%40thread.v2/0?context=%7B%7D>',
+      );
+    });
+
+    test('a label that promises another host is dropped for the address',
+        () async {
+      expect(
+        stripChatHtml('<a href="https://evil.example.net/x">'
+            'https://bank.example.com/login</a>'),
+        'https://evil.example.net/x',
+      );
+    });
+
+    test('a scheme nobody can open keeps the words only', () async {
+      expect(stripChatHtml('<a href="javascript:alert(1)">click</a>'), 'click');
+      expect(
+        stripChatHtml('<a href="msteams:/l/chat/0/0">open in Teams</a>'),
+        'open in Teams',
+      );
+    });
+
+    test('two links in one message, with a mention between', () async {
+      expect(
+        stripChatHtml('<p><a href="https://docs.example.com/a">Agenda</a> for '
+            '<at id="0">Jordan Bond</at>, then '
+            '<a href="https://docs.example.com/b">notes</a>.</p>'),
+        'Agenda <https://docs.example.com/a> for Jordan Bond, then '
+        'notes <https://docs.example.com/b>.',
+      );
+    });
+
+    test('markup inside the label is flattened', () async {
+      expect(
+        stripChatHtml('<a href="https://x.example.com/a"><span><strong>Q3'
+            '</strong> deck</span></a>'),
+        'Q3 deck <https://x.example.com/a>',
+      );
+    });
+
+    test('entities around a link decode once', () async {
+      // The href and the label are decoded as the run is built and held
+      // through the whole-text decode, so `&amp;b=2` is `&b=2` and stays it.
+      expect(
+        stripChatHtml('&lt;b&gt; <a href="https://x.example.com/?a=1&amp;b=2">'
+            'one &amp; two</a>'),
+        '<b> one & two <https://x.example.com/?a=1&b=2>',
+      );
+    });
+
+    test('an anchor around a hosted image keeps the marker as its label',
+        () async {
+      // The image marker is written before anchors are read, so the label the
+      // run gets is the marker itself.
+      expect(
+        stripChatHtml('<a href="https://x.example.com/a"><img src="'
+            r'https://graph.example.com/v1.0/chats/19:x/messages/1/'
+            r'hostedContents/abc/$value"></a>'),
+        '[[img:abc]] <https://x.example.com/a>',
+      );
+    });
+
+    test('a break inside a label is a space', () async {
+      expect(
+        stripChatHtml('<a href="https://x.example.com/o">View<br>order</a>'),
+        'View order <https://x.example.com/o>',
+      );
+    });
+
+    test('an anchor a person typed stays the text they typed', () async {
+      final text = stripChatHtml(
+          '&lt;a href="https://x.example.com"&gt;hi&lt;/a&gt;');
+      expect(text, '<a href="https://x.example.com">hi</a>');
+      expect(text, isNot(contains(' <https')));
+    });
+
+    test('a mailto link whose text is the address stays one address',
+        () async {
+      expect(
+        stripChatHtml('<a href="mailto:pat@example.com">pat@example.com</a>'),
+        'pat@example.com',
+      );
+    });
+
+    test('a raw hold mark in a body cannot forge a bracket', () async {
+      expect(stripChatHtml('a\u0003b\u0004c\u0005'), 'abc');
+      final text = stripChatHtml('\u0003x\u0004 '
+          '<a href="https://x.example.com/a">deck</a> \u0005');
+      expect(text, 'x deck <https://x.example.com/a>');
+      expect(' <https'.allMatches(text).length, 1);
+    });
   });
 
   group('re-entry', () {

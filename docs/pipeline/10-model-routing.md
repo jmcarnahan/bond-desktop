@@ -31,6 +31,7 @@ Every stage that dials a model has a row in `pipelineStages`, and the row's
 | `draft_reply`, `draft_improve` | Generative, or cloud drafts (below) |
 | `meeting_brief` | Generative — never cloud drafts |
 | `calendar_intent` | Generative — never cloud drafts; on demand, not a lane |
+| `ask_read` | Generative — never cloud drafts; on demand (the draft lane pre-warms it) |
 | `embeddings` | Embeddings, not routed |
 
 `meeting_brief` (the pre-meeting brief, [14-calendar.md](14-calendar.md#briefs))
@@ -46,6 +47,16 @@ head's when one ships, else the lexicon's) is under 0.8 or a slot is
 unresolved with words left over. The live preview never calls it. It is
 not in `draftStageIds` either: it reads the owner's own words and writes
 nothing in their name, so Cloud drafts never sees it.
+
+`ask_read` (a scheduling ask's own words read for the days, hours and
+length it asks for, [14-calendar.md](14-calendar.md#reading-the-ask)) is
+generative and on demand in the same way: no work kind and no lane —
+`AskReader.readFor` is called when an ask opens in the Day column, and by
+a draft answering an ask before it searches for the times it offers, which
+pre-warms the cache ([07-replies.md](07-replies.md#times-in-a-draft-2026-10)).
+The model only copies phrases; Dart resolves every date. It is not in `draftStageIds`: it reads somebody
+else's words for the owner and writes nothing in their name, so Cloud
+drafts never sees it.
 
 There is no storyline-membership or storyline-grouping stage: whether a thread
 belongs to a storyline is the decision model's `member_of`, which threads the

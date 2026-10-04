@@ -339,7 +339,13 @@ handlers' cue to hydrate a message's attachment rows; the list card's 📎
 count reads the rows themselves (`attachment_count` in `loadConversations`),
 so for mail it appears once the detail fetch has written them. The attachment LIST arrives later
 and differently per connector: mail writes rows inside `_fetchDetailInto`,
-because the detail fetch is the first moment a list exists; chat writes them
+because the detail fetch is the first moment a list exists — and that fetch
+runs for triage (the queue's `ensureBody`, inbound mail only), when a thread
+is opened (`ensureBodies`), for the storyline judge (`ensureBodiesFor`: the
+rows, but no text work queued), and before a meeting brief for a kept thread's mail that has the
+flag and no rows (`ensureMessageBody`, through the brief handler's
+`fetchDetails`: an invite the owner sent with a PDF on it, which no triage
+ever fetched — [14-calendar.md](14-calendar.md#briefs)); chat writes them
 in `_ingestChat`'s insert loop, because chat has no detail step. A Teams
 quote-reply arrives as a `message_reference` entry, and its quote lands on the
 columns mail's `item` rows own: `item_from` is who was quoted, `card_text` the
@@ -420,6 +426,25 @@ sends. The mail profile's rules, each pinned by a test:
   and open-head bodies cannot run past a later opener, so malformed input
   stays linear.
 
+**Teams chat bodies** are converted by `stripChatHtml`
+(`app/lib/services/teams_sync.dart`), a smaller converter than the mail
+profile, but its anchors take the mail path: `holdAnchorRuns` writes the same
+canonical `label <url>` run through the same `canonicalLinkRun` rules, so a
+titled link or a "Join the meeting now" stays clickable, and an anchor with no
+label (a linked external image) vanishes as it does in mail. The run's `&`,
+`<` and `>` ride behind hold marks through the tag strip and the entity
+decode, and `releaseHeldMarks` writes them back last; a raw mark in the input
+is stripped first (`stripHeldMarks`, mail's guard), so a Graph body cannot
+forge one. A `msteams:` link keeps only its words: `linkTargetOf` refuses
+every non-web scheme on purpose. Only the raw HTML carries the address and it
+is not stored, so a chat stored before this build gets its links from a
+widened Teams lookback (every chat re-reads from the new floor) or Forget
+everything and re-sync. Opening a chat or pressing Refresh re-reads only what
+changed since the chat's newest stored message, and only in a chat whose
+newest message is newer than the stored one (`_alreadyCurrent`), so an edit
+to an old message is picked up only once a newer message arrives in that
+chat.
+
 The mail detail fetch also REWRITES the body it stores. Outlook's "attach as
 link" is not in Graph's attachment list at all — it is a zero-width-space
 delimited run in the body — so `_fetchDetailInto` parses it out
@@ -463,7 +488,12 @@ backend maps `read_email`'s `meeting_message_type` onto the same key and adds
 `calendarEventId`, stored as `event_id` — the link from a message to its
 calendar event ([14-calendar.md](14-calendar.md)). It also maps `is_auto_reply`
 to `isAutoReply`, stored as `auto_reply: true` only when true and read by
-`Message.isAutoReply`; nothing gates on it yet.
+`Message.isAutoReply`; nothing gates on it, and a follow-up reminder's
+reconcile reads it so an out-of-office does not count as the reply
+([15-reminders.md](15-reminders.md)). And it maps `web_link` (Graph's
+Outlook-on-the-web link to the message) to `webLink`, stored as `web_link`
+only when non-empty and read by `Message.webLink` (http(s) only): the link a
+To Do reminder carries back to the mail. The SDK detail asks for none.
 
 Two one-shots repair what earlier builds stored, and neither stamps
 `messages.updated_at`, so the keyword index keeps the old text until a

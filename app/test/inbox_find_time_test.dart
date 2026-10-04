@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/draft_provenance.dart' show DraftProvenance;
 import 'package:bond_inbox/models/calendar_models.dart'
     show MeetingTimeSuggestion, MeetingTimes, WritePreview;
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -16,7 +17,12 @@ import 'package:bond_inbox/screens/new_message_screen.dart'
     show NewMessageScreen;
 import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
-import 'package:bond_inbox/services/calendar/ask_hints.dart' show AskHints;
+import 'package:bond_inbox/services/activity_log.dart' show ActivityLog;
+import 'package:bond_inbox/services/ai_worker.dart' show AiWorker;
+import 'package:bond_inbox/services/drain_gate.dart' show DrainGate;
+import 'package:bond_inbox/services/calendar/ask_hints.dart'
+    show readAskHintsFromRead;
+import 'package:bond_inbox/services/calendar/ask_reader.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
@@ -24,6 +30,9 @@ import 'package:bond_inbox/services/calendar/scheduling_ask.dart'
     show schedulingAskMessageIds;
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
+import 'package:bond_inbox/services/llm/ask_read_task.dart' show AskRead;
+import 'package:bond_inbox/services/llm/llm_client.dart'
+    show LlmUnavailableException;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart'
@@ -54,6 +63,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'fixtures/fake_decision_client.dart';
+import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -110,6 +120,22 @@ class _QuietCalendarSync extends CalendarSync {
 
   @override
   Future<CalendarSyncOutcome> syncNow({bool force = false}) => gate.future;
+}
+
+/// A calendar sync whose every tick completes at once, `synced`: what the
+/// inbox plans briefs and redrafts stale offered times off.
+class _SyncedCalendarSync extends CalendarSync {
+  _SyncedCalendarSync(MessageStore store, CalendarStore calendar)
+      : super(const UnavailableCalendarBackend(), store, calendar);
+
+  int ticks = 0;
+
+  @override
+  Future<CalendarSyncOutcome> syncNow({bool force = false}) {
+    ticks += 1;
+    return Future.value(
+        const CalendarSyncOutcome(CalendarSyncStatus.synced, upserts: 1));
+  }
 }
 
 /// `find_meeting_times` answering [slots], each call's attendees recorded.
@@ -256,7 +282,11 @@ void main() {
     writer = _RecordingWriter(notifies: const [_dana]);
   });
 
-  tearDown(() => db.close());
+  tearDown(() {
+    InboxScreen.askReadWaitOverride = null;
+    InboxScreen.askResultLifetimeOverride = null;
+    return db.close();
+  });
 
   Future<void> pumps(WidgetTester tester) async {
     await tester.pump();
@@ -315,10 +345,25 @@ void main() {
   }
 
   Future<void> pumpScreen(WidgetTester tester,
-      {bool zoneResolves = true, MessageStore? storeOverride}) async {
+      {bool zoneResolves = true,
+      MessageStore? storeOverride,
+      AskReader? askReader,
+      CalendarSync? calendarSyncOverride,
+      bool processing = false}) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    final calendarSync = _QuietCalendarSync(store, CalendarStore(db));
+    final calendarSync =
+        calendarSyncOverride ?? _QuietCalendarSync(store, CalendarStore(db));
+    // Processing on with three idle lanes: what runs off a sync is seen in
+    // the store, and no drain dials a server.
+    final idle = [
+      if (processing)
+        for (var i = 0; i < 3; i++)
+          AiWorker(store, handlers: const [], gate: DrainGate()),
+    ];
+    for (final w in idle) {
+      addTearDown(w.dispose);
+    }
     final client = MockClient((_) async => http.Response('{}', 200));
     final tokens = _Tokens();
     tokens.values['refresh_token'] = 'rt-1';
@@ -340,6 +385,12 @@ void main() {
         graphAuthProvider.overrideWithValue(auth),
         syncServiceProvider.overrideWithValue(_FakeSync()),
         calendarSyncProvider.overrideWithValue(calendarSync),
+        if (processing) ...[
+          processingProvider.overrideWith((ref) => ProcessingNotifier(true)),
+          aiWorkerProvider.overrideWithValue(idle[0]),
+          storylineWorkerProvider.overrideWithValue(idle[1]),
+          draftWorkerProvider.overrideWithValue(idle[2]),
+        ],
         calendarAvailabilityProvider
             .overrideWith((ref) => CalendarAvailability.available),
         // A zone that never resolves is the one a slow mailbox read leaves.
@@ -347,6 +398,15 @@ void main() {
             zoneResolves ? Future.value(la) : Completer<CalendarZone>().future),
         calendarBackendProvider.overrideWithValue(backend),
         calendarWritesProvider.overrideWithValue(writer),
+        // The model off unless a test reads with one: the rules alone.
+        askReaderProvider.overrideWithValue(askReader ??
+            AskReader(
+              store: store,
+              client: () => ScriptedLlm.never(label: 'ask_read off'),
+              log: ActivityLog(store),
+              zone: () => la,
+              enabled: false,
+            )),
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -878,15 +938,26 @@ void main() {
 
       final nextWeek = find.byKey(SchedulingAskTile.windowKeyFor(
           'email', 'c-ask', FindTimeWindow.nextWeek));
+      // The pill reads "Next Mon" only while the day it covers lies in next
+      // week's Monday–Sunday (`findTimeWindowLabel`). On a Sunday, tomorrow
+      // is next week's Monday, so Next week covers the Monday AFTER that and
+      // the pill names the date instead — the same rule, from the real clock.
+      // The rule itself is pinned on fixed dates in `find_time_search_test`
+      // ('a week pill whose Friday has gone says the date it now means').
+      final then = day.addDays(7);
+      final nextMonday = today.addDays(1 - today.weekday).addDays(7);
+      final inNextWeek = !then.isBefore(nextMonday) &&
+          then.isBefore(nextMonday.addDays(7));
       expect(
           find.descendant(
               of: nextWeek,
-              matching: find.text('Next ${shortDate(day).split(' ').first}')),
+              matching: find.text(inNextWeek
+                  ? 'Next ${shortDate(day).split(' ').first}'
+                  : shortDate(then))),
           findsOneWidget);
       await tester.tap(nextWeek);
       await pumps(tester);
       await pumps(tester);
-      final then = day.addDays(7);
       expect(find.text(dayTitle(then, today)), findsOneWidget);
       expect(backend.windows.last, (
         DateTime.fromMicrosecondsSinceEpoch(
@@ -1094,18 +1165,38 @@ void main() {
           isFalse);
     });
 
-    test('their day stands only while the words name a day', () {
-      const friday = CalendarDate(2026, 10, 9);
-      expect(askWindowFor(FindTimeWindow.theirs, const AskHints(day: friday)),
-          FindTimeWindow.theirs);
-      expect(askWindowFor(FindTimeWindow.theirs, const AskHints()),
-          FindTimeWindow.thisWeek,
-          reason: 'read again with no day, their day is this week');
-      expect(askWindowFor(FindTimeWindow.theirs, null),
-          FindTimeWindow.thisWeek);
-      expect(askWindowFor(FindTimeWindow.nextWeek, null),
-          FindTimeWindow.nextWeek,
-          reason: 'the owner\'s own pill stands');
+    testWidgets('the refresher runs on a synced outcome', (tester) async {
+      // A suggested draft whose one offered time began an hour ago.
+      final past = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'c-old',
+        replyToMessageId: 'old-m1',
+        body: 'Happy to.\n\nWould any of these work? · …',
+        contextJson: DraftProvenance.none.copyWith(calendar: {
+          'slots': [
+            {
+              'start_utc': MessageStore.isoStamp(past),
+              'end_utc': MessageStore.isoStamp(
+                  past.add(const Duration(minutes: 30))),
+            },
+          ],
+        }).encode(),
+      );
+      final sync = _SyncedCalendarSync(store, CalendarStore(db));
+      await pumpScreen(tester, calendarSyncOverride: sync, processing: true);
+      await pumps(tester);
+
+      expect(sync.ticks, greaterThanOrEqualTo(1));
+      expect(await store.getDraftForMessage('email', 'old-m1'), isNull,
+          reason: 'its time has gone');
+      final work = await db
+          .customSelect(
+            "SELECT status FROM work_items WHERE task_kind = 'draft' "
+            "AND source = 'email' AND entity_id = 'old-m1'",
+          )
+          .get();
+      expect(work.single.data['status'], 'pending');
     });
 
     testWidgets('the search\'s activity row counts its Graph calls',
@@ -2390,4 +2481,338 @@ void main() {
     });
   });
 
+  group('the model reads the ask (ask_read)', () {
+    /// The model's answer, every key the schema requires.
+    Map<String, dynamic> read(List<String> when,
+            {String time = '', String meal = 'none'}) =>
+        {
+          'evidence': 'Dana asks to meet.',
+          'asks_for_time': true,
+          'when': when,
+          'time': time,
+          'duration': '',
+          'meal': meal,
+        };
+
+    AskReader readerWith(ScriptedLlm llm) => AskReader(
+          store: store,
+          client: () => llm,
+          log: ActivityLog(store),
+          zone: () => la,
+        );
+
+    /// The screen's own `ask_read` rows (the reader writes one of its own
+    /// per call, without `agree`).
+    Future<List<String>> verdicts() async => [
+          for (final r in await store.recentActivity(limit: 40))
+            if (r['kind'] == 'ask_read' &&
+                (r['detail_json'] as String? ?? '').contains('"agree"'))
+              r['detail_json'] as String,
+        ];
+
+    /// The local days the backend was asked about, in call order.
+    List<CalendarDate> askedDays() =>
+        [for (final (start, _) in backend.windows) la.dateOf(start)];
+
+    /// The next [weekday] from today (today when it is today's).
+    CalendarDate next(int weekday) {
+      final today = la.dateOf(DateTime.now().toUtc());
+      return today.addDays((weekday - today.weekday + 7) % 7);
+    }
+
+    // The rules read the last day named: the ruled-out Friday.
+    const notFriday =
+        "How about Monday instead? Friday doesn't work for me.";
+
+    testWidgets("the model's reading replaces the rules': the row and the "
+        'search name Monday', (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..answer('ask_read', read(['Monday']));
+      await seedAsk(body: notFriday, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await pumps(tester);
+
+      final monday = next(DateTime.monday);
+      expect(llm.calls.map((c) => c.schemaName), ['ask_read']);
+      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      expect(askedDays(), [monday],
+          reason: 'a quick reading seeds the first search: one search, '
+              'on Monday');
+      final rows = await verdicts();
+      expect(rows.single, contains('"applied":true'));
+      expect(rows.single, contains('"agree":false'));
+      expect(rows.single, contains('"cached":false'));
+    });
+
+    testWidgets('a reading that agrees leaves one search', (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..answer('ask_read', read(['Friday'], meal: 'dinner'));
+      await seedAsk(
+          body: 'Could we grab dinner on Friday to go over the plan?',
+          minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await pumps(tester);
+
+      expect(llm.calls, hasLength(1));
+      expect(backend.windows, hasLength(1));
+      final rows = await verdicts();
+      expect(rows.single, contains('"agree":true'));
+      expect(rows.single, contains('"applied":false'));
+    });
+
+    testWidgets('a slow read: the rules search first, the model refines and '
+        'searches once more', (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final gate = Completer<void>();
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..scriptFor('ask_read', [gate, read(['Monday'])]);
+      await seedAsk(body: notFriday, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      expect(backend.windows, isEmpty,
+          reason: 'the first search waits for the model');
+
+      await tester.pump(const Duration(milliseconds: 350));
+      await pumps(tester);
+      expect(backend.windows, hasLength(1),
+          reason: 'past the wait the rules search alone');
+      final monday = next(DateTime.monday);
+      expect(askedDays().single, isNot(monday));
+      expect(await verdicts(), isEmpty);
+
+      gate.complete();
+      await pumps(tester);
+      await pumps(tester);
+      expect(askedDays(), hasLength(2), reason: 'one search more, no other');
+      expect(askedDays().last, monday);
+      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      expect((await verdicts()).single, contains('"applied":true'));
+    });
+
+    testWidgets('a pill the owner pressed survives a late reading',
+        (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final gate = Completer<void>();
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..scriptFor('ask_read', [gate, read(['Monday'])]);
+      await seedAsk(body: notFriday, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      await pumps(tester);
+      expect(backend.windows, hasLength(1), reason: 'the rules searched');
+
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c-ask', FindTimeWindow.nextWeek)));
+      await pumps(tester);
+      await pumps(tester);
+      expect(backend.windows, hasLength(2), reason: 'the pill searched');
+
+      gate.complete();
+      await pumps(tester);
+      await pumps(tester);
+      final monday = next(DateTime.monday);
+      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget,
+          reason: "the row says the model's day");
+      expect(backend.windows, hasLength(3),
+          reason: 'one search more for the new reading');
+      // Next week as the pill reads it with the model's Monday, not their
+      // day: the owner's pill was not re-seeded.
+      final model = readAskHintsFromRead(
+        read: AskRead.fromJson(read(['Monday'])),
+        subject: _subject,
+        body: notFriday,
+        now: DateTime.now(),
+        zone: la,
+      );
+      final nextWeek = findTimeWindowUtc(FindTimeWindow.nextWeek,
+          now: DateTime.now(),
+          zone: la,
+          durationMinutes: 30,
+          hints: model);
+      expect(askedDays().last, nextWeek.firstDay);
+      expect((await verdicts()).single, contains('"applied":true'));
+    });
+
+    /// Next week as the pill reads it with the model's Monday on the
+    /// [notFriday] ask: its first day.
+    CalendarDate nextWeekWithMonday() {
+      final model = readAskHintsFromRead(
+        read: AskRead.fromJson(read(['Monday'])),
+        subject: _subject,
+        body: notFriday,
+        now: DateTime.now(),
+        zone: la,
+      );
+      return findTimeWindowUtc(FindTimeWindow.nextWeek,
+              now: DateTime.now(),
+              zone: la,
+              durationMinutes: 45,
+              hints: model)
+          .firstDay;
+    }
+
+    Future<void> pressPills(WidgetTester tester) async {
+      await tester.tap(
+          find.byKey(SchedulingAskTile.minutesKeyFor('email', 'c-ask', 45)));
+      await pumps(tester);
+      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
+          'email', 'c-ask', FindTimeWindow.nextWeek)));
+      await pumps(tester);
+    }
+
+    testWidgets("a pill the owner pressed during the wait survives the "
+        "model's reading", (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final gate = Completer<void>();
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..scriptFor('ask_read', [gate, read(['Monday'])]);
+      await seedAsk(body: notFriday, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      expect(backend.windows, isEmpty, reason: 'still in the wait');
+
+      await pressPills(tester);
+      expect(backend.windows, isEmpty,
+          reason: "the pills' search waits for the reading too");
+      gate.complete();
+      await pumps(tester);
+      await pumps(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      await pumps(tester);
+
+      final monday = next(DateTime.monday);
+      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      expect(backend.minutes.last, 45);
+      expect(askedDays().last, nextWeekWithMonday());
+      expect(backend.windows, hasLength(1),
+          reason: 'the one search, on the pills, after the reading');
+    });
+
+    testWidgets("a stale answer forgotten on reopen keeps the owner's pills",
+        (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      // No model the first time (nothing stored), Monday the second.
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..scriptFor('ask_read', [
+          const LlmUnavailableException('no server'),
+          read(['Monday']),
+        ]);
+      await seedAsk(body: notFriday, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await pressPills(tester);
+      await pumps(tester);
+      expect(backend.minutes.last, 45);
+
+      // Folded and opened again with the answer stale: the words are read
+      // again, and this time the model differs from the rules.
+      InboxScreen.askResultLifetimeOverride = Duration.zero;
+      final row = find.byKey(SchedulingAskTile.rowKeyFor('email', 'c-ask'));
+      await tester.tap(row);
+      await pumps(tester);
+      await tester.tap(row);
+      await pumps(tester);
+      await pumps(tester);
+      await pumps(tester);
+
+      expect(llm.calls, hasLength(2));
+      final monday = next(DateTime.monday);
+      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      expect(backend.minutes.last, 45);
+      expect(askedDays().last, nextWeekWithMonday(),
+          reason: 'Next week stands; their day would be the Monday itself');
+      expect((await verdicts()).single, contains('"applied":true'));
+    });
+
+    testWidgets("the model saying nobody asked leaves the rules' day",
+        (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..answer('ask_read', {
+          'evidence': 'Not asking for a time.',
+          'asks_for_time': false,
+          'when': <String>[],
+          'time': '',
+          'duration': '',
+          'meal': 'none',
+        });
+      await seedAsk(
+          body: 'Could we grab dinner on Friday to go over the plan?',
+          minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await pumps(tester);
+
+      final friday = next(DateTime.friday);
+      expect(find.textContaining('Asked for: '), findsOneWidget);
+      expect(find.textContaining('· dinner'), findsOneWidget,
+          reason: "the rules' dinner stands");
+      expect(backend.windows, hasLength(1));
+      // The rules' Friday: today's dinner gone rolls a week, which the
+      // search then asks about.
+      expect(askedDays().single.weekday, DateTime.friday);
+      expect(askedDays().single.isBefore(friday), isFalse);
+      final rows = await verdicts();
+      expect(rows.single, contains('"agree":false'));
+      expect(rows.single, contains('"applied":false'));
+    });
+
+    testWidgets('model off: the rules stand, no toast, no activity row',
+        (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..answer('ask_read', const LlmUnavailableException('no server'));
+      await seedAsk(
+          body: 'Could we grab dinner on Friday to go over the plan?',
+          minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await pumps(tester);
+
+      expect(llm.calls, hasLength(1));
+      expect(backend.windows, hasLength(1));
+      expect(find.textContaining('Asked for: '), findsOneWidget);
+      expect(find.textContaining('· dinner'), findsOneWidget,
+          reason: "the rules' reading");
+      expect(find.byType(SnackBar), findsNothing);
+      final rows = await store.recentActivity(limit: 40);
+      expect(rows.where((r) => r['kind'] == 'ask_read'), isEmpty);
+    });
+
+    testWidgets('two alternatives: both days asked, both said',
+        (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      const body = 'Could we meet next Tuesday or next Thursday afternoon?';
+      final answer =
+          read(['next Tuesday', 'next Thursday'], time: 'afternoon');
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..answer('ask_read', answer);
+      await seedAsk(body: body, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await pumps(tester);
+
+      // "next <weekday>" is strictly after today, so neither day is today
+      // and neither can run out of afternoon; the days themselves are the
+      // resolution layer's, which `ask_hints_test` pins.
+      final want = readAskHintsFromRead(
+        read: AskRead.fromJson(answer),
+        subject: _subject,
+        body: body,
+        now: DateTime.now(),
+        zone: la,
+      );
+      expect(want.days, hasLength(2));
+      expect(askedDays(), want.days, reason: 'one call per day named');
+      expect(
+          find.text('Asked for: ${shortDate(want.days.first)} or '
+              '${shortDate(want.days.last)} · afternoon'),
+          findsOneWidget);
+    });
+  });
 }

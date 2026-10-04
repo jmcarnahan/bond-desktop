@@ -49,7 +49,7 @@ transcript's own 420 minimum, with nothing to catch it.
 |---|---|---|---|
 | Inbox (`RailSection.home`) | `bolt` | the whole stack: Needs You · Today · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row; Today only once the calendar has answered | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
-| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda or its time grid (Day or Week, remembered), or the invites owed; over the agenda and the grid, the command bar (`DayCommandBar`) and the card for its last Enter (`docs/pipeline/14-calendar.md`, Commands) |
+| Day | `calendar_today_outlined` | `Invites · N`, then today, tomorrow and each later day (two weeks out) with something on it — `Today · 3 meetings · 1 due` | `DayPane` — one day's agenda or its time grid (Day or Week, remembered), or the invites owed; every meeting row on the agenda wears its standing (a coloured bar, `Maybe` for a tentative one) and, when it overlaps another, a clash strip — `⚠ overlaps` and a chip per clashing meeting that opens it — with Yes / Maybe / No kept on a row the owner attends; each briefed meeting row on the agenda carries its brief's three-line glance and a chevron that opens the brief inline under the row (the catch-up: briefing, what the files say with their chips, people, questions, prep, open asks, then at most three references — the points with their threads —; while the files sent ahead are read, a one-line "Reading the files sent ahead — brief coming." instead, with no chevron, until the meeting starts; `docs/pipeline/14-calendar.md`, Briefs); over the agenda and the grid, the command bar (`DayCommandBar`) and the card for its last Enter (`docs/pipeline/14-calendar.md`, Commands) |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person | the directory of everyone, or the open room |
 | Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
@@ -81,7 +81,9 @@ touches it, and Enter on Find opens nothing there (`firstFindTarget` answers
 null). Without the calendar — SDK mode, or a grant missing the calendar scope —
 the column says `Calendar not connected` and has no rows. The Inbox stack's
 **Today** section is the Day stop's slice: up to three meetings still ahead
-today with a countdown, and `Invites · N`. It appears only once a sync tick has
+today with a countdown (the label ending ` · Maybe` or ` · RSVP owed` when
+that is where the owner stands), each with its brief's two-line glance under it when
+one is written, and `Invites · N`. It appears only once a sync tick has
 said the calendar is there, so a launch does not grow a section and lose it
 again. The rules for what a day holds are in
 [pipeline/14-calendar.md](pipeline/14-calendar.md#the-day-stop).
@@ -168,7 +170,7 @@ innermost of a stack:
 | `ContextPanel` | which directories a room reads when a reply is drafted | the room header's **Context** on a thread and on a storyline |
 | `ContextFilePanel` | one file out of one of those directories — its words, the passage a citation named, its `AI` summary, and **Consult for the reply** | a provenance chip under the composer's caption, a `Files ›` row on the Context panel, a tile in the search's **In your directories** list |
 | `CheatSheetPanel` | the keyboard shortcuts | `?` |
-| `EventPanel` | one calendar event — when, where, who organised it, your answer, Join and **Open in Outlook**, the attendees with their answers and a tally, the overlap line, the conversations that carried the invite (and the Teams meeting chat), the invite's own text as plain words, and the calendar writes the owner's role allows (answer, propose, move, cancel, delete — `docs/pipeline/14-calendar.md`, Writes) | a Day agenda, all-day or invite row; a Today-section meeting row; **Open event** on an invite card in a thread (pushed when the thread is the one beside); a person room's next / last meeting line |
+| `EventPanel` | one calendar event — when, where, who organised it, your answer, Join and **Open in Outlook**, the attendees with their answers and a tally, the clash list (each clashing meeting, hard first; a row opens it in the panel, pushed so Back returns), the conversations that carried the invite (and the Teams meeting chat), the invite's own text with its web addresses live (a Teams "Join:" line opens), the meeting's brief (the glance in bold, then briefing, materials with their files — which open beside —, people, questions, prep, open asks, references), and the calendar writes the owner's role allows (answer, propose, move, cancel, delete — `docs/pipeline/14-calendar.md`, Writes) | a Day agenda, all-day or invite row; a Today-section meeting row; **Open event** on an invite card in a thread (pushed when the thread is the one beside); a person room's next / last meeting line |
 
 The side is a STACK (`_sideStack`; `_side` is the innermost panel). A panel
 opened from INSIDE the one beside — a file, a Why or a history asked for from
@@ -210,7 +212,10 @@ alone, and only the setters that move `_section` clear it.
 | the Day stop, or a day row in its column | `DayPane`'s agenda or grid for that day (`_selectDay`; paging the grid lands here too); the stop's arrival forces a calendar sync tick |
 | `Invites · N` (in the Day column or the Inbox stack's Today section) | `DayPane` in invites mode (`_openInvites`); `‹ Day` returns to the day it left |
 | a Due or Back-from-Later row on the agenda | that thread, in main (`_select`) |
+| a reminder row on the agenda (*Reminder · in To Do*), or its tile in the grid's header | the thread it is about, in main (`_select`) |
 | a meeting, all-day or invite row | the event, beside (`_openEvent` → `EventPanel`) |
+| a chip on a meeting row's clash strip (`⚠ overlaps` then each clashing meeting, hard first) | the OTHER meeting, beside (`_openEvent`); a row of the panel's clash list opens it on top of the panel (`push: true`) |
+| Yes / Maybe / No / Dismiss on an invite row, or on an unanswered meeting's agenda row, or Yes / Maybe / No on an attended meeting's row that overlaps another (`EventActions`, compact; the current answer chosen) | nothing opens: the write's inline confirm strip in the row (Send / Cancel; Dismiss / Cancel for the quiet decline that tells the organiser nothing), then the toast; a dismissed meeting leaves the agenda at once |
 | a Today-section meeting row | the event, beside, over whatever main is showing |
 | a conversation row inside the event panel | that thread, pushed on the event so ✕ comes back to it |
 | a row in the Day column's **SCHEDULING ASKS · N** | the row opens in place and searches (one open at a time), and the pane underneath moves to the day it searches (`_followAsk` sets `_selectedDay` alone, so a thread, New message, Settings, the log or Invites open there stays open); the header and its chevron fold the section and bring it back |
@@ -226,6 +231,19 @@ the main thread and on a thread beside. A press is the owner's word that the
 thread asks for a time (a `scheduling_ask` label `yes`, unless it is already
 listed) and goes to the Day stop with that ask open in the column, its
 search running; there is no main-pane Find a time any more.
+
+**Remind me** (`docs/pipeline/15-reminders.md` "The three doors") is the
+thread bar's alarm icon right after Later / Keep in inbox, on any thread that
+is not done, main or beside. It has no key: `r` is Reply. A press opens its
+choices under the bar the way Mark done's open — one strip at a time, Escape
+or ✕ shuts it — holding the host's pills (In 2 hours, 5 pm today, Tomorrow 9
+am, Next Monday 9 am, On the deadline) and a typed-time field previewed as an
+absolute time; a pick is a To Do task and a toast with Undo. Until To Do can
+carry it the strip says the permission sentence beside a **Settings** button.
+The docked reply box carries **No follow-up | 2 days | 1 week** on a line just
+above Send on a mail thread it can really send, while To Do is available; the
+send's toast says when the follow-up fires. Reminders show on the Day
+timeline as rows and grid-header tiles that open their thread.
 
 ---
 

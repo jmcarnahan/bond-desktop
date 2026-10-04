@@ -17,7 +17,10 @@ always has the summary, while a DEADLINE settle may fire before the text
 lands (a slow or parked text server). `NotificationCoordinator.toastSummary`
 puts the summary on the event when it is present and the message's own
 `body_preview` otherwise (both candidate projections select `body_preview`);
-the desktop toast's body stays `ctaText ?? summary`. The thread's CTA is
+the desktop toast's body stays `ctaText ?? summary` — and for a MEETING
+message that CTA never ends in "— by <time>": a meeting message's time is the
+event's, never the reader's deadline (the clean-up round, 2026-10-04;
+[14-calendar.md](14-calendar.md), Deadlines). The thread's CTA is
 quoted, and counted as an ask, only by a message that OWNS it: `ownsCta`
 requires the message triaged AND its summary present, because until the text
 lands the CTA on the thread is an older message's. The text write stamps

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../../data/calendar_store.dart';
 import '../../models/calendar_models.dart';
 import '../activity_log.dart';
@@ -66,6 +68,7 @@ class MeetingBriefHandler extends WorkHandler {
     ActivityLog? activityLog,
     DateTime Function()? clock,
     this._onStored,
+    this._fetchDetails,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _clock = clock ?? DateTime.now;
 
@@ -82,12 +85,46 @@ class MeetingBriefHandler extends WorkHandler {
   /// Told after every row this handler writes, so an open panel re-reads.
   final void Function()? _onStored;
 
+  /// Fetches the detail of mail messages whose files nobody has listed yet,
+  /// listing them and queueing their text — the sync's body fetch, handed in
+  /// as a closure because `services/` never reads a provider — and says how
+  /// many it fetched. It is expected never to throw ([fetchEach] keeps one
+  /// failed id from costing the rest). Null (tests, or no sync wired)
+  /// briefs from what is listed.
+  final Future<int> Function(String source, List<String> messageIds)?
+      _fetchDetails;
+
+  /// Runs [one] for each of [ids], a failure costing only its own id, and
+  /// says how many completed: the shape [_fetchDetails] is built on, so a
+  /// 502 on the second invite still leaves the first's files listed and
+  /// gathered again.
+  static Future<int> fetchEach(
+      List<String> ids, Future<void> Function(String id) one) async {
+    var fetched = 0;
+    for (final id in ids) {
+      try {
+        await one(id);
+        fetched++;
+      } on Object catch (e) {
+        debugPrint('MeetingBriefHandler: no detail for one message '
+            '(${e.runtimeType})');
+      }
+    }
+    return fetched;
+  }
+
+  /// How close to its start a meeting is briefed with whatever of its files
+  /// has been read, rather than waiting for the rest.
+  static const Duration pendingGrace = Duration(minutes: 20);
+
   @override
   String get kind => 'meeting_brief';
 
   @override
   Future<void> run(Map<String, Object?> item) async {
     final asked = BriefRequest.fromPayload(item['payload_json']).asked;
+    // On every row, skipped or written: whether a person asked for it.
+    _log.note({'asked': asked});
     final now = _clock();
     final stamp = calendarStamp(now);
 
@@ -115,14 +152,89 @@ class MeetingBriefHandler extends WorkHandler {
     final id = event.id;
     final existing = await _calendar.brief(id);
 
-    final gathered = await _gatherer.gather(event, now: now);
-    final BriefInput input;
+    // The LIGHT gather first (no file text, no people, no embedding): it
+    // hashes and reads the wait exactly as the full one does, and a brief
+    // that waits or is unchanged costs nothing more than these store reads.
+    var gathered = await _gatherer.gather(event,
+        now: now, passages: false, asked: asked);
+    // A thread's mail that says it carries files nobody has listed — the
+    // owner's own invite with its PDF, sent from this mailbox and so never
+    // triaged — is fetched ONCE and the meeting gathered again, so this
+    // brief already names the file. Its text and digest arrive later through
+    // the attachment lane and move the hash. Never a loop: whatever the
+    // second gather finds is what the brief is written from. One failed id
+    // costs only itself; the meeting is gathered again whenever any fetch
+    // completed, and only a fetch that fetched nothing keeps the first
+    // gather's answer.
+    final fetch = _fetchDetails;
+    if (fetch != null &&
+        gathered is BriefEligible &&
+        gathered.unlisted.isNotEmpty) {
+      final bySource = <String, List<String>>{};
+      for (final u in gathered.unlisted) {
+        (bySource[u.source] ??= []).add(u.messageId);
+      }
+      var fetched = 0;
+      for (final MapEntry(key: source, value: ids) in bySource.entries) {
+        try {
+          fetched += await fetch(source, ids);
+        } on Object catch (e) {
+          debugPrint(
+              'MeetingBriefHandler: no detail fetch (${e.runtimeType})');
+        }
+      }
+      _log.note({'fetched': fetched});
+      if (fetched > 0) {
+        gathered = await _gatherer.gather(event,
+            now: now, passages: false, asked: asked);
+      }
+    }
+    final BriefInput light;
+    final List<({BriefMaterial material, bool young})> unqueued;
     switch (gathered) {
       case BriefIneligible(:final why):
         await _skip(id, why, stamp, existing: existing);
         return;
-      case BriefEligible(input: final found):
-        input = found;
+      case BriefEligible(input: final found, unqueued: final owed):
+        light = found;
+        unqueued = owed;
+    }
+
+    // A file listed with no text work at all (`ensureBodiesFor` lists files
+    // and queues nothing) would stay `pending` for good. It is queued here,
+    // once — the queue ignores a second ask — and counts as being read for
+    // this run: its reading starts now, whatever the mail's age, and the next
+    // gather times it from the work row's `created_at`.
+    if (unqueued.isNotEmpty) {
+      final queued =
+          await _gatherer.queueText([for (final u in unqueued) u.material]);
+      _log.note({'queued_text': queued});
+    }
+    final pending = light.materialsPending || unqueued.any((u) => u.young);
+
+    // Waiting for the files (D13). A brief written while a file sent ahead
+    // is still being read says "unread" about the one thing the meeting is
+    // likeliest to be about, and is rewritten minutes later when the text
+    // lands and moves the hash — so, when a file is pending AND no ready
+    // brief is stored AND the meeting starts more than [pendingGrace] from
+    // now AND nobody asked for this brief, the row says the files are being
+    // read and no call is made. The planner gathers a skipped row on every
+    // pass and queues it when the hash moves or the wait ends. A ready
+    // brief is rewritten anyway (it is already there to read, and the
+    // rewrite takes in what has landed), a meeting about to start gets what
+    // is read, and a person's Regenerate is never told to wait: they
+    // pressed it. `start` is never null past the gather (its quick check
+    // answered `past` for a row with no start); the guard keeps the
+    // comparison honest if that rule ever moves.
+    final start = briefStartOf(event, _gatherer.zoneNow());
+    if (!asked &&
+        pending &&
+        existing?.status != EventBrief.ready &&
+        start != null &&
+        start.isAfter(now.toUtc().add(pendingGrace))) {
+      await _skip(id, BriefIneligibility.materialsPending, stamp,
+          existing: existing);
+      return;
     }
 
     // A person's Regenerate always writes: they are looking at the brief and
@@ -130,7 +242,7 @@ class MeetingBriefHandler extends WorkHandler {
     if (!asked &&
         existing != null &&
         existing.isReady &&
-        existing.inputsHash == input.inputsHash) {
+        existing.inputsHash == light.inputsHash) {
       // Nothing it was written from has moved: the stored brief IS the
       // answer, and a second call would only reword it.
       _log
@@ -139,10 +251,26 @@ class MeetingBriefHandler extends WorkHandler {
       return;
     }
 
+    // A call will be made: now the full gather, with the files' text, the
+    // people and the passages. Its answer is the same meeting's a moment
+    // later; one that has turned ineligible meanwhile is skipped as such.
+    final full = await _gatherer.gather(event, now: now, asked: asked);
+    final BriefInput input;
+    switch (full) {
+      case BriefIneligible(:final why):
+        await _skip(id, why, stamp, existing: existing);
+        return;
+      case BriefEligible(input: final found):
+        input = found;
+    }
+
     try {
       final brief = await runTask(
         _client(),
-        MeetingBriefTask(threadCount: input.threads.length),
+        MeetingBriefTask(
+          threadCount: input.threads.length,
+          materialCount: input.materials.length,
+        ),
         input,
         temperature: MeetingBriefTask.temperature,
         maxTokens: MeetingBriefTask.maxTokens,
@@ -160,6 +288,14 @@ class MeetingBriefHandler extends WorkHandler {
             conversationKey: t.conversationKey,
             subject: t.subject,
           ),
+      ]).withMaterials([
+        for (final m in input.materials)
+          BriefMaterialRef(
+            source: m.source,
+            messageId: m.messageId,
+            attachmentId: m.attachmentId,
+            name: m.name,
+          ),
       ]);
       await _calendar.putBrief(
         eventId: id,
@@ -172,6 +308,12 @@ class MeetingBriefHandler extends WorkHandler {
       _log.note({
         'threads': input.threads.length,
         'asks': withThreads.openAsks.length,
+        'materials': input.materials.length,
+        'other_files': input.otherFiles.length,
+        'questions': withThreads.questions.length,
+        'people': input.people.length,
+        // What the model was shown of the files, not what was gathered.
+        'text_chars': MeetingBriefTask.materialTextCharsWritten(input),
       });
       _stored();
     } on LlmUnavailableException {
@@ -203,7 +345,7 @@ class MeetingBriefHandler extends WorkHandler {
   /// of the window, still has a brief worth reading) with only its stamp
   /// moved. A meeting the owner declined, or one cancelled or gone, is not
   /// one they are going to: the skip replaces its brief, so neither the
-  /// panel nor the Day's teaser goes on offering it.
+  /// panel nor the agenda's glance goes on offering it.
   Future<void> _skip(
     String id,
     BriefIneligibility why,

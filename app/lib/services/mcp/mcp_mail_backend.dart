@@ -135,6 +135,7 @@ class McpMailBackend implements MailBackend {
     final meetingKind = meeting is String ? meeting.trim() : '';
     final eventId = result['event_id'];
     final autoReply = result['is_auto_reply'];
+    final webLink = result['web_link'];
 
     final headers = result['headers'];
     final attachments = result['attachments'];
@@ -176,6 +177,10 @@ class McpMailBackend implements MailBackend {
       // is carried; false, a string or no key all say nothing, and nothing
       // gates on it yet.
       if (autoReply == true) 'isAutoReply': true,
+      // Graph's own key name for the Outlook-on-the-web link to the message:
+      // what a To Do reminder links back to. `""` (Graph gave none) is
+      // omitted like a missing event id.
+      if (webLink is String && webLink.isNotEmpty) 'webLink': webLink,
     };
   }
 

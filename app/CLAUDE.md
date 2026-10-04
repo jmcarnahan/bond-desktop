@@ -156,6 +156,13 @@ enforce the ones that are commands.
 - `services/` never imports `providers/`; no dialogs or popups
   (`test/no_dialogs_test.dart`) — every surface is a screen or pane with a
   back button.
+- Mail and chat HTML keep their links the same way: `holdAnchorRuns` before
+  the converter's own tag strip + entity decode, then `releaseHeldMarks` /
+  `stripHeldMarks` (`html_text.dart`; both `_mailText` and `stripChatHtml`).
+  `canonicalLinkRun` stores the URL as Dart READ it (`webTargetOf(...)`:
+  `%3a` → `%3A`, host lower-cased, `:443` dropped) — tests assert that form.
+  Old chat bodies are never re-pulled to repair links (the Teams rule: every
+  Teams call traces to a user action); a widened lookback or Forget does.
 - One shared prompt per LLM task across sources, pinned by parity tests;
   examples ride in the user message, never the system prompt.
 - Prefer narrow SQL statements over widening a `copyWith`. Request parameters
@@ -874,8 +881,11 @@ that bite.
   - On a write, `calendar_scope_missing` also answers a read-only calendar.
     The app writes only to the primary calendar, so treat it as a missing
     permission.
-  - `body_preview` and OOO text are untrusted. Render them as plain `Text`,
-    and pass them through `wrapUntrusted` before any model reads them.
+  - `body_preview` and OOO text are untrusted. Render them as text, never
+    markup — the event panel's "From the invite" goes through `LinkedText`
+    (http(s)/mailto only, the host's guarded launcher) so a Teams invite's
+    "Join:" line is clickable; everything else plain `Text` — and pass them
+    through `wrapUntrusted` before any model reads them.
 - **Time (D13):**
   - Instants are stored as `isoStamp` UTC (`calendarStamp`, same width), so
     SQL string order is chronological. An all-day event is `yyyy-mm-dd` with
@@ -941,6 +951,78 @@ that bite.
   - A write that confirms by its kind but whose dry run named nobody says
     "This may email: …" from `mayEmailFor`; the toast says "Emails go to …"
     (a preview, never "Emailed").
+- **Invitations (the clean-up round, 2026-10):**
+  - A meeting message's time is never a deadline. ONE SQL reader,
+    `MessageStore._meetingMessageSql(alias)` (a `json_valid`-guarded CASE,
+    lower-cased `$.meeting` NOT IN ('', 'none') — Graph's enum has `none`),
+    feeds the conversations query's `latest_deadline` and
+    `latestInboundMeta`'s `deadline`; ONE Dart reader,
+    `Message._meetingTypeOf`, feeds `meetingMessageType` and both factories,
+    which read `deadline` as null for a meeting message. The extraction
+    computes the deadline once for `writeMessageText`, `foldCtaUp` and the
+    activity row. An invitation is never a Due row nor a deadline reminder.
+  - A declined meeting is NOT drawn (agenda, grid, Today); a cancelled one is,
+    struck through. `_applyLocally` marks the mirror declined at once, so a
+    Dismiss or No leaves the agenda before the write returns.
+  - Dismiss is `RespondToEvent(sendResponse: false)` (`quiet`): a bare
+    decline — never a comment or a proposal (asserted in `_send`), emails
+    nobody (`mayEmailFor` adds none), still waits on the strip (label
+    'Dismiss'), activity `quiet: true`. `EventActions.dismissKey` shows only
+    while `needsResponse`, in compact and full mode. No path rebuilds a
+    `RespondToEvent` (retry reuses the object; `_undoFor` is null for an
+    answer).
+  - An unanswered meeting's agenda row carries the compact Yes / Maybe / No /
+    Dismiss (`DayPane.meetingActions`, host-built like `inviteActions`) while
+    the meeting has not ended; otherwise the 'RSVP owed' chip. After Yes the
+    row stays and the buttons go; after Dismiss the row leaves. An attended
+    meeting in a clash keeps its buttons only for a HARD clash or a soft one
+    whose other side answered Maybe — never for an unanswered pencilled
+    invite beside it (that invite is the side to settle, and has its own).
+    The '⚠ overlaps' heading is `error` for a hard clash, `inkMuted` for a
+    soft-only one (the grid's rule).
+  - The answer belt: `CalendarSync.answerHold` (2 min). `guarded`,
+    `keepAnswerFor` and `held` are read INSIDE the page transaction after
+    `_checkRun`; `upsertEvents(keepAnswerFor:)` keeps the mirror's own
+    ANSWER against any differing value the page carries (Accepted → Maybe is
+    a main flow since the clash buttons; a page that still says `accepted`
+    must not put it back), and a page that agrees is applied; `_applyLocally`
+    notes the write BEFORE `setResponseStatus`. A test of a lagging page goes through
+    `syncNow(force:)`, never `upsertEvents` alone.
+- **Standing (the clean-up round, 2026-10):**
+  - `standingOf(e)` (`services/calendar/event_standing.dart`, re-exported by
+    `event_view.dart`) is the ONE reader of `responseStatus`, and of
+    `showAs` for the tentative hold, for every face and for the overlap
+    maths — never compare the strings elsewhere (the one other `showAs`
+    read, `overlaps.dart` dropping `free`/`workingElsewhere` time, is about
+    blocking, not standing). Order: cancelled → organizer (`isOwnersEvent`,
+    which lives there now) → the ANSWER (`answerOf`: accepted / tentative /
+    declined — **the answer wins over `showAs`**: Outlook pencils every new
+    invite in as `showAs: tentative` and a fresh Yes only moves `show_as`
+    on a later delta, so "accepted + shown tentative" is ACCEPTED, never a
+    Maybe; the second live pass found every face calling a just-accepted
+    meeting a Maybe for minutes) → unanswered (`needsResponse`) →
+    `showAs: tentative` → noAnswerNeeded. **Unanswered wins over "shown
+    tentative"** for the same reason. `setResponseStatus` also moves
+    `show_as` the way Outlook records an answer (tentative → busy on Yes,
+    → tentative on Maybe) and `keepAnswerFor` keeps the stored `show_as`
+    with the kept answer. `isTentativeHold(e)` (a
+    Maybe standing OR `showAs` tentative) is the soft-overlap predicate and
+    `tentativeBlocks`' rule; a Maybe ANSWER is a soft overlap now.
+  - The chosen (disabled) answer button follows the ANSWER (`answerOf`),
+    not the standing. `responseLine` reads the standing; its seven strings
+    are unchanged.
+  - The palette is `widgets/event_standing_style.dart` (`toneOfStanding`,
+    `standingBarColor`, `standingFillColor`): organizer/accepted/
+    noAnswerNeeded → primary, Maybe → attention, unanswered/declined/
+    cancelled → neutral (bar `inkMuted`). A hard clash turns a tile's bar the ERROR colour (not
+    attention — that is Maybe's) and prefixes '⚠'; a soft one only the '⚠'.
+    `theme/` never imports `services/`; the style file is in widgets for
+    that reason.
+  - Grid tiles overlap side by side through
+    `MultiDayBodyConfiguration(eventLayoutStrategy:
+    EventLayoutStrategy.sideBySide())` — the view factories do not take it.
+  - The word is overlap or clash, never "conflict" (`CalendarEventChanged`,
+    an etag rejection, owns that word).
 - **The UI write path:**
   - `CalendarWriteFlow` is the ONE write state machine. The panel, cards,
     grid, command card and Find a time all go through it (or through
@@ -997,14 +1079,144 @@ that bite.
 - **Briefs:**
   - Briefs read MAIL only. Teams participants are `teams:<id>` and carry no
     address to match an attendee.
+  - Threads: the event's own invite threads first (`messagesForEvent` for the
+    occurrence, then its series master; ≤ 3), then the 30-day address match;
+    `noMail` means no threads at all. Materials (`BriefMaterial`) are the
+    files on THIS MEETING'S OWN invite threads only (the occurrence's, then
+    its series master's) — inbound and outbound, non-inline `file|reference`
+    attachments that are not images (the owner's own: sender `you`). Files on
+    the address-matched threads are `BriefInput.otherFiles`: names only
+    (≤ 4, 80 chars as fenced), written under "Files on other threads with
+    these people (NOT sent for this meeting)", and the prompt forbids reading
+    the meeting's purpose from them (live lesson 2026-10-04: a test meeting
+    with no attachment was briefed as a candidate review because the same
+    person's earlier invites carried a resume). Materials are
+    newest first, the newest copy per lowercased name, ≤ 6, each with its
+    digest, its TEXT (`attachmentTextOf` for a `done` file, cut at a word
+    to `materialTextCap` 6000, raw — the task fences it; `textCut` says it
+    was cut) and ≤ 2 passages
+    from ONE scoped `chunkKnn` (attachment ids, then the exact
+    `(messageId, attachmentId)` pair). The planner gathers with
+    `passages: false`, the LIGHT gather: no text, no people, no embedding
+    (none of them hashed, so the hash is the same); only the handler reads
+    them and embeds the meeting, once, lazily. The hash carries
+    `material|msg|att|textStatus|digestStatus`, so a deck whose text or
+    digest lands later re-briefs on the next pass.
+  - People (`BriefPerson`, handler's gather only): the organiser first,
+    then the attendees' order (a deliberate departure from D14), the cap
+    ≤ `maxPeople` 8 after (+`peopleMore`), `briefOrgOf` (the label before
+    the public suffix; the tenant for `*.onmicrosoft.com`, past a
+    routing `mail` label; '' for a
+    consumer domain or an IP), the answer only on the
+    owner's own organiser copy ("response not known" elsewhere), their own
+    last met, threads they are in, their newest inbound's `askOwnWords` cut
+    at 240 and fenced `last_words`, their open ask. NOT hashed (`lastMet`
+    moving alone never re-briefs). The typedef `briefOthers` returns is
+    `BriefOther`.
+  - Waiting for the files: `BriefInput.materialsPending` — a material
+    `text_status == 'pending'` AND its `attachment_text` work row
+    (`workRowOf`, entity `attachmentEntityId(msg, att)`) `pending` or
+    `processing` AND being read for less than `BriefGatherer.pendingMaxAge`
+    (2 h, from the later of the mail's `received_at` and the work row's
+    `created_at`, so an old invite's freshly fetched file is waited for).
+    There is NO `error` `text_status`: a text work row that gave up
+    leaves the attachment row `pending` forever, so the work row is the
+    rule. A `pending` file with no work row (`ensureBodiesFor` queues none)
+    is `BriefEligible.unqueued`; the handler `queueText`s it once (INSERT OR
+    IGNORE, `queued_text: n`) and waits on it (its reading starts now). The
+    handler decides on the LIGHT gather (`passages: false`) and runs the full one
+    only before a call. Pending AND no ready brief AND the start more than
+    `MeetingBriefHandler.pendingGrace` (20 min) away AND nobody asked for
+    it (`BriefRequest(asked: true)`, Regenerate, never waits): skipped
+    `ineligible:materials_pending` through `_skip`, NO call; a ready brief
+    is rewritten anyway, inside the grace it briefs with what is read. The
+    planner queues that row when the hash moves, when the light gather
+    says nothing is pending any more (once per stored row, `_endedFor`),
+    and once more on the same hash inside the grace.
+  - A chosen thread's mail with `has_attachments` and no `attachments` row
+    (the owner's sent invite: its detail runs only on a thread open) is
+    `BriefEligible.unlisted` (≤ 4). The handler's `fetchDetails` (the
+    sync's `ensureMessageBody`, which lists the files AND queues their text;
+    `ensureBodiesFor` queues none) runs ONCE through
+    `MeetingBriefHandler.fetchEach` (one failed id costs only itself; the
+    closure returns the count and never throws), then it gathers again
+    whenever any fetch completed (`fetched: n`, the real count); a fetch
+    that fetched nothing keeps the first gather. Never a loop.
+  - The task is v3, evidence first, dense, second person ("you", never
+    "the owner"): `evidence, headline (≤ 320), briefing[] (≤ 6 × 320),
+    people[{name, line}] (≤ 8, line 220), materials[{file, points[]}] (≤ 4
+    × ≤ 5 × 220), questions (≤ 5 × 220), open_asks, points (≤ 5 × 200),
+    prep (≤ 3 × 120)`; `maxItems` only on `briefing`/`questions`/`prep`;
+    headline and briefing cut at a word (`capAtWord`); 2700 tokens (the
+    caps' sum / 4 within 1.2 × that, pinned); the first entry per file
+    index wins. A
+    material index outside the list is dropped, never -1. `MeetingBrief`
+    writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,
+    and `BriefMaterialOut.takeaway` (the points joined) is kept for old
+    readers; the faces draw the points. The user message has a People
+    block after `With:` (the fenced `name · org`, the org being a domain
+    owner's words; "open ask: yes (see Open asks)", never the ask again);
+    every label (file names, thread and last subjects, the meeting's
+    subject, storyline titles, attendee and people names) is capped at 120
+    AS ESCAPED (`labelCap`, `_label`: the fence writes `&` as five). The
+    materials' digest + `material_text` + passages share `materialsBudget`
+    10000, a block costing its length PLUS its digit count, in two rounds
+    (`_spend`): digest then text (whole, else a word-cut head while > 1000
+    is left), then passages only for a material whose text was not written
+    whole and uncut (`!textCut`, never a length guess).
+    `materialTextCharsWritten` runs the same spend for the activity row's
+    `text_chars`. The size guard in `meeting_brief_task_test` holds a
+    maximal prompt (every label 300 characters of `&<>`, four other files
+    fenced at `otherFileNameCap` 80) at ≤ 38500 characters (38133 measured,
+    plus ~1%; 37012/37800 before the other-files block; the ceiling is
+    (16384 − 2700) × 3.0 ≈ 41052). A material line
+    puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
+    block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
-    forced sync after a write). It rechecks an event at
-    most every 15 minutes in memory, except rows with no brief, which it
-    plans at once after Clear AI results.
+    forced sync after a write). It skips an event only when its brief is
+    fresh (< 2 h) AND the inputs hash is unchanged; `_queuedFor` (event id →
+    last queued hash) stops a retry storm; it rechecks a `failed` row at
+    most every 15 minutes in memory (a back-off). `ready` rows, rows with no
+    brief (after Clear AI results) and `skipped` rows (any `ineligible:*`)
+    are gathered on EVERY pass: a Gmail invite's event syncs seconds before
+    its mail, and a deck's text landing should reach the brief at once.
   - A failed or skipped run over a ready brief calls `touchBrief` (it moves
     only `generated_at`) — except a skip for `gone`, `declined` or
     `cancelled`, which replaces the brief with a skipped row.
   - Briefs are keyed by OCCURRENCE, never by master.
+  - The box is today and tomorrow in the DISPLAY zone, one function:
+    `briefHorizonEnd(nowUtc, zone)` (the local midnight that ends tomorrow;
+    `too_far` is `!start.isBefore(end)`), read by the planner's window, the
+    quick check and the panel. The host skips `_planBriefs` while no zone
+    has resolved — never UTC's tomorrow. A brief lives until its meeting
+    ENDS (`deleteBriefsOfEndedEvents`), not until it leaves the window, so a
+    hand-asked brief for next week survives every pass. `asked`
+    (`BriefRequest`, Regenerate and **Write a brief** `brief-write`) lifts
+    the files wait, the unchanged hash, `too_far` and `no_mail` (the brief
+    is then written from the invite and its people, "Threads: none.") —
+    never `past`, `cancelled`, `declined`, `no_others` or `too_many`; the
+    panel offers the button only where the quick check with `asked: true`
+    is clear.
+  - The agenda: `dayBriefsProvider(day)` watches the day's events and
+    `briefRevisionProvider` (NOT `briefWorkTickProvider`) and holds READY
+    briefs only; `dayBriefsWaitingProvider(day)` shares its one read and
+    holds the `materials_pending` event ids (none while processing is off);
+    `DayPane` draws the glance (`day-brief-teaser-$id`, three lines, not
+    focusable) and the chevron (`day-brief-toggle-$id`, the one keyboard
+    toggle), else a note in the glance slot (`day-brief-note-$id`, one
+    line, no chevron, never once the meeting has started); the panel's
+    pending sentence gives way to `eligible == false`'s reason; `BriefSection(compact:)` draws a READY brief's body,
+    else only the `materials_pending` sentence (`statusKey`), else nothing;
+    both faces draw ONE body in the catch-up order — Briefing
+    (`brief-briefing`, one `SelectableText`), From the materials (chip
+    `brief-material-$i`, points `brief-material-point-$i-$j` inside
+    `brief-material-text-$i`), People (`brief-person-$i`, one `Text.rich`),
+    Questions, Prep, Open asks, then the points under References (compact:
+    at most `compactPointsCap` = 3); the widget never reads
+    `BriefMaterialOut.takeaway`; `_setSelectedDay` is the one writer of
+    `_selectedDay` and clears `_expandedBriefs` only when the day changes;
+    `_openMaterial` rebuilds the `AttachmentRef` from `attachmentRow` and
+    toasts 'That file is no longer here.' on a missing row.
 - **The Day command bar:**
   - The order is: Dart resolution, then the decision head, then the
     lexicon, then the generative model on Enter only (under the 0.8 bar, or
@@ -1083,6 +1295,42 @@ that bite.
     call over the window starting now; without hours, one call for 5.
     Counted in the `find_time` row's `graph_calls`
     (`FindTimeResult.graphCalls`). The `_insideHours` drop is a belt only.
+  - Hints are read by the RULES at once (`readAskHints`) and by the model
+    (`ask_read`, `AskReader.readFor`) when it answers. The model copies
+    phrases that must appear in the subject and own words on word
+    boundaries (`findPhrase`, `phrase_guard.dart`, shared with the command
+    router) and a meal only when that meal's regex matches; Dart resolves
+    each phrase on its own through ONE core (`_hintsFrom`), so the 34 rules
+    tests in `ask_hints_test.dart` are the spec for both readers. Readings
+    are stored as PHRASES (`ask_readings`, derived) and re-resolved against
+    today. Several days (`AskHints.days`, `day` is the first) only widen the
+    `theirs` window: one Graph call per day named, none between; the week
+    pills keep the first day.
+  - The inbox waits `InboxScreen.askReadWait` (4 s) for the model INSIDE
+    the one read in flight, so every caller waits the same once; past it
+    the first search runs on the rules and the reading refines later
+    (`_AskSearch.refining`, nulled by `forgetReading`). A differing reading
+    sets `hintsSource = 'model'`, re-seeds through `_seedFromHints` (the
+    first search's own rule) and searches AT MOST once more per reading; a
+    folded ask drops its answer instead. **The owner's pills win**: a pill
+    press sets `pickedMinutes` / `pickedWindow` (kept by `forgetReading`,
+    never set by seeding — `_changeAsk` no longer sets `searched`), and
+    `_seedFromHints` leaves a picked field alone. **The model's "none"
+    never erases the rules' day**: a reading with nothing in it against a
+    rules reading that found something is kept as the rules', recorded
+    `agree: false, applied: false`. `chooseAskHints(rules:, model:)` in
+    `ask_hints.dart` IS that rule — the draft's slot step calls it, and the
+    inbox's `kept` expression is the same rule (keep them equivalent). The
+    `ask_read` verdict row is booleans only. Screen tests override `askReaderProvider` (the helper defaults to
+    a disabled reader) and shorten the wait with
+    `InboxScreen.askReadWaitOverride` (and the stale path with
+    `askResultLifetimeOverride`), both cleared in `tearDown`; a held read
+    left pending at the end fails the test on the timeout's timer.
+  - The ask fixture (`test/fixtures/ask_reads/asks.jsonl`, 40 rows) is
+    scored offline by `ask_read_fixture_test.dart`, which PRINTS the rules'
+    score and asserts shape only; `expect` is a perfect reading, never the
+    rules' output. `make ask-read-eval` is live (`@Skip`'d, `--run-skipped`)
+    and never in the gate.
   - With a weekday read, a week pill means THAT weekday of the week
     (`weekdayWithin`, pills "This Fri" / "Next Fri", or the date they mean
     once this week's has gone), falling back to the
@@ -1106,6 +1354,20 @@ that bite.
   - An empty Graph answer falls back to the owner's free times unless
     `empty_reason` is `attendeesunavailable`; `findTimeEmptyFallback` is the
     one rule.
+  - A draft's times (`draft_slots.dart`) are appended by Dart after the
+    model call — the model never sees the calendar, so the v4 prompt stands
+    and a cloud target sees no slot. It reuses the column's helpers, never
+    copies: `askWindowFor` (`find_time.dart`) and `otherAddresses` /
+    `otherPeople` / `ownerAddressesOf` (`scheduling_ask.dart`, the inbox
+    delegates). Only `suggested`, never-improved drafts are redrafted when
+    their times go stale (`DraftSlotRefresher`, beside `_planBriefs`;
+    `slotGone` is the one rule, also applied before a draft offers a slot);
+    the delete is `deleteSuggestedDraft` (status checked in the DELETE) and
+    the re-queue passes the old `workPayload` back — `requeueWork` with no
+    payload over a done row clears it. The search never throws; an auth
+    failure reaches the lane through `FindTimeResult.error`. The reading's
+    call and the `find_time` row run in their own `inSpan`, or they would
+    drain the draft row's tally.
 - **Inbox widget tests** reach the real `McpCalendarBackend` through
   `calendarSyncProvider`, which fails fast and silently. To observe the sync,
   build a recording `CalendarSync` subclass INSIDE the test body
@@ -1120,3 +1382,43 @@ that bite.
     compound command, so stage and commit as separate commands.
   - The commit hook only WARNS when the gate stamp is older than the staged
     files. Re-run the gate.
+
+## Reminders (the calendar-automation round, 2026-10)
+
+`docs/pipeline/15-reminders.md` describes the feature. The rules that bite:
+
+- **The carrier is To Do, and it is dark until consent.** Every To Do call
+  answers `tasks_scope_missing` (`TasksScopeMissing`) until the owner's
+  consent round: that is UNAVAILABLE, never retried and never an error row.
+  Every door reads `tasksAvailabilityProvider` first and, when it is not
+  `available`, shows `tasksUnavailableSentence` and offers nothing to pick
+  (while it is still loading the pills draw; a pick then meets the
+  service's own precheck).
+  Widget tests that make it available override BOTH `tasksBackendProvider`
+  (a recording fake declared in the test, every method implemented) AND
+  `tasksAvailabilityProvider` (`overrideWith((ref) async =>
+  TasksAvailability.available)`); the default under `flutter test` is
+  unavailable (`inbox_reminders_test.dart`).
+- **The host computes every instant.** `ThreadActionBar` never reads the
+  clock or the zone: the inbox builds its `ReminderPill`s
+  (`remindChoices`, `services/reminders/remind_choices.dart`) and reads a
+  typed time through `resolveRemindText` (the bar's callback returns a
+  `ReminderPill?`, previewed by its label). The strip is Mark done's inline
+  choices pattern (its own focus node taken as it opens, Escape, the
+  `_choicesCap` height, one strip at a time); Remind me has NO key (`r` is
+  Reply).
+- **Bumps are the caller's.** The service bumps nothing (services never
+  import providers): the inbox bumps `reminderRevisionProvider` after every
+  `create` and `cancel`, and after a tend whose `reconcile()` or `plan()`
+  returned > 0, reading the notifier ONCE before the awaits.
+- **The poll's tend is single-flight** (`_tending`): `reconcile()` then
+  `plan()` in one try off `_refresh`'s `finally`, everything caught and
+  traced by type, skipped until the zone resolves. Reminders have no work
+  kinds, so there is nothing to `requeueWork`.
+- **Follow-up at send**: `DraftNotifier.lastEchoId` is the local echo id of
+  the last mail reply sent (null otherwise); `_send` reads the choice before
+  the await and creates the reminder RIGHT after `send` returns `sent`
+  (anchor and Graph id = the echo id; the re-anchor is a 15-minute time
+  match). A reminder toast passes `cleared: 0` so the pile's progress line
+  is untouched; with reply-marks-done on, the follow-up is a line on the
+  done toast and its Undo stays the done's.

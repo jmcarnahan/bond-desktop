@@ -9,6 +9,8 @@ import '../services/calendar/overlaps.dart';
 import '../theme/tokens.dart';
 import 'clock_tick.dart';
 import 'day_pane.dart' show DayPane;
+import 'event_standing_style.dart';
+import 'linked_text.dart';
 
 /// One meeting, read beside whatever named it: when it is, whether to join,
 /// where the owner stands, who is coming, and which conversations are about
@@ -24,9 +26,11 @@ import 'day_pane.dart' show DayPane;
 /// ahead. The actions and overlaps a host passes are for that occurrence.
 ///
 /// Everything the organiser wrote — subject, location, the invite's body —
-/// arrives untrusted and is drawn as plain text: never a link, never markup.
-/// The only links are the join URL and Outlook's own page, each behind a
-/// button, through [onOpenLink] and the screen's guarded launcher.
+/// arrives untrusted and is drawn as text, never markup. The subject and
+/// location are plain; the invite's body goes through [LinkedText], so a web
+/// address in it (a Teams invite's "Join:" line) opens the way a mail body's
+/// does — http(s) and mailto only, through [onOpenLink] and the screen's
+/// guarded launcher, the same door the Join button and Outlook's page use.
 class EventPanelBody extends StatelessWidget {
   const EventPanelBody({
     super.key,
@@ -39,6 +43,7 @@ class EventPanelBody extends StatelessWidget {
     required this.onOpenLink,
     required this.onOpenThread,
     this.onOpenStoryline,
+    this.onOpenEvent,
     this.onOpenSettings,
     this.brief,
     this.actions,
@@ -62,6 +67,10 @@ class EventPanelBody extends StatelessWidget {
 
   static Key linkKeyFor(String source, String conversationKey) =>
       ValueKey('event-panel-link-$source-$conversationKey');
+
+  /// The key of the [i]th row of the clash list under [overlapKey], hard
+  /// overlaps first.
+  static Key overlapRowKeyFor(int i) => ValueKey('event-panel-overlap-$i');
 
   static Key attendeeKeyFor(String address) =>
       ValueKey('event-panel-attendee-$address');
@@ -88,6 +97,10 @@ class EventPanelBody extends StatelessWidget {
 
   /// Opens a link's storyline. Null draws no storyline chips.
   final void Function(String storylineId)? onOpenStoryline;
+
+  /// Opens another event — a clashing meeting — in this same side panel;
+  /// null leaves the clash rows inert.
+  final void Function(String eventId)? onOpenEvent;
 
   /// Where the scope-missing sentence's button goes. Null draws no button.
   final VoidCallback? onOpenSettings;
@@ -173,11 +186,42 @@ class EventPanelBody extends StatelessWidget {
         child: Text(text, style: BondType.label),
       );
 
+  /// One clashing meeting under the '⚠ overlaps' heading — subject and
+  /// time, 'maybe' for a soft one — opening it in this panel when the host
+  /// can.
+  Widget _clashRow(int i, CalendarEvent other, {required bool soft}) {
+    final open = onOpenEvent;
+    final text = Text(
+      clashLabel(zone, other, soft: soft),
+      style: BondType.small.copyWith(
+        color: soft ? BondColors.inkMuted : BondColors.inkSecondary,
+      ),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+    final padded = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: text,
+    );
+    if (open == null) return KeyedSubtree(key: overlapRowKeyFor(i), child: padded);
+    return InkWell(
+      key: overlapRowKeyFor(i),
+      onTap: () => open(other.id),
+      borderRadius: BondRadii.smAll,
+      hoverColor: BondColors.faintGround,
+      child: padded,
+    );
+  }
+
   Widget _found(CalendarEvent event, List<CalendarEvent> occurrences) {
     final shown = displayOccurrence(event, occurrences, now.toUtc(), zone);
     final when = eventWhenLine(shown, zone: zone, today: today);
     final series = isSeriesEvent(event) || isSeriesEvent(shown);
-    final overlap = overlaps == null ? null : overlapLine(overlaps!);
+    // Hard overlaps first; all-day banners are not overlaps.
+    final clashes = [
+      for (final e in overlaps?.hard ?? const <CalendarEvent>[]) (e, false),
+      for (final e in overlaps?.soft ?? const <CalendarEvent>[]) (e, true),
+    ];
     final tally = attendeeTally(shown);
     final organiser = shown.organizerName.trim().isNotEmpty
         ? shown.organizerName.trim()
@@ -229,18 +273,32 @@ class EventPanelBody extends StatelessWidget {
         else if (organiser.isNotEmpty)
           Text('Organised by $organiser', style: _muted),
         const SizedBox(height: BondSpacing.s8),
-        Text(responseLine(shown), key: responseKey, style: BondType.small),
+        Text(
+          responseLine(shown),
+          key: responseKey,
+          style: BondType.small.copyWith(
+            color: bondToneColors[toneOfStanding(standingOf(shown))]!
+                .foreground,
+          ),
+        ),
         if (actions != null) ...[
           const SizedBox(height: BondSpacing.s8),
           actions!,
         ],
-        if (overlap != null) ...[
+        if (clashes.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s4),
           Text(
-            overlap,
+            '⚠ overlaps',
             key: overlapKey,
-            style: BondType.caption.copyWith(color: BondColors.attention),
+            // Red for a real clash; a Maybe-only one is said, not alarmed.
+            style: BondType.caption.copyWith(
+              color: (overlaps?.hard.isNotEmpty ?? false)
+                  ? BondColors.error
+                  : BondColors.inkMuted,
+            ),
           ),
+          for (final (i, (other, soft)) in clashes.indexed)
+            _clashRow(i, other, soft: soft),
         ],
         if (shown.attendees.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s16),
@@ -266,9 +324,18 @@ class EventPanelBody extends StatelessWidget {
         if (body.isNotEmpty) ...[
           const SizedBox(height: BondSpacing.s16),
           _heading('From the invite'),
-          // The organiser's words, untrusted: plain text that can be
-          // selected and copied, and nothing in it is a link.
-          SelectableText(body, key: bodyPreviewKey, style: _muted),
+          // The organiser's words, untrusted: selectable text whose web
+          // addresses open the way a mail body's do — `LinkedText` lets
+          // only http(s) and mailto through, and the host's launcher
+          // guards the rest. A Teams invite's "Join: https://…" line is why.
+          LinkedText(
+            body,
+            key: bodyPreviewKey,
+            style: _muted,
+            onOpenLink: (uri) => onOpenLink(uri.toString()),
+            maxLabelChars: bodyMaxLabelChars,
+            maxLabelWords: bodyMaxLabelWords,
+          ),
         ],
       ],
     );

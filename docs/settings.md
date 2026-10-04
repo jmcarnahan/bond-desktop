@@ -149,6 +149,18 @@ the button. The line is drawn only once the host has read the counts, and
 it is not in the section summary. See
 [pipeline/11-needs-you.md](pipeline/11-needs-you.md).
 
+Above it sits **Remind me in To Do about deadlines** — *A Needs You thread
+with a deadline gets a To Do reminder that morning* — keyed
+`settings-remind-deadlines`, wired by `onRemindDeadlinesChanged` and stored
+as `remind_deadlines` (`AppPrefs.remindDeadlines`). It is **on by default**:
+the reminder lands in the owner's own Microsoft To Do and emails nobody. While
+To Do cannot carry a reminder (`tasksAvailability` is not `available`, which
+is every install until the consent round) the caption gains ` · Needs the To
+Do permission` — or, on the SDK backend, where To Do is never reachable,
+` · Needs the Bond server connection` — and the switch stays live, because
+the pref is the owner's wish and holds until the permission arrives. What it turns on is the deadline
+planner ([pipeline/15-reminders.md](pipeline/15-reminders.md#the-deadline-planner)).
+
 The section's last control is a switch, **Sending a reply marks it done** — *A
 thread leaves Needs You as soon as you answer it, instead of waiting for you to
 mark it done.* — keyed `settings-reply-send-marks-done` and wired by
@@ -269,13 +281,17 @@ which server they belong to. Which source answers follows the mode the screen is
 
 The rows are `microsoftPermissions` in `settings_connection_section.dart`, in
 this order: **Send mail** (`mail.send`), **Save drafts** (`mail.readwrite`),
-**Teams chats** (`chat.read`, satisfied by `Chat.ReadWrite`) and **Calendar
+**Teams chats** (`chat.read`, satisfied by `Chat.ReadWrite`), **Calendar
 (read and write)** (`calendars.readwrite`: the app answers, moves, cancels and
-creates meetings, so the row names both halves of the grant). Only the first
-two count toward the **Sign in again to enable** offer: Teams and Calendar
-arrive through a platform-side Microsoft reconnect in MCP mode, which this
-app's sign-in cannot deliver, so a cross on either is reported and never
-offered. The section's `_subsumedBy` copy
+creates meetings, so the row names both halves of the grant) and **To Do
+reminders** (`tasks.readwrite`, satisfied by nothing else; dark until the
+consent round — every install shows a cross there until the owner's consent
+round adds the scope and each user reconnects, see
+[pipeline/15-reminders.md](pipeline/15-reminders.md#dark-until-consent)).
+Only the first two count toward the **Sign in again to enable** offer: Teams,
+Calendar and To Do arrive through a platform-side Microsoft reconnect in MCP
+mode, which this app's sign-in cannot deliver, so a cross on any of them is
+reported and never offered. The section's `_subsumedBy` copy
 (`calendars.read` ← `calendars.readwrite` among them) must agree with
 `McpAuthSession._subsumedBy`.
 

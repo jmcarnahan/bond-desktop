@@ -22,6 +22,7 @@ import '../services/decision/needs_you_predicate.dart'
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../services/models/managed_model_status.dart' show ManagedModelStatus;
+import '../services/reminders/tasks_availability.dart';
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
@@ -206,6 +207,18 @@ class SettingsScreen extends StatefulWidget {
   /// `AppPrefs.replySendMarksDone`. Null takes the switch off the section.
   final bool replySendMarksDone;
   final void Function(bool value)? onReplySendMarksDoneChanged;
+
+  /// Whether a Needs You thread with a deadline gets a To Do reminder that
+  /// morning (`AppPrefs.remindDeadlines`, on by default). A null
+  /// [onRemindDeadlinesChanged] takes the switch off the section.
+  final bool remindDeadlines;
+  final void Function(bool value)? onRemindDeadlinesChanged;
+
+  /// Whether To Do can carry a reminder right now. Anything but
+  /// [TasksAvailability.available] adds a caption to the switch above; the
+  /// switch itself stays live, because the pref is the owner's wish and
+  /// holds until the permission arrives.
+  final TasksAvailability tasksAvailability;
 
   final bool storylineNewestFirst;
   final void Function(bool value)? onStorylineNewestFirstChanged;
@@ -554,6 +567,9 @@ class SettingsScreen extends StatefulWidget {
     this.onSignOutOfServer,
     this.replySendMarksDone = false,
     this.onReplySendMarksDoneChanged,
+    this.remindDeadlines = true,
+    this.onRemindDeadlinesChanged,
+    this.tasksAvailability = TasksAvailability.available,
     this.storylineNewestFirst = false,
     this.onStorylineNewestFirstChanged,
     this.probeServer,
@@ -651,6 +667,9 @@ class SettingsScreen extends StatefulWidget {
   static const Key replySendMarksDoneKey =
       ValueKey('settings-reply-send-marks-done');
 
+  /// The Needs You section's To Do switch, keyed for the same reason.
+  static const Key remindDeadlinesKey = ValueKey('settings-remind-deadlines');
+
   /// The Processing section's controls, keyed for the reason the three above
   /// are: 'Clear AI results' is also most of the caption beside it, and both
   /// confirm buttons carry the same words on purpose.
@@ -705,7 +724,7 @@ class SettingsScreen extends StatefulWidget {
   /// an ordinary phrase, and the caption beside it contains half of it.
   static const Key checkForUpdatesKey = ValueKey('settings-check-for-updates');
 
-  /// The three extended permissions, which are [microsoftPermissions] — the
+  /// The five extended permissions, which are [microsoftPermissions] — the
   /// table itself moved to the section that renders the rows. Kept here
   /// because `settings_connection_test.dart` reads its length off
   /// `SettingsScreen.permissions`.
@@ -723,6 +742,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _cloudDraftsStanding = widget.cloudDraftsStanding;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
   late bool _replySendMarksDone = widget.replySendMarksDone;
+  late bool _remindDeadlines = widget.remindDeadlines;
 
   /// One stop per [NeedsYouTuning.step] from end to end: eighteen, so every
   /// stop is a threshold the stored pref can hold and the number under the
@@ -927,6 +947,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     if (old.replySendMarksDone != widget.replySendMarksDone) {
       _replySendMarksDone = widget.replySendMarksDone;
+    }
+    if (old.remindDeadlines != widget.remindDeadlines) {
+      _remindDeadlines = widget.remindDeadlines;
     }
     // The host clamps: a typed 5000 comes back as 1000, and the field has to
     // say what the ledger line beside it says. Only while the field still
@@ -2374,6 +2397,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: BondSpacing.s12),
           ..._needsYouAnswersBlock(answers),
         ],
+        // Above the reply switch, which stays last: this one is about what
+        // the pile asks of the owner, that one about leaving it.
+        if (widget.onRemindDeadlinesChanged case final onChanged?)
+          SwitchListTile(
+            key: SettingsScreen.remindDeadlinesKey,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _remindDeadlines,
+            title: Text(
+              'Remind me in To Do about deadlines',
+              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(_remindDeadlinesCaption(), style: BondType.caption),
+            onChanged: (value) {
+              setState(() => _remindDeadlines = value);
+              onChanged(value);
+            },
+          ),
         // Last in the section because it is about leaving the pile rather than
         // about what lands in it, and it is the one control here that acts on
         // threads already judged.
@@ -2399,6 +2440,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
       ],
     );
+  }
+
+  /// The To Do switch's caption, with what is missing named when To Do
+  /// cannot carry a reminder yet: the permission, or (in SDK mode) the Bond
+  /// server connection — the two causes `tasksUnavailableSentence` names.
+  /// While the grant is still being read the host passes `available`.
+  String _remindDeadlinesCaption() {
+    const caption =
+        'A Needs You thread with a deadline gets a To Do reminder that morning';
+    return switch (widget.tasksAvailability) {
+      TasksAvailability.available => caption,
+      TasksAvailability.scopeMissing =>
+        '$caption · Needs the To Do permission',
+      TasksAvailability.sdkMode => '$caption · Needs the Bond server connection',
+    };
   }
 
   // ── Notifications ─────────────────────────────────────────────────────────

@@ -255,6 +255,51 @@ void main() {
     });
   });
 
+  group('a meeting message and its deadline', () {
+    Map<String, Object?> row(String? meta) => {
+          'source_message_id': 'm1',
+          'deadline': 'Sunday 2pm',
+          'source_meta_json': meta,
+        };
+
+    test("a meeting message's deadline reads null; a plain mail's reads as "
+        'stored; a meeting type of none keeps it', () {
+      final invite =
+          Message.fromRow(row('{"meeting": "meetingRequest", "event_id": "e"}'));
+      expect(invite.meetingMessageType, 'meetingRequest');
+      expect(invite.deadline, isNull);
+      expect(Message.fromRow(row(null)).deadline, 'Sunday 2pm');
+      expect(Message.fromRow(row('not json')).deadline, 'Sunday 2pm');
+      expect(Message.fromRow(row('{"meeting": ""}')).deadline, 'Sunday 2pm');
+      final none = Message.fromRow(row('{"meeting": "none"}'));
+      expect(none.deadline, 'Sunday 2pm');
+
+      final cancelled = Message.fromJson({
+        'id': 'm1',
+        'deadline': 'Sunday 2pm',
+        'source_meta_json': '{"meeting": "meetingCancelled"}',
+      });
+      expect(cancelled.deadline, isNull);
+      // The blob rides along, so the getter agrees with the dropped deadline.
+      expect(cancelled.meetingMessageType, 'meetingCancelled');
+      expect(Message.fromJson({'id': 'm1', 'deadline': 'Sunday 2pm'}).deadline,
+          'Sunday 2pm');
+    });
+
+    test("Graph's none names no meeting", () {
+      expect(const Message(id: 'm1', outbound: false, sourceMetaJson: '{"meeting": "none"}')
+              .meetingMessageType,
+          isNull);
+      expect(const Message(id: 'm1', outbound: false, sourceMetaJson: '{"meeting": " None "}')
+              .meetingMessageType,
+          isNull);
+      expect(
+          const Message(id: 'm1', outbound: false, sourceMetaJson: '{"meeting": "meetingRequest"}')
+              .meetingMessageType,
+          'meetingRequest');
+    });
+  });
+
   group('Message.fromJson', () {
     test('reads a fully-populated payload', () {
       final m = Message.fromJson({

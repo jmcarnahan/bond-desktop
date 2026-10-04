@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/draft_policy.dart';
+import 'package:bond_inbox/services/llm/ask_read_task.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/calendar_intent_task.dart';
 import 'package:bond_inbox/services/llm/context_brief_task.dart';
@@ -35,6 +36,7 @@ Set<String> taskSchemaNames() => {
       const DraftTask().schemaName,
       const MeetingBriefTask().schemaName,
       const CalendarIntentTask().schemaName,
+      const AskReadTask().schemaName,
     };
 
 void main() {
@@ -106,6 +108,7 @@ void main() {
       'draft_improve',
       'meeting_brief',
       'calendar_intent',
+      'ask_read',
     });
     expect(idsOn(ModelSlot.decide), {'decision'});
     expect(idsOn(ModelSlot.embed), {'embeddings'});
@@ -205,6 +208,22 @@ void main() {
     expect(row.slot, ModelSlot.generative);
     expect(draftStageIds, isNot(contains('calendar_intent')));
     expect(const CalendarIntentTask().schemaName, 'calendar_intent');
+  });
+
+  test('the ask reader is generative, on demand, and never a drafting stage',
+      () {
+    // Called when a scheduling ask opens in the Day column, and by a draft
+    // answering one (which pre-warms it). It reads somebody else's words for
+    // the owner and writes nothing in their name, so Cloud drafts never sees
+    // it.
+    final row = pipelineStages.singleWhere((s) => s.id == 'ask_read');
+    expect(row.label, 'Ask reading');
+    expect(row.description,
+        "Reads a scheduling ask's own words for its days, hours and length "
+        '— copies phrases, never a date');
+    expect(row.slot, ModelSlot.generative);
+    expect(draftStageIds, isNot(contains('ask_read')));
+    expect(const AskReadTask().schemaName, 'ask_read');
   });
 
   test('a third-party host is Bedrock and the three vendors', () {

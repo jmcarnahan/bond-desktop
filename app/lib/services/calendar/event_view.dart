@@ -5,6 +5,9 @@ import '../../models/message_models.dart' show Message;
 import 'calendar_sync.dart' show CalendarAvailability;
 import 'calendar_zone.dart';
 import 'day_items.dart';
+import 'event_standing.dart';
+
+export 'event_standing.dart';
 
 /// What the event panel, the meeting card and a person's room say about one
 /// meeting: which occurrence of a series to show, who is coming, where the
@@ -186,14 +189,6 @@ CalendarEvent displayOccurrence(
   return occurrences.last;
 }
 
-/// Whether [e] is the owner's own event — they organised it. Graph marks
-/// the owner's copy `isOrganizer`, and its response `organizer`; either says
-/// it. The one organiser rule: the role a write takes (`eventRoleOf`), the
-/// tally ([attendeeTally]) and the response line all read it here, so no two
-/// of them can disagree about whose meeting it is.
-bool isOwnersEvent(CalendarEvent e) =>
-    e.isOrganizer || e.responseStatus.trim().toLowerCase() == 'organizer';
-
 /// Whether [e] is part of a recurring series: the master itself, or one of
 /// its occurrences or exceptions.
 bool isSeriesEvent(CalendarEvent e) =>
@@ -291,21 +286,31 @@ String? attendeeTally(CalendarEvent e) {
 /// Where the owner stands: "You organised this", "You accepted", "You said
 /// maybe", "You declined", "You haven't answered", or "No answer needed"
 /// when the organiser asked for none. A cancelled meeting is "Cancelled",
-/// whatever was answered before.
+/// whatever was answered before. Read over [standingOf], except that "You
+/// said maybe" is a claim about what the owner ANSWERED: a meeting that is a
+/// Maybe only because the calendar shows it `tentative` says what was
+/// actually answered.
 String responseLine(CalendarEvent e) {
-  if (e.isCancelled) return 'Cancelled';
-  final status = e.responseStatus.trim().toLowerCase();
-  if (isOwnersEvent(e)) return 'You organised this';
-  switch (status) {
-    case 'accepted':
+  switch (standingOf(e)) {
+    case EventStanding.cancelled:
+      return 'Cancelled';
+    case EventStanding.organizer:
+      return 'You organised this';
+    case EventStanding.accepted:
       return 'You accepted';
-    case 'tentativelyaccepted':
-      return 'You said maybe';
-    case 'declined':
+    case EventStanding.tentative:
+      return switch (answerOf(e)) {
+        EventAnswer.tentative => 'You said maybe',
+        EventAnswer.accepted => 'You accepted',
+        _ => 'No answer needed',
+      };
+    case EventStanding.declined:
       return 'You declined';
+    case EventStanding.unanswered:
+      return "You haven't answered";
+    case EventStanding.noAnswerNeeded:
+      return 'No answer needed';
   }
-  if (e.needsResponse) return "You haven't answered";
-  return 'No answer needed';
 }
 
 // ── when ───────────────────────────────────────────────────────────────

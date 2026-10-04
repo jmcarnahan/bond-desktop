@@ -1,8 +1,12 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/services/attachments/attachment_policy.dart'
+    show attachmentEntityId;
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
@@ -10,6 +14,7 @@ import 'package:bond_inbox/services/calendar/brief_planner.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/fake_embed_server.dart';
 import 'fixtures/test_db.dart';
 
 /// The planner over a real mirror: which meetings it queues after a sync,
@@ -98,6 +103,29 @@ void main() {
         generatedAt: calendarStamp(now.subtract(const Duration(hours: 3))),
       );
 
+  /// Pins [now] to [hour]:[minute] local on [date] in Los Angeles — never
+  /// the wall clock, so a day-edge test cannot flake — and moves Dana's mail
+  /// to two hours before it.
+  Future<void> fixNow(CalendarDate date, int hour, int minute) async {
+    now = la.localDateTime(date, hour, minute).toUtc();
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'c-1',
+      'subject': 'Fabrikam renewal',
+      'participants_json': jsonEncode([
+        {'name': 'Dana', 'email': dana},
+      ]),
+      'state': 'waiting',
+      'message_count': 1,
+      'last_message_at':
+          MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+    });
+  }
+
+  /// [startsIn] for a meeting at [hour]:[minute] local on [date].
+  Duration untilLocal(CalendarDate date, int hour, int minute) =>
+      la.localDateTime(date, hour, minute).toUtc().difference(now);
+
   Future<String> currentHash(String id) async {
     final g = await gatherer.gather(meeting(id), now: now);
     gatherer.gathers--;
@@ -106,12 +134,15 @@ void main() {
 
   test('queues eligible meetings only, at most six a pass, soonest first',
       () async {
+    await fixNow(const CalendarDate(2026, 10, 6), 9, 0);
     await calendar.upsertEvents([
       for (var i = 0; i < 8; i++)
         meeting('evt-$i', startsIn: Duration(hours: i + 1)),
       meeting('solo', attendees: const [Attendee(name: 'Me', address: owner)]),
       meeting('off', isCancelled: true),
-      meeting('far', startsIn: const Duration(hours: 40)),
+      // The day after tomorrow, 09:00 local.
+      meeting('far',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 8), 9, 0)),
     ], syncRun: 'run-1');
 
     expect(await plan(), BriefPlanner.maxPerPass);
@@ -132,16 +163,157 @@ void main() {
     expect(await status('master'), isNull);
   });
 
-  test('a fresh brief is left alone, whatever changed', () async {
+  test('a fresh brief is left alone unless its inputs moved', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    final young = calendarStamp(now.subtract(const Duration(minutes: 30)));
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: await currentHash('evt-1'),
+      status: EventBrief.ready,
+      generatedAt: young,
+    );
+    expect(await plan(), 0, reason: 'fresh and unchanged');
+    expect(await status('evt-1'), isNull);
+
+    // A deck (or its digest) landed: the same young brief, inputs moved.
     await calendar.putBrief(
       eventId: 'evt-1',
       inputsHash: 'something else',
       status: EventBrief.ready,
+      generatedAt: young,
+    );
+    expect(await plan(after: const Duration(minutes: 16)), 1,
+        reason: 're-briefed within one recheck, not after two hours');
+    expect(await status('evt-1'), 'pending');
+  });
+
+  test('a fresh brief whose rewrite failed is not retried on the same '
+      'inputs until it ages, and is when they move again', () async {
+    await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: 'stale',
+      status: EventBrief.ready,
       generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
     );
-    expect(await plan(), 0);
-    expect(await status('evt-1'), isNull);
+    expect(await plan(), 1);
+
+    // The rewrite failed: the worker finished the row, and the handler kept
+    // the old brief, moving only its stamp (`touchBrief`).
+    await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+        status: 'done');
+    await calendar.touchBrief('evt-1',
+        generatedAt: calendarStamp(now.add(const Duration(minutes: 1))));
+    expect(await plan(after: const Duration(minutes: 20)), 0,
+        reason: 'these inputs were already tried while the brief is fresh');
+
+    // New mail moves the inputs again.
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'c-1',
+      'subject': 'Fabrikam renewal',
+      'participants_json': jsonEncode([
+        {'name': 'Dana', 'email': dana},
+      ]),
+      'state': 'waiting',
+      'message_count': 2,
+      'last_message_at':
+          MessageStore.isoStamp(now.add(const Duration(minutes: 30))),
+    });
+    expect(await plan(after: const Duration(minutes: 40)), 1);
+
+    // A failed row on unchanged inputs waits out the two hours.
+    await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+        status: 'done');
+    final fresh = BriefPlanner(store, calendar, gatherer);
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: await currentHash('evt-1'),
+      status: EventBrief.failed,
+      generatedAt: calendarStamp(now.add(const Duration(minutes: 40))),
+    );
+    expect(await fresh.plan(now: now.add(const Duration(minutes: 41)), zone: la),
+        0);
+    // Two hours and five minutes after the failure; the meeting is still
+    // ahead (it starts three hours after `now`).
+    expect(
+        await fresh.plan(
+            now: now.add(const Duration(hours: 2, minutes: 45)), zone: la),
+        1);
+  });
+
+  test('a ready brief whose rewrite failed IS retried on the same moved '
+      'inputs once it is older than two hours', () async {
+    await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    await calendar.putBrief(
+      eventId: 'evt-1',
+      inputsHash: 'stale',
+      status: EventBrief.ready,
+      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
+    );
+    expect(await plan(), 1);
+    await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+        status: 'done');
+    await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now));
+    expect(await plan(after: const Duration(minutes: 20)), 0,
+        reason: 'tried once while fresh');
+
+    // Two hours and a bit after the failed rewrite's stamp: the same moved
+    // inputs are tried again.
+    expect(await plan(after: const Duration(hours: 2, minutes: 5)), 1);
+    expect(await status('evt-1'), 'pending');
+  });
+
+  test('the planner makes no embedding call, even when the files have '
+      'passages', () async {
+    final chunks = _ChunkStore(db);
+    final server = FakeEmbedServer();
+    final counting = _CountingGatherer(
+      chunks,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: () => la,
+      embeddings: server.client,
+    );
+    final planning = BriefPlanner(chunks, calendar, counting);
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm-1',
+      'conversation_key': 'c-1',
+      'direction': 'inbound',
+      'from_name': 'Dana',
+      'from_address': dana,
+      'received_at':
+          MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+      'body_text': 'Deck attached.',
+      'triage_status': 'done',
+      // evt-1's invite: a file on it is a material.
+      'source_meta_json':
+          jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-1'}),
+    });
+    await store.upsertAttachments('email', 'm-1', [
+      {
+        'attachment_id': 'a-deck',
+        'ordinal': 0,
+        'kind': 'file',
+        'name': 'deck.pptx',
+        'is_inline': 0,
+      },
+    ]);
+    await calendar.upsertEvents([meeting('evt-1'), meeting('evt-2')],
+        syncRun: 'run-1');
+
+    expect(await planning.plan(now: now, zone: la), 2);
+    expect(counting.gathers, 2);
+    expect(counting.passageAsks, [false, false]);
+    expect(server.calls, 0);
+    expect(chunks.knnCalls, 0);
+
+    // The handler's gather (the default) is the one that embeds — once.
+    final asked = await counting.gather(meeting('evt-1'), now: now);
+    expect((asked as BriefEligible).input.materials.single.passages,
+        isNotEmpty);
+    expect(server.calls, 1);
   });
 
   test('an old brief is requeued only when its inputs moved', () async {
@@ -182,18 +354,53 @@ void main() {
     expect(await status('evt-1'), 'pending');
   });
 
-  test('briefs of events out of the window are deleted', () async {
-    await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
-    for (final id in ['evt-1', 'gone']) {
-      await calendar.putBrief(
-        eventId: id,
-        inputsHash: 'h',
-        status: EventBrief.skipped,
-        generatedAt: calendarStamp(now),
-      );
+  test('briefs of meetings that have ended are deleted; a brief for a '
+      'meeting outside the window is kept', () async {
+    await calendar.upsertEvents([
+      meeting('evt-1'),
+      // Asked for by hand: next week, far outside today and tomorrow.
+      meeting('next-week', startsIn: const Duration(days: 7)),
+      // Ended an hour ago.
+      meeting('ended', startsIn: const Duration(minutes: -90)),
+    ], syncRun: 'run-1');
+    for (final id in ['evt-1', 'next-week', 'ended', 'gone']) {
+      await readyBrief(id);
     }
     await plan();
-    expect((await calendar.briefsFor(['evt-1', 'gone'])).keys, ['evt-1']);
+    expect(
+        (await calendar.briefsFor(['evt-1', 'next-week', 'ended', 'gone']))
+            .keys
+            .toSet(),
+        {'evt-1', 'next-week'});
+    expect(await status('next-week'), isNull,
+        reason: 'kept, never planned: the window is where briefs are written');
+  });
+
+  test('the planner never queues a meeting the day after tomorrow, even at '
+      '00:05', () async {
+    // Just after midnight: tomorrow ends almost 48 hours away, and a
+    // meeting late tomorrow is in.
+    await fixNow(const CalendarDate(2026, 10, 6), 0, 5);
+    await calendar.upsertEvents([
+      meeting('late-tomorrow',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 7), 23, 30)),
+      meeting('day-after',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 8), 0, 30)),
+    ], syncRun: 'run-1');
+    expect(await plan(), 1);
+    expect(await status('late-tomorrow'), 'pending');
+    expect(await status('day-after'), isNull);
+
+    // Just before midnight: the day after tomorrow starts barely a day away
+    // and is still out.
+    await fixNow(const CalendarDate(2026, 10, 6), 23, 55);
+    await calendar.upsertEvents([
+      meeting('soon-after',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 8), 0, 5)),
+    ], syncRun: 'run-2');
+    expect(await plan(), 0);
+    expect(await status('soon-after'), isNull);
+    expect(await status('day-after'), isNull);
   });
 
   test('nothing is planned while the owner is unknown', () async {
@@ -222,10 +429,15 @@ void main() {
   });
 
   group('the recheck throttle', () {
-    test('two plans a minute apart gather once; sixteen minutes later, again',
-        () async {
+    test('a failed brief waits out the recheck: two plans a minute apart '
+        'gather once; sixteen minutes later, again', () async {
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
-      await readyBrief('evt-1', hash: await currentHash('evt-1'));
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: await currentHash('evt-1'),
+        status: EventBrief.failed,
+        generatedAt: calendarStamp(now),
+      );
 
       expect(await plan(), 0);
       expect(gatherer.gathers, 1);
@@ -235,6 +447,212 @@ void main() {
       expect(gatherer.gathers, 2);
     });
 
+    test('a skipped meeting is gathered again on the next pass once its mail '
+        'arrives', () async {
+      // A Gmail invite: the event syncs a few seconds before its mail.
+      await calendar.upsertEvents([
+        meeting('evt-ed', attendees: const [Attendee(name: 'Ed', address: ed)]),
+      ], syncRun: 'run-1');
+      expect(await plan(), 0);
+      expect((await calendar.brief('evt-ed'))?.skipReason, 'no_mail');
+      expect(gatherer.gathers, 1);
+
+      // Still no mail: gathered again, nothing rewritten or queued.
+      expect(await plan(after: const Duration(seconds: 30)), 0);
+      expect(gatherer.gathers, 2, reason: 'a skipped row is never throttled');
+      expect(await status('evt-ed'), isNull);
+
+      final at = MessageStore.isoStamp(now);
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-invite',
+        'subject': 'Invitation: Northwind',
+        'participants_json': jsonEncode([
+          {'name': 'Me', 'email': owner},
+        ]),
+        'state': 'waiting',
+        'message_count': 1,
+        'last_message_at': at,
+      });
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-invite',
+        'conversation_key': 'c-invite',
+        'direction': 'inbound',
+        'from_name': 'Calendar',
+        'from_address': 'calendar-notification@example.com',
+        'received_at': at,
+        'body_text': 'You have been invited.',
+        'triage_status': 'done',
+        'source_meta_json':
+            jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-ed'}),
+      });
+      expect(await plan(after: const Duration(minutes: 1)), 1);
+      expect(await status('evt-ed'), 'pending');
+    });
+
+    test('a ready brief is gathered on every pass and queued when its hash '
+        'moved — the recheck no longer holds a ready row', () async {
+      await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+      await readyBrief('evt-1', hash: await currentHash('evt-1'));
+      expect(await plan(), 0);
+      expect(gatherer.gathers, 1);
+      expect(await plan(after: const Duration(seconds: 30)), 0,
+          reason: 'unchanged: gathered, nothing queued');
+      expect(gatherer.gathers, 2);
+
+      // New mail moves the hash a minute later: queued on this pass, not a
+      // quarter of an hour later.
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-1',
+        'subject': 'Fabrikam renewal',
+        'participants_json': jsonEncode([
+          {'name': 'Dana', 'email': dana},
+        ]),
+        'state': 'waiting',
+        'message_count': 2,
+        'last_message_at': MessageStore.isoStamp(now),
+      });
+      expect(await plan(after: const Duration(minutes: 1)), 1);
+      expect(gatherer.gathers, 3);
+      expect(await status('evt-1'), 'pending');
+    });
+
+    /// m-1 an hour old (inside the wait's age cap) carrying a deck whose
+    /// text work is queued and not done: a file being read.
+    Future<void> seedPendingDeck() async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-1',
+        'conversation_key': 'c-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at':
+            MessageStore.isoStamp(now.subtract(const Duration(hours: 1))),
+        'body_text': 'The deck.',
+        'triage_status': 'done',
+        // evt-1's invite: a file on it is a material.
+        'source_meta_json':
+            jsonEncode({'meeting': 'meetingRequest', 'event_id': 'evt-1'}),
+      });
+      await store.upsertAttachments('email', 'm-1', [
+        {
+          'attachment_id': 'a-deck',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'deck.pdf',
+          'content_type': 'application/pdf',
+          'is_inline': 0,
+        },
+      ]);
+      await store.enqueueWork(
+          'attachment_text', 'email', attachmentEntityId('m-1', 'a-deck'));
+    }
+
+    test('a meeting waiting on its files is queued when the text lands, and '
+        'once more on the same inputs when it comes inside the grace',
+        () async {
+      await seedPendingDeck();
+      await calendar.upsertEvents([
+        meeting('evt-1', startsIn: const Duration(minutes: 50)),
+      ], syncRun: 'run-1');
+      expect(await plan(), 1, reason: 'no row yet');
+      // The handler found the deck pending and said so.
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'ineligible:materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+      expect(await plan(after: const Duration(minutes: 1)), 0,
+          reason: 'the same inputs were queued already');
+
+      // Inside the grace (twenty minutes before the start), still pending:
+      // queued once on the same hash, so it is briefed with what is read.
+      expect(await plan(after: const Duration(minutes: 31)), 1);
+      expect(await status('evt-1'), 'pending');
+      expect(await plan(after: const Duration(minutes: 32)), 0,
+          reason: 'already waiting');
+
+      // Or the text lands before then: the hash moves and it is queued.
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      final again = BriefPlanner(store, calendar, gatherer);
+      expect(await again.plan(now: now, zone: la), 1,
+          reason: 'a new planner has queued nothing yet');
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      expect(await again.plan(now: now.add(const Duration(minutes: 1)), zone: la),
+          0);
+      await store.setAttachmentText('email', 'm-1', 'a-deck',
+          status: 'done', text: 'Two tiers.');
+      expect(await again.plan(now: now.add(const Duration(minutes: 2)), zone: la),
+          1);
+    });
+
+    test('a materials_pending row is queued when the wait ends without the '
+        'hash moving', () async {
+      await seedPendingDeck();
+      await calendar.upsertEvents([
+        meeting('evt-1', startsIn: const Duration(hours: 5)),
+      ], syncRun: 'run-1');
+      expect(await plan(), 1, reason: 'no row yet');
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'ineligible:materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+      expect(await plan(after: const Duration(minutes: 1)), 0,
+          reason: 'still being read');
+
+      // The text work gives up: the attachment row still says pending, so
+      // the hash is the same, but nothing is being read any more.
+      final hash = await currentHash('evt-1');
+      await db.customStatement("UPDATE work_items SET status = 'error' "
+          "WHERE task_kind = 'attachment_text'");
+      expect(await currentHash('evt-1'), hash);
+      expect(await plan(after: const Duration(minutes: 2)), 1);
+      expect(await status('evt-1'), 'pending');
+
+      // A handler that throws before it writes leaves the same row: queued
+      // once, not every pass.
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'error');
+      expect(await plan(after: const Duration(minutes: 3)), 0);
+    });
+
+    test('the wait ends once the work row is two hours old', () async {
+      await seedPendingDeck();
+      await calendar.upsertEvents([
+        meeting('evt-1', startsIn: const Duration(hours: 5)),
+      ], syncRun: 'run-1');
+      expect(await plan(), 1, reason: 'no row yet');
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'ineligible:materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+
+      // The mail is past two hours by now, but its text work was asked for
+      // only an hour after it arrived: still being read.
+      expect(await plan(after: const Duration(minutes: 110)), 0,
+          reason: 'the work row is not two hours old yet');
+      // The work row passes two hours with the text still pending: the hash
+      // has not moved, and the wait is over.
+      expect(await plan(after: const Duration(minutes: 125)), 1);
+      expect(await status('evt-1'), 'pending');
+    });
+
     test('a cleared table gathers at once', () async {
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
       await readyBrief('evt-1', hash: await currentHash('evt-1'));
@@ -242,7 +660,7 @@ void main() {
       expect(gatherer.gathers, 1);
 
       // Clear AI results empties the derived table.
-      await calendar.deleteBriefsExcept(const []);
+      await db.customStatement('DELETE FROM event_briefs');
       expect(await plan(after: const Duration(minutes: 1)), 1);
       expect(gatherer.gathers, 2);
       expect(await status('evt-1'), 'pending');
@@ -369,13 +787,62 @@ class _CountingGatherer extends BriefGatherer {
     super.calendar, {
     required super.ownerAddress,
     required super.zone,
+    super.embeddings,
   });
 
   int gathers = 0;
 
+  /// The `passages` flag of every gather, in order.
+  final List<bool> passageAsks = [];
+
   @override
-  Future<BriefGather> gather(CalendarEvent event, {required DateTime now}) {
+  Future<BriefGather> gather(
+    CalendarEvent event, {
+    required DateTime now,
+    bool passages = true,
+    bool asked = false,
+  }) {
     gathers++;
-    return super.gather(event, now: now);
+    passageAsks.add(passages);
+    return super.gather(event, now: now, passages: passages, asked: asked);
+  }
+}
+
+/// [MessageStore] whose files always have chunks and whose KNN answers one
+/// passage per file, so a gather that asked for passages would embed.
+class _ChunkStore extends MessageStore {
+  _ChunkStore(super.db);
+
+  int knnCalls = 0;
+
+  @override
+  Future<bool> hasAttachmentChunks(
+    String source, {
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+  }) async =>
+      true;
+
+  @override
+  Future<List<AttachmentChunkHit>?> chunkKnn(
+    Uint8List query, {
+    required String embedModel,
+    required String source,
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+    int limit = 6,
+  }) async {
+    knnCalls++;
+    return [
+      for (final id in attachmentIds)
+        AttachmentChunkHit(
+          ref: AttachmentRef(source: source, messageId: 'm-1', attachmentId: id),
+          chunkId: 1,
+          seq: 0,
+          locator: 'slide 1',
+          text: 'Words.',
+          outbound: false,
+        ),
+    ];
   }
 }

@@ -12,6 +12,8 @@ import 'package:bond_inbox/services/backend/calendar_backend.dart';
 import 'package:bond_inbox/services/backend/calendar_errors.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
 import 'package:bond_inbox/services/calendar/calendar_writes.dart';
+import 'package:bond_inbox/services/calendar/event_standing.dart';
+import 'package:bond_inbox/services/calendar/write_rules.dart' show mayEmailFor;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -177,6 +179,21 @@ class _FakeCalendarBackend implements CalendarBackend {
 /// The real sync with its network half stubbed: the forced sync after a
 /// write only counts, so no tick outlives the test's database, and the write
 /// guard's notes are recorded as well as kept.
+/// A store that records what the sync had noted at the moment an answer was
+/// stored, to prove the guard is up first.
+class _OrderedCalendarStore extends CalendarStore {
+  _OrderedCalendarStore(super.db, this.notedNow);
+
+  final List<String> Function() notedNow;
+  final List<List<String>> notedAtStore = [];
+
+  @override
+  Future<List<String>> setResponseStatus(String eventId, String status) {
+    notedAtStore.add(List.of(notedNow()));
+    return super.setResponseStatus(eventId, status);
+  }
+}
+
 class _RecordingSync extends CalendarSync {
   _RecordingSync(super.backend, super.store, super.calendar);
 
@@ -259,10 +276,14 @@ void main() {
     String eventType = '',
     bool isOrganizer = true,
     List<Attendee> attendees = const [],
+    String responseStatus = 'none',
+    String showAs = '',
   }) =>
       CalendarEvent(
         id: id,
         subject: 'Budget review',
+        responseStatus: responseStatus,
+        showAs: showAs,
         seriesMasterId: seriesMasterId,
         eventType: eventType,
         isOrganizer: isOrganizer,
@@ -602,6 +623,20 @@ void main() {
       expect(changed, 1);
     });
 
+    test('Yes on a tentative-shown invite leaves a row whose standing is '
+        'accepted', () async {
+      await calendar.upsertEvents([
+        timed('e1',
+            isOrganizer: false,
+            responseStatus: 'notResponded',
+            showAs: 'tentative'),
+      ], syncRun: run);
+      await writes.commit(const RespondToEvent('e1', RsvpResponse.accept));
+      final row = (await calendar.event('e1'))!;
+      expect(row.showAs, 'busy');
+      expect(standingOf(row), EventStanding.accepted);
+    });
+
     test('tentative and decline store their Graph words', () async {
       await calendar.upsertEvents(
           [timed('a', isOrganizer: false), timed('b', isOrganizer: false)],
@@ -611,6 +646,59 @@ void main() {
       expect((await calendar.event('a'))!.responseStatus,
           'tentativelyAccepted');
       expect((await calendar.event('b'))!.responseStatus, 'declined');
+    });
+
+    test(
+        'a quiet decline sends sendResponse false and no comment, notifies '
+        'nobody, still waits on the confirm, applies declined locally and '
+        'notes quiet: true', () async {
+      await calendar.upsertEvents([
+        timed('e1',
+            isOrganizer: false,
+            attendees: const [Attendee(name: 'Dana Contoso', address: dana)]),
+      ], syncRun: run);
+      const quiet =
+          RespondToEvent('e1', RsvpResponse.decline, sendResponse: false);
+
+      final ready = await writes.preview(quiet) as PreviewReady;
+      expect(ready.needsConfirm, isTrue,
+          reason: 'the owner asked for the confirm on a Dismiss');
+      expect(ready.preview.notifies, isEmpty);
+      expect(mayEmailFor(quiet, event: await calendar.event('e1')), isEmpty);
+      final dry = backend.callsTo('respond', dryRun: true).single;
+      expect(dry.args['sendResponse'], isFalse);
+      expect(dry.args['comment'], isNull);
+      expect(dry.args['proposedStartUtc'], isNull);
+
+      final outcome = await writes.commit(quiet, preview: ready.preview);
+      expect(outcome.ok, isTrue);
+      expect(outcome.undo, isNull);
+      final real = backend.callsTo('respond', dryRun: false).single;
+      expect(real.args['response'], 'decline');
+      expect(real.args['sendResponse'], isFalse);
+      expect(real.args['comment'], isNull);
+      expect((await calendar.event('e1'))!.responseStatus, 'declined');
+      expect(sync.noted, contains('e1'));
+      expect(changed, 1);
+
+      final detail = jsonDecode((await writeRows()).single['detail_json']
+          as String) as Map<String, dynamic>;
+      expect(detail['action'], 'decline');
+      expect(detail['notified'], 0);
+      expect(detail['quiet'], isTrue);
+    });
+
+    test('an answer notes its write before it stores the answer', () async {
+      await calendar.upsertEvents([timed('e1', isOrganizer: false)],
+          syncRun: run);
+      final ordered = _OrderedCalendarStore(db, () => sync.noted);
+      final ordering = CalendarWrites(backend, ordered, sync, store,
+          activityLog: activity, clock: () => t0);
+      await ordering.commit(const RespondToEvent('e1', RsvpResponse.accept));
+      expect(ordered.notedAtStore, [
+        ['e1'],
+      ]);
+      expect((await calendar.event('e1'))!.responseStatus, 'accepted');
     });
 
     test('a cancel and a delete remove the event and its occurrences',
