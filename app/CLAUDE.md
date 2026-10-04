@@ -881,8 +881,11 @@ that bite.
   - On a write, `calendar_scope_missing` also answers a read-only calendar.
     The app writes only to the primary calendar, so treat it as a missing
     permission.
-  - `body_preview` and OOO text are untrusted. Render them as plain `Text`,
-    and pass them through `wrapUntrusted` before any model reads them.
+  - `body_preview` and OOO text are untrusted. Render them as text, never
+    markup — the event panel's "From the invite" goes through `LinkedText`
+    (http(s)/mailto only, the host's guarded launcher) so a Teams invite's
+    "Join:" line is clickable; everything else plain `Text` — and pass them
+    through `wrapUntrusted` before any model reads them.
 - **Time (D13):**
   - Instants are stored as `isoStamp` UTC (`calendarStamp`, same width), so
     SQL string order is chronological. An all-day event is `yyyy-mm-dd` with

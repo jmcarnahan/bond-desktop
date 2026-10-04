@@ -755,9 +755,10 @@ before the start, absent once it has ended, when cancelled, or with no link);
 **Open in Outlook** (`web_link`); where; who organised it; your own answer
 (`You accepted`, `You haven't answered`, …); the overlap line; the attendees
 with their answers under a tally; the conversations linked to the
-event; and the invite's own text as plain words (untrusted — never a link,
-never HTML). Every link it offers goes through `_launchExternal`'s scheme
-guard.
+event; and the invite's own text (untrusted — never HTML; drawn through
+`LinkedText`, so a web address in it, a Teams invite's "Join:" line, is a
+link, http(s) and mailto only). Every link it offers goes through
+`_launchExternal`'s scheme guard.
 
 **The tally** counts people, never rooms, the organiser, or an entry whose
 answer is `organizer`. On a meeting you organised — `isOwnersEvent`

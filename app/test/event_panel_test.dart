@@ -366,18 +366,33 @@ void main() {
     expect(threads, ['teams/19:meeting_x@thread.v2', 'email/conv-a']);
   });
 
-  testWidgets('the invite body is plain text, never links', (tester) async {
-    const body = 'Agenda at https://contoso.example.com/agenda — bring notes';
-    await pumpBody(tester, EventLookup.found(meeting(bodyPreview: body)));
+  testWidgets("the invite body's web addresses open through the host",
+      (tester) async {
+    // A Teams invite's "Join:" line is a bare URL in the body text; it must
+    // be a link, and only the host's guarded launcher opens it.
+    const body = 'Join: https://teams.example.com/l/meetup-join/fictional\n'
+        'Meeting ID: 221 756 307';
+    final opened = <String>[];
+    await pumpBody(tester, EventLookup.found(meeting(bodyPreview: body)),
+        onOpenLink: opened.add);
     expect(find.text('From the invite'), findsOneWidget);
-    expect(find.byKey(EventPanelBody.bodyPreviewKey), findsOneWidget);
-    expect(
-      tester
-          .widget<SelectableText>(find.byKey(EventPanelBody.bodyPreviewKey))
-          .data,
-      body,
-    );
-    expect(find.byType(LinkedText), findsNothing);
+    final shown = tester
+        .widget<LinkedText>(find.byKey(EventPanelBody.bodyPreviewKey));
+    expect(shown.text, body);
+    expect(shown.onOpenLink, isNotNull);
+    shown.onOpenLink!(
+        Uri.parse('https://teams.example.com/l/meetup-join/fictional'));
+    expect(opened, ['https://teams.example.com/l/meetup-join/fictional']);
+  });
+
+  testWidgets('the invite body never opens a non-web scheme', (tester) async {
+    const body = 'Dial msteams://l/meetup-join/fictional or javascript:void(0)';
+    await pumpBody(tester, EventLookup.found(meeting(bodyPreview: body)));
+    final shown = tester
+        .widget<LinkedText>(find.byKey(EventPanelBody.bodyPreviewKey));
+    expect(shown.text, body);
+    expect(linkTargetOf('msteams://l/meetup-join/fictional'), isNull);
+    expect(linkTargetOf('javascript:void(0)'), isNull);
   });
 
   testWidgets('the brief and actions slots render only when given',

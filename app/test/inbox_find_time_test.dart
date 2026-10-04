@@ -938,15 +938,24 @@ void main() {
 
       final nextWeek = find.byKey(SchedulingAskTile.windowKeyFor(
           'email', 'c-ask', FindTimeWindow.nextWeek));
+      // The pill reads "Next Mon" only while the day it covers lies in next
+      // week's Monday–Sunday (`findTimeWindowLabel`). On a Sunday, tomorrow
+      // is next week's Monday, so Next week covers the Monday AFTER that and
+      // the pill names the date instead — the same rule, from the real clock.
+      final then = day.addDays(7);
+      final nextMonday = today.addDays(1 - today.weekday).addDays(7);
+      final inNextWeek = !then.isBefore(nextMonday) &&
+          then.isBefore(nextMonday.addDays(7));
       expect(
           find.descendant(
               of: nextWeek,
-              matching: find.text('Next ${shortDate(day).split(' ').first}')),
+              matching: find.text(inNextWeek
+                  ? 'Next ${shortDate(day).split(' ').first}'
+                  : shortDate(then))),
           findsOneWidget);
       await tester.tap(nextWeek);
       await pumps(tester);
       await pumps(tester);
-      final then = day.addDays(7);
       expect(find.text(dayTitle(then, today)), findsOneWidget);
       expect(backend.windows.last, (
         DateTime.fromMicrosecondsSinceEpoch(
