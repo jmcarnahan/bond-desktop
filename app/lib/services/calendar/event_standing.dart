@@ -1,11 +1,13 @@
 import '../../models/calendar_models.dart';
 
 /// Where the owner stands on a meeting — the ONE reader of Graph's
-/// `responseStatus` and `showAs` strings for display and for the overlap
-/// maths. The agenda row, the grid tile, the panel line, the Today row, the
-/// answer buttons and the overlap walk all ask here, so no two faces can
-/// disagree about what "maybe" or "declined" means. Never compare the strings
-/// anywhere else.
+/// `responseStatus` string, and of `showAs` for the tentative hold, for
+/// display and for the overlap maths. The agenda row, the grid tile, the
+/// panel line, the Today row, the answer buttons and the overlap walk all ask
+/// here, so no two faces can disagree about what "maybe" or "declined" means.
+/// Never compare the strings anywhere else — the one other `showAs` read is
+/// `overlaps.dart` dropping `free` and `workingElsewhere` time, which is about
+/// blocking, not standing.
 ///
 /// Its own file because the overlap maths (`overlaps.dart`) and the day
 /// (`day_items.dart`) both read it, and `event_view.dart` — which re-exports

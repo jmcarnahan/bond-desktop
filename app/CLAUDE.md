@@ -974,18 +974,31 @@ that bite.
   - An unanswered meeting's agenda row carries the compact Yes / Maybe / No /
     Dismiss (`DayPane.meetingActions`, host-built like `inviteActions`) while
     the meeting has not ended; otherwise the 'RSVP owed' chip. After Yes the
-    row stays and the buttons go; after Dismiss the row leaves.
+    row stays and the buttons go; after Dismiss the row leaves. An attended
+    meeting in a clash keeps its buttons only for a HARD clash or a soft one
+    whose other side answered Maybe — never for an unanswered pencilled
+    invite beside it (that invite is the side to settle, and has its own).
+    The '⚠ overlaps' heading is `error` for a hard clash, `inkMuted` for a
+    soft-only one (the grid's rule).
   - The answer belt: `CalendarSync.answerHold` (2 min). `guarded`,
     `keepAnswerFor` and `held` are read INSIDE the page transaction after
-    `_checkRun`; `upsertEvents(keepAnswerFor:)` disbelieves only
-    ''/`none`/`notResponded` over a stored answer; `_applyLocally` notes the
-    write BEFORE `setResponseStatus`. A test of a lagging page goes through
+    `_checkRun`; `upsertEvents(keepAnswerFor:)` keeps the mirror's own
+    ANSWER against any differing value the page carries (Accepted → Maybe is
+    a main flow since the clash buttons; a page that still says `accepted`
+    must not put it back), and a page that agrees is applied; `_applyLocally`
+    notes the write BEFORE `setResponseStatus`. A test of a lagging page goes through
     `syncNow(force:)`, never `upsertEvents` alone.
 - **Standing (the clean-up round, 2026-10):**
   - `standingOf(e)` (`services/calendar/event_standing.dart`, re-exported by
-    `event_view.dart`) is the ONE reader of `responseStatus`/`showAs` for
-    every face and for the overlap maths — never compare the strings
-    elsewhere. Order: cancelled → organizer (`isOwnersEvent`, which lives
+    `event_view.dart`) is the ONE reader of `responseStatus`, and of
+    `showAs` for the tentative hold, for every face and for the overlap
+    maths — never compare the strings elsewhere (the one other `showAs`
+    read, `overlaps.dart` dropping `free`/`workingElsewhere` time, is about
+    blocking, not standing). An accepted meeting Outlook shows as tentative
+    is a Maybe on the agenda, the grid and Today, while the panel line and
+    the chosen button follow the ANSWER ("You accepted", Yes chosen) — a
+    deliberate softening of D8, recorded in the plan. Order: cancelled →
+    organizer (`isOwnersEvent`, which lives
     there now) → the ANSWER (`answerOf`: accepted / tentative / declined) →
     unanswered (`needsResponse`) → `showAs: tentative` → noAnswerNeeded.
     **Unanswered wins over "shown tentative"**: Outlook puts every
@@ -997,9 +1010,9 @@ that bite.
     not the standing. `responseLine` reads the standing; its seven strings
     are unchanged.
   - The palette is `widgets/event_standing_style.dart` (`toneOfStanding`,
-    `standingBarColor`, `standingFillColor`): organizer/accepted → primary,
-    Maybe → attention, unanswered/declined/cancelled → neutral (bar
-    `inkMuted`). A hard clash turns a tile's bar the ERROR colour (not
+    `standingBarColor`, `standingFillColor`): organizer/accepted/
+    noAnswerNeeded → primary, Maybe → attention, unanswered/declined/
+    cancelled → neutral (bar `inkMuted`). A hard clash turns a tile's bar the ERROR colour (not
     attention — that is Maybe's) and prefixes '⚠'; a soft one only the '⚠'.
     `theme/` never imports `services/`; the style file is in widgets for
     that reason.

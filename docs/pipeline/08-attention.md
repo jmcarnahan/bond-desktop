@@ -112,7 +112,15 @@ triage CTA suffix, which is why a "— by Day 1" banner is never written
 where a plan-relative phrase does not stop a thread reading as quiet; the
 message-row chip, the Why panel and the Needs You deadlines lens; and
 `notifyWorthy`'s deadline ask
-([09-notifications.md](09-notifications.md)). The `plan_relative_banner_strip`
+([09-notifications.md](09-notifications.md)). A MEETING message's deadline
+reaches none of them (the clean-up round, 2026-10-04): `Message.deadline`, the
+conversations query's `latest_deadline` and `latestInboundMeta`'s `deadline`
+all read NULL when the message carries `source_meta_json.meeting` (not
+`none`), and the extraction stores none — the text model has read an invite's
+meeting time as the reader's deadline, and that time is the event's to show
+([14-calendar.md](14-calendar.md), Deadlines). One consequence: Later on an
+invite thread defaults to seven days (`snoozeUntilFor` with no deadline), not
+the meeting day. The `plan_relative_banner_strip`
 one-shot (`stripPlanRelativeBanners`) takes a trailing "— by …" that
 `showableDeadline` refuses off the stored `cta_text` written before the fix.
 

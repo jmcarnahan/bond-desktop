@@ -69,8 +69,10 @@ class CalendarStore {
   /// write would put the old version back (the write-sequence guard).
   ///
   /// [keepAnswerFor]: ids this app answered within `CalendarSync.answerHold`:
-  /// a page that still says the invite is unanswered keeps the stored answer,
-  /// the rest of the row is the page's.
+  /// when the stored answer is one of the owner's own ([_answers]), a page
+  /// that carries any other status — unanswered, or the answer it replaced
+  /// (Accepted → Maybe from a clash row) — keeps the stored answer; a page
+  /// that agrees is applied as is. The rest of the row is the page's.
   ///
   /// Returns the rows written.
   Future<int> upsertEvents(
@@ -88,17 +90,18 @@ class CalendarStore {
     await db.transaction(() async {
       final held = [
         for (final e in keep)
-          if (keepAnswerFor.contains(e.id) && _unanswered(e.responseStatus))
-            e.id,
+          if (keepAnswerFor.contains(e.id)) e.id,
       ];
       final stored = await _responseStatuses(held);
       for (final event in keep) {
         final row = event.toDbRow(syncRun: syncRun, syncedAt: syncedAt);
         final answer = stored[event.id];
-        if (answer != null &&
-            _answers.contains(answer.trim().toLowerCase()) &&
-            _unanswered(event.responseStatus)) {
-          row['response_status'] = answer;
+        if (answer != null) {
+          final mine = answer.trim().toLowerCase();
+          if (_answers.contains(mine) &&
+              event.responseStatus.trim().toLowerCase() != mine) {
+            row['response_status'] = answer;
+          }
         }
         await db.customUpdate(
           _upsertSql,
@@ -109,18 +112,13 @@ class CalendarStore {
     return keep.length;
   }
 
-  /// The owner's own answers, lower-cased, that a lagging page's "unanswered"
-  /// does not overwrite (see [upsertEvents]' `keepAnswerFor`).
+  /// The owner's own answers, lower-cased, that a lagging page's different
+  /// status does not overwrite (see [upsertEvents]' `keepAnswerFor`).
   static const Set<String> _answers = {
     'accepted',
     'tentativelyaccepted',
     'declined',
   };
-
-  static bool _unanswered(String status) {
-    final s = status.trim().toLowerCase();
-    return s.isEmpty || s == 'none' || s == 'notresponded';
-  }
 
   /// The stored `response_status` of each of [ids] the mirror holds, as
   /// stored. Chunked as [deleteEvents] is.
@@ -338,7 +336,7 @@ class CalendarStore {
         .customSelect(
           'SELECT * FROM calendar_events WHERE $_notMaster'
           ' AND (response_requested IS NULL OR response_requested = 1)'
-          " AND response_status IN ('none', 'notResponded')"
+          " AND lower(trim(response_status)) IN ('none', 'notresponded')"
           ' AND is_organizer = 0 AND is_cancelled = 0'
           ' AND ((is_all_day = 0 AND start_utc > ?)'
           '      OR (is_all_day = 1 AND start_date >= ?))',
@@ -400,7 +398,7 @@ class CalendarStore {
         .customSelect(
           'SELECT * FROM calendar_events WHERE $_notMaster'
           ' AND is_all_day = 0 AND start_utc IS NOT NULL AND end_utc IS NOT NULL'
-          " AND is_cancelled = 0 AND response_status <> 'declined'"
+          " AND is_cancelled = 0 AND lower(trim(response_status)) <> 'declined'"
           ' AND $where'
           ' AND (lower(organizer_address) IN ($places)'
           '      OR EXISTS (SELECT 1 FROM json_each(calendar_events.attendees_json)'

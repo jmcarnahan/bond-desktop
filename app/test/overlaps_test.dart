@@ -171,6 +171,17 @@ void main() {
       expect(overlapsForEvent(busy, [busy, off, no]).isEmpty, isTrue);
     });
 
+    test('a free or working-elsewhere event wears no clash of its own', () {
+      final busy = timed('busy', at(wed, 15), at(wed, 16));
+      final free = timed('free', at(wed, 15), at(wed, 16), showAs: 'free');
+      final away = timed('away', at(wed, 15), at(wed, 16),
+          showAs: 'workingElsewhere');
+      expect(overlapsForEvent(free, [busy, free, away]).isEmpty, isTrue);
+      expect(overlapsForEvent(away, [busy, free, away]).isEmpty, isTrue);
+      // The busy meeting sees nothing back from either.
+      expect(overlapsForEvent(busy, [busy, free, away]).isEmpty, isTrue);
+    });
+
     test('an all-day event has no slot and returns empty', () {
       final banner = allDay('banner', wed, wed.addDays(1));
       final o = overlapsForEvent(

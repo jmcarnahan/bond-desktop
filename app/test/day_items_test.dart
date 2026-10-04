@@ -236,8 +236,10 @@ void main() {
     });
 
     test(
-        'deadlines: open threads whose showable deadline lands on the day; an '
-        'invite thread with a deadline draws no Due row', () {
+        'deadlines: open threads whose showable deadline lands on the day; a '
+        'thread the query left without a latestDeadline (a meeting message — '
+        'the rule is the store\'s, store_drafts_inbox_test pins it) draws no '
+        'Due row', () {
       const day = CalendarDate(2026, 10, 1);
       final items = buildDayItems(
         day: day,

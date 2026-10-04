@@ -118,17 +118,23 @@ void main() {
     });
 
     test(
-        "upsertEvents keeps a fresh answer over a page's notResponded; applies "
-        'any other change; an id not in keepAnswerFor is overwritten', () async {
+        "upsertEvents keeps a fresh answer over a page's notResponded or the "
+        'answer it replaced; applies an agreeing page; an id not in '
+        'keepAnswerFor is overwritten', () async {
       await calendar.upsertEvents(
         [
           timed('evt-1', start: inHours(3), responseStatus: 'accepted'),
           timed('evt-2', start: inHours(4), responseStatus: 'accepted'),
           timed('evt-3', start: inHours(5), responseStatus: 'declined'),
+          timed('evt-4', start: inHours(6), responseStatus: 'accepted'),
+          timed('evt-5', start: inHours(7), responseStatus: 'accepted'),
         ],
         syncRun: 'run-a',
       );
-      // A lagging page: still unanswered, but with a new change key.
+      // The app changes its answers: Accepted → Maybe from a clash row.
+      await calendar.setResponseStatus('evt-4', 'tentativelyAccepted');
+      await calendar.setResponseStatus('evt-5', 'tentativelyAccepted');
+      // A lagging page: still unanswered, or still the old answer.
       final written = await calendar.upsertEvents(
         [
           timed('evt-1',
@@ -136,21 +142,42 @@ void main() {
               responseStatus: 'notResponded',
               changeKey: 'ck-2'),
           timed('evt-2', start: inHours(4), responseStatus: 'notResponded'),
-          timed('evt-3', start: inHours(5), responseStatus: 'tentativelyAccepted'),
+          timed('evt-3', start: inHours(5), responseStatus: 'Declined'),
+          timed('evt-4', start: inHours(6), responseStatus: 'accepted'),
+          timed('evt-5', start: inHours(7), responseStatus: 'accepted'),
         ],
         syncRun: 'run-b',
-        keepAnswerFor: {'evt-1', 'evt-3'},
+        keepAnswerFor: {'evt-1', 'evt-3', 'evt-4'},
       );
 
-      expect(written, 3);
+      expect(written, 5);
       final one = (await calendar.event('evt-1'))!;
       expect(one.responseStatus, 'accepted');
       expect(one.changeKey, 'ck-2');
       // Not answered here lately: the page is believed.
       expect((await calendar.event('evt-2'))!.responseStatus, 'notResponded');
-      // A page that carries an ANSWER is applied, held or not.
-      expect((await calendar.event('evt-3'))!.responseStatus,
+      // A page that agrees (whatever its case) is applied.
+      expect((await calendar.event('evt-3'))!.responseStatus, 'Declined');
+      // The replaced answer on a held page is disbelieved...
+      expect((await calendar.event('evt-4'))!.responseStatus,
           'tentativelyAccepted');
+      // ...and believed for an id not in keepAnswerFor.
+      expect((await calendar.event('evt-5'))!.responseStatus, 'accepted');
+
+      // Once the page catches up with the Maybe, it is applied.
+      await calendar.upsertEvents(
+        [
+          timed('evt-4',
+              start: inHours(6),
+              responseStatus: 'tentativelyAccepted',
+              changeKey: 'ck-3'),
+        ],
+        syncRun: 'run-c',
+        keepAnswerFor: {'evt-4'},
+      );
+      final four = (await calendar.event('evt-4'))!;
+      expect(four.responseStatus, 'tentativelyAccepted');
+      expect(four.changeKey, 'ck-3');
     });
 
     test('deleteEvents ignores ids it never stored', () async {
@@ -343,6 +370,8 @@ void main() {
       await calendar.upsertEvents([
         timed('owed', start: inHours(5)),
         timed('owed-soon', start: inHours(1), responseStatus: 'notResponded'),
+        // The status is compared case-insensitively.
+        timed('owed-upper', start: inHours(7), responseStatus: 'NotResponded'),
         timed('asked-explicitly', start: inHours(6), responseRequested: true),
         timed('no-reply-wanted', start: inHours(5), responseRequested: false),
         timed('accepted', start: inHours(5), responseStatus: 'accepted'),
@@ -356,8 +385,13 @@ void main() {
 
       final owed = await calendar.invitesOwed(nowUtc: now, today: today);
       final ids = [for (final e in owed) e.id];
-      expect(ids.toSet(),
-          {'owed', 'owed-soon', 'asked-explicitly', 'all-day-today'});
+      expect(ids.toSet(), {
+        'owed',
+        'owed-soon',
+        'owed-upper',
+        'asked-explicitly',
+        'all-day-today',
+      });
       // Soonest first: today's all-day event sorts at its UTC midnight.
       expect(ids.first, 'all-day-today');
       expect(ids.indexOf('owed-soon'), lessThan(ids.indexOf('owed')));
@@ -389,6 +423,12 @@ void main() {
             attendees: const [sam],
             organizerAddress: '',
             responseStatus: 'declined'),
+        // Compared case-insensitively: still declined.
+        timed('declined-upper-with-sam',
+            start: inHours(1.25),
+            attendees: const [sam],
+            organizerAddress: '',
+            responseStatus: 'Declined'),
         timed('cancelled-with-sam',
             start: inHours(1.5),
             attendees: const [sam],

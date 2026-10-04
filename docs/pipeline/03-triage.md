@@ -126,7 +126,9 @@ thread out of Needs You and back. The message-text handler calls it again
 when the text lands, and that call writes the ask: the first action item (or
 the summary, when the message needs something and names no item), with the
 deadline appended as "— by <deadline>" before the 200-character clamp —
-cleared when the message asks for nothing. The deadline goes through
+cleared when the message asks for nothing, and never appended for a meeting
+message (`meetingMessageType` set), whose time is the event's, not the
+reader's deadline ([14-calendar.md](14-calendar.md), Deadlines). The deadline goes through
 `showableDeadline` (`app/lib/services/deadline_parse.dart`) first, because
 this WRITES the banner: a plan-relative word such as "Day 1" stamped here
 would outlive every display-time filter (see

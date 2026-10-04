@@ -290,7 +290,12 @@ class EventPanelBody extends StatelessWidget {
           Text(
             '⚠ overlaps',
             key: overlapKey,
-            style: BondType.caption.copyWith(color: BondColors.error),
+            // Red for a real clash; a Maybe-only one is said, not alarmed.
+            style: BondType.caption.copyWith(
+              color: (overlaps?.hard.isNotEmpty ?? false)
+                  ? BondColors.error
+                  : BondColors.inkMuted,
+            ),
           ),
           for (final (i, (other, soft)) in clashes.indexed)
             _clashRow(i, other, soft: soft),

@@ -283,8 +283,9 @@ class CalendarSync {
   static const Duration mailboxRefresh = Duration(hours: 24);
   static const Duration writeGuardSpan = Duration(minutes: 10);
 
-  /// How long after this app's own answer a page's `none`/`notResponded` for
-  /// that event is disbelieved: Graph's delta can lag the answer by a few
+  /// How long after this app's own answer any other answer the page carries
+  /// for that event is disbelieved (`none`/`notResponded`, or the answer it
+  /// replaced): Graph's delta can lag the answer by a few
   /// seconds; two minutes is a belt, not a window. The write guard covers only
   /// pages requested while the write was in the air; the forced sync after a
   /// write starts after it, so this is what keeps its pages from putting the

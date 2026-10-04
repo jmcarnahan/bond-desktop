@@ -137,8 +137,8 @@ void main() {
     });
 
     test(
-        'a blob that is not JSON, names no meeting, or names none keeps the '
-        'deadline',
+        'a blob that is not JSON, names no meeting, names none, or carries '
+        'a meeting that is not a string keeps the deadline',
         () async {
       await seedConversation(key: 'broken');
       await seedConversation(key: 'empty');
@@ -162,6 +162,14 @@ void main() {
         deadline: 'Tuesday',
         sourceMetaJson: '{"meeting": "none"}',
       );
+      // Not a string: the model ignores it, and so does the SQL.
+      await seedConversation(key: 'number');
+      await seedInbound(
+        id: 'm-number',
+        key: 'number',
+        deadline: 'Wednesday',
+        sourceMetaJson: '{"meeting": 7}',
+      );
 
       final rows = {
         for (final c in await store.loadConversations()) c.id: c,
@@ -170,6 +178,7 @@ void main() {
       expect(rows['broken']!.latestDeadline, 'Friday');
       expect(rows['empty']!.latestDeadline, 'Monday');
       expect(rows['none']!.latestDeadline, 'Tuesday');
+      expect(rows['number']!.latestDeadline, 'Wednesday');
     });
 
     test('pending_draft_count counts a suggestion on the newest inbound',

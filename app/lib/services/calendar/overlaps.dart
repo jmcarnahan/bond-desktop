@@ -183,13 +183,16 @@ Overlaps findOverlaps(
 /// fine. An all-day event has no slot to clash with, so it returns an empty
 /// [Overlaps]; so does a timed event whose instants could not be read, and a
 /// cancelled or declined one — it is not on the day, so it clashes with
-/// nothing, just as nothing clashes with it.
+/// nothing, just as nothing clashes with it. A `free` or `workingElsewhere`
+/// event occupies no time either, so it wears no clash for a busy meeting
+/// that shows nothing back.
 Overlaps overlapsForEvent(
   CalendarEvent event,
   Iterable<CalendarEvent> others, {
   CalendarZone? zone,
 }) {
   if (!_counts(event)) return const Overlaps();
+  if (_nonBlockingShowAs.contains(_showAs(event))) return const Overlaps();
   final s = event.startUtc;
   final e = event.endUtc;
   if (event.isAllDay || s == null || e == null) return const Overlaps();

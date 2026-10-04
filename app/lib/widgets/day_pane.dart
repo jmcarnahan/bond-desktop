@@ -191,9 +191,11 @@ class DayPane extends StatelessWidget {
 
   /// Yes / Maybe / No / Dismiss for an UNANSWERED meeting's agenda row that
   /// has not ended, drawn under its text exactly as [inviteActions] is under
-  /// an invite row — and for a meeting you attend that overlaps another, so
-  /// one side can be stepped down to Maybe or declined from its row (the
-  /// current answer drawn as chosen); the host builds it (the writes need
+  /// an invite row — and for a meeting you attend that overlaps a busy
+  /// meeting or a Maybe, so one side can be stepped down to Maybe or
+  /// declined from its row (the current answer drawn as chosen; a clash
+  /// with only an unanswered invite Outlook pencilled in draws none — the
+  /// invite is the side to settle); the host builds it (the writes need
   /// the app's writer); null draws the 'RSVP owed' chip instead. A press
   /// inside is the button's, never the row's open.
   final Widget Function(CalendarEvent e)? meetingActions;
@@ -501,6 +503,12 @@ class DayPane extends StatelessWidget {
     final standing = standingOf(e);
     final hasClash =
         item.overlaps.hard.isNotEmpty || item.overlaps.soft.isNotEmpty;
+    // The clash that earns this row buttons: a real one, or a Maybe the
+    // owner gave. An unanswered invite Outlook pencilled in is the side to
+    // settle, and it has buttons of its own.
+    final settleHere = item.overlaps.hard.isNotEmpty ||
+        item.overlaps.soft
+            .any((x) => standingOf(x) == EventStanding.tentative);
     final nowUtc = t.toUtc();
     final range = (e.startUtc != null && e.endUtc != null)
         ? formatEventRange(zone, e.startUtc!, e.endUtc!)
@@ -517,12 +525,13 @@ class DayPane extends StatelessWidget {
         : _glance(e.id, brief.headline, expanded);
     // The invitation is answered where it is seen, until the meeting ends;
     // the chip is the fallback when the host gives no buttons, and all an
-    // ended meeting still owed an answer shows. A clash keeps the buttons on
-    // a meeting the owner attends, so one side can be stepped down; an
-    // organiser's row has none (the panel has Move and Cancel).
+    // ended meeting still owed an answer shows. A hard clash, or one with a
+    // Maybe, keeps the buttons on a meeting the owner attends, so one side
+    // can be stepped down; an organiser's row has none (the panel has Move
+    // and Cancel).
     final ended = e.endUtc != null && !e.endUtc!.isAfter(nowUtc);
     final actions =
-        !ended && (item.needsResponse || (hasClash && canRespond(e)))
+        !ended && (item.needsResponse || (settleHere && canRespond(e)))
             ? meetingActions?.call(e)
             : null;
 
@@ -830,8 +839,9 @@ class DayPane extends StatelessWidget {
     );
   }
 
-  /// '⚠ overlaps' and one chip per meeting [e] runs into, hard before soft
-  /// (soft muted, said 'maybe'); a chip opens that meeting beside the pane
+  /// '⚠ overlaps' (red for a hard clash, muted when every clash is soft) and
+  /// one chip per meeting [e] runs into, hard before soft (soft muted, said
+  /// 'maybe'); a chip opens that meeting beside the pane
   /// and is the chip's press, never the row's.
   Widget _clashStrip(CalendarEvent e, Overlaps o) {
     Widget chip(CalendarEvent other, {required bool soft}) {
@@ -867,7 +877,10 @@ class DayPane extends StatelessWidget {
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Text('⚠ overlaps',
-              style: BondType.caption.copyWith(color: BondColors.error)),
+              style: BondType.caption.copyWith(
+                  color: o.hard.isNotEmpty
+                      ? BondColors.error
+                      : BondColors.inkMuted)),
           for (final other in o.hard) chip(other, soft: false),
           for (final other in o.soft) chip(other, soft: true),
         ],

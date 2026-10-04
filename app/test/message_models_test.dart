@@ -274,13 +274,14 @@ void main() {
       final none = Message.fromRow(row('{"meeting": "none"}'));
       expect(none.deadline, 'Sunday 2pm');
 
-      expect(
-          Message.fromJson({
-            'id': 'm1',
-            'deadline': 'Sunday 2pm',
-            'source_meta_json': '{"meeting": "meetingCancelled"}',
-          }).deadline,
-          isNull);
+      final cancelled = Message.fromJson({
+        'id': 'm1',
+        'deadline': 'Sunday 2pm',
+        'source_meta_json': '{"meeting": "meetingCancelled"}',
+      });
+      expect(cancelled.deadline, isNull);
+      // The blob rides along, so the getter agrees with the dropped deadline.
+      expect(cancelled.meetingMessageType, 'meetingCancelled');
       expect(Message.fromJson({'id': 'm1', 'deadline': 'Sunday 2pm'}).deadline,
           'Sunday 2pm');
     });

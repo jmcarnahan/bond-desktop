@@ -426,12 +426,15 @@ class CalendarEvent {
   ///
   /// `responseRequested` null counts as requested — only an explicit false
   /// means the organiser asked for none. Your own meetings and cancelled ones
-  /// never need a reply.
-  bool get needsResponse =>
-      responseRequested != false &&
-      (responseStatus == 'none' || responseStatus == 'notResponded') &&
-      !isOrganizer &&
-      !isCancelled;
+  /// never need a reply. The status is compared case-insensitively, as
+  /// `standingOf` reads it.
+  bool get needsResponse {
+    final status = responseStatus.trim().toLowerCase();
+    return responseRequested != false &&
+        (status == 'none' || status == 'notresponded') &&
+        !isOrganizer &&
+        !isCancelled;
+  }
 
   List<Object?> get _props => [
         id,

@@ -850,8 +850,9 @@ class Message {
   factory Message.fromJson(Map<String, dynamic> json) {
     final rawTo = json['to'] as List<dynamic>?;
     final rawActionItems = json['action_items'] as List<dynamic>?;
-    final meta = json['source_meta_json'];
-    final meeting = _meetingTypeOf(meta is String ? meta : null) != null;
+    final rawMeta = json['source_meta_json'];
+    final meta = rawMeta is String ? rawMeta : null;
+    final meeting = _meetingTypeOf(meta) != null;
     return Message(
       id: json['id'] as String? ?? '',
       source: json['source'] as String? ?? 'email',
@@ -881,6 +882,7 @@ class Message {
       deadline: meeting ? null : json['deadline'] as String?,
       needsYouP: (json['needs_you_p'] as num?)?.toDouble(),
       needsYouReason: json['needs_you_reason'] as String?,
+      sourceMetaJson: meta,
     );
   }
 

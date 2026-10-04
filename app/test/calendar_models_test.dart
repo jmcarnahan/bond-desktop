@@ -244,6 +244,9 @@ void main() {
     test('the truth table', () {
       expect(row().needsResponse, isTrue);
       expect(row(status: 'notResponded').needsResponse, isTrue);
+      // Compared case-insensitively, as the standing reads it.
+      expect(row(status: ' NotResponded ').needsResponse, isTrue);
+      expect(row(status: 'None').needsResponse, isTrue);
       // Null is not an explicit "no reply wanted".
       expect(row(requested: null).needsResponse, isTrue);
       expect(row(requested: false).needsResponse, isFalse);

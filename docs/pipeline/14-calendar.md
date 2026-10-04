@@ -302,8 +302,11 @@ The guard covers only pages requested while the write was in the air; the
 forced sync after a write starts after the note, so a lagging Graph delta in it
 could put `notResponded` back over the app's own answer. The belt: ids noted
 within `answerHold` (2 minutes) before the page's request stamp go to
-`upsertEvents(keepAnswerFor:)`, where a page status of none/`notResponded`
-keeps the stored answer and the rest of the row is applied.
+`upsertEvents(keepAnswerFor:)`, where the mirror's own ANSWER is kept against
+any differing value the page carries (a page that still says `accepted` after
+the owner pressed Maybe must not put it back — changing an answer is a main
+flow since the clash buttons), a page that agrees is applied, and the rest of
+the row is always the page's.
 
 ## Mailbox settings
 
@@ -460,7 +463,8 @@ the instant just before its end; an all-day event on every date in
 
 A meeting that overlaps another carries a **clash strip**
 (`DayPane.clashKeyFor(id)`) in place of the old one-line summary: `⚠ overlaps`
-and one chip per clashing meeting — hard first, then soft (muted, ending
+(in the error colour when any clash is hard, muted when every clash is soft —
+the grid's rule) and one chip per clashing meeting — hard first, then soft (muted, ending
 ` · maybe` for a Maybe, ` · not answered` for an invite still owed an answer,
 ` · tentative` otherwise) — labelled `subject · time` (`clashLabel`), keyed
 `clashChipKeyFor(id, otherId)`; a chip opens THAT meeting beside, and its
@@ -485,8 +489,11 @@ An unanswered meeting's row (`MeetingItem.needsResponse`) carries the compact
 Yes / Maybe / No / Dismiss under its text, through the host's `meetingActions`
 builder (one `CalendarWriteFlow` per event, `agenda-write-<id>`, no series
 folding — the row IS the occurrence), as does an attended meeting with a
-clash (above); the 'RSVP owed' chip gives way to the
-buttons and is drawn only when no builder is given. A press inside is the
+HARD clash, or a soft one whose other side answered Maybe (above) — never
+for an unanswered pencilled invite beside it, which is the side to settle and
+has its own buttons; the 'RSVP owed' chip gives way to the
+buttons and is drawn only when no builder is given or once the meeting has
+ended (an ended invite gets no live buttons). A press inside is the
 button's, never the row's open. Rows are keyed `DayPane.meetingRowKeyFor(id)`.
 
 ### What shows, per availability
@@ -589,8 +596,14 @@ in-memory.
   clock, titled by its subject (plain text) with its range when there is
   room. A tile wears the owner's standing — `standingOf`
   (`app/lib/services/calendar/event_standing.dart`, re-exported by
-  `event_view.dart`), the ONE reader of `responseStatus`/`showAs` — in the
-  one palette every calendar face shares (`toneOfStanding`,
+  `event_view.dart`), the ONE reader of `responseStatus`, and of `showAs` for
+  the tentative hold (`overlaps.dart` reads `showAs` once more, only to drop
+  `free`/`workingElsewhere` time — blocking, not standing). An accepted
+  meeting Outlook shows as tentative is a Maybe on the agenda, the grid and
+  Today, while the panel's response line and the chosen answer button follow
+  the ANSWER ("You accepted", Yes chosen) — a deliberate softening of the
+  one-standing rule, so a face that shows the answer never lies about it — in
+  the one palette every calendar face shares (`toneOfStanding`,
   `standingBarColor`, `standingFillColor` in
   `app/lib/widgets/event_standing_style.dart`):
 
@@ -829,7 +842,8 @@ before the start, absent once it has ended, when cancelled, or with no link);
 (`You accepted`, `You haven't answered`, …; `responseLine` reads the standing,
 and says "You said maybe" only for a tentative ANSWER; the line wears the
 standing's tone colour, `toneOfStanding`); the clash list — `⚠ overlaps`
-(`overlapKey`) then one row per clashing meeting, hard first, `subject · time`
+(`overlapKey`; the error colour when any clash is hard, muted when all are
+soft) then one row per clashing meeting, hard first, `subject · time`
 (a soft one ending ` · maybe`, ` · not answered` or ` · tentative`), keyed `EventPanelBody.overlapRowKeyFor(i)`, each
 opening that meeting in the same side panel on top of this one through
 `onOpenEvent` (the host's `_openEvent(id, push: true)`, so Back returns;
@@ -975,7 +989,7 @@ one row it answered:
   the forced sync, whose publisher bumps the revision when it brings the row;
 - an answer → `CalendarStore.setResponseStatus` on the id and, for a master,
   every mirrored occurrence, each id noted — so for `answerHold` (2 minutes)
-  a sync page that still says unanswered keeps the answer (see The write
+  a sync page that disagrees with the answer keeps the answer (see The write
   guard);
 - a cancel or a delete → `CalendarStore.deleteWithOccurrences`, each id noted.
 
@@ -2470,6 +2484,34 @@ draft lane pre-warms the cache, since a draft answering an ask reads it first
 
 ## Owner checks and follow-ups
 
+**The clean-up round (2026-10-04).** Owed by the owner before the PR merges;
+tests cannot settle these. The app runs from the main checkout
+(`make app-run BOND_SAMPLE_DIR=`, the real account).
+
+- **Briefs are boxed to today and tomorrow.** The Day stop two days ahead
+  shows no glance; a meeting's panel there says "Briefs are written for today
+  and tomorrow." with **Write a brief**; pressing it queues an asked brief
+  (the work row's payload is `{"asked":true}`) and the glance appears under
+  that row once written; a standing meeting next week never gets a brief on
+  its own; a brief read during the meeting stays until the meeting ends and
+  is gone after.
+- **An invitation is one row.** A fresh invite from the Gmail account appears
+  ONCE on the agenda — the meeting row with Yes / Maybe / No / Dismiss and no
+  "Due" row — and the Invites count agrees. **Yes** → the strip's Send → the
+  buttons collapse, the row stays, the Invites count drops, and nothing comes
+  back on the next sync. **Dismiss** → the strip reads Dismiss → the row
+  leaves the agenda and the grid at once, Outlook shows it declined, and the
+  organiser's mailbox receives nothing.
+- **Standing and clashes.** Two accepted meetings at the same time:
+  side-by-side tiles in the grid, both with a red bar and a ⚠ (each is a hard
+  overlap for the other), each agenda row carrying the clash strip that names
+  the other; a chip opens the other meeting beside. Maybe on one → that tile's
+  fill turns the attention colour and its bar STAYS red (the firm meeting is
+  still a hard overlap for it), while the firm tile's bar goes back to its own
+  colour and keeps only the ⚠ (a Maybe is a soft overlap for it); the firm
+  row's chip reads "· maybe"; the panel lists the clash; the Today section
+  says "· Maybe" / "· RSVP owed".
+
 **The calendar-automation round (2026-10-03).** Owed by the owner before the
 PR merges; tests cannot settle these. Every surface below is reached from the
 main checkout after `make foreground W=calendar-automation` and
@@ -2489,7 +2531,7 @@ calendar and no To Do).
 - **Times in a draft.** A suggested reply on a scheduling-ask thread ends with
   "Would any of these work? · …" and real slots; its `find_time` row carries
   `action: draft`; the model's input (the activity detail) never named a
-  slot. After a conflicting event syncs, the still-untouched draft is written
+  slot. After an overlapping event syncs, the still-untouched draft is written
   again (`draft` requeued, `slots_stale`).
 - **Briefs in the agenda.** With processing on, a meeting today or tomorrow
   with a deck sent ahead shows a two-line glance under its Day row; the

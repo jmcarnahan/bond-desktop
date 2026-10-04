@@ -4854,12 +4854,14 @@ FROM messages
   /// Whether the `messages` row aliased [alias] is a meeting message (its
   /// `source_meta_json.meeting` names a type — `Message.meetingMessageType`;
   /// Graph's `none` names none), as SQL. A blob that is null or invalid JSON
-  /// is not one; the CASE guards `json_extract` for the reason
+  /// is not one, nor is a `meeting` that is not a string (the model ignores
+  /// those too); the CASEs guard `json_type`/`json_extract` for the reason
   /// [_bodyStaleSql] gives.
   static String _meetingMessageSql(String alias) =>
       "CASE WHEN json_valid($alias.source_meta_json) "
-      "THEN lower(trim(COALESCE(json_extract($alias.source_meta_json, "
-      "'\$.meeting'), ''))) ELSE '' END NOT IN ('', 'none')";
+      "THEN CASE WHEN json_type($alias.source_meta_json, '\$.meeting') "
+      "= 'text' THEN lower(trim(json_extract($alias.source_meta_json, "
+      "'\$.meeting'))) ELSE '' END ELSE '' END NOT IN ('', 'none')";
 
   /// Whether a `messages` row carries the stale-body mark, as SQL. A blob that
   /// is null or invalid JSON carries no mark. A CASE and not an AND, because
@@ -8875,7 +8877,9 @@ RETURNING source_message_id
         .customSelect(
           '''
 SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
-  m.subject, m.from_name, m.summary, m.body_preview, m.urgency, m.deadline,
+  m.subject, m.from_name, m.summary, m.body_preview, m.urgency,
+  CASE WHEN ${_meetingMessageSql('m')} THEN NULL ELSE m.deadline END
+    AS deadline,
   m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
   m.triage_status, m.received_at,
   m.updated_at AS message_updated_at,
@@ -8927,7 +8931,9 @@ LIMIT ?
         .customSelect(
           '''
 SELECT m.subject, m.from_name, m.summary, m.body_preview, m.urgency,
-  m.deadline, m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
+  CASE WHEN ${_meetingMessageSql('m')} THEN NULL ELSE m.deadline END
+    AS deadline,
+  m.needs_action, m.reply_expected, m.needs_you_p, m.is_read,
   m.triage_status, m.received_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   c.last_outbound_at,

@@ -272,10 +272,10 @@ the draft row's tally.
 once, so after each calendar sync the inbox ran while processing is on (beside
 the brief planner), the 50 newest `suggested` drafts with a `calendar.slots`
 record are read, the mirror once over all their slots, and every one with a
-slot that has begun or that a mirror event now blocks — `slotGone`, the Day
-column's hard overlap: timed, not cancelled, not declined, `busy`, `oof` or no
-word; a tentative hold the owner did not answer blocks nothing; a Maybe
-ANSWER, like busy, makes the slot stale; `free` and `workingElsewhere` block
+slot that has begun or that a mirror event now blocks — `slotGone`: a hard
+overlap (timed, not cancelled, not declined, `busy`, `oof` or no word) or a
+soft one the owner answered Maybe to; a tentative hold the owner did not
+answer blocks nothing; `free` and `workingElsewhere` block
 nothing — is deleted
 (only while still `suggested`, checked in the DELETE) and its `draft` work row
 re-queued with the payload it ran with (`workPayload`: an asked-for press and

@@ -171,6 +171,35 @@ void main() {
     expect(find.text('Organised by Dana Ortiz'), findsOneWidget);
   });
 
+  testWidgets('a soft-only clash heading is muted, a hard one red',
+      (tester) async {
+    final maybe = CalendarEvent(
+      id: 'm',
+      subject: 'Fabrikam review',
+      startUtc: DateTime.utc(2026, 9, 29, 16, 45),
+      endUtc: DateTime.utc(2026, 9, 29, 17, 15),
+      responseStatus: 'tentativelyAccepted',
+    );
+    Color? headingColour() => tester
+        .widget<Text>(find.byKey(EventPanelBody.overlapKey))
+        .style!
+        .color;
+    await pumpBody(tester, EventLookup.found(meeting()),
+        overlaps: Overlaps(soft: [maybe]));
+    expect(headingColour(), BondColors.inkMuted);
+
+    await pumpBody(tester, EventLookup.found(meeting()),
+        overlaps: Overlaps(hard: [
+          CalendarEvent(
+            id: 'b',
+            subject: 'Budget review',
+            startUtc: DateTime.utc(2026, 9, 29, 17),
+            endUtc: DateTime.utc(2026, 9, 29, 18),
+          ),
+        ], soft: [maybe]));
+    expect(headingColour(), BondColors.error);
+  });
+
   testWidgets("the organiser's copy counts everyone, no-replies included",
       (tester) async {
     await pumpBody(

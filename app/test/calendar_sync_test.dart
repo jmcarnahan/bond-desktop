@@ -925,6 +925,31 @@ void main() {
 
       expect((await calendar.event('inv'))!.responseStatus, 'notResponded');
     });
+
+    test('a page seconds after Accepted → Maybe cannot put accepted back',
+        () async {
+      CalendarEvent meeting(String changeKey) => CalendarEvent(
+            id: 'mtg',
+            subject: 'Planning sync',
+            startUtc: t0.add(const Duration(days: 1)),
+            endUtc: t0.add(const Duration(days: 1, minutes: 30)),
+            responseStatus: 'accepted',
+            changeKey: changeKey,
+          );
+      await calendar.upsertEvents([meeting('ck-1')], syncRun: 'old-run');
+      final sync = build();
+      // A clash row's Maybe, in `_applyLocally`'s order.
+      sync.noteWrite('mtg');
+      await calendar.setResponseStatus('mtg', 'tentativelyAccepted');
+      clock = clock.add(const Duration(seconds: 5));
+      backend.steps
+          .add(CalendarSyncPage(events: [meeting('ck-2')], cursor: 'd1'));
+      await sync.syncNow(force: true);
+
+      final held = (await calendar.event('mtg'))!;
+      expect(held.responseStatus, 'tentativelyAccepted');
+      expect(held.changeKey, 'ck-2');
+    });
   });
 
   group('mailbox settings', () {

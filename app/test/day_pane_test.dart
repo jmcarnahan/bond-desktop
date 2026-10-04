@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/calendar/day_items.dart';
 import 'package:bond_inbox/services/calendar/event_view.dart'
     show EventStanding;
 import 'package:bond_inbox/services/calendar/overlaps.dart';
+import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/command_plan_card.dart';
 import 'package:bond_inbox/widgets/day_grid.dart' show GridSpan;
 import 'package:bond_inbox/widgets/day_pane.dart';
@@ -968,6 +969,51 @@ void main() {
       await tester.tap(maybe);
       await tester.pump();
       expect(starts.single.eventId, 'a');
+    });
+
+    testWidgets('an accepted meeting whose only clash is an unanswered '
+        'pencilled invite shows no buttons; one clashing with a Maybe answer '
+        'does', (tester) async {
+      final built = <String>[];
+      await pumpPane(
+        tester,
+        meetingActions: (e) {
+          built.add(e.id);
+          return Text('Yes ${e.id}');
+        },
+        events: [
+          timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20)),
+          timed('o', 'Northwind kickoff', DateTime.utc(2026, 9, 29, 20),
+              responseStatus: 'notResponded', showAs: 'tentative'),
+          timed('b', 'Budget review', DateTime.utc(2026, 9, 29, 22)),
+          timed('m', 'Fabrikam review', DateTime.utc(2026, 9, 29, 22),
+              responseStatus: 'tentativelyAccepted'),
+        ],
+      );
+      // Both clashes still wear the strip.
+      expect(find.byKey(DayPane.clashKeyFor('a')), findsOneWidget);
+      expect(find.byKey(DayPane.clashKeyFor('b')), findsOneWidget);
+      // The invite answers for itself; the Maybe and its accepted rival
+      // both get buttons (the Maybe's own clash is hard: 'b' is busy).
+      expect(built, isNot(contains('a')));
+      expect(built, containsAll(<String>['o', 'b', 'm']));
+    });
+
+    testWidgets('a soft-only strip is muted, a hard one red', (tester) async {
+      await pumpPane(tester, events: [
+        timed('a', 'Planning', DateTime.utc(2026, 9, 29, 20)),
+        timed('m', 'Fabrikam review', DateTime.utc(2026, 9, 29, 20),
+            responseStatus: 'tentativelyAccepted'),
+      ]);
+      Color? headingColour(String id) => tester
+          .widget<Text>(find.descendant(
+              of: find.byKey(DayPane.clashKeyFor(id)),
+              matching: find.text('⚠ overlaps')))
+          .style!
+          .color;
+      // 'a' runs only into a Maybe; the Maybe runs into a busy meeting.
+      expect(headingColour('a'), BondColors.inkMuted);
+      expect(headingColour('m'), BondColors.error);
     });
 
     testWidgets("an organiser's clashing meeting shows the strip and no "
