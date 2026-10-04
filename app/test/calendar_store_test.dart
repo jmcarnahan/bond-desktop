@@ -554,8 +554,7 @@ void main() {
       expect((row.status, row.inputsHash), (EventBrief.ready, 'h2'));
     });
 
-    test('briefsFor reads many; deleteBriefsExcept keeps only the named',
-        () async {
+    test('briefsFor reads many', () async {
       for (final id in ['a', 'b', 'c']) {
         await calendar.putBrief(
           eventId: id,
@@ -566,9 +565,49 @@ void main() {
       }
       expect((await calendar.briefsFor(['a', 'c', 'nope'])).keys.toSet(),
           {'a', 'c'});
-      expect(await calendar.deleteBriefsExcept(['b']), 2);
-      expect((await calendar.briefsFor(['a', 'b', 'c'])).keys, ['b']);
-      expect(await calendar.deleteBriefsExcept(const []), 1);
+    });
+
+    test('deleteBriefsOfEndedEvents: gone and ended briefs go, a future one '
+        'stays (timed and all-day)', () async {
+      final today = CalendarDate(now.year, now.month, now.day);
+      await calendar.upsertEvents([
+        timed('ended', start: inHours(-2), end: inHours(-1)),
+        // Ends exactly now: over.
+        timed('ends-now', start: inHours(-1), end: now),
+        timed('under-way', start: inHours(-1), end: inHours(1)),
+        timed('next-month', start: inHours(24 * 30)),
+        // Yesterday's all-day event ends (exclusive) today: over.
+        allDay('yesterday', today.addDays(-1)),
+        allDay('today', today),
+        allDay('next-week', today.addDays(7)),
+      ], syncRun: 'run-1');
+      const ids = [
+        'ended',
+        'ends-now',
+        'under-way',
+        'next-month',
+        'yesterday',
+        'today',
+        'next-week',
+        'gone',
+      ];
+      for (final id in ids) {
+        await calendar.putBrief(
+          eventId: id,
+          inputsHash: 'h',
+          status: EventBrief.ready,
+          briefJson: '{"headline":"Kept."}',
+          generatedAt: calendarStamp(now),
+        );
+      }
+      expect(
+          await calendar.deleteBriefsOfEndedEvents(nowUtc: now, today: today),
+          4);
+      expect((await calendar.briefsFor(ids)).keys.toSet(),
+          {'under-way', 'next-month', 'today', 'next-week'});
+      expect(
+          await calendar.deleteBriefsOfEndedEvents(nowUtc: now, today: today),
+          0);
     });
   });
 

@@ -23,7 +23,8 @@ import 'fixtures/test_db.dart';
 /// The brief's inputs, gathered over a real in-memory store: who counts as
 /// someone else, which meetings are eligible (D6), how threads rank, what an
 /// open ask is, the caps, the fencing, and the inputs hash. Fixture times are
-/// derived from the clock, so the 36-hour and 30-day windows never rot.
+/// derived from the clock, so the 30-day window never rots; the today-and-
+/// tomorrow edge is pinned to a fixed instant in a named zone.
 void main() {
   setUpAll(initCalendarZones);
 
@@ -173,17 +174,30 @@ void main() {
     await message('m-$key', key, body: body, ago: ago);
   }
 
-  Future<BriefInput> eligible(CalendarEvent e) async {
-    final g = await gatherer.gather(e, now: now);
+  Future<BriefInput> eligible(CalendarEvent e, {bool asked = false}) async {
+    final g = await gatherer.gather(e, now: now, asked: asked);
     expect(g, isA<BriefEligible>());
     return (g as BriefEligible).input;
   }
 
-  Future<BriefIneligibility> ineligible(CalendarEvent e) async {
-    final g = await gatherer.gather(e, now: now);
+  Future<BriefIneligibility> ineligible(CalendarEvent e,
+      {bool asked = false}) async {
+    final g = await gatherer.gather(e, now: now, asked: asked);
     expect(g, isA<BriefIneligible>());
     return (g as BriefIneligible).why;
   }
+
+  /// Pins [now] to Tue 6 Oct 2026 09:00 in Los Angeles — never the wall
+  /// clock, so the end-of-tomorrow edge cannot flake at 23:59 — and gives
+  /// Dana mail two hours before it.
+  Future<void> atFixedNow() async {
+    now = la.localDateTime(const CalendarDate(2026, 10, 6), 9, 0).toUtc();
+    await thread('c-1');
+  }
+
+  /// [startsIn] for a meeting at [hour]:[minute] local on [date].
+  Duration untilLocal(CalendarDate date, int hour, int minute) =>
+      la.localDateTime(date, hour, minute).toUtc().difference(now);
 
   group('eligibility', () {
     setUp(() async => thread('c-1'));
@@ -193,9 +207,13 @@ void main() {
     });
 
     test('started, too far off, cancelled, declined', () async {
+      await atFixedNow();
       expect(await ineligible(meeting(startsIn: const Duration(hours: -1))),
           BriefIneligibility.past);
-      expect(await ineligible(meeting(startsIn: const Duration(hours: 40))),
+      // The day after tomorrow, 09:00 local.
+      expect(
+          await ineligible(meeting(
+              startsIn: untilLocal(const CalendarDate(2026, 10, 8), 9, 0))),
           BriefIneligibility.tooFar);
       expect(await ineligible(meeting(isCancelled: true)),
           BriefIneligibility.cancelled);
@@ -257,14 +275,118 @@ void main() {
       expect(input.attendees, ['Dana Lee']);
     });
 
-    test('the 36-hour edge: exactly 36 hours is in, a minute past is out',
-        () async {
-      await eligible(meeting(startsIn: briefHorizon));
+    test('the end-of-tomorrow edge: 23:59 tomorrow is in, 00:00 the day '
+        'after is out', () async {
+      await atFixedNow();
+      await eligible(meeting(
+          startsIn: untilLocal(const CalendarDate(2026, 10, 7), 23, 59)));
       expect(
-        await ineligible(
-            meeting(startsIn: briefHorizon + const Duration(minutes: 1))),
+        await ineligible(meeting(
+            startsIn: untilLocal(const CalendarDate(2026, 10, 8), 0, 0))),
         BriefIneligibility.tooFar,
       );
+      expect(briefHorizonEnd(now, la),
+          la.localDateTime(const CalendarDate(2026, 10, 8), 0, 0).toUtc());
+    });
+
+    test('ahead of UTC, tomorrow is the local one, not UTC\'s', () {
+      // Wed 7 Oct 2026 08:00 in Auckland is still Tue 6 Oct in UTC; local
+      // tomorrow is Thu 8 Oct, so the box ends at Fri 9 Oct 00:00 NZDT —
+      // where UTC's own tomorrow would have ended it a day sooner.
+      final nz = CalendarZone.tryNamed('Pacific/Auckland')!;
+      final at = nz.localDateTime(const CalendarDate(2026, 10, 7), 8, 0).toUtc();
+      expect(at.day, 6, reason: 'the fixture: UTC is still the day before');
+      final end = nz.localDateTime(const CalendarDate(2026, 10, 9), 0, 0).toUtc();
+      expect(briefHorizonEnd(at, nz), end);
+      CalendarEvent at8(CalendarDate d) => CalendarEvent(
+            id: 'evt-nz',
+            subject: 'Fabrikam sync',
+            startUtc: nz.localDateTime(d, 8, 0).toUtc(),
+            endUtc: nz.localDateTime(d, 8, 30).toUtc(),
+            responseStatus: 'accepted',
+            attendees: const [Attendee(name: 'Dana Lee', address: dana)],
+          );
+      expect(
+          briefQuickCheck(at8(const CalendarDate(2026, 10, 8)),
+              owner: owner, now: at, zone: nz),
+          isNull,
+          reason: 'Thursday 08:00 is local tomorrow');
+      expect(
+          briefQuickCheck(at8(const CalendarDate(2026, 10, 9)),
+              owner: owner, now: at, zone: nz),
+          BriefIneligibility.tooFar);
+    });
+
+    test('the quick check: asked lifts the horizon, nothing else', () async {
+      await atFixedNow();
+      final nextWeek = meeting(
+          startsIn: untilLocal(const CalendarDate(2026, 10, 13), 9, 0));
+      expect(briefQuickCheck(nextWeek, owner: owner, now: now, zone: la),
+          BriefIneligibility.tooFar);
+      expect(
+          briefQuickCheck(nextWeek,
+              owner: owner, now: now, zone: la, asked: true),
+          isNull);
+      BriefIneligibility? asked(CalendarEvent e) =>
+          briefQuickCheck(e, owner: owner, now: now, zone: la, asked: true);
+      expect(asked(meeting(startsIn: const Duration(hours: -1))),
+          BriefIneligibility.past);
+      expect(asked(meeting(isCancelled: true)), BriefIneligibility.cancelled);
+      expect(asked(meeting(responseStatus: 'declined')),
+          BriefIneligibility.declined);
+      expect(asked(meeting(attendees: const [], isOrganizer: true)),
+          BriefIneligibility.noOthers);
+      expect(
+          asked(meeting(attendees: [
+            for (var i = 0; i <= briefMaxOthers; i++)
+              Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
+          ])),
+          BriefIneligibility.tooMany);
+    });
+
+    test('asked: too far off and no mail are gathered anyway; started, '
+        'cancelled, declined and nobody else are not', () async {
+      await atFixedNow();
+      // Next week, with Dana's mail: a person asked, so the horizon is off.
+      final far = await eligible(
+          meeting(
+              startsIn: untilLocal(const CalendarDate(2026, 10, 13), 9, 0)),
+          asked: true);
+      expect(far.threads, hasLength(1));
+      // Soon, with Sam, who has written nothing: briefed from the invite
+      // and its people alone.
+      final quiet = await eligible(
+          meeting(
+            attendees: const [Attendee(name: 'Sam', address: sam)],
+            bodyPreview: 'Agenda: the renewal.',
+          ),
+          asked: true);
+      expect(quiet.threads, isEmpty);
+      expect(quiet.openAsks, isEmpty);
+      expect(quiet.materials, isEmpty);
+      expect(quiet.attendees, ['Sam']);
+      expect(quiet.people.map((p) => p.address), [sam]);
+      expect(quiet.inputsHash, isNotEmpty);
+      // The light gather takes it too.
+      final light = await gatherer.gather(
+          meeting(attendees: const [Attendee(name: 'Sam', address: sam)]),
+          now: now,
+          passages: false,
+          asked: true);
+      expect(light, isA<BriefEligible>());
+
+      expect(
+          await ineligible(meeting(startsIn: const Duration(hours: -1)),
+              asked: true),
+          BriefIneligibility.past);
+      expect(await ineligible(meeting(isCancelled: true), asked: true),
+          BriefIneligibility.cancelled);
+      expect(await ineligible(meeting(responseStatus: 'declined'), asked: true),
+          BriefIneligibility.declined);
+      expect(
+          await ineligible(meeting(attendees: const [], isOrganizer: true),
+              asked: true),
+          BriefIneligibility.noOthers);
     });
 
     test('more than fifteen other people is too many; fifteen is not',

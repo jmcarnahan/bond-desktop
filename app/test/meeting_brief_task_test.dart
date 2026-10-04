@@ -807,6 +807,24 @@ void main() {
           const MeetingBriefTask().buildUserMessage(input(threads: const []));
       expect(msg, contains('Threads: none.'));
     });
+
+    test('zero threads still builds a message: the meeting and the people',
+        () {
+      // A person's Write a brief for a meeting with no mail: the invite and
+      // its people are all there is.
+      final msg = const MeetingBriefTask().buildUserMessage(input(
+        threads: const [],
+        people: const [
+          BriefPerson(
+              name: 'Dana Lee', address: 'dana@fabrikam.example', org: 'fabrikam'),
+        ],
+      ));
+      expect(msg, contains('Fabrikam sync'));
+      expect(msg, contains('Threads: none.'));
+      expect(msg, contains('People, numbered, the organiser first:'));
+      expect(msg, contains('Dana Lee · fabrikam'));
+      expect(msg, isNot(contains('Threads with')));
+    });
   });
 
   group('validate', () {

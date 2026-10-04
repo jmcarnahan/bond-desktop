@@ -1103,6 +1103,19 @@ that bite.
     only `generated_at`) — except a skip for `gone`, `declined` or
     `cancelled`, which replaces the brief with a skipped row.
   - Briefs are keyed by OCCURRENCE, never by master.
+  - The box is today and tomorrow in the DISPLAY zone, one function:
+    `briefHorizonEnd(nowUtc, zone)` (the local midnight that ends tomorrow;
+    `too_far` is `!start.isBefore(end)`), read by the planner's window, the
+    quick check and the panel. The host skips `_planBriefs` while no zone
+    has resolved — never UTC's tomorrow. A brief lives until its meeting
+    ENDS (`deleteBriefsOfEndedEvents`), not until it leaves the window, so a
+    hand-asked brief for next week survives every pass. `asked`
+    (`BriefRequest`, Regenerate and **Write a brief** `brief-write`) lifts
+    the files wait, the unchanged hash, `too_far` and `no_mail` (the brief
+    is then written from the invite and its people, "Threads: none.") —
+    never `past`, `cancelled`, `declined`, `no_others` or `too_many`; the
+    panel offers the button only where the quick check with `asked: true`
+    is clear.
   - The agenda: `dayBriefsProvider(day)` watches the day's events and
     `briefRevisionProvider` (NOT `briefWorkTickProvider`) and holds READY
     briefs only; `dayBriefsWaitingProvider(day)` shares its one read and

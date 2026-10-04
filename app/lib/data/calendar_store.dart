@@ -472,31 +472,25 @@ class CalendarStore {
     return out;
   }
 
-  /// Deletes every brief whose event is not in [keepIds] — the planner's
-  /// housekeeping, so the briefs of meetings that are over, moved out of the
-  /// window or gone from the mirror do not pile up. Returns rows deleted.
+  /// Deletes the briefs of meetings that are gone from the mirror or have
+  /// ended: a timed event whose end is at or before [nowUtc], an all-day event
+  /// whose exclusive end date is at or before [today]. A brief for a meeting
+  /// still ahead — however far — is kept: the planner's window is where
+  /// briefs are WRITTEN, not where they are allowed to live. Returns rows deleted.
   ///
-  /// Read-then-delete rather than one `NOT IN`: a chunked NOT IN would let
-  /// each chunk delete what another chunk keeps, and the table is small
-  /// enough that reading its ids costs nothing.
-  Future<int> deleteBriefsExcept(Iterable<String> keepIds) async {
-    final keep = keepIds.toSet();
-    final rows =
-        await db.customSelect('SELECT event_id FROM event_briefs').get();
-    final doomed = [
-      for (final r in rows)
-        if (!keep.contains(r.data['event_id'])) r.data['event_id'] as String,
-    ];
-    var deleted = 0;
-    for (var i = 0; i < doomed.length; i += 500) {
-      final end = i + 500 > doomed.length ? doomed.length : i + 500;
-      final chunk = doomed.sublist(i, end);
-      deleted += await db.customUpdate(
-        'DELETE FROM event_briefs '
-        'WHERE event_id IN (${_placeholders(chunk.length)})',
-        variables: _args(chunk),
+  /// `event_briefs` never holds a series master's id (the planner and the
+  /// handler key briefs by occurrence), so a master needs no case here. A
+  /// timed row with no `end_utc` reads as ended — `eventsBetween` never
+  /// lists one, so it never had a brief to lose.
+  Future<int> deleteBriefsOfEndedEvents({
+    required DateTime nowUtc,
+    required CalendarDate today,
+  }) =>
+      db.customUpdate(
+        'DELETE FROM event_briefs WHERE event_id NOT IN ('
+        'SELECT id FROM calendar_events WHERE '
+        '(is_all_day = 0 AND end_utc > ?) OR '
+        '(is_all_day = 1 AND end_date > ?))',
+        variables: _args([calendarStamp(nowUtc), today.toIso()]),
       );
-    }
-    return deleted;
-  }
 }

@@ -34,11 +34,20 @@ import 'time_format.dart';
 ///    the old one is still the best answer until the new one lands;
 /// 2. queued, with processing on — "Writing the brief…";
 /// 3. processing off — the switch is why nothing is coming;
-/// 4. skipped — the rule that kept the meeting out;
-/// 5. failed — with Regenerate;
-/// 6. known ineligible ([eligible] false) with nothing stored, in the words
-///    of [ineligibleReason] when it has some;
-/// 7. otherwise — a brief comes after the next calendar sync.
+/// 4. waiting on the files while the quick check says no — its reason;
+/// 5. skipped — the rule that kept the meeting out, with Write a brief when
+///    that rule was no mail or too far off;
+/// 6. failed — with Regenerate;
+/// 7. known ineligible ([eligible] false) with nothing stored, in the words
+///    of [ineligibleReason] when it has some — with Write a brief when the
+///    meeting is too far off;
+/// 8. otherwise — a brief comes after the next calendar sync, with Write a
+///    brief to have it now.
+///
+/// Write a brief ([onWrite]) is offered only with processing on, and never
+/// for a meeting that has started, was cancelled or declined, has nobody
+/// else or too many people: a person's request lifts the horizon and the
+/// mail rule, nothing else.
 class BriefSection extends StatelessWidget {
   const BriefSection({
     super.key,
@@ -46,6 +55,7 @@ class BriefSection extends StatelessWidget {
     required this.now,
     required this.onOpenThread,
     required this.onRegenerate,
+    this.onWrite,
     this.eligible,
     this.ineligibleReason,
     this.onOpenMaterial,
@@ -56,6 +66,7 @@ class BriefSection extends StatelessWidget {
   static const Key headlineKey = ValueKey('brief-headline');
   static const Key statusKey = ValueKey('brief-status');
   static const Key regenerateKey = ValueKey('brief-regenerate');
+  static const Key writeKey = ValueKey('brief-write');
   static Key pointKeyFor(int i) => ValueKey('brief-point-$i');
   static Key askKeyFor(int i) => ValueKey('brief-ask-$i');
   static Key pointThreadKeyFor(int i) => ValueKey('brief-point-thread-$i');
@@ -80,8 +91,7 @@ class BriefSection extends StatelessWidget {
       'No brief — no recent mail with these people.';
   static const String noOthersText = 'No brief — nobody else is invited.';
   static const String tooManyText = 'No brief — too many people for a brief.';
-  static const String tooFarText =
-      'A brief is written in the 36 hours before the meeting.';
+  static const String tooFarText = 'Briefs are written for today and tomorrow.';
   static const String startedText = 'No brief — this meeting has started.';
   static const String ineligibleText = 'No brief for this meeting.';
   static const String materialsPendingText =
@@ -89,6 +99,7 @@ class BriefSection extends StatelessWidget {
   static const String failedText = "The brief couldn't be written.";
   static const String comingText =
       'Brief coming after the next calendar sync.';
+  static const String writeLabel = 'Write a brief';
 
   /// Null while the read is in flight, which draws nothing rather than a
   /// sentence that may be about to be wrong.
@@ -106,6 +117,10 @@ class BriefSection extends StatelessWidget {
   final DateTime now;
   final void Function(String source, String conversationKey) onOpenThread;
   final VoidCallback onRegenerate;
+
+  /// Asks for a brief the rules did not write: too far off, no mail, or none
+  /// yet. Null draws no button.
+  final VoidCallback? onWrite;
 
   /// Opens one of the brief's files. Null draws the file names as plain
   /// text.
@@ -183,8 +198,17 @@ class BriefSection extends StatelessWidget {
     if (stored?.skipReason == 'materials_pending' && eligible == false) {
       return _status(reasonText(ineligibleReason));
     }
+    // Write a brief stands in for the rules a person's request lifts — and
+    // only while the quick check is not saying no for a reason it does not
+    // lift: a stored no_mail row over a meeting that has since started
+    // offers nothing.
+    final lifts = eligible != false || ineligibleReason == 'too_far';
+    final offer = onWrite != null && v.processingOn && lifts;
     if (stored?.status == EventBrief.skipped) {
-      return _status(reasonText(stored!.skipReason));
+      final reason = stored!.skipReason;
+      return offer && (reason == 'no_mail' || reason == 'too_far')
+          ? _statusWith(reasonText(reason), _write())
+          : _status(reasonText(reason));
     }
     if (stored?.status == EventBrief.failed) {
       return Wrap(
@@ -195,8 +219,12 @@ class BriefSection extends StatelessWidget {
         ],
       );
     }
-    if (eligible == false) return _status(reasonText(ineligibleReason));
-    return _status(comingText);
+    if (eligible == false) {
+      return offer && ineligibleReason == 'too_far'
+          ? _statusWith(reasonText(ineligibleReason), _write())
+          : _status(reasonText(ineligibleReason));
+    }
+    return offer ? _statusWith(comingText, _write()) : _status(comingText);
   }
 
   /// The sentence for an ineligibility wire word; a word with none of its
@@ -215,6 +243,19 @@ class BriefSection extends StatelessWidget {
   static const Set<String> _ends = {'declined', 'cancelled'};
 
   Widget _status(String text) => Text(text, key: statusKey, style: _muted);
+
+  /// [text] with [button] after it, wrapping under it when the panel is
+  /// narrow — the failed state's shape.
+  Widget _statusWith(String text, Widget button) => Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [Text(text, key: statusKey, style: _muted), button],
+      );
+
+  Widget _write() => TextButton(
+        key: writeKey,
+        onPressed: onWrite,
+        child: const Text(writeLabel),
+      );
 
   Widget _regenerate() => TextButton(
         key: regenerateKey,

@@ -529,8 +529,12 @@ String briefOrgOf(String address) {
 final RegExp _numericLabel = RegExp(r'^[0-9]+$');
 final RegExp _dnsLabel = RegExp(r'^[a-z0-9-]+$');
 
-/// How far ahead a meeting is briefed (D6).
-const Duration briefHorizon = Duration(hours: 36);
+/// The instant briefs stop: the local midnight in [zone] that ends tomorrow.
+/// Briefs cover today and tomorrow in the display zone — a standing meeting
+/// months out is never gathered — and the planner, the gatherer and the
+/// panel all read this one function.
+DateTime briefHorizonEnd(DateTime nowUtc, CalendarZone zone) =>
+    zone.localDateTime(zone.dateOf(nowUtc.toUtc()).addDays(2), 0, 0).toUtc();
 
 /// How far back the mail with its people is read (D6).
 const Duration briefMailWindow = Duration(days: 30);
@@ -648,6 +652,9 @@ List<BriefOther> briefOthers(CalendarEvent e, {required String? owner}) {
 /// too many people.
 /// Null when the meeting passes them all — the mail rule is the gatherer's.
 ///
+/// [asked] — a person pressed Write a brief: the horizon does not apply (the
+/// rest does).
+///
 /// Pure, so the planner can skip a meeting before a single read and the event
 /// panel can say why a meeting has no brief before anything is stored.
 BriefIneligibility? briefQuickCheck(
@@ -655,6 +662,7 @@ BriefIneligibility? briefQuickCheck(
   required String? owner,
   required DateTime now,
   required CalendarZone zone,
+  bool asked = false,
 }) {
   if (e.isCancelled) return BriefIneligibility.cancelled;
   if (e.responseStatus.trim().toLowerCase() == 'declined') {
@@ -663,7 +671,9 @@ BriefIneligibility? briefQuickCheck(
   final start = briefStartOf(e, zone);
   final nowUtc = now.toUtc();
   if (start == null || !start.isAfter(nowUtc)) return BriefIneligibility.past;
-  if (start.isAfter(nowUtc.add(briefHorizon))) return BriefIneligibility.tooFar;
+  if (!asked && !start.isBefore(briefHorizonEnd(nowUtc, zone))) {
+    return BriefIneligibility.tooFar;
+  }
   final ownerKey = owner?.trim().toLowerCase();
   final others = briefOthers(e, owner: ownerKey);
   if (others.isEmpty) return BriefIneligibility.noOthers;
@@ -785,10 +795,15 @@ class BriefGatherer {
   /// inputs hash is the same either way, and so are [BriefInput.
   /// materialsPending] and [BriefEligible.unqueued], which read only the
   /// stored states and the work rows.
+  ///
+  /// [asked] — a person pressed Write a brief: neither the horizon nor the
+  /// mail rule applies, and a meeting with no mail is briefed from the
+  /// invite and its people alone.
   Future<BriefGather> gather(
     CalendarEvent event, {
     required DateTime now,
     bool passages = true,
+    bool asked = false,
   }) async {
     final owner = await this.owner();
     // Unknown, the owner's own attendee row counts as somebody else, and a
@@ -797,7 +812,8 @@ class BriefGatherer {
     if (owner == null) throw const BriefOwnerUnknown();
     final zone = _zone();
     final nowUtc = now.toUtc();
-    final quick = briefQuickCheck(event, owner: owner, now: nowUtc, zone: zone);
+    final quick = briefQuickCheck(event,
+        owner: owner, now: nowUtc, zone: zone, asked: asked);
     if (quick != null) return BriefIneligible(quick);
 
     final others = briefOthers(event, owner: owner);
@@ -851,8 +867,9 @@ class BriefGatherer {
       invites.add(await candidateOf(Conversation.fromRow(row)));
     }
     // An invite thread alone is mail about this meeting: the rule is "no
-    // threads at all", not "no address match".
-    if (invites.isEmpty && conversations.isEmpty) {
+    // threads at all", not "no address match". A person who asked gets a
+    // brief anyway: every step below takes an empty thread list.
+    if (!asked && invites.isEmpty && conversations.isEmpty) {
       return const BriefIneligible(BriefIneligibility.noMail);
     }
 

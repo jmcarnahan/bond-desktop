@@ -1,15 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 
 // `show`: drift generates row classes named Message/Conversation from the
 // tables, and this file means the app's own models.
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/backend/unavailable_calendar_backend.dart';
 import 'package:bond_inbox/services/calendar/calendar_sync.dart';
+import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -130,7 +133,12 @@ void main() {
     await store.recomputeConversationCounts('email', 'c1');
   }
 
-  Future<void> pumpScreen(WidgetTester tester) async {
+  Future<void> pumpScreen(
+    WidgetTester tester, {
+    bool processing = false,
+    String? ownerMail,
+    List<Override> overrides = const [],
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     // Built inside the test body, not in setUp: a completer made outside the
@@ -142,10 +150,15 @@ void main() {
     final tokens = _Tokens();
     tokens.values['refresh_token'] = 'rt-1';
     tokens.values['granted_scopes'] = _readGrant;
+    // The brief planner plans nothing until it knows whose calendar it is.
+    if (ownerMail != null) {
+      tokens.values['account_json'] =
+          jsonEncode({'displayName': 'Me', 'mail': ownerMail});
+    }
     final auth = GraphAuth(httpClient: client, store: tokens);
     // The default MCP session would ask a server that is not there.
     await store.setPref(backendModeKey, backendModeSdk);
-    await store.setPref(processingOnKey, 'false');
+    await store.setPref(processingOnKey, processing ? 'true' : 'false');
     final prefs = await AppPrefsNotifier.read(store);
 
     await tester.pumpWidget(ProviderScope(
@@ -166,6 +179,7 @@ void main() {
           );
           return calendarSync = sync;
         }),
+        ...overrides,
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -206,5 +220,108 @@ void main() {
     // Both waiting ticks saw a change, so the mirror's readers were told
     // twice — by the sync's publisher, not by the inbox.
     expect(container.read(calendarRevisionProvider), 2);
+  });
+
+  group('briefs after a synced tick', () {
+    setUpAll(initCalendarZones);
+
+    const owner = 'me@contoso.com';
+    const dana = 'dana.ortiz@contoso.com';
+
+    /// A meeting tomorrow at 10:00 in Los Angeles with Dana — inside the
+    /// briefs' box at any hour — and a thread with her an hour old, so the
+    /// planner's gather finds mail and queues the brief.
+    Future<void> seedMeeting(CalendarZone la) async {
+      final start = la
+          .localDateTime(la.dateOf(DateTime.now().toUtc()).addDays(1), 10, 0)
+          .toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-brief',
+          subject: 'Fabrikam sync',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          attendees: const [
+            Attendee(name: 'Me', address: owner),
+            Attendee(name: 'Dana Ortiz', address: dana),
+          ],
+        ),
+      ], syncRun: 'run-1');
+      final at = MessageStore.isoStamp(
+          DateTime.now().toUtc().subtract(const Duration(hours: 1)));
+      await store.upsertMessage({
+        'source_message_id': 'd1-m1',
+        'conversation_key': 'd1',
+        'direction': 'inbound',
+        'subject': 'Fabrikam renewal',
+        'from_name': 'Dana Ortiz',
+        'from_address': dana,
+        'received_at': at,
+        'body_text': 'Can we go over the renewal?',
+      });
+      await store.upsertConversation({
+        'conversation_key': 'd1',
+        'subject': 'Fabrikam renewal',
+        'participants_json': jsonEncode([
+          {'name': 'Dana Ortiz', 'email': dana},
+        ]),
+        'state': 'waiting',
+        'last_message_at': at,
+        'last_inbound_at': at,
+      });
+    }
+
+    /// Completes the launch's forced sync as `synced` and lets the planner,
+    /// which is store reads off the real event loop, run.
+    Future<String?> syncedThenStatus(WidgetTester tester) async {
+      calendarSync.gate.complete(
+        const CalendarSyncOutcome(CalendarSyncStatus.synced, upserts: 1),
+      );
+      for (var i = 0; i < 3; i++) {
+        await tester.pump();
+        await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 50)));
+      }
+      await tester.pump();
+      return tester.runAsync<String?>(() =>
+          store.workStatusOf('meeting_brief', 'calendar', 'evt-brief'));
+    }
+
+    testWidgets('a synced tick with the zone resolved plans the brief',
+        (tester) async {
+      final la = CalendarZone.tryNamed('America/Los_Angeles')!;
+      await seedMeeting(la);
+      await pumpScreen(tester, processing: true, ownerMail: owner, overrides: [
+        calendarZoneProvider.overrideWith((ref) async => la),
+      ]);
+
+      // Queued by the planner. Processing is on (the planner runs only
+      // then), so the woken draft lane may already have claimed the row —
+      // and failed it, with no model in a test: the row's existence is the
+      // claim, and its null payload says the planner wrote it, not a press.
+      expect(await syncedThenStatus(tester), isNotNull,
+          reason: 'the planner queued the meeting');
+      final row = await tester.runAsync(() => db
+          .customSelect('SELECT payload_json FROM work_items '
+              "WHERE task_kind = 'meeting_brief' AND entity_id = 'evt-brief'")
+          .getSingle());
+      expect(row!.data['payload_json'], isNull);
+    });
+
+    testWidgets('a synced tick before the zone has resolved plans nothing: '
+        "UTC's tomorrow is not the owner's", (tester) async {
+      final la = CalendarZone.tryNamed('America/Los_Angeles')!;
+      await seedMeeting(la);
+      // Never completes, and nothing in the body awaits it.
+      final never = Completer<CalendarZone>();
+      await pumpScreen(tester, processing: true, ownerMail: owner, overrides: [
+        calendarZoneProvider.overrideWith((ref) => never.future),
+      ]);
+
+      expect(await syncedThenStatus(tester), isNull,
+          reason: 'no zone, no pass: no work row at all');
+    });
   });
 }

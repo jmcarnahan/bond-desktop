@@ -84,18 +84,21 @@ void main() {
   final opened = <(String, String)>[];
   final files = <BriefMaterialRef>[];
   var regenerated = 0;
+  var written = 0;
 
   setUp(() {
     opened.clear();
     files.clear();
     regenerated = 0;
+    written = 0;
   });
 
   Future<void> pump(WidgetTester tester, EventBriefView? view,
       {bool? eligible,
       String? reason,
       bool compact = false,
-      bool canOpenFiles = true}) async {
+      bool canOpenFiles = true,
+      bool canWrite = false}) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: SingleChildScrollView(
@@ -108,6 +111,7 @@ void main() {
             onOpenThread: (s, k) => opened.add((s, k)),
             onOpenMaterial: canOpenFiles ? files.add : null,
             onRegenerate: () => regenerated++,
+            onWrite: canWrite ? () => written++ : null,
           ),
         ),
       ),
@@ -465,8 +469,7 @@ void main() {
     // The no-read rules' own words, when nothing is stored yet.
     await pump(tester, const EventBriefView(),
         eligible: false, reason: 'too_far');
-    expect(status(tester),
-        'A brief is written in the 36 hours before the meeting.');
+    expect(status(tester), 'Briefs are written for today and tomorrow.');
     await pump(tester, const EventBriefView(),
         eligible: false, reason: 'no_others');
     expect(status(tester), 'No brief — nobody else is invited.');
@@ -518,6 +521,105 @@ void main() {
     await pump(tester, EventBriefView(brief: ready()),
         eligible: false, reason: 'past');
     expect(find.byKey(BriefSection.headlineKey), findsOneWidget);
+  });
+
+  testWidgets('Write a brief shows for too far, no mail and coming, and calls '
+      'onWrite', (tester) async {
+    Future<void> pressWrite() async {
+      expect(find.byKey(BriefSection.writeKey), findsOneWidget);
+      expect(find.text(BriefSection.writeLabel), findsOneWidget);
+      await tester.tap(find.byKey(BriefSection.writeKey));
+    }
+
+    // Too far off, nothing stored: the quick check's reason and the button.
+    await pump(tester, const EventBriefView(),
+        eligible: false, reason: 'too_far', canWrite: true);
+    expect(status(tester), BriefSection.tooFarText);
+    await pressWrite();
+    expect(written, 1);
+
+    // A skipped row for no mail — and one for too far, written by a
+    // planner request the handler refused.
+    for (final reason in ['no_mail', 'too_far']) {
+      await pump(
+          tester,
+          EventBriefView(
+              brief: row(EventBrief.skipped, hash: 'ineligible:$reason')),
+          canWrite: true);
+      expect(status(tester), BriefSection.reasonText(reason));
+      await pressWrite();
+    }
+    expect(written, 3);
+
+    // Nothing stored and nothing against it: coming, or now by hand.
+    await pump(tester, const EventBriefView(), canWrite: true);
+    expect(status(tester), BriefSection.comingText);
+    await pressWrite();
+    expect(written, 4);
+    expect(regenerated, 0);
+
+    // Null onWrite: the sentence alone.
+    await pump(tester, const EventBriefView(),
+        eligible: false, reason: 'too_far');
+    expect(find.byKey(BriefSection.writeKey), findsNothing);
+  });
+
+  testWidgets('Write a brief: never for a started, cancelled or declined '
+      'meeting, a ready or failed brief, or with processing off',
+      (tester) async {
+    Future<void> none(EventBriefView view,
+        {bool? eligible, String? reason}) async {
+      await pump(tester, view,
+          eligible: eligible, reason: reason, canWrite: true);
+      expect(find.byKey(BriefSection.writeKey), findsNothing,
+          reason: '${view.brief?.status} $eligible $reason');
+    }
+
+    for (final reason in [
+      'past',
+      'cancelled',
+      'declined',
+      'no_others',
+      'too_many',
+    ]) {
+      await none(const EventBriefView(), eligible: false, reason: reason);
+    }
+    for (final reason in ['no_others', 'too_many', 'materials_pending']) {
+      await none(EventBriefView(
+          brief: row(EventBrief.skipped, hash: 'ineligible:$reason')));
+    }
+    // A stored no_mail or too_far row over a meeting the quick check now
+    // refuses for a reason a request does not lift: started, cancelled,
+    // declined, nobody else.
+    for (final stored in ['no_mail', 'too_far']) {
+      for (final reason in ['past', 'cancelled', 'declined', 'no_others']) {
+        await none(
+            EventBriefView(
+                brief: row(EventBrief.skipped, hash: 'ineligible:$stored')),
+            eligible: false,
+            reason: reason);
+      }
+    }
+    // Waiting on the files, after the meeting has started.
+    await none(
+        EventBriefView(
+            brief: row(EventBrief.skipped,
+                hash: 'ineligible:materials_pending')),
+        eligible: false,
+        reason: 'past');
+    await none(EventBriefView(brief: ready()));
+    await none(EventBriefView(brief: row(EventBrief.failed)));
+    await none(const EventBriefView(queued: true));
+    await none(const EventBriefView(processingOn: false));
+    await none(
+        EventBriefView(
+            processingOn: false,
+            brief: row(EventBrief.skipped, hash: 'ineligible:no_mail')),
+        eligible: false,
+        reason: 'too_far');
+    // The agenda's compact face never offers it.
+    await pump(tester, const EventBriefView(), compact: true, canWrite: true);
+    expect(find.byKey(BriefSection.writeKey), findsNothing);
   });
 
   testWidgets('a failed brief offers Regenerate', (tester) async {

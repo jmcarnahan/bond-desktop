@@ -103,6 +103,29 @@ void main() {
         generatedAt: calendarStamp(now.subtract(const Duration(hours: 3))),
       );
 
+  /// Pins [now] to [hour]:[minute] local on [date] in Los Angeles — never
+  /// the wall clock, so a day-edge test cannot flake — and moves Dana's mail
+  /// to two hours before it.
+  Future<void> fixNow(CalendarDate date, int hour, int minute) async {
+    now = la.localDateTime(date, hour, minute).toUtc();
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'c-1',
+      'subject': 'Fabrikam renewal',
+      'participants_json': jsonEncode([
+        {'name': 'Dana', 'email': dana},
+      ]),
+      'state': 'waiting',
+      'message_count': 1,
+      'last_message_at':
+          MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+    });
+  }
+
+  /// [startsIn] for a meeting at [hour]:[minute] local on [date].
+  Duration untilLocal(CalendarDate date, int hour, int minute) =>
+      la.localDateTime(date, hour, minute).toUtc().difference(now);
+
   Future<String> currentHash(String id) async {
     final g = await gatherer.gather(meeting(id), now: now);
     gatherer.gathers--;
@@ -111,12 +134,15 @@ void main() {
 
   test('queues eligible meetings only, at most six a pass, soonest first',
       () async {
+    await fixNow(const CalendarDate(2026, 10, 6), 9, 0);
     await calendar.upsertEvents([
       for (var i = 0; i < 8; i++)
         meeting('evt-$i', startsIn: Duration(hours: i + 1)),
       meeting('solo', attendees: const [Attendee(name: 'Me', address: owner)]),
       meeting('off', isCancelled: true),
-      meeting('far', startsIn: const Duration(hours: 40)),
+      // The day after tomorrow, 09:00 local.
+      meeting('far',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 8), 9, 0)),
     ], syncRun: 'run-1');
 
     expect(await plan(), BriefPlanner.maxPerPass);
@@ -325,18 +351,53 @@ void main() {
     expect(await status('evt-1'), 'pending');
   });
 
-  test('briefs of events out of the window are deleted', () async {
-    await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
-    for (final id in ['evt-1', 'gone']) {
-      await calendar.putBrief(
-        eventId: id,
-        inputsHash: 'h',
-        status: EventBrief.skipped,
-        generatedAt: calendarStamp(now),
-      );
+  test('briefs of meetings that have ended are deleted; a brief for a '
+      'meeting outside the window is kept', () async {
+    await calendar.upsertEvents([
+      meeting('evt-1'),
+      // Asked for by hand: next week, far outside today and tomorrow.
+      meeting('next-week', startsIn: const Duration(days: 7)),
+      // Ended an hour ago.
+      meeting('ended', startsIn: const Duration(minutes: -90)),
+    ], syncRun: 'run-1');
+    for (final id in ['evt-1', 'next-week', 'ended', 'gone']) {
+      await readyBrief(id);
     }
     await plan();
-    expect((await calendar.briefsFor(['evt-1', 'gone'])).keys, ['evt-1']);
+    expect(
+        (await calendar.briefsFor(['evt-1', 'next-week', 'ended', 'gone']))
+            .keys
+            .toSet(),
+        {'evt-1', 'next-week'});
+    expect(await status('next-week'), isNull,
+        reason: 'kept, never planned: the window is where briefs are written');
+  });
+
+  test('the planner never queues a meeting the day after tomorrow, even at '
+      '00:05', () async {
+    // Just after midnight: tomorrow ends almost 48 hours away, and a
+    // meeting late tomorrow is in.
+    await fixNow(const CalendarDate(2026, 10, 6), 0, 5);
+    await calendar.upsertEvents([
+      meeting('late-tomorrow',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 7), 23, 30)),
+      meeting('day-after',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 8), 0, 30)),
+    ], syncRun: 'run-1');
+    expect(await plan(), 1);
+    expect(await status('late-tomorrow'), 'pending');
+    expect(await status('day-after'), isNull);
+
+    // Just before midnight: the day after tomorrow starts barely a day away
+    // and is still out.
+    await fixNow(const CalendarDate(2026, 10, 6), 23, 55);
+    await calendar.upsertEvents([
+      meeting('soon-after',
+          startsIn: untilLocal(const CalendarDate(2026, 10, 8), 0, 5)),
+    ], syncRun: 'run-2');
+    expect(await plan(), 0);
+    expect(await status('soon-after'), isNull);
+    expect(await status('day-after'), isNull);
   });
 
   test('nothing is planned while the owner is unknown', () async {
@@ -593,7 +654,7 @@ void main() {
       expect(gatherer.gathers, 1);
 
       // Clear AI results empties the derived table.
-      await calendar.deleteBriefsExcept(const []);
+      await db.customStatement('DELETE FROM event_briefs');
       expect(await plan(after: const Duration(minutes: 1)), 1);
       expect(gatherer.gathers, 2);
       expect(await status('evt-1'), 'pending');
@@ -733,10 +794,11 @@ class _CountingGatherer extends BriefGatherer {
     CalendarEvent event, {
     required DateTime now,
     bool passages = true,
+    bool asked = false,
   }) {
     gathers++;
     passageAsks.add(passages);
-    return super.gather(event, now: now, passages: passages);
+    return super.gather(event, now: now, passages: passages, asked: asked);
   }
 }
 

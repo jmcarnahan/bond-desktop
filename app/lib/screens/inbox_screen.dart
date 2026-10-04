@@ -1506,8 +1506,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// trace and never reaches the mail.
   Future<void> _planBriefs() async {
     try {
-      final zone =
-          ref.read(calendarZoneProvider).valueOrNull ?? CalendarZone.utc();
+      // No zone yet, no pass: "tomorrow" is a local day, and UTC's tomorrow
+      // is not the owner's.
+      final zone = ref.read(calendarZoneProvider).valueOrNull;
+      if (zone == null) return;
       final queued = await ref
           .read(briefPlannerProvider)
           .plan(now: DateTime.now(), zone: zone);
@@ -8487,6 +8489,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           _openThreadBeside(source, key, push: true),
       onOpenMaterial: (material) => unawaited(_openMaterial(material)),
       onRegenerate: () => unawaited(_regenerateBrief(shown.id)),
+      // Offered only where a request would be honoured: the quick check with
+      // the horizon lifted must be clear, or a far-off block with nobody
+      // else would offer a button whose press ends as a skipped row.
+      onWrite: briefQuickCheck(shown,
+                  owner: null, now: nowUtc, zone: zone, asked: true) ==
+              null
+          ? () => unawaited(_regenerateBrief(shown.id))
+          : null,
     );
   }
 

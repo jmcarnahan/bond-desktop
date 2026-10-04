@@ -123,6 +123,8 @@ class MeetingBriefHandler extends WorkHandler {
   @override
   Future<void> run(Map<String, Object?> item) async {
     final asked = BriefRequest.fromPayload(item['payload_json']).asked;
+    // On every row, skipped or written: whether a person asked for it.
+    _log.note({'asked': asked});
     final now = _clock();
     final stamp = calendarStamp(now);
 
@@ -153,7 +155,8 @@ class MeetingBriefHandler extends WorkHandler {
     // The LIGHT gather first (no file text, no people, no embedding): it
     // hashes and reads the wait exactly as the full one does, and a brief
     // that waits or is unchanged costs nothing more than these store reads.
-    var gathered = await _gatherer.gather(event, now: now, passages: false);
+    var gathered = await _gatherer.gather(event,
+        now: now, passages: false, asked: asked);
     // A thread's mail that says it carries files nobody has listed — the
     // owner's own invite with its PDF, sent from this mailbox and so never
     // triaged — is fetched ONCE and the meeting gathered again, so this
@@ -182,7 +185,8 @@ class MeetingBriefHandler extends WorkHandler {
       }
       _log.note({'fetched': fetched});
       if (fetched > 0) {
-        gathered = await _gatherer.gather(event, now: now, passages: false);
+        gathered = await _gatherer.gather(event,
+            now: now, passages: false, asked: asked);
       }
     }
     final BriefInput light;
@@ -250,7 +254,7 @@ class MeetingBriefHandler extends WorkHandler {
     // A call will be made: now the full gather, with the files' text, the
     // people and the passages. Its answer is the same meeting's a moment
     // later; one that has turned ineligible meanwhile is skipped as such.
-    final full = await _gatherer.gather(event, now: now);
+    final full = await _gatherer.gather(event, now: now, asked: asked);
     final BriefInput input;
     switch (full) {
       case BriefIneligible(:final why):

@@ -135,7 +135,7 @@ class ActivityLogPanel extends StatefulWidget {
   /// meeting.
   static const Map<String, String> _briefSkips = {
     'past': 'already started',
-    'too_far': 'more than 36 hours away',
+    'too_far': 'not today or tomorrow',
     'no_others': 'nobody else invited',
     'cancelled': 'cancelled',
     'declined': 'declined',

@@ -119,18 +119,24 @@ class BriefPlanner {
     if (owner == null) return 0;
     final nowUtc = now.toUtc();
     final stamp = calendarStamp(nowUtc);
-    final end = nowUtc.add(briefHorizon);
-    // Every event touching the window, a meeting already under way included:
-    // its brief is still worth reading while it runs, so the housekeeping
-    // below keeps it, even though nothing new is planned for it.
+    final today = zone.dateOf(nowUtc);
+    final end = briefHorizonEnd(nowUtc, zone);
+    // Every event touching today and tomorrow, a meeting already under way
+    // included (nothing new is planned for it, but it is in the window).
     final events = await _calendar.eventsBetween(
       startUtc: nowUtc,
       endUtc: end,
-      fromDate: zone.dateOf(nowUtc),
-      toDateExclusive: zone.dateOf(end).addDays(1),
+      fromDate: today,
+      toDateExclusive: today.addDays(2),
     );
     final ids = {for (final e in events) e.id};
-    await _calendar.deleteBriefsExcept(ids);
+    // The window is where briefs are WRITTEN, not where they may live: only
+    // the briefs of meetings that have ended or are gone are deleted, so a
+    // brief read during its meeting stays, and one a person asked for a
+    // meeting next week survives this pass (D2/D3). A ready brief whose
+    // meeting moved out of the window stays as written until the meeting
+    // comes back in; its start is in the hash, so it is rewritten then.
+    await _calendar.deleteBriefsOfEndedEvents(nowUtc: nowUtc, today: today);
     _lastChecked.removeWhere((id, _) => !ids.contains(id));
     _queuedFor.removeWhere((id, _) => !ids.contains(id));
     _endedFor.removeWhere((id, _) => !ids.contains(id));

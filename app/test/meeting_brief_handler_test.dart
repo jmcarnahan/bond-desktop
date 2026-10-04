@@ -683,6 +683,64 @@ void main() {
     expect(llm.callsFor('meeting_brief'), 2);
   });
 
+  test('an asked request briefs a meeting next week', () async {
+    await seedEvent(startsIn: const Duration(days: 7));
+    await seedThread();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+    final log = ActivityLog(store);
+    final briefs = MeetingBriefHandler(
+      calendar,
+      gatherer,
+      client: () => llm,
+      activityLog: log,
+      clock: () => now,
+    );
+
+    await briefs.run(item('evt-1', asked: true));
+    await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+
+    expect(llm.callsFor('meeting_brief'), 1);
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.ready);
+    expect(row.brief!.headline, 'Dana is waiting on the quote.');
+    final rows = [
+      for (final r in await store.recentActivity())
+        if (r['kind'] == 'meeting_brief') r,
+    ];
+    expect(jsonDecode(rows.single['detail_json'] as String),
+        containsPair('asked', true));
+  });
+
+  test('an asked request briefs a meeting with no mail', () async {
+    await seedEvent();
+    final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+
+    await handler(llm).run(item('evt-1', asked: true));
+
+    expect(llm.callsFor('meeting_brief'), 1);
+    expect(llm.userMessages.single, contains('Threads: none.'));
+    final row = (await calendar.brief('evt-1'))!;
+    expect(row.status, EventBrief.ready);
+    expect(row.brief!.points.single.thread, -1,
+        reason: 'there is no thread for the point to name');
+    expect(stored, 1);
+  });
+
+  test('a planner request for the same meetings is skipped too_far / no_mail',
+      () async {
+    await seedEvent(id: 'evt-far', startsIn: const Duration(days: 7));
+    await seedEvent(id: 'evt-quiet');
+    final llm = ScriptedLlm.never();
+    final h = handler(llm);
+
+    await h.run(item('evt-far'));
+    await h.run(item('evt-quiet'));
+
+    expect((await calendar.brief('evt-far'))!.skipReason, 'too_far');
+    expect((await calendar.brief('evt-quiet'))!.skipReason, 'no_mail');
+    expect(llm.calls, isEmpty);
+  });
+
   test('the request payload reads asked only for a literal true', () {
     expect(BriefRequest.fromPayload('{"asked":true}').asked, isTrue);
     expect(BriefRequest.fromPayload('{"asked":"true"}').asked, isFalse);

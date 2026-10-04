@@ -36,8 +36,10 @@ use. None of them goes to the cloud.
    offers Undo. The grid's drag, the command bar's card and Find a time's
    invite all go through this same path ([Writes](#writes)).
 5. **Briefs.** After each synced tick, `BriefPlanner` queues `meeting_brief`
-   work for the next 36 hours of meetings with people the owner has
-   exchanged mail with. The handler writes `event_briefs`, which the panel
+   work for the meetings of today and tomorrow in the display zone
+   (`briefHorizonEnd`: the local midnight that ends tomorrow) with people the
+   owner has exchanged mail with; a person can ask for a brief of any future
+   meeting (**Write a brief**). The handler writes `event_briefs`, which the panel
    draws and the agenda teases ([Briefs](#briefs)).
 6. **The command bar.** `DayCommandBar` reads a typed request mostly by
    lookup. Dart resolvers find the time, the people and the meeting; the
@@ -143,7 +145,7 @@ and unlike it in one respect: this IS mailbox data.
 | `messagesForEvent(eventId)` | stored messages whose `source_meta_json.event_id` is the event, newest first; a `LIKE '%"event_id"%'` prefilter first, then `json_extract` guarded by `json_valid` so one malformed blob cannot fail the statement |
 | `brief(eventId)` / `briefsFor(ids)` / `putBrief(…)` | the `event_briefs` reads and the handler's upsert ([Briefs](#briefs)) |
 | `touchBrief(eventId, generatedAt:, inputsHash:)` | moves only `generated_at` (and the hash, if one is given); the one write a failed or skipped run makes over a ready brief |
-| `deleteBriefsExcept(keepIds)` | the planner's cleanup: deletes the briefs of meetings that are no longer in the window |
+| `deleteBriefsOfEndedEvents(nowUtc:, today:)` | the planner's cleanup: deletes the briefs of meetings gone from the mirror, timed ones whose `end_utc` is at or before now, and all-day ones whose exclusive `end_date` is at or before today — a brief for a meeting still ahead is kept however far off |
 
 ## The sync
 
@@ -973,10 +975,10 @@ the mail rule in `BriefGatherer.gather`; each failure is an enum word
 | not cancelled | `cancelled` |
 | the owner's own response is not `declined` | `declined` |
 | starts after now (an all-day event at its local midnight) | `past` |
-| starts within the next 36 hours (`briefHorizon`; exactly 36 h is in, a minute past is not) | `too_far` |
+| starts today or tomorrow in the display zone (`briefHorizonEnd(nowUtc, zone)`: the local midnight that ends tomorrow; 23:59 tomorrow is in, 00:00 the day after is not) — lifted when a person asked (`asked`) | `too_far` |
 | at least one other person: an attendee whose address is not the owner's (case-insensitive) and whose type is not `resource`, or an organiser who is not the owner — an attendee's copy with a hidden guest list names only the organiser, and is still a meeting with someone | `no_others` |
 | at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast — a narrowing of D6, which set no ceiling | `too_many` |
-| at least one thread: the meeting's own invite mail (`CalendarStore.messagesForEvent` of the occurrence, then of its series master — any sender, any age), or a conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
+| at least one thread (lifted when a person asked: the brief is written from the invite and its people alone): the meeting's own invite mail (`CalendarStore.messagesForEvent` of the occurrence, then of its series master — any sender, any age), or a conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
 | (handler only) the event is no longer in the mirror | `gone` |
 | (handler only) a file sent ahead is still being read, no ready brief is stored, and the meeting starts more than 20 minutes from now (`MeetingBriefHandler.pendingGrace`) — not a rule about the meeting but a wait, below | `materials_pending` |
 
@@ -1251,7 +1253,7 @@ failed id is traced by its type and costs only itself, so the meeting is
 gathered again whenever any fetch completed, and the first gather stands
 only when none did — and returns
 without a call when the stored brief is `ready` with the same hash — unless
-the row's payload is `{"asked":true}` (`BriefRequest`, Regenerate's), which
+the row's payload is `{"asked":true}` (`BriefRequest`, Regenerate's and Write a brief's), which
 always writes. Every one of those decisions is made on the LIGHT gather
 (`passages: false`: no file text, no people, no embedding), which hashes and
 reads the wait exactly as the full one does; the full gather (text, people,
@@ -1270,7 +1272,7 @@ file is read says "unread" about the thing the meeting is likeliest to be
 about, and would be rewritten minutes later; the panel says "Reading the
 files sent ahead — brief coming." A ready brief is rewritten anyway (it is
 there to read meanwhile), a meeting inside the grace is briefed with what
-is read, and an asked-for row (Regenerate) never waits. Otherwise
+is read, and an asked-for row (Regenerate, Write a brief) never waits. Otherwise
 it runs the task and stores `ready` with the brief JSON — plus a `threads`
 list of `{source, conversation_key, subject}` in the order the model was
 shown them, so the panel links a point to its thread without gathering again,
@@ -1313,13 +1315,19 @@ starts after a write call `syncNow` directly and plan no briefs. The planner
 runs (never awaited by the mail load; every failure a trace) and pumps
 the draft lane when it queued anything. It returns 0 at once while the
 owner's address is unknown (the keychain has not answered): without it the
-owner counts among every meeting's people. Otherwise it reads every event
-touching the next 36 hours, deletes the briefs of every other event
-(`deleteBriefsExcept`, so the table holds only the window, a meeting under
-way included), and walks the meetings soonest first, timed before all-day:
+owner counts among every meeting's people. The host skips the pass while the
+display zone has not resolved (UTC's tomorrow is not the owner's). Otherwise
+it reads every event touching today and tomorrow in the display zone
+(`briefHorizonEnd`: the local midnight that ends tomorrow; a meeting under
+way included), deletes the briefs of meetings that have ended or are gone
+(`deleteBriefsOfEndedEvents`); a brief for a meeting still ahead is kept
+however far off — the window is where briefs are written, not where they
+may live, so a brief asked for by hand for next week survives the pass —
+and walks the meetings soonest first, timed before all-day:
 
 - on `briefQuickCheck`, skips it — writing a `skipped` row for `no_others`
-  or `too_many` (below);
+  or `too_many` (below; `no_mail`, the gather's word, is recorded from the
+  gather path);
 - does not gather again an event it gathered less than **15 minutes** ago
   (`BriefPlanner.recheck`, in memory) whose stored row is `failed` and has
   not moved since — a back-off for a brief that could not be written, and
@@ -1372,6 +1380,17 @@ draft-lane pump. Over a ready brief it is offered with processing off too
 request waits and runs when the switch comes back. A failed row with
 processing off shows only the paused sentence, with no Regenerate.
 
+**Write a brief** (`brief-write`) is the same request, offered when the panel
+would otherwise only explain — too far off, no mail, or nothing stored yet —
+only with processing on, and never once the quick check refuses for a reason
+a request does not lift (a stored `no_mail` row over a meeting that has since
+started draws its sentence alone). An asked request also bypasses `too_far` and
+`no_mail` in the quick check and the gather (`briefQuickCheck(asked:)`,
+`gather(asked:)`, which the handler passes from the row's payload), never
+`past`, `cancelled`, `declined`, `no_others` or `too_many`; with no thread
+the brief is written from the invite and its people ("Threads: none."). The
+handler notes `asked` on every activity row.
+
 **Clear AI results** empties `event_briefs` (a derived table) and the next
 sync plans the briefs again. Briefs are per meeting, not per message, so
 nothing is added to `clearDerived`'s per-message loop.
@@ -1401,9 +1420,11 @@ meeting." — a `materials_pending` row gives way to the quick check's
 sentence when it says no, so a meeting that has started says "No brief —
 this meeting has started.", not "brief coming"); "The brief couldn't be
 written." with Regenerate; when the
-no-read rules already say no, the same sentence for their word ("A brief is
-written in the 36 hours before the meeting." for `too_far`); else "Brief
-coming after the next calendar sync." The view
+no-read rules already say no, the same sentence for their word ("Briefs are
+written for today and tomorrow." for `too_far`, with **Write a brief**); else
+"Brief coming after the next calendar sync." with **Write a brief**. A
+skipped `no_mail` or `too_far` row draws **Write a brief** beside its
+sentence too. The view
 re-reads on the calendar revision, `briefRevisionProvider` (bumped by the
 handler's `onStored` and by Regenerate) and `briefWorkTickProvider` (the draft
 lane's progress for this kind, which lands after the work row is written).
@@ -2373,7 +2394,7 @@ calendar and no To Do).
   `action: draft`; the model's input (the activity detail) never named a
   slot. After a conflicting event syncs, the still-untouched draft is written
   again (`draft` requeued, `slots_stale`).
-- **Briefs in the agenda.** With processing on, a meeting in the next 36 h
+- **Briefs in the agenda.** With processing on, a meeting today or tomorrow
   with a deck sent ahead shows a two-line glance under its Day row; the
   chevron opens the brief inline, the deck named under Materials with a chip
   that opens the file beside; the Today section shows the glance. A deck that

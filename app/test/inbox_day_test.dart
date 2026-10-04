@@ -843,6 +843,57 @@ void main() {
       );
     });
 
+    testWidgets('Write a brief in the panel requeues an asked brief',
+        (tester) async {
+      final today = la.dateOf(DateTime.now().toUtc());
+      // The day after tomorrow at 10:00: outside the briefs' box at any hour.
+      final start = la.localDateTime(today.addDays(2), 10, 0).toUtc();
+      await CalendarStore(db).upsertEvents([
+        CalendarEvent(
+          id: 'evt-later',
+          subject: 'Northwind review',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          attendees: const [
+            Attendee(name: 'Dana Ortiz', address: 'dana.ortiz@contoso.com'),
+          ],
+        ),
+      ], syncRun: 'run-2');
+      await pumpScreen(tester, overrides: [
+        processingProvider.overrideWith((ref) => ProcessingNotifier(true)),
+      ]);
+
+      await tester.tap(find.text('Day'));
+      await pumps(tester);
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.byTooltip('Next day'));
+        await pumps(tester);
+      }
+      await tester.tap(find.text('Northwind review'));
+      await pumps(tester);
+      expect(
+          tester.widget<Text>(inSide(find.byKey(BriefSection.statusKey))).data,
+          BriefSection.tooFarText);
+
+      await tester.tap(inSide(find.byKey(BriefSection.writeKey)));
+      await pumps(tester);
+      // Queued (processing is on here, so the woken lane may already have
+      // claimed it — and failed, with no model in a test), marked asked.
+      expect(
+        await tester.runAsync(() =>
+            store.workStatusOf('meeting_brief', 'calendar', 'evt-later')),
+        isNotNull,
+      );
+      final queued = await tester.runAsync(() => db
+          .customSelect('SELECT payload_json FROM work_items '
+              "WHERE task_kind = 'meeting_brief' AND entity_id = 'evt-later'")
+          .getSingle());
+      expect(jsonDecode(queued!.data['payload_json'] as String),
+          {'asked': true});
+    });
+
     testWidgets('a meeting waiting for its files says so in the agenda; one '
         'that has started does not', (tester) async {
       final nowUtc = DateTime.now().toUtc();
