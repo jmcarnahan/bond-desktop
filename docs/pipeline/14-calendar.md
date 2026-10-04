@@ -954,8 +954,10 @@ mailbox's zone (`allDayZone`, from the cached settings, else a live read).
 
 ## Briefs
 
-A short brief before a meeting with people the owner has been writing to:
-what is open with them, what they asked, what the owner is waiting on. Stage
+A dense briefing before a meeting with people the owner has been writing to:
+the story so far, who each person is and what they last wrote, what the files
+sent ahead say, what is open with them, what they asked, what the owner is
+waiting on, and questions worth asking. Stage
 `meeting_brief` (generative, [10-model-routing.md](10-model-routing.md)),
 stored per event in `event_briefs` (`event_id` PK, `inputs_hash`, `status`
 `ready|failed|skipped`, `brief_json`, `model`, `generated_at`), drawn in the
@@ -976,6 +978,7 @@ the mail rule in `BriefGatherer.gather`; each failure is an enum word
 | at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast — a narrowing of D6, which set no ceiling | `too_many` |
 | at least one thread: the meeting's own invite mail (`CalendarStore.messagesForEvent` of the occurrence, then of its series master — any sender, any age), or a conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
 | (handler only) the event is no longer in the mirror | `gone` |
+| (handler only) a file sent ahead is still being read, no ready brief is stored, and the meeting starts more than 20 minutes from now (`MeetingBriefHandler.pendingGrace`) — not a rule about the meeting but a wait, below | `materials_pending` |
 
 **Mail only for now.** Teams participants are stored as `teams:<id>`, not
 addresses, so the address match never finds a chat; mapping them through the
@@ -998,10 +1001,12 @@ master, and a master that reaches the handler anyway is briefed as its
 the panel reads.
 
 **What is gathered** (`lib/services/calendar/brief_gatherer.dart`, no model).
-The planner gathers with `passages: false` — store reads only, so it can
-gather every meeting in the window; the handler's gather (the default) also
-embeds the meeting once to find the materials' passages. Passages are not
-hashed, so the two gathers hash alike:
+The planner gathers with `passages: false` — the light gather: the store reads
+the hash needs and nothing else (no file text, no people block, no embedding),
+so it can gather every meeting in the window; the handler's gather (the
+default) also reads each read file's text, builds the people block and embeds
+the meeting once to find the materials' passages. None of those is hashed, so
+the two gathers hash alike:
 
 - **Threads** — first the meeting's own mail: the distinct conversations of
   `messagesForEvent(event.id)` (newest first), then of
@@ -1043,7 +1048,25 @@ hashed, so the two gathers hash alike:
   else the address; the word `you` for the owner's own), the day its mail arrived (`yyyy-MM-dd` in the display
   zone), its `text_status`, and its digest (`attachments.digest_json`) when
   there is one. A file whose text is not read yet is still listed — the brief
-  names it as arrived. **Passages**: with an embeddings client
+  names it as arrived. **Text** (handler's gather only): a file whose
+  `text_status` is `done` carries its `attachment_text` (`attachmentTextOf`),
+  runs of spaces and blank lines closed up, cut at a word to 6000 characters
+  (`BriefGatherer.materialTextCap`, `capAtWord`) — the head of the document,
+  raw, fenced by the task as `material_text`; a store error costs that file
+  its text, never the brief. **Pending**: `BriefInput.materialsPending` is
+  true when a material's `text_status` is `pending` AND its `attachment_text`
+  work row (`workStatusOf('attachment_text', source,
+  attachmentEntityId(messageId, attachmentId))`) is `pending` or
+  `processing` AND its mail arrived less than 2 hours ago
+  (`BriefGatherer.pendingMaxAge`, from `received_at` against the gather's
+  `now`). There is no `error` `text_status`: a text work row that gave up
+  (`error` after its attempts) leaves the attachment row `pending` for good,
+  so the work row is what says a file is still being read, and the age is
+  the backstop. A `pending` file with NO work row at all — listed by
+  `ensureBodiesFor`, which queues no text — is reported in
+  `BriefEligible.unqueued` (with whether its mail is young enough to wait
+  for) rather than counted. Both gathers compute both from the stored states
+  and the work rows. **Passages**: with an embeddings client
   (`briefGathererProvider` passes the retriever's), and when
   `hasAttachmentChunks` says a file's attachment id has chunks, the meeting's
   subject and preview are embedded under the document prefix (the
@@ -1064,6 +1087,29 @@ hashed, so the two gathers hash alike:
   (below), so the brief names the file; its text and digest arrive through
   the attachment lane and move the hash, which re-briefs the meeting.
 - **Last met** — `lastMetWith` → `lastMetLabel`.
+- **People** (`BriefPerson`, handler's gather only) — the other people,
+  the organiser first and then the attendees in the invite's order, at most
+  8 (`BriefGatherer.maxPeople`, applied after the ordering; the rest are
+  counted in `peopleMore`). The organiser first is a deliberate departure
+  from D14's literal "attendee order": `briefOthers` appends the organiser
+  last (a Graph attendee copy does not list them among the attendees), and
+  who called the meeting is the one person the block must not count among
+  "+N more". Each: the invite's name (else the address), the
+  organisation (`briefOrgOf`: the label before the domain's public suffix —
+  `fabrikam` for `mail.fabrikam.com`, `contoso` for `contoso.co.uk`, the
+  tenant `contoso` for `contoso.onmicrosoft.com` — and ''
+  for a consumer mailbox (gmail, googlemail, outlook, hotmail, live, msn,
+  yahoo, icloud, me, mac, proton, protonmail, aol), a
+  `*.calendar.google.com` resource, an address written as an IP, or a label
+  that is not letters, digits and hyphens), whether they organised it, their answer (below), their own
+  "Last met …" (`lastMetWith([address])`), how many kept threads they are in
+  (by `participants_json` or a message from them), and their newest inbound
+  message in those threads: how long ago (`briefAgo`), its thread's subject,
+  and its own words — cut at the first quoted-reply header (`askOwnWords`),
+  whitespace collapsed, at most 240 at a word (`lastWordsCap`), fenced as
+  `last_words` — and their open ask (the `BriefAsk` from their address), as
+  fenced there. Not hashed: every field follows from hashed inputs but last
+  met, and a past meeting ageing by a day is no reason to rewrite a brief.
 - **The invite's `body_preview`**, capped at 600 and fenced.
 
 Every cap here, and the task's ceilings below (but the glance's, which cuts
@@ -1076,10 +1122,11 @@ The fencing rule: every free-text body arrives from the gatherer inside
 raw because the panel's links and the hash read them, and the task fences
 each as it lays the message out.
 
-**Tally honesty.** Nobody's response is read anywhere in a brief. Only the
-organiser's copy tracks answers; on an attendee's copy `none` means "not
-known", never "hasn't answered", so the brief says nothing about who is
-coming (the prompt also forbids it) rather than risk saying something false.
+**Tally honesty.** Only the organiser's copy tracks answers; on an
+attendee's copy `none` means "not known", never "hasn't answered". So a
+person's answer is read only off the owner's OWN organiser copy (`accepted`,
+`tentative`, `declined`, `no answer yet`) and is "response not known" on any
+other copy, rather than risk saying something false.
 
 **The inputs hash** is sha256 over the event's id, `change_key` and times,
 the owner's address, each kept thread's `source|key|last_message_at|
@@ -1091,50 +1138,97 @@ an existing message's text alone does not. A storyline's text is hashed
 because a recap is rewritten in place, moving no id or stamp. A material's
 text and digest states are hashed so a deck whose words or digest land after
 the first brief re-briefs the meeting; its name is not (a rename says nothing
-new), and neither are its passages (they follow from the text). The hash
-never reads the clock.
+new), and neither are its text or passages (they follow from the text
+status), nor the people block. The hash never reads the clock.
 
 **The task** (`MeetingBriefTask`, `lib/services/llm/meeting_brief_task.dart`):
-a const system prompt ending in `untrustedDataClause`, with the rule "Never
-write today, tomorrow or yesterday; name the day." (a brief is read for up to
-a day and a half after it is written); the user message opens with `Now:
-<absolute local time>` and the meeting line, both absolute (`briefWhenLine`:
-"Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All day · Wed 7 Oct 2026"), then the
-numbered threads, each with its last message as an age from `now`
-(`briefAgo`: "3 hours ago", "2 days ago"), and each section. After the
-storylines and before the invite, **Materials sent ahead, numbered ("you"
-is the owner):** — per material `[n] (<state>)` and a fenced `name · sender
-· day` (`you` as the sender is a file the owner sent: the prompt says the
-owner knows it but may want it summarised for the meeting), then its fenced
-digest (summary, then its facts one per line) and its pre-fenced passages.
-Digests and passages share a 3000-character budget (`materialsBudget`),
-filled in material order; once a block does not fit, every later material
-gets only its name line. The state word is the app's and sits OUTSIDE the
-fence, so a file name cannot pose as one: `read` only when a digest or a
-passage was actually written for that file, `unread` when its text was never
-read, `not shown` when it was read but nothing of it is in the message (the
-budget is spent, or there is nothing to show). The prompt treats `not shown`
-like `unread`: the file is named as arrived, not summarised. Temperature 0.2, 900
-tokens. The schema (v2) is flat and in THIS order, which is the order the
-grammar makes the model write: `evidence` (one sentence — what the meeting is
-for and where things stand; written first so the rest follows from it),
-`headline` (the glance: one or two dense sentences for the agenda), `points`
-(`{text, thread}`), `open_asks` (`{person, ask, thread}`), `materials`
-(`{file, takeaway}`), `questions` (strings, `maxItems` 3), `prep` (strings,
-`maxItems` 3) — all required, `additionalProperties: false`, and no
-`maxItems` on the three object arrays and no `maxLength` anywhere, because
-the grammar converter refuses them. `validate` holds every ceiling instead:
-evidence 300 and headline 240, each cut back to the last whole word
-(`capAtWord`) so the glance never ends inside one, at most 5 points of 200, 4 asks of 200 (person
-80), 4 material lines of 160, 3 questions of 160, 3 prep lines of 120, empty
-strings dropped; thread numbers are 1-based in the message and the answer,
-and are turned 0-based, with anything outside the numbered list (or ≤ 0)
-becoming -1, so a line can never link to a thread that is not there. A
-material number outside the materials list DROPS its line (never -1): a line
-about a file that is not there is about nothing. The prompt has the model
-name an unread material as arrived, not summarise it, and ask questions
-grounded in the inputs — a gap, an open decision, a figure to confirm,
-something a material raises — never rhetorical or generic.
+a const system prompt ending in `untrustedDataClause`. v3 is written for an
+owner who wants to walk in completely on top of the meeting: it speaks to them
+as "you" and never "the owner", asks for DENSITY — every sentence carries a
+name, a number, a date, a decision or a claim from a file; thin inputs mean
+fewer sentences, never vaguer ones — has the model write the evidence line
+first, and keeps "Name a day by its date, never by a relative word." (a brief
+is read for up to a day and a half after it is written) and "Never invent: a
+number, a name, a date or a claim that is not in the inputs does not go in."
+The user message opens with `Now: <absolute local time>` and the meeting line,
+both absolute (`briefWhenLine`: "Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All
+day · Wed 7 Oct 2026"), the fenced attendees and the last-met line, then
+**People, numbered, the organiser first:** — per person `[n]` and the fenced
+name, then the app's words outside the fence: the organisation (or "no
+organisation known"), `organiser|attendee` and the answer; then, only when
+present, their "Last met …" line, "in N of the threads", "last wrote <ago>:"
+with the fenced subject (capped at 120, `labelCap`) and the fenced last
+words, and "open ask: yes (see Open asks)" — the ask itself is said once, in
+"Open asks", not repeated here; "+N more" past eight. Then the numbered threads, each with its
+last message as an age from `now` (`briefAgo`: "3 hours ago", "2 days ago"),
+and each section. After the storylines and before the invite, **Materials
+sent ahead, numbered ("you" is the owner):** — per material `[n] (<state>)`
+and a fenced `name · sender · day` (the name capped at 120, `labelCap`), then
+its fenced digest (summary, then its facts one per line), its text fenced as
+`material_text`, and its pre-fenced passages. Digests, text and passages
+share a budget of 10000 (`materialsBudget`), fences included, where a block
+COSTS its length plus its digit count: Qwen tokenises digits one per token,
+so a sheet or a financial deck runs near two characters a token, and at the
+old 14000 raw characters such a block overflowed the 16k context. The budget
+is spent in two rounds (one private spend, `_spend`). Round 1, newest
+material first: its digest, then its text whole when it fits, else — while
+more than 1000 is left (`minTextHead`) — its head cut at a word to what is
+left (a partial head beats "not shown"). Round 2: the passages, with what is
+left, for every material whose text was not written whole and uncut (a text
+under `materialTextCap − 50` written whole is the whole document, and its
+passages would be duplicates). Each block is tried on its own, so a later,
+smaller one may still fit. A digest at its caps is about 1.7k, so one file's
+digest and whole 6000-character text, plus a second's digest and the head of
+its text, fit; a third is named only. The state word is the app's and
+sits OUTSIDE the fence, so a file name cannot pose as one: `read` only when a
+digest, text or passage was actually written for that file, `unread` when its
+text was never read, `not shown` when it was read but nothing of it is in the
+message. The prompt treats `not shown` like `unread`: the file is named as
+arrived in one point, not summarised. The prompt carries length hints
+inside its rules — a person's line "at most about 25 words", each briefing
+sentence "at most about 40 words", each material point "a short line" — so
+the model aims below the hard caps. Temperature 0.2, **2700 tokens**: every
+string at its cap is about 12.9k characters (13.7k with keys and quotes,
+about 3.4k tokens), a realistic dense answer about 8k characters (2.0–2.1k
+tokens), and a truncated answer is invalid JSON — a failed brief retried on
+the same inputs — so the budget sits over the realistic answer, and a test
+holds the caps' sum / 4 within 1.2 × `maxTokens`. Worst case in, measured by
+the size guard in `meeting_brief_task_test` (every cap full, 120-character
+subjects): about 35.0k characters with the 3.9k system prompt — six threads
+(~9.3k with their two 600-character snippets), four asks (~1.9k), two
+storylines (~1.2k), materials 10k plus six name lines (~11.1k), eight people
+(~5.7k), the invite 0.7k and the headers — about 11.7k tokens at three
+characters a token, plus the 2.7k answer: about 14.4k, inside the 16384
+context. The guard holds it at 35000.
+
+The schema (v3) is flat and in THIS order, which is the order the grammar
+makes the model write: `evidence` (one sentence — what the meeting is for and
+where things stand), `headline` (the glance: one or two dense sentences for
+the agenda), `briefing` (strings, `maxItems` 6 — the story so far, one
+fact-bearing sentence each), `people` (`{name, line}` — who they are, what
+they last wrote or asked and when, what is open with them), `materials`
+(`{file, points}` — per numbered file that matters, up to five points of what
+it SAYS: figures, names, dates, claims, decisions asked for, gaps),
+`questions` (strings, `maxItems` 5, each grounded in one specific fact),
+`open_asks` (`{person, ask, thread}`), `points` (`{text, thread}` — the
+references), `prep` (strings, `maxItems` 3) — all required,
+`additionalProperties: false`, `maxItems` only on the three arrays of strings
+at the top (none on an object array or on `materials[].points`) and no
+`maxLength` anywhere, because the grammar converter refuses them. `validate`
+holds every ceiling instead: evidence 300, headline 320 and each briefing
+sentence 320, all cut back to the last whole word (`capAtWord`); at most 6
+briefing sentences, 8 people (name 80, line 220), 4 materials of at most 5
+points of 220, 5 questions of 220, 4 asks of 200 (person 80), 5 points of
+200, 3 prep lines of 120, empty strings dropped; thread numbers are 1-based
+in the message and the answer, and are turned 0-based, with anything outside
+the numbered list (or ≤ 0) becoming -1, so a line can never link to a thread
+that is not there. A material number outside the materials list DROPS its
+entry (never -1): points about a file that is not there are about nothing.
+`MeetingBrief` writes v3 (`materials[].points`); a stored v1 row (no
+`evidence`, `materials`, `questions`, `material_refs`) and a v2 row (a
+material's one `takeaway`, read as its one point; no `briefing` or `people`)
+still decode. `BriefMaterialOut.takeaway` joins the points back into a line
+for the faces that still draw one.
 
 **The handler** (`MeetingBriefHandler`, kind `meeting_brief`, source
 `calendar`, entity = event id) re-reads the event (missing → skipped
@@ -1146,16 +1240,36 @@ again, never looping; a failed fetch is traced by its type and the first
 gather stands — and returns
 without a call when the stored brief is `ready` with the same hash — unless
 the row's payload is `{"asked":true}` (`BriefRequest`, Regenerate's), which
-always writes. Otherwise
+always writes. Every one of those decisions is made on the LIGHT gather
+(`passages: false`: no file text, no people, no embedding), which hashes and
+reads the wait exactly as the full one does; the full gather (text, people,
+passages) runs only once a call will be made, so a waiting or unchanged
+brief costs store reads and nothing more. **Queueing the unqueued**: when
+the gather reports `unqueued` files (listed, `pending`, no `attachment_text`
+row), the handler `enqueueWork`s their text once (INSERT OR IGNORE, so a
+second ask changes nothing; activity `queued_text: n`), and those whose mail
+is young enough count as pending for this run. **Waiting for the files**:
+after the (possibly second) gather,
+when a material is still pending AND no ready brief is stored AND the meeting
+starts more than 20 minutes from now (`pendingGrace`), it writes `skipped`
+with `ineligible:materials_pending` (the skip path, so the activity note is
+`{reason: materials_pending}`) and makes no call — a brief written before the
+file is read says "unread" about the thing the meeting is likeliest to be
+about, and would be rewritten minutes later; the panel says "Reading the
+files sent ahead — brief coming." A ready brief is rewritten anyway (it is
+there to read meanwhile), a meeting inside the grace is briefed with what
+is read, and an asked-for row (Regenerate) never waits. Otherwise
 it runs the task and stores `ready` with the brief JSON — plus a `threads`
 list of `{source, conversation_key, subject}` in the order the model was
 shown them, so the panel links a point to its thread without gathering again,
 and a `material_refs` list of `{source, message_id, attachment_id, name}` in
 the materials' order, so a material line opens its file the same way
-(`MeetingBrief.materialAt`) — and the resolved model name. Stored v1 rows
-(no `evidence`, `materials`, `questions` or `material_refs`) decode with those
-empty. The activity detail carries `threads`, `asks`, `materials` and
-`questions` counts, and `fetched` (how many unlisted messages it fetched)
+(`MeetingBrief.materialAt`) — and the resolved model name. Stored v1 and v2
+rows decode (above). The activity detail carries `threads`, `asks`,
+`materials`, `questions` and `people` counts and `text_chars` (the
+characters of the materials' text the message actually carried —
+`MeetingBriefTask.materialTextCharsWritten`, the same spend as the message —
+not what was gathered), `queued_text` when it queued any, and `fetched` (how many unlisted messages it fetched)
 when it fetched any. An empty headline is an `LlmFormatException`.
 A dead server (`LlmUnavailableException` and its subclasses) propagates and
 PARKS the kind like a draft, writing nothing; any other failure writes
@@ -1194,25 +1308,37 @@ way included), and walks the meetings soonest first, timed before all-day:
 - on `briefQuickCheck`, skips it — writing a `skipped` row for `no_others`
   or `too_many` (below);
 - does not gather again an event it gathered less than **15 minutes** ago
-  (`BriefPlanner.recheck`, in memory) whose stored row is `ready` or
-  `failed` and has not moved since; an event with NO stored row is never
-  throttled, so after Clear AI results the next synced tick plans it at
-  once, and neither is a `skipped` row (any `ineligible:*` reason), which
-  is gathered again on EVERY pass — a Gmail invite's event syncs seconds
-  before its mail, and a quarter of an hour of "No brief — no recent mail"
-  over a thread that is there would be wrong. Few events in the window are
-  skipped and the gather is store reads; an unchanged reason writes and
-  queues nothing (the row already says so, and `_queuedFor`). This throttle is what keeps a busy
-  thread the morning of a meeting from buying a model call per sync;
+  (`BriefPlanner.recheck`, in memory) whose stored row is `failed` and has
+  not moved since — a back-off for a brief that could not be written, and
+  the only row it holds. A `ready` row is gathered on EVERY pass: a deck
+  sent the morning of the meeting, or its text landing, reaches the brief on
+  the next sync, and `_queuedFor` with the "fresh AND unchanged" rule below
+  keep an unchanged one from queueing — that is what keeps a busy thread
+  the morning of a meeting from buying a model call per sync. An event with
+  NO stored row is never throttled, so after Clear AI results the next
+  synced tick plans it at once, and neither is a `skipped` row (any
+  `ineligible:*` reason), which is gathered again on EVERY pass — a Gmail
+  invite's event syncs seconds before its mail, a file being read lands in a
+  minute, and a quarter of an hour of "No brief — no recent mail" over a
+  thread that is there would be wrong. The gathers are store reads; an
+  unchanged reason writes and queues nothing (the row already says so, and
+  `_queuedFor`);
 - past that, gathers the fresh hash and marks the meeting due when there is
   no brief or the hash moved — at ANY age, so a deck or its digest landing
-  an hour after the first brief re-briefs the meeting within one recheck. The
+  an hour after the first brief re-briefs the meeting on the next pass. The
   one skip is "younger than **2 hours** (`freshFor`) AND unchanged": a
   `failed` brief on unchanged inputs waits out the 2 hours before it is
   tried again, and a moved hash that was already queued once while the brief
   is fresh (`_queuedFor`, in memory — a failed rewrite over a ready brief
   keeps the old hash) is not queued again until the brief ages or the inputs
-  move again;
+  move again. A `materials_pending` row is queued when the text lands (the
+  hash moves); when the light gather says nothing is being read any more
+  though the hash did not move (the text work gave up, or the mail aged past
+  2 hours), once per stored row (`_endedFor`, in memory, keyed by its
+  `generated_at`, so a handler that throws before writing does not buy a
+  queue every pass); and once more on the same hash when the meeting comes
+  inside the 20-minute grace, so it is briefed with what is read rather than
+  waiting on a file that may never finish;
 - when the gather says `no_mail`, `no_others` or `too_many`, writes
   `skipped` with `inputs_hash = ineligible:<word>` (no model call) unless the
   row already says so or holds a ready brief, which stands; once the reason
@@ -1241,18 +1367,27 @@ nothing is added to `clearDerived`'s per-message loop.
 over `eventBriefProvider(<shown occurrence id>)`, drawn while the meeting has
 not ended. In order of precedence: a meeting the owner declined or that was
 cancelled — its sentence, even over a ready brief, since the owner is not
-going; a ready brief (headline, **Questions** numbered "1.", "2.", **Prep**,
-**Materials** — per takeaway, a chip with the file's name (tooltip "Open the
-file") when the brief still holds its `materialRefs` entry, then the
-takeaway; a takeaway whose ref is missing is drawn alone —, **Open asks**,
-then the points with a chip naming the thread under **References** — what to
-do before the meeting first, what it rests on last —, "Generated 2h ago ·
-Regenerate" — or "Rewriting…" while a new one is queued; the old brief stands
-until the new one lands); "Writing the brief…"; "Briefs are paused while processing is off.";
+going; a ready brief — the headline in bold, then the body both faces draw,
+in the order a catch-up is read, each block only when it has something:
+**Briefing** (the sentences as one selectable paragraph, key
+`brief-briefing`), **From the materials** (per material a chip with the
+file's name — tooltip "Open the file" — when the brief still holds its
+`materialRefs` entry, then its points as bullets, keys
+`brief-material-point-<i>-<j>`; points whose ref is missing are drawn
+alone), **People** (per person the name in bold, " — ", the line; key
+`brief-person-<i>`), **Questions** numbered "1.", "2.", **Prep**, **Open
+asks**, then the points with a chip naming the thread under **References**
+— what it rests on last —, then "Generated 2h ago · Regenerate" — or
+"Rewriting…" while a new one is queued; the old brief stands until the new
+one lands; "Writing the brief…"; "Briefs are paused while processing is off.";
 a skipped row's reason ("No brief — no recent mail with these people.",
 "No brief — nobody else is invited.", "No brief — too many people for a
-brief.", "No brief — this meeting has started.", else "No brief for this
-meeting."); "The brief couldn't be written." with Regenerate; when the
+brief.", "No brief — this meeting has started.", "Reading the files sent
+ahead — brief coming." for `materials_pending`, else "No brief for this
+meeting." — a `materials_pending` row gives way to the quick check's
+sentence when it says no, so a meeting that has started says "No brief —
+this meeting has started.", not "brief coming"); "The brief couldn't be
+written." with Regenerate; when the
 no-read rules already say no, the same sentence for their word ("A brief is
 written in the 36 hours before the meeting." for `too_far`); else "Brief
 coming after the next calendar sync." The view
@@ -1264,8 +1399,11 @@ the file's row now (`MessageStore.attachmentRow(source, messageId,
 attachmentId)`) and opens `FilePanel(attachment: AttachmentRef.fromRow(row))`
 beside, pushed; a row the store no longer holds toasts "That file is no
 longer here." No conversation key rides along: briefs read mail, where the
-message id is enough. Every string is model output and plain `Text`; the
-chips are the only tappables.
+message id is enough. Every string is model output and plain text (`Text`,
+the briefing's `SelectableText`, a person's unstyled spans — no markup, no
+links); the chips are the only tappables. A briefing sentence cut at its cap
+(no closing punctuation) ends in "…" so it does not run into the next, and a
+person with no name is the line alone.
 
 **The agenda.** The owner reads the day's agenda in the morning to get up to
 speed with every meeting at once, so the brief lives there, not only in the
@@ -1274,26 +1412,36 @@ ready briefs with a non-empty headline, watching the day's events — so the
 calendar revision — and `briefRevisionProvider`, not the work tick the panel
 view watches for its "Writing…" state) →
 `DayPane.briefs`. Under a meeting's subject, the **glance** — the headline,
-muted, up to two lines (key `day-brief-teaser-<id>`) — with a chevron beside
+muted, up to three lines (key `day-brief-teaser-<id>`) — with a chevron beside
 it (`day-brief-toggle-<id>`, "Show the brief" / "Hide the brief"); a tap on
 either toggles the brief, a tap anywhere else on the row still opens the
 event. The host holds the open set (`InboxScreen._expandedBriefs`, emptied
 whenever the shown day changes, through `_setSelectedDay`), and an open row
 draws `BriefSection(compact: true)` under itself from the subject column
-(`DayPane.subjectIndent`): Questions, Prep, Materials, Open asks, at most
-three points with their thread chips under References
-(`BriefSection.compactPointsCap`; the panel shows them all) and one
-Regenerate — no headline (the glance is
-it), no footer, no status sentence, and nothing at all unless a ready brief
-is stored. None of it on a cancelled or a declined meeting. The **Today
+(`DayPane.subjectIndent`): the panel's body in the panel's order — Briefing,
+From the materials, People, Questions, Prep, Open asks, at most three points
+with their thread chips under References (`BriefSection.compactPointsCap`;
+the panel shows them all) — and one Regenerate: no headline (the glance is
+it) and no footer. A brief waiting on the files sent ahead
+(`materials_pending`) has no glance to open, so the agenda says so in the
+glance slot instead: `dayBriefsWaitingProvider(day)` (the event ids, from
+the same stored rows as `dayBriefsProvider`; none while processing is off)
+→ `DayPane.briefsWaiting`, drawn as "Reading the files sent ahead — brief
+coming." in one muted caption line (key `day-brief-note-<id>`) with no
+chevron — not once the meeting has started, when the planner no longer
+tends the wait; a ready brief wins. A body is only opened under a ready
+brief, so the note is what the agenda shows: the compact face's own copy of
+the sentence serves only a host that draws a compact face for a skipped row
+(a row that turned pending under an open brief). None of it on a cancelled or a declined meeting. The **Today
 section** of the rail draws the same glance under each of its up to three
 meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 `dayBriefsProvider(today)`, only while that section is shown.
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks, materials,
-questions}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word, or
-`unchanged`) → "Meeting brief — skipped (no recent mail with these people)";
+questions, people, text_chars}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word,
+`materials_pending` — "reading the files sent ahead" — or `unchanged`) →
+"Meeting brief — skipped (no recent mail with these people)";
 `error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)
 adds "; the last brief stands"; a park keeps the general sentence. Counts
 and enum words only: an answer that was not the JSON asked for is recorded as

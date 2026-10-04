@@ -5,6 +5,8 @@ import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/services/attachments/attachment_policy.dart'
+    show attachmentEntityId;
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
@@ -363,10 +365,15 @@ void main() {
   });
 
   group('the recheck throttle', () {
-    test('two plans a minute apart gather once; sixteen minutes later, again',
-        () async {
+    test('a failed brief waits out the recheck: two plans a minute apart '
+        'gather once; sixteen minutes later, again', () async {
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
-      await readyBrief('evt-1', hash: await currentHash('evt-1'));
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: await currentHash('evt-1'),
+        status: EventBrief.failed,
+        generatedAt: calendarStamp(now),
+      );
 
       expect(await plan(), 0);
       expect(gatherer.gathers, 1);
@@ -420,13 +427,18 @@ void main() {
       expect(await status('evt-ed'), 'pending');
     });
 
-    test('a ready brief still waits out the recheck', () async {
+    test('a ready brief is gathered on every pass and queued when its hash '
+        'moved — the recheck no longer holds a ready row', () async {
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
       await readyBrief('evt-1', hash: await currentHash('evt-1'));
       expect(await plan(), 0);
       expect(gatherer.gathers, 1);
+      expect(await plan(after: const Duration(seconds: 30)), 0,
+          reason: 'unchanged: gathered, nothing queued');
+      expect(gatherer.gathers, 2);
 
-      // New mail moves the hash, but the row was checked a minute ago.
+      // New mail moves the hash a minute later: queued on this pass, not a
+      // quarter of an hour later.
       await store.upsertConversation({
         'source': 'email',
         'conversation_key': 'c-1',
@@ -438,11 +450,115 @@ void main() {
         'message_count': 2,
         'last_message_at': MessageStore.isoStamp(now),
       });
-      expect(await plan(after: const Duration(minutes: 1)), 0);
-      expect(gatherer.gathers, 1);
-      expect(await plan(after: const Duration(minutes: 16)), 1);
-      expect(gatherer.gathers, 2);
+      expect(await plan(after: const Duration(minutes: 1)), 1);
+      expect(gatherer.gathers, 3);
       expect(await status('evt-1'), 'pending');
+    });
+
+    /// m-1 an hour old (inside the wait's age cap) carrying a deck whose
+    /// text work is queued and not done: a file being read.
+    Future<void> seedPendingDeck() async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-1',
+        'conversation_key': 'c-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': dana,
+        'received_at':
+            MessageStore.isoStamp(now.subtract(const Duration(hours: 1))),
+        'body_text': 'The deck.',
+        'triage_status': 'done',
+      });
+      await store.upsertAttachments('email', 'm-1', [
+        {
+          'attachment_id': 'a-deck',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'deck.pdf',
+          'content_type': 'application/pdf',
+          'is_inline': 0,
+        },
+      ]);
+      await store.enqueueWork(
+          'attachment_text', 'email', attachmentEntityId('m-1', 'a-deck'));
+    }
+
+    test('a meeting waiting on its files is queued when the text lands, and '
+        'once more on the same inputs when it comes inside the grace',
+        () async {
+      await seedPendingDeck();
+      await calendar.upsertEvents([
+        meeting('evt-1', startsIn: const Duration(minutes: 50)),
+      ], syncRun: 'run-1');
+      expect(await plan(), 1, reason: 'no row yet');
+      // The handler found the deck pending and said so.
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'ineligible:materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+      expect(await plan(after: const Duration(minutes: 1)), 0,
+          reason: 'the same inputs were queued already');
+
+      // Inside the grace (twenty minutes before the start), still pending:
+      // queued once on the same hash, so it is briefed with what is read.
+      expect(await plan(after: const Duration(minutes: 31)), 1);
+      expect(await status('evt-1'), 'pending');
+      expect(await plan(after: const Duration(minutes: 32)), 0,
+          reason: 'already waiting');
+
+      // Or the text lands before then: the hash moves and it is queued.
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      final again = BriefPlanner(store, calendar, gatherer);
+      expect(await again.plan(now: now, zone: la), 1,
+          reason: 'a new planner has queued nothing yet');
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      expect(await again.plan(now: now.add(const Duration(minutes: 1)), zone: la),
+          0);
+      await store.setAttachmentText('email', 'm-1', 'a-deck',
+          status: 'done', text: 'Two tiers.');
+      expect(await again.plan(now: now.add(const Duration(minutes: 2)), zone: la),
+          1);
+    });
+
+    test('a materials_pending row is queued when the wait ends without the '
+        'hash moving', () async {
+      await seedPendingDeck();
+      await calendar.upsertEvents([
+        meeting('evt-1', startsIn: const Duration(hours: 5)),
+      ], syncRun: 'run-1');
+      expect(await plan(), 1, reason: 'no row yet');
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'done');
+      await calendar.putBrief(
+        eventId: 'evt-1',
+        inputsHash: 'ineligible:materials_pending',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now),
+      );
+      expect(await plan(after: const Duration(minutes: 1)), 0,
+          reason: 'still being read');
+
+      // The text work gives up: the attachment row still says pending, so
+      // the hash is the same, but nothing is being read any more.
+      final hash = await currentHash('evt-1');
+      await db.customStatement("UPDATE work_items SET status = 'error' "
+          "WHERE task_kind = 'attachment_text'");
+      expect(await currentHash('evt-1'), hash);
+      expect(await plan(after: const Duration(minutes: 2)), 1);
+      expect(await status('evt-1'), 'pending');
+
+      // A handler that throws before it writes leaves the same row: queued
+      // once, not every pass.
+      await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
+          status: 'error');
+      expect(await plan(after: const Duration(minutes: 3)), 0);
     });
 
     test('a cleared table gathers at once', () async {

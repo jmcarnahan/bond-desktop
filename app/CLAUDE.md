@@ -1013,43 +1013,101 @@ that bite.
     chosen threads' inbound and outbound, non-inline `file|reference`
     attachments that are not images (the owner's own: sender `you`),
     newest first, the newest copy per lowercased name, ≤ 6, each with its
-    digest and ≤ 2 passages from ONE scoped `chunkKnn` (attachment
-    ids, then the exact `(messageId, attachmentId)` pair). The planner
-    gathers with `passages: false` (a plan is store reads, never an
-    embedding; passages are unhashed, so the hash is the same); only the
-    handler embeds the meeting, once, lazily. The hash carries
+    digest, its TEXT (`attachmentTextOf` for a `done` file, cut at a word
+    to `materialTextCap` 6000, raw — the task fences it) and ≤ 2 passages
+    from ONE scoped `chunkKnn` (attachment ids, then the exact
+    `(messageId, attachmentId)` pair). The planner gathers with
+    `passages: false`, the LIGHT gather: no text, no people, no embedding
+    (none of them hashed, so the hash is the same); only the handler reads
+    them and embeds the meeting, once, lazily. The hash carries
     `material|msg|att|textStatus|digestStatus`, so a deck whose text or
-    digest lands later re-briefs within the 15-minute recheck.
+    digest lands later re-briefs on the next pass.
+  - People (`BriefPerson`, handler's gather only): the organiser first,
+    then the attendees' order (a deliberate departure from D14), the cap
+    ≤ `maxPeople` 8 after (+`peopleMore`), `briefOrgOf` (the label before
+    the public suffix; the tenant for `*.onmicrosoft.com`; '' for a
+    consumer domain or an IP), the answer only on the
+    owner's own organiser copy ("response not known" elsewhere), their own
+    last met, threads they are in, their newest inbound's `askOwnWords` cut
+    at 240 and fenced `last_words`, their open ask. NOT hashed (`lastMet`
+    moving alone never re-briefs). The typedef `briefOthers` returns is
+    `BriefOther`.
+  - Waiting for the files: `BriefInput.materialsPending` — a material
+    `text_status == 'pending'` AND its `attachment_text` work row
+    (`workStatusOf`, entity `attachmentEntityId(msg, att)`) `pending` or
+    `processing` AND its mail younger than `BriefGatherer.pendingMaxAge`
+    (2 h). There is NO `error` `text_status`: a text work row that gave up
+    leaves the attachment row `pending` forever, so the work row is the
+    rule. A `pending` file with no work row (`ensureBodiesFor` queues none)
+    is `BriefEligible.unqueued`; the handler `queueText`s it once (INSERT OR
+    IGNORE, `queued_text: n`) and waits on it when young. The handler
+    decides on the LIGHT gather (`passages: false`) and runs the full one
+    only before a call. Pending AND no ready brief AND the start more than
+    `MeetingBriefHandler.pendingGrace` (20 min) away AND nobody asked for
+    it (`BriefRequest(asked: true)`, Regenerate, never waits): skipped
+    `ineligible:materials_pending` through `_skip`, NO call; a ready brief
+    is rewritten anyway, inside the grace it briefs with what is read. The
+    planner queues that row when the hash moves, when the light gather
+    says nothing is pending any more (once per stored row, `_endedFor`),
+    and once more on the same hash inside the grace.
   - A chosen thread's mail with `has_attachments` and no `attachments` row
     (the owner's sent invite: its detail runs only on a thread open) is
     `BriefEligible.unlisted` (≤ 4). The handler's `fetchDetails` (the
     sync's `ensureMessageBody`, which lists the files AND queues their text;
     `ensureBodiesFor` queues none) runs ONCE, then it gathers again; a
     failed fetch keeps the first gather. Never a loop.
-  - The task is v2, evidence first: `evidence, headline (the glance, ≤ 240,
-    cut at a word by `capAtWord`),
-    points, open_asks, materials[{file, takeaway}] ≤ 4, questions ≤ 3, prep`;
-    a material index outside the list is dropped, never -1; v1 stored rows
-    still decode. A material line puts `read|unread|not shown` OUTSIDE the
-    fence (`read` only when a digest or passage block was really written).
+  - The task is v3, evidence first, dense, second person ("you", never
+    "the owner"): `evidence, headline (≤ 320), briefing[] (≤ 6 × 320),
+    people[{name, line}] (≤ 8, line 220), materials[{file, points[]}] (≤ 4
+    × ≤ 5 × 220), questions (≤ 5 × 220), open_asks, points (≤ 5 × 200),
+    prep (≤ 3 × 120)`; `maxItems` only on `briefing`/`questions`/`prep`;
+    headline and briefing cut at a word (`capAtWord`); 2700 tokens (the
+    caps' sum / 4 within 1.2 × that, pinned); the first entry per file
+    index wins. A
+    material index outside the list is dropped, never -1. `MeetingBrief`
+    writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,
+    and `BriefMaterialOut.takeaway` (the points joined) is kept for old
+    readers; the faces draw the points. The user message has a People block after `With:`
+    ("open ask: yes (see Open asks)", never the ask again); file names and
+    last subjects capped at 120 (`labelCap`). The materials' digest +
+    `material_text` + passages share `materialsBudget` 10000, a block
+    costing its length PLUS its digit count, in two rounds (`_spend`):
+    digest then text (whole, else a word-cut head while > 1000 is left),
+    then passages only for a material whose text was not written whole and
+    uncut. `materialTextCharsWritten` runs the same spend for the activity
+    row's `text_chars`. The size guard in `meeting_brief_task_test` holds a
+    maximal prompt at ≤ 35000 characters (~35.0k measured). A material line
+    puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
+    block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
     forced sync after a write). It skips an event only when its brief is
     fresh (< 2 h) AND the inputs hash is unchanged; `_queuedFor` (event id →
-    last queued hash) stops a retry storm; it rechecks a `ready` or `failed`
-    row at most every 15 minutes in memory. Rows with no brief (after Clear
-    AI results) and `skipped` rows (any `ineligible:*`) are gathered on
-    EVERY pass: a Gmail invite's event syncs seconds before its mail.
+    last queued hash) stops a retry storm; it rechecks a `failed` row at
+    most every 15 minutes in memory (a back-off). `ready` rows, rows with no
+    brief (after Clear AI results) and `skipped` rows (any `ineligible:*`)
+    are gathered on EVERY pass: a Gmail invite's event syncs seconds before
+    its mail, and a deck's text landing should reach the brief at once.
   - A failed or skipped run over a ready brief calls `touchBrief` (it moves
     only `generated_at`) — except a skip for `gone`, `declined` or
     `cancelled`, which replaces the brief with a skipped row.
   - Briefs are keyed by OCCURRENCE, never by master.
   - The agenda: `dayBriefsProvider(day)` watches the day's events and
-    `briefRevisionProvider` (NOT `briefWorkTickProvider`); `DayPane` draws the
-    glance (`day-brief-teaser-$id`, two lines, not focusable) and the chevron
-    (`day-brief-toggle-$id`, the one keyboard toggle); `BriefSection(compact:)`
-    draws only a READY brief; both faces draw Questions, Prep, Materials,
-    Open asks, then the points under References (compact: at most
-    `compactPointsCap` = 3); `_setSelectedDay` is the one writer of
+    `briefRevisionProvider` (NOT `briefWorkTickProvider`) and holds READY
+    briefs only; `dayBriefsWaitingProvider(day)` shares its one read and
+    holds the `materials_pending` event ids (none while processing is off);
+    `DayPane` draws the glance (`day-brief-teaser-$id`, three lines, not
+    focusable) and the chevron (`day-brief-toggle-$id`, the one keyboard
+    toggle), else a note in the glance slot (`day-brief-note-$id`, one
+    line, no chevron, never once the meeting has started); the panel's
+    pending sentence gives way to `eligible == false`'s reason; `BriefSection(compact:)` draws a READY brief's body,
+    else only the `materials_pending` sentence (`statusKey`), else nothing;
+    both faces draw ONE body in the catch-up order — Briefing
+    (`brief-briefing`, one `SelectableText`), From the materials (chip
+    `brief-material-$i`, points `brief-material-point-$i-$j` inside
+    `brief-material-text-$i`), People (`brief-person-$i`, one `Text.rich`),
+    Questions, Prep, Open asks, then the points under References (compact:
+    at most `compactPointsCap` = 3); the widget never reads
+    `BriefMaterialOut.takeaway`; `_setSelectedDay` is the one writer of
     `_selectedDay` and clears `_expandedBriefs` only when the day changes;
     `_openMaterial` rebuilds the `AttachmentRef` from `attachmentRow` and
     toasts 'That file is no longer here.' on a missing row.

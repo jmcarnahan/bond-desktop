@@ -6,6 +6,8 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/services/attachments/attachment_policy.dart'
+    show attachmentEntityId;
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
@@ -751,6 +753,116 @@ void main() {
       expect(digested, isNot(textLanded));
     });
 
+    test("a read file carries its text, cut at a word to the cap; the "
+        "planner's gather reads none, and the hash is the same", () async {
+      await thread('c-1');
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx');
+      final words = List.filled(2000, 'word').join(' ');
+      await store.setAttachmentText('email', 'm-c-1', 'a-deck',
+          status: 'done', text: 'Tier B   is 12k.\n\n\n\n$words');
+
+      final input = await eligible(meeting());
+      final text = input.materials.single.text;
+      expect(text, startsWith('Tier B is 12k.\n\nword'),
+          reason: 'runs of spaces and blank lines closed up');
+      expect(text.length, lessThanOrEqualTo(BriefGatherer.materialTextCap));
+      expect(text.length, greaterThan(BriefGatherer.materialTextCap - 5));
+      expect(text, endsWith('word'), reason: 'cut at a word');
+      expect(BriefGatherer.materialTextCap, 6000);
+
+      final light =
+          await gatherer.gather(meeting(), now: now, passages: false)
+              as BriefEligible;
+      expect(light.input.materials.single.text, '');
+      expect(light.input.people, isEmpty);
+      expect(light.input.inputsHash, input.inputsHash);
+    });
+
+    Future<void> queueText(String messageId, String attachmentId) =>
+        store.enqueueWork('attachment_text', 'email',
+            attachmentEntityId(messageId, attachmentId));
+
+    test('a file still being read is pending; a skipped or read one is not',
+        () async {
+      // An hour old: inside the wait's age cap.
+      await thread('c-1', ago: const Duration(hours: 1));
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx');
+      await queueText('m-c-1', 'a-deck');
+      final pending = await eligible(meeting());
+      expect(pending.materialsPending, isTrue);
+      expect(pending.materials.single.text, '');
+      final light =
+          await gatherer.gather(meeting(), now: now, passages: false)
+              as BriefEligible;
+      expect(light.input.materialsPending, isTrue,
+          reason: 'the planner reads the same stored state');
+
+      await store.setAttachmentText('email', 'm-c-1', 'a-deck',
+          status: 'skipped', reason: 'too_large');
+      expect((await eligible(meeting())).materialsPending, isFalse);
+
+      await read('m-c-1', 'a-deck');
+      expect((await eligible(meeting())).materialsPending, isFalse);
+    });
+
+    test('a file whose text work gave up is not pending', () async {
+      // An hour old: inside the wait's age cap.
+      await thread('c-1', ago: const Duration(hours: 1));
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx');
+      await queueText('m-c-1', 'a-deck');
+      // The worker's give-up: the WORK row says error, and nothing touches
+      // the attachment row, which still says pending.
+      await db.customStatement(
+          "UPDATE work_items SET status = 'error' "
+          "WHERE task_kind = 'attachment_text'");
+      final input = await eligible(meeting());
+      expect(input.materials.single.textStatus, 'pending');
+      expect(input.materialsPending, isFalse);
+      final g = await gatherer.gather(meeting(), now: now) as BriefEligible;
+      expect(g.unqueued, isEmpty, reason: 'it was queued; it gave up');
+    });
+
+    test('a file older than two hours is not waited for', () async {
+      await conversation('c-1', ago: const Duration(hours: 3));
+      await message('m-c-1', 'c-1', ago: const Duration(hours: 3));
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx');
+      await queueText('m-c-1', 'a-deck');
+      expect((await eligible(meeting())).materialsPending, isFalse);
+      expect(BriefGatherer.pendingMaxAge, const Duration(hours: 2));
+
+      // The same file on mail an hour old is waited for.
+      await conversation('c-2', ago: const Duration(hours: 1));
+      await message('m-c-2', 'c-2', ago: const Duration(hours: 1));
+      await attach('m-c-2', 'a-memo', name: 'memo.pdf');
+      await queueText('m-c-2', 'a-memo');
+      expect((await eligible(meeting())).materialsPending, isTrue);
+    });
+
+    test('a listed file with no text work is reported unqueued, not pending',
+        () async {
+      // An hour old: inside the wait's age cap.
+      await thread('c-1', ago: const Duration(hours: 1));
+      await attach('m-c-1', 'a-deck', name: 'deck.pptx');
+      for (final passages in [true, false]) {
+        final g = await gatherer.gather(meeting(), now: now,
+            passages: passages) as BriefEligible;
+        expect(g.input.materialsPending, isFalse);
+        expect([for (final u in g.unqueued) u.material.attachmentId],
+            ['a-deck']);
+        expect(g.unqueued.single.young, isTrue);
+      }
+
+      expect(await gatherer.queueText([
+        for (final u
+            in ((await gatherer.gather(meeting(), now: now)) as BriefEligible)
+                .unqueued)
+          u.material,
+      ]), 1);
+      final after = await gatherer.gather(meeting(), now: now) as BriefEligible;
+      expect(after.unqueued, isEmpty);
+      expect(after.input.materialsPending, isTrue);
+    });
+
     BriefGatherer withChunks(_ChunkStore chunks, FakeEmbedServer server) =>
         BriefGatherer(
           chunks,
@@ -991,6 +1103,147 @@ void main() {
     expect(capRunes(s, 2), 'ab');
     expect(capRunes(s, 99), s);
     expect(capRunes(s, 0), '');
+  });
+
+  group('people', () {
+    test('the people block: org, organiser, last met, threads, last words, '
+        'open ask', () async {
+      await conversation('c-1', state: 'needs_reply', count: 2);
+      await message('m-old', 'c-1',
+          body: 'Earlier note.', ago: const Duration(hours: 5));
+      await message('m-new', 'c-1',
+          body: 'Can you confirm the 12k tier before Thursday?\n\n'
+              'On Mon, Sep 28, 2026 at 3:15 PM Me <me@contoso.com> wrote:\n'
+              '> the quoted history',
+          ago: const Duration(hours: 2));
+      await decide('m-new', needsYou: 0.9, intent: 'request');
+      final past = now.subtract(const Duration(days: 3));
+      await calendar.upsertEvents([
+        CalendarEvent(
+          id: 'evt-past',
+          subject: 'Earlier',
+          startUtc: past,
+          endUtc: past.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          attendees: const [Attendee(name: 'Dana Lee', address: dana)],
+        ),
+      ], syncRun: 'run-1');
+
+      // A consumer host, joined here so no literal reads as an address.
+      const gmail = 'gmail.com';
+      final input = await eligible(meeting(
+        organizerAddress: dana,
+        attendees: const [
+          Attendee(name: 'Me', address: owner),
+          Attendee(name: 'Dana Lee', address: dana, response: 'accepted'),
+          Attendee(name: 'Kim', address: 'kim@$gmail'),
+        ],
+      ));
+      expect([for (final p in input.people) p.name], ['Dana Lee', 'Kim'],
+          reason: "the attendees' order, the owner left out");
+      final d = input.people.first;
+      expect(d.org, 'fabrikam');
+      expect(d.isOrganizer, isTrue);
+      expect(d.response, 'response not known',
+          reason: "an attendee's copy does not track answers");
+      expect(d.lastMet, startsWith('Last met'));
+      expect(d.threadCount, 1);
+      expect(d.lastInboundAgo, '2 hours ago');
+      expect(d.lastSubject, 'Thread c-1');
+      expect(d.lastWords,
+          wrapUntrusted('last_words',
+              'Can you confirm the 12k tier before Thursday?'),
+          reason: 'her newest message, the quoted history cut off');
+      expect(d.openAsk, input.openAsks.single.ask);
+      final k = input.people.last;
+      expect(k.org, '', reason: 'a consumer mailbox names no organisation');
+      expect(k.isOrganizer, isFalse);
+      expect(k.threadCount, 0);
+      expect(k.lastInboundAgo, '');
+      expect(k.lastWords, '');
+      expect(k.openAsk, '');
+      expect(k.lastMet, isNull);
+      expect(input.peopleMore, 0);
+    });
+
+    test("the owner's organiser copy reads each answer", () async {
+      await thread('c-1');
+      final input = await eligible(meeting(
+        isOrganizer: true,
+        organizerAddress: owner,
+        attendees: const [
+          Attendee(name: 'Dana Lee', address: dana, response: 'accepted'),
+          Attendee(name: 'Sam', address: sam, response: 'tentativelyAccepted'),
+          Attendee(name: 'Kim', address: 'kim@northwind.com', response: 'none'),
+        ],
+      ));
+      expect([for (final p in input.people) p.response],
+          ['accepted', 'tentative', 'no answer yet']);
+      expect(input.people.every((p) => !p.isOrganizer), isTrue);
+    });
+
+    test('eight people at most, the rest counted', () async {
+      await thread('c-1');
+      final input = await eligible(meeting(attendees: [
+        const Attendee(name: 'Dana Lee', address: dana),
+        for (var i = 0; i < 10; i++)
+          Attendee(name: 'P$i', address: 'p$i@northwind.com'),
+      ]));
+      expect(input.people, hasLength(BriefGatherer.maxPeople));
+      expect(input.people.first.name, 'Dana Lee');
+      expect(input.peopleMore, 3);
+    });
+
+    test('the organiser is never cut past eight', () async {
+      await thread('c-1');
+      // A Graph attendee copy: the organiser is not among the attendees,
+      // so `briefOthers` lists them last.
+      final input = await eligible(meeting(
+        organizerAddress: 'olu@northwind.com',
+        attendees: [
+          const Attendee(name: 'Me', address: owner),
+          const Attendee(name: 'Dana Lee', address: dana),
+          for (var i = 0; i < 9; i++)
+            Attendee(name: 'P$i', address: 'p$i@northwind.com'),
+        ],
+      ));
+      expect(input.people, hasLength(BriefGatherer.maxPeople));
+      expect(input.people.first.address, 'olu@northwind.com');
+      expect(input.people.first.isOrganizer, isTrue);
+      expect(input.people[1].name, 'Dana Lee',
+          reason: 'then the invite\'s order');
+      expect(input.peopleMore, 3);
+    });
+
+    test('the organisation of an address', () {
+      expect(briefOrgOf('guest@contoso.onmicrosoft.com'), 'contoso');
+      expect(briefOrgOf('a@10.0.0.1'), '');
+      expect(briefOrgOf('dana@fabrikam.com'), 'fabrikam');
+      expect(briefOrgOf('dana@mail.fabrikam.com'), 'fabrikam');
+      expect(briefOrgOf('sam@contoso.co.uk'), 'contoso');
+      expect(briefOrgOf('sam@eu.contoso.com.au'), 'contoso');
+      // The consumer services are named as HOSTS and joined to a local part
+      // here, so no literal in the repo reads as somebody's address.
+      for (final host in [
+        'gmail.com',
+        'googlemail.com',
+        'outlook.com',
+        'hotmail.co.uk',
+        'live.com',
+        'yahoo.com',
+        'icloud.com',
+        'me.com',
+        'proton.me',
+        'protonmail.com',
+        'aol.com',
+      ]) {
+        expect(briefOrgOf('a@$host'), '', reason: host);
+      }
+      const googleCalendar = 'group.calendar.google.com';
+      expect(briefOrgOf('c_123@$googleCalendar'), '');
+      expect(briefOrgOf('no-at-sign'), '');
+      expect(briefOrgOf('a@localhost'), '');
+    });
   });
 
   test('last met: the latest meeting with them that ended', () async {

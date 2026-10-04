@@ -48,10 +48,15 @@ String askOwnWords(String body) {
 /// before the cap so a word is never halved ("at 11pm" never reads "at 1"),
 /// and so never through a surrogate pair either. `brief_gatherer.dart`'s
 /// `capRunes` cuts mid-word, which a resolver cannot afford.
+///
+/// The word cut is taken only when that whitespace is in the last fifth
+/// before the cap: an extracted sheet whose only space is near its start
+/// would otherwise keep a handful of characters of six thousand, so past
+/// that it cuts hard at the cap (still never through a surrogate pair).
 String capAtWord(String s, int max) {
   if (s.length <= max) return s;
   final space = s.lastIndexOf(RegExp(r'\s'), max);
-  if (space > 0) return s.substring(0, space);
+  if (space > max * 0.8) return s.substring(0, space);
   final last = s.codeUnitAt(max - 1);
   return s.substring(0, last >= 0xD800 && last <= 0xDBFF ? max - 1 : max);
 }

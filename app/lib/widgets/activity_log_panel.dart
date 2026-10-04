@@ -142,6 +142,7 @@ class ActivityLogPanel extends StatefulWidget {
     'no_mail': 'no recent mail with these people',
     'too_many': 'too many people',
     'gone': 'no longer on the calendar',
+    'materials_pending': 'reading the files sent ahead',
     'unchanged': 'nothing new since the last one',
   };
 

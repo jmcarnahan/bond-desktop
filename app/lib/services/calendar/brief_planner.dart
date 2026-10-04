@@ -3,6 +3,7 @@ import '../../data/message_store.dart';
 import '../../models/calendar_models.dart';
 import 'brief_gatherer.dart';
 import 'calendar_zone.dart';
+import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 
 /// Decides, after each calendar sync, which meetings need a brief written
 /// and queues them on the DRAFT lane.
@@ -14,14 +15,25 @@ import 'calendar_zone.dart';
 ///
 /// **The regeneration rule.** A meeting with no brief is queued. A stored
 /// brief is queued again when its inputs hash moved — at any age, so a deck
-/// or its digest landing an hour after the first brief re-briefs within one
-/// [recheck] rather than waiting out [freshFor]. A failed brief is retried
+/// or its digest landing an hour after the first brief re-briefs on the
+/// next pass rather than waiting out [freshFor]. A failed brief is retried
 /// only once it is older than [freshFor] (unless its inputs moved). What
 /// keeps a thread that is busy the morning of a meeting from buying a model
-/// call per sync is the [recheck] throttle below, which gathers each event
-/// with a ready or failed brief at most every fifteen minutes. At most [maxPerPass] per pass, the soonest
-/// meetings first, so a calendar full of meetings costs a few calls a sync
-/// rather than a burst — and queued so the soonest drains first.
+/// call per sync is [_queuedFor] and the "fresh AND unchanged" rule: one set
+/// of inputs is queued once while the brief is fresh. At most [maxPerPass]
+/// per pass, the soonest meetings first, so a calendar full of meetings
+/// costs a few calls a sync rather than a burst — and queued so the soonest
+/// drains first.
+///
+/// **Waiting for the files.** The handler writes a `skipped` row with the
+/// reason `materials_pending` when a file sent ahead is still being read
+/// and the meeting is more than [MeetingBriefHandler.pendingGrace] off. Like
+/// every skipped row it is gathered on every pass, and queued when the text
+/// lands and moves the hash, or when the light gather says nothing is being
+/// read any more though the hash did not move (the text work gave up, or the
+/// mail aged past [BriefGatherer.pendingMaxAge]); and once the meeting comes
+/// inside the grace it is queued on the same hash, once, so it is briefed
+/// with what is read rather than waiting on a file that may never finish.
 ///
 /// **What it writes itself.** A meeting found ineligible for a reason that
 /// can change while it stays on the calendar ([recorded]: no recent mail,
@@ -34,17 +46,22 @@ import 'calendar_zone.dart';
 ///
 /// **The recheck throttle.** Gathering is store reads, but up to twenty
 /// candidate threads per meeting is not free, and the calendar syncs every
-/// few minutes. So an event whose stored row has not moved since it was
-/// gathered less than [recheck] ago is not gathered again. The throttle
-/// holds a READY or FAILED row only. An event with NO stored row is never
-/// throttled: that is the state after Clear AI results, and the next synced
-/// tick should plan it at once. Nor is a `skipped` row: its reason is the
-/// kind that goes away within seconds — a Gmail invite's event syncs before
-/// its mail, which is then the meeting's thread — and a quarter of an hour
-/// of "No brief — no recent mail" over a thread that is there is a wrong
-/// sentence. Few events in the window are skipped, and the gather is store
-/// reads; [_queuedFor] and the "already says so" check keep an unchanged
-/// reason from queueing or writing anything.
+/// few minutes. So an event whose stored row is FAILED and has not moved
+/// since it was gathered less than [recheck] ago is not gathered again — a
+/// back-off for a brief that could not be written. That is the only row it
+/// holds. A READY row is gathered on every pass: a deck sent the morning of
+/// the meeting, or its text landing, should reach the brief on the next
+/// sync rather than a quarter of an hour later, and [_queuedFor] with the
+/// "fresh AND unchanged" rule keep an unchanged one from queueing. An event
+/// with NO stored row is never throttled: that is the state after Clear AI
+/// results, and the next synced tick should plan it at once. Nor is a
+/// `skipped` row: its reason is the kind that goes away within seconds — a
+/// Gmail invite's event syncs before its mail, which is then the meeting's
+/// thread, and a file being read lands in a minute — and a quarter of an
+/// hour of "No brief — no recent mail" over a thread that is there is a
+/// wrong sentence. The gathers are store reads; [_queuedFor] and the
+/// "already says so" check keep an unchanged reason from queueing or writing
+/// anything.
 ///
 /// **Not per-message.** `clearDerived` empties `event_briefs` (a derived
 /// table) and the next sync's plan writes them again, so nothing is added to
@@ -85,6 +102,10 @@ class BriefPlanner {
   /// brief is fresh.
   final Map<String, String> _queuedFor = {};
 
+  /// The `generated_at` of the `materials_pending` row each event was last
+  /// queued for because its wait ended. In memory, like [_queuedFor].
+  final Map<String, String> _endedFor = {};
+
   /// Queues what needs writing and returns how many it queued. [now] and
   /// [zone] are the caller's: the planner reads no clock.
   ///
@@ -111,6 +132,7 @@ class BriefPlanner {
     await _calendar.deleteBriefsExcept(ids);
     _lastChecked.removeWhere((id, _) => !ids.contains(id));
     _queuedFor.removeWhere((id, _) => !ids.contains(id));
+    _endedFor.removeWhere((id, _) => !ids.contains(id));
 
     // Soonest first, and timed meetings before all-day ones: an all-day event
     // is a holiday or a deadline far more often than a meeting, and should
@@ -139,13 +161,13 @@ class BriefPlanner {
         continue;
       }
       // Fresh no longer skips the gather: a young brief whose inputs moved is
-      // written again. The throttle just below is what bounds the reads.
+      // written again. Only a failed row is throttled, as a back-off.
       final generated = stored?.generatedAtUtc;
       final fresh =
           generated != null && nowUtc.difference(generated) < freshFor;
       final checked = _lastChecked[e.id];
       if (stored != null &&
-          stored.status != EventBrief.skipped &&
+          stored.status == EventBrief.failed &&
           checked != null &&
           nowUtc.difference(checked.at) < recheck &&
           checked.generatedAt == stored.generatedAt) {
@@ -169,9 +191,27 @@ class BriefPlanner {
           hash = input.inputsHash;
           final moved = stored == null || stored.inputsHash != hash;
           // Fresh and unchanged is the one skip; a failed brief waits out
-          // [freshFor] before it is tried again on the same inputs.
+          // [freshFor] before it is tried again on the same inputs; a
+          // meeting waiting on its files is briefed once it is inside the
+          // grace, on whatever is read — or once nothing is being read any
+          // more, which can happen without the hash moving (the text work
+          // gave up, or the mail aged past the wait).
+          final start = briefStartOf(e, zone);
+          final waiting = stored?.skipReason ==
+              BriefIneligibility.materialsPending.wire;
+          final waitedEnough = waiting &&
+              start != null &&
+              !start.isAfter(nowUtc.add(MeetingBriefHandler.pendingGrace));
+          // Once per stored row: a handler that throws before it writes
+          // leaves the same row, and must not buy a queue every pass.
+          final waitEnded = waiting &&
+              !input.materialsPending &&
+              _endedFor[e.id] != stored?.generatedAt;
+          if (waitEnded) _endedFor[e.id] = stored?.generatedAt ?? '';
           final changed = (moved && !(fresh && _queuedFor[e.id] == hash)) ||
-              (!fresh && stored?.status == EventBrief.failed);
+              (!fresh && stored?.status == EventBrief.failed) ||
+              waitedEnough ||
+              waitEnded;
           if (!changed) continue;
       }
 

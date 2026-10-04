@@ -758,18 +758,47 @@ class BriefAskOut {
       };
 }
 
-/// One line of a brief about a file sent ahead — the attendees' or the
-/// owner's own. [file] is a 0-based
-/// index into [MeetingBrief.materialRefs]; the task drops an entry whose
-/// number is outside the list it showed, so there is no -1 here.
+/// What a brief says about one file sent ahead — the attendees' or the
+/// owner's own: up to five [points] taken from what the file says. [file] is
+/// a 0-based index into [MeetingBrief.materialRefs]; the task drops an entry
+/// whose number is outside the list it showed, so there is no -1 here.
+///
+/// [takeaway] is a v2 brief's one line, kept as a constructor argument and a
+/// getter so a hand-built v2 brief and the faces that still draw one line per
+/// file go on reading: given alone it IS the one point, and the getter joins
+/// the points back into a line.
 @immutable
 class BriefMaterialOut {
   final int file;
-  final String takeaway;
+  final List<String> _listed;
+  final String _line;
 
-  const BriefMaterialOut({required this.file, required this.takeaway});
+  const BriefMaterialOut({
+    required this.file,
+    List<String> points = const [],
+    String takeaway = '',
+  })  : _listed = points,
+        _line = takeaway;
 
-  Map<String, Object?> toJson() => {'file': file, 'takeaway': takeaway};
+  List<String> get points =>
+      _listed.isNotEmpty || _line.isEmpty ? _listed : [_line];
+
+  String get takeaway => points.join(' ');
+
+  Map<String, Object?> toJson() => {'file': file, 'points': points};
+}
+
+/// One line about one person in a meeting: who they are, what they last
+/// wrote or asked, what is open with them. [name] is the model's copy of a
+/// name it was given.
+@immutable
+class BriefPersonOut {
+  final String name;
+  final String line;
+
+  const BriefPersonOut({required this.name, required this.line});
+
+  Map<String, Object?> toJson() => {'name': name, 'line': line};
 }
 
 /// One file a brief can point at, stored INSIDE the brief (like
@@ -828,13 +857,21 @@ class MeetingBrief {
 
   /// The glance: one or two dense sentences the agenda shows.
   final String headline;
+
+  /// The story so far, one fact-bearing sentence per entry, at most six; ''
+  /// entries never. Empty on a row written before v3.
+  final List<String> briefing;
+
+  /// One line per person in the meeting, in the order they were given.
+  /// Empty on a row written before v3.
+  final List<BriefPersonOut> people;
   final List<BriefPoint> points;
   final List<BriefAskOut> openAsks;
 
   /// What the files sent ahead say, each pointing into [materialRefs].
   final List<BriefMaterialOut> materials;
 
-  /// Questions worth asking in the meeting, at most three.
+  /// Questions worth asking in the meeting, at most five.
   final List<String> questions;
   final List<String> prep;
 
@@ -850,6 +887,8 @@ class MeetingBrief {
   const MeetingBrief({
     this.evidence = '',
     required this.headline,
+    this.briefing = const [],
+    this.people = const [],
     this.points = const [],
     this.openAsks = const [],
     this.materials = const [],
@@ -866,6 +905,8 @@ class MeetingBrief {
       MeetingBrief(
         evidence: evidence,
         headline: headline,
+        briefing: briefing,
+        people: people,
         points: points,
         openAsks: openAsks,
         materials: materials,
@@ -894,13 +935,17 @@ class MeetingBrief {
     return ref.attachmentId.isEmpty ? null : ref;
   }
 
+  /// Always the v3 shape, in the schema's order: a material writes its
+  /// `points`, never a `takeaway`.
   Map<String, Object?> toJson() => {
         'evidence': evidence,
         'headline': headline,
-        'points': [for (final p in points) p.toJson()],
-        'open_asks': [for (final a in openAsks) a.toJson()],
+        'briefing': briefing,
+        'people': [for (final p in people) p.toJson()],
         'materials': [for (final m in materials) m.toJson()],
         'questions': questions,
+        'open_asks': [for (final a in openAsks) a.toJson()],
+        'points': [for (final p in points) p.toJson()],
         'prep': prep,
         'threads': [for (final t in threads) t.toJson()],
         'material_refs': [for (final r in materialRefs) r.toJson()],
@@ -908,12 +953,27 @@ class MeetingBrief {
 
   /// Tolerant: a stored blob is this app's own writing, but a row from an
   /// older build or a hand-edited database must still draw something rather
-  /// than throw inside a panel.
+  /// than throw inside a panel. A v1 row has no materials and a v2 row's
+  /// material carries one `takeaway`, which reads as its one point; a key
+  /// either never wrote is empty.
   factory MeetingBrief.fromJson(Map<String, dynamic> json) {
     int index(Object? raw) => raw is int ? raw : (raw is num ? raw.toInt() : -1);
+    List<String> pointsOf(Map m) {
+      final points = _strings(m['points']);
+      if (points.isNotEmpty) return points;
+      final takeaway = _str(m['takeaway']);
+      return takeaway.isEmpty ? const [] : [takeaway];
+    }
+
     return MeetingBrief(
       evidence: _str(json['evidence']),
       headline: _str(json['headline']),
+      briefing: _strings(json['briefing']),
+      people: [
+        for (final p in json['people'] is List ? json['people'] as List : const [])
+          if (p is Map && _str(p['line']).isNotEmpty)
+            BriefPersonOut(name: _str(p['name']), line: _str(p['line'])),
+      ],
       points: [
         for (final p in json['points'] is List ? json['points'] as List : const [])
           if (p is Map && _str(p['text']).isNotEmpty)
@@ -932,11 +992,8 @@ class MeetingBrief {
       materials: [
         for (final m
             in json['materials'] is List ? json['materials'] as List : const [])
-          if (m is Map && index(m['file']) >= 0 && _str(m['takeaway']).isNotEmpty)
-            BriefMaterialOut(
-              file: index(m['file']),
-              takeaway: _str(m['takeaway']),
-            ),
+          if (m is Map && index(m['file']) >= 0 && pointsOf(m).isNotEmpty)
+            BriefMaterialOut(file: index(m['file']), points: pointsOf(m)),
       ],
       questions: _strings(json['questions']),
       prep: _strings(json['prep']),

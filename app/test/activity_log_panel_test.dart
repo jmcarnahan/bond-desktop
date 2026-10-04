@@ -666,6 +666,14 @@ void main() {
         )),
         'Meeting brief — skipped (too many people)',
       );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          status: 'skipped',
+          detail: const {'reason': 'materials_pending'},
+        )),
+        'Meeting brief — skipped (reading the files sent ahead)',
+      );
       // Over a ready brief the old one stands, and the sentence says so.
       expect(
         ActivityLogPanel.describe(_event(

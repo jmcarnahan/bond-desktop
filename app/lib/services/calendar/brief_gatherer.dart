@@ -15,9 +15,11 @@ import '../decision/decision_policy.dart';
 import '../decision/needs_you_predicate.dart' show needsYouAt;
 import '../decision/stored_decision.dart';
 import '../attachments/attachment_markers.dart';
+import '../attachments/attachment_policy.dart' show attachmentEntityId;
 import '../html_text.dart' show stripLinkTargets;
 import '../llm/embeddings_client.dart';
 import '../llm/prompt_guard.dart';
+import 'ask_words.dart' show askOwnWords, capAtWord;
 import 'calendar_zone.dart';
 import 'day_items.dart' show formatEventRange;
 import 'event_view.dart' show lastMetLabel;
@@ -38,7 +40,13 @@ enum BriefIneligibility {
 
   /// The event is no longer in the mirror. Only the handler says this: the
   /// gatherer is always handed an event.
-  gone('gone');
+  gone('gone'),
+
+  /// A file sent ahead is still being read, and the meeting is far enough
+  /// off to wait for it. Only the handler says this, and only for a while:
+  /// the row is gathered again every planner pass, and the hash moves when
+  /// the text lands.
+  materialsPending('materials_pending');
 
   const BriefIneligibility(this.wire);
   final String wire;
@@ -133,8 +141,11 @@ class BriefStoryline {
 /// out); every passage is already inside [wrapUntrusted].
 ///
 /// A file whose text has not been read ([textStatus] not `done`) is still a
-/// material: it carries no [digest] and no [passages], and the brief names it
-/// as arrived rather than summarising words nobody has read.
+/// material: it carries no [digest], no [text] and no [passages], and the
+/// brief names it as arrived rather than summarising words nobody has read.
+///
+/// [text] is raw, like [digest]: the task fences it as it spends its budget,
+/// because how much of it fits is the task's to decide.
 @immutable
 class BriefMaterial {
   final String source;
@@ -151,6 +162,11 @@ class BriefMaterial {
   /// the mail has no readable stamp.
   final String date;
 
+  /// The carrying mail's `received_at` stamp, for how long a file still
+  /// being read is waited for ([BriefGatherer.pendingMaxAge]); '' when the
+  /// mail has none. Not hashed.
+  final String receivedAt;
+
   /// `attachments.text_status`: `pending`, `done` or `skipped`.
   final String textStatus;
 
@@ -162,7 +178,13 @@ class BriefMaterial {
   final AttachmentDigest? digest;
 
   /// The passages nearest the meeting, at most two, each already fenced.
+  /// They come from anywhere in the document; [text] is its head.
   final List<String> passages;
+
+  /// The file's extracted words, cut at a word to
+  /// [BriefGatherer.materialTextCap]; '' when they were not read — the file
+  /// is not `done`, or the gather was the planner's, which reads no text.
+  final String text;
 
   const BriefMaterial({
     required this.source,
@@ -172,13 +194,20 @@ class BriefMaterial {
     this.contentType = '',
     this.sender = '',
     this.date = '',
+    this.receivedAt = '',
     this.textStatus = 'pending',
     this.digestStatus = '',
     this.digest,
     this.passages = const [],
+    this.text = '',
   });
 
-  BriefMaterial withPassages(List<String> passages) => BriefMaterial(
+  BriefMaterial withPassages(List<String> passages) =>
+      _copy(passages: passages);
+
+  BriefMaterial withText(String text) => _copy(text: text);
+
+  BriefMaterial _copy({List<String>? passages, String? text}) => BriefMaterial(
         source: source,
         messageId: messageId,
         attachmentId: attachmentId,
@@ -186,11 +215,78 @@ class BriefMaterial {
         contentType: contentType,
         sender: sender,
         date: date,
+        receivedAt: receivedAt,
         textStatus: textStatus,
         digestStatus: digestStatus,
         digest: digest,
-        passages: passages,
+        passages: passages ?? this.passages,
+        text: text ?? this.text,
       );
+}
+
+/// One other person in a meeting, as the brief task is shown them: who they
+/// are as far as the mail and the calendar say, and what is open with them.
+///
+/// The labels ([name], [org], [lastSubject]) are raw — the task fences each
+/// as it lays the block out; the two bodies ([lastWords], [openAsk]) arrive
+/// already inside [wrapUntrusted], the [BriefInput] rule. Never hashed:
+/// every field follows from inputs that are (the threads, the asks, the
+/// event), except [lastMet], and a past meeting ageing by a day is no reason
+/// to write the brief again.
+@immutable
+class BriefPerson {
+  /// The invite's name, else the address.
+  final String name;
+  final String address;
+
+  /// [briefOrgOf] the address: `fabrikam` for `dana@mail.fabrikam.com`, ''
+  /// for a consumer mailbox.
+  final String org;
+
+  /// Whether they organised the meeting.
+  final bool isOrganizer;
+
+  /// What is known of their answer, in words: `accepted`, `tentative`,
+  /// `declined` or `no answer yet` on the owner's own organiser copy, which
+  /// is the only copy that tracks answers; `response not known` on any
+  /// other.
+  final String response;
+
+  /// "Last met 3 days ago", or null when the mirror holds no earlier
+  /// meeting with them.
+  final String? lastMet;
+
+  /// How many of [BriefInput.threads] they are in.
+  final int threadCount;
+
+  /// How long ago their newest inbound message in those threads arrived
+  /// ([briefAgo]); '' when they wrote none of it.
+  final String lastInboundAgo;
+
+  /// The subject of the thread that message is in; '' with no message.
+  final String lastSubject;
+
+  /// That message's own words — the quoted history cut off — at most
+  /// [BriefGatherer.lastWordsCap] cut at a word, fenced; '' with no message.
+  final String lastWords;
+
+  /// Their open ask in [BriefInput.openAsks], fenced as it is there; ''
+  /// when they have none.
+  final String openAsk;
+
+  const BriefPerson({
+    required this.name,
+    required this.address,
+    this.org = '',
+    this.isOrganizer = false,
+    this.response = 'response not known',
+    this.lastMet,
+    this.threadCount = 0,
+    this.lastInboundAgo = '',
+    this.lastSubject = '',
+    this.lastWords = '',
+    this.openAsk = '',
+  });
 }
 
 /// Everything the brief task is shown about one meeting, gathered without a
@@ -237,6 +333,26 @@ class BriefInput {
   /// newest first.
   final List<BriefMaterial> materials;
 
+  /// Whether any of [materials] is still being read: its `text_status` is
+  /// `pending` AND its `attachment_text` work row is `pending` or
+  /// `processing` AND its mail arrived less than
+  /// [BriefGatherer.pendingMaxAge] ago. A file whose text work gave up
+  /// (the work row `error`, the attachment row left `pending`) or was never
+  /// queued ([BriefEligible.unqueued]) is not being read, and an old one is
+  /// not worth holding a brief for. The handler waits on it while the
+  /// meeting is far enough off. Not hashed: the materials' states already
+  /// are.
+  final bool materialsPending;
+
+  /// The people in the meeting, the organiser first and then the attendees'
+  /// order, at most
+  /// [BriefGatherer.maxPeople]; empty from the planner's gather, which
+  /// needs only the hash.
+  final List<BriefPerson> people;
+
+  /// How many people there are beyond [people].
+  final int peopleMore;
+
   /// "Last met 3 days ago", or null when the mirror holds no earlier meeting
   /// with any of them.
   final String? lastMet;
@@ -257,6 +373,9 @@ class BriefInput {
     this.waitingOn = const [],
     this.storylines = const [],
     this.materials = const [],
+    this.materialsPending = false,
+    this.people = const [],
+    this.peopleMore = 0,
     this.lastMet,
     this.invitePreview,
     required this.inputsHash,
@@ -278,7 +397,19 @@ final class BriefEligible extends BriefGather {
   /// fetches them once and gathers again.
   final List<({String source, String messageId})> unlisted;
 
-  const BriefEligible(this.input, {this.unlisted = const []});
+  /// The materials whose attachment row is `pending` with NO
+  /// `attachment_text` work row at all — listed by a fetch that queued no
+  /// text (`ensureBodiesFor`), so nothing will ever read them unless
+  /// somebody queues it. [young] is whether the carrying mail is inside
+  /// [BriefGatherer.pendingMaxAge], the same age rule
+  /// [BriefInput.materialsPending] reads. The handler queues them once.
+  final List<({BriefMaterial material, bool young})> unqueued;
+
+  const BriefEligible(
+    this.input, {
+    this.unlisted = const [],
+    this.unqueued = const [],
+  });
 }
 
 final class BriefIneligible extends BriefGather {
@@ -309,8 +440,75 @@ String capRunes(String s, int max) {
   return s.substring(0, end);
 }
 
-/// One other person in a meeting.
-typedef BriefPerson = ({String name, String address});
+/// One other person in a meeting, as [briefOthers] finds them.
+typedef BriefOther = ({String name, String address});
+
+/// The mailbox providers whose domain says nothing about who someone works
+/// for.
+const Set<String> briefConsumerDomains = {
+  'gmail',
+  'googlemail',
+  'outlook',
+  'hotmail',
+  'live',
+  'msn',
+  'yahoo',
+  'icloud',
+  'me',
+  'mac',
+  'proton',
+  'protonmail',
+  'aol',
+};
+
+/// The second-level labels that sit inside a country's two-part suffix
+/// (`co.uk`, `com.au`, `ac.jp`): the organisation is the label before them.
+const Set<String> _secondLevelSuffixes = {
+  'co',
+  'com',
+  'org',
+  'net',
+  'ac',
+  'gov',
+  'edu',
+  'ne',
+  'or',
+};
+
+/// The organisation an address's domain names: the label before its public
+/// suffix, so `fabrikam` for `dana@mail.fabrikam.com` and `contoso` for
+/// `sam@contoso.co.uk`. '' for a consumer mailbox ([briefConsumerDomains]),
+/// a Google calendar resource (`*.calendar.google.com`), an address written
+/// as an IP, or anything that is not an address; the tenant for Microsoft's
+/// `contoso.onmicrosoft.com`. Only letters, digits and hyphens ever come back, which is
+/// why the task can lay it out unfenced.
+String briefOrgOf(String address) {
+  final at = address.lastIndexOf('@');
+  if (at < 0) return '';
+  final domain = address.substring(at + 1).trim().toLowerCase();
+  if (domain.endsWith('.calendar.google.com')) return '';
+  final labels = [
+    for (final l in domain.split('.'))
+      if (l.isNotEmpty) l,
+  ];
+  if (labels.length < 2) return '';
+  // An address written as an IP names no organisation.
+  if (labels.every((l) => RegExp(r'^[0-9]+$').hasMatch(l))) return '';
+  final twoPart = labels.length >= 3 &&
+      labels.last.length == 2 &&
+      _secondLevelSuffixes.contains(labels[labels.length - 2]);
+  // Microsoft's tenant domain (`contoso.onmicrosoft.com`, a default M365
+  // address or a B2B guest) names the tenant in the label before it.
+  final tenant = labels.indexOf('onmicrosoft');
+  if (tenant == 0) return '';
+  final org = tenant > 0
+      ? labels[tenant - 1]
+      : labels[labels.length - (twoPart ? 3 : 2)];
+  // A label the DNS letters could not spell (an unencoded IDN, a stray
+  // character) is not shown: the task writes this one unfenced.
+  if (!RegExp(r'^[a-z0-9-]+$').hasMatch(org)) return '';
+  return briefConsumerDomains.contains(org) ? '' : org;
+}
 
 /// How far ahead a meeting is briefed (D6).
 const Duration briefHorizon = Duration(hours: 36);
@@ -396,13 +594,14 @@ DateTime? briefStartOf(CalendarEvent e, CalendarZone zone) {
 /// someone). [owner] is lowercased; when it is unknown, an event the owner
 /// organised still leaves its organiser out.
 ///
-/// Nobody's RESPONSE is read here or anywhere in a brief. Only the
-/// organiser's copy tracks answers; on an attendee's copy `none` means "not
-/// known", never "hasn't answered", so the brief says nothing about who is
-/// coming rather than risk saying something false.
-List<BriefPerson> briefOthers(CalendarEvent e, {required String? owner}) {
+/// Nobody's RESPONSE is read here. Only the organiser's copy tracks
+/// answers; on an attendee's copy `none` means "not known", never "hasn't
+/// answered" — so the people block reads an answer only off the owner's own
+/// organiser copy ([BriefPerson.response]) and says "not known" everywhere
+/// else rather than risk saying something false.
+List<BriefOther> briefOthers(CalendarEvent e, {required String? owner}) {
   final seen = <String>{};
-  final out = <BriefPerson>[];
+  final out = <BriefOther>[];
   bool isOwner(String address) =>
       owner != null && owner.isNotEmpty && address == owner;
   for (final a in e.attendees) {
@@ -454,11 +653,12 @@ BriefIneligibility? briefQuickCheck(
 }
 
 /// Collects what a pre-meeting brief is written from. Deterministic and
-/// model-free: with `passages: false` it is store reads only, so the planner
-/// can afford to run it for every meeting in the window just to learn
-/// whether anything changed. The handler's gather (the default) also embeds
-/// the meeting once to find the materials' passages — never hashed, so both
-/// gathers hash alike.
+/// model-free: with `passages: false` it is the planner's light gather —
+/// the store reads the hash needs and nothing else — so the planner can
+/// afford to run it for every meeting in the window just to learn whether
+/// anything changed. The handler's gather (the default) also reads each
+/// file's text, builds the people block and embeds the meeting once to find
+/// the materials' passages — none of it hashed, so both gathers hash alike.
 ///
 /// Always handed the OCCURRENCE to brief. A series master carries the
 /// series' first meeting's times; the planner targets occurrence ids (the
@@ -522,6 +722,25 @@ class BriefGatherer {
   static const int storylineCap = 400;
   static const int invitePreviewCap = 600;
 
+  /// How much of a file's text a material carries, cut at a word: the head
+  /// of the document, where a deck's ask and a memo's point usually are.
+  /// The task's budget decides how much of it the model is shown.
+  static const int materialTextCap = 6000;
+
+  /// The most people the people block lists; the rest are counted.
+  static const int maxPeople = 8;
+
+  /// How long after its mail arrived a file still being read is waited
+  /// for. A backstop: the work row's state is the rule, and a file whose
+  /// extraction neither finishes nor gives up in two hours is not going to.
+  static const Duration pendingMaxAge = Duration(hours: 2);
+
+  /// The work kind that reads a file's text (`AttachmentTextHandler.kind`).
+  static const String textKind = 'attachment_text';
+
+  /// How much of a person's newest message the people block quotes.
+  static const int lastWordsCap = 240;
+
   /// The intents that make an inbound message an ASK. `scheduling` is left
   /// out on purpose: the meeting being briefed is usually its answer.
   static const Set<String> askIntents = {'question', 'request', 'approval'};
@@ -541,8 +760,11 @@ class BriefGatherer {
     }
   }
 
-  /// [passages] false skips the one network call (the planner's gathers,
-  /// which only need the hash); the inputs hash is the same either way.
+  /// [passages] false is the light gather, which only needs the hash and
+  /// the wait: no embedding call, no file text read, no people block. The
+  /// inputs hash is the same either way, and so are [BriefInput.
+  /// materialsPending] and [BriefEligible.unqueued], which read only the
+  /// stored states and the work rows.
   Future<BriefGather> gather(
     CalendarEvent event, {
     required DateTime now,
@@ -660,6 +882,9 @@ class BriefGatherer {
     // the thread: an ask before a reply is taken to have been answered. The
     // newest qualifying one per thread.
     final asks = <BriefAsk>[];
+    // Who asked each one, for the people block: the address, not the name
+    // the ask carries.
+    final askOf = <String, String>{};
     final needsYouThreshold = await _store.needsYouThreshold();
     for (var i = 0; i < chosen.length && asks.length < maxAsks; i++) {
       final k = chosen[i];
@@ -684,6 +909,7 @@ class BriefGatherer {
           threadIndex: i,
           messageId: m.id,
         ));
+        askOf.putIfAbsent(from, () => asks.last.ask);
         break;
       }
     }
@@ -716,11 +942,35 @@ class BriefGatherer {
     }
 
     final found = _materialsOf(chosen, nameOf, zone);
-    final materials = passages ? await _withPassages(event, found) : found;
+    final (:pending, :unqueued) = await _readingOf(found, nowUtc);
+    final materials = passages
+        ? await _withPassages(event, await _withText(found))
+        : found;
 
     final today = zone.dateOf(nowUtc);
     final met = await _calendar.lastMetWith(addresses, nowUtc: nowUtc);
     final preview = event.bodyPreview.trim();
+    // The organiser first, then the attendees in the invite's order, and
+    // the cap after: who called the meeting is the one person the people
+    // block must not count among "+N more" (`briefOthers` appends the
+    // organiser LAST, since an attendee copy's list leaves them out). A
+    // deliberate departure from D14's literal "attendee order".
+    final organiser = event.organizerAddress.trim().toLowerCase();
+    final organiserFirst = [
+      ...others.where((p) => p.address == organiser),
+      ...others.where((p) => p.address != organiser),
+    ];
+    final people = passages
+        ? await _peopleOf(
+            event,
+            organiserFirst.take(maxPeople).toList(),
+            chosen,
+            askOf,
+            nowUtc: nowUtc,
+            zone: zone,
+            today: today,
+          )
+        : const <BriefPerson>[];
 
     final inputsHash = _hash(
       event: event,
@@ -731,7 +981,8 @@ class BriefGatherer {
       materials: materials,
     );
 
-    return BriefEligible(unlisted: _unlistedOf(chosen), BriefInput(
+    return BriefEligible(
+        unlisted: _unlistedOf(chosen), unqueued: unqueued, BriefInput(
       event: event,
       whenLocal: briefWhenLine(event, zone),
       nowLocal: briefNowLine(nowUtc, zone),
@@ -744,6 +995,9 @@ class BriefGatherer {
       waitingOn: waitingOn,
       storylines: storylines,
       materials: materials,
+      materialsPending: pending,
+      people: people,
+      peopleMore: math.max(0, others.length - maxPeople),
       lastMet: met == null ? null : lastMetLabel(met, zone: zone, today: today),
       invitePreview: preview.isEmpty
           ? null
@@ -813,6 +1067,7 @@ class BriefGatherer {
           contentType: a.contentType ?? '',
           sender: m.outbound ? 'you' : _who(m, nameOf),
           date: _dayOf(m.receivedAt, zone),
+          receivedAt: m.receivedAt ?? '',
           textStatus: a.textStatus,
           digestStatus: a.digestStatus,
           digest: a.digest,
@@ -821,6 +1076,146 @@ class BriefGatherer {
     }
     return out;
   }
+
+  /// Whether any of [materials] is still being read, and which are listed
+  /// `pending` with no text work queued at all ([BriefInput.
+  /// materialsPending], [BriefEligible.unqueued]). One work-row read per
+  /// `pending` file and none for the rest.
+  Future<({bool pending, List<({BriefMaterial material, bool young})> unqueued})>
+      _readingOf(List<BriefMaterial> materials, DateTime nowUtc) async {
+    var pending = false;
+    final unqueued = <({BriefMaterial material, bool young})>[];
+    for (final m in materials) {
+      if (m.textStatus != 'pending') continue;
+      final at = DateTime.tryParse(m.receivedAt);
+      // An unreadable stamp is never waited for: the age is the backstop,
+      // and a file with none cannot show it is young.
+      final young =
+          at != null && nowUtc.difference(at.toUtc()) < pendingMaxAge;
+      final work = await _store.workStatusOf(
+          textKind, m.source, attachmentEntityId(m.messageId, m.attachmentId));
+      if (work == null) {
+        unqueued.add((material: m, young: young));
+      } else if (young && (work == 'pending' || work == 'processing')) {
+        pending = true;
+      }
+    }
+    return (pending: pending, unqueued: unqueued);
+  }
+
+  /// Queues the text work [materials] are owed, and says how many it asked
+  /// for. `enqueueWork` is INSERT OR IGNORE, so a second ask changes
+  /// nothing.
+  Future<int> queueText(List<BriefMaterial> materials) async {
+    for (final m in materials) {
+      await _store.enqueueWork(
+          textKind, m.source, attachmentEntityId(m.messageId, m.attachmentId));
+    }
+    return materials.length;
+  }
+
+  /// [materials] with the text of each file that has been read, cut at a
+  /// word to [materialTextCap] with its runs of spaces and blank lines
+  /// closed up (an extracted deck is mostly layout). A store error leaves
+  /// that file without text: the digest still says what it is.
+  Future<List<BriefMaterial>> _withText(List<BriefMaterial> materials) async {
+    final out = <BriefMaterial>[];
+    for (final m in materials) {
+      if (m.textStatus != 'done') {
+        out.add(m);
+        continue;
+      }
+      try {
+        final raw = await _store.attachmentTextOf(
+            m.source, m.messageId, m.attachmentId);
+        final text = (raw ?? '')
+            .replaceAll(RegExp(r'[ \t]+'), ' ')
+            .replaceAll(RegExp(r'\s*\n\s*\n\s*'), '\n\n')
+            .trim();
+        out.add(text.isEmpty ? m : m.withText(capAtWord(text, materialTextCap)));
+      } on Object catch (e) {
+        debugPrint('BriefGatherer: no material text (${e.runtimeType})');
+        out.add(m);
+      }
+    }
+    return out;
+  }
+
+  /// The people block: [others] in the order given (the organiser first),
+  /// each with what the
+  /// mail and the calendar say of them. Their newest inbound message is
+  /// looked for in [chosen] only — the threads the brief is written from —
+  /// and its quoted history is cut off ([askOwnWords]) before it is capped,
+  /// so what they last wrote is theirs.
+  Future<List<BriefPerson>> _peopleOf(
+    CalendarEvent event,
+    List<BriefOther> others,
+    List<_Candidate> chosen,
+    Map<String, String> askOf, {
+    required DateTime nowUtc,
+    required CalendarZone zone,
+    required CalendarDate today,
+  }) async {
+    final organiser = event.organizerAddress.trim().toLowerCase();
+    final answers = {
+      for (final a in event.attendees) a.address.trim().toLowerCase(): a.response,
+    };
+    final out = <BriefPerson>[];
+    for (final p in others) {
+      var threadCount = 0;
+      Message? newest;
+      String newestSubject = '';
+      for (final k in chosen) {
+        final inThread = k.c.participants
+                .any((x) => (x.email ?? '').trim().toLowerCase() == p.address) ||
+            k.messages.any(
+                (m) => (m.fromAddress ?? '').trim().toLowerCase() == p.address);
+        if (!inThread) continue;
+        threadCount++;
+        for (final m in k.messages) {
+          if (m.outbound ||
+              (m.fromAddress ?? '').trim().toLowerCase() != p.address) {
+            continue;
+          }
+          if (newest == null ||
+              (m.receivedAt ?? '').compareTo(newest.receivedAt ?? '') > 0) {
+            newest = m;
+            newestSubject = (k.c.subject ?? '').trim();
+          }
+        }
+      }
+      final words = newest == null ? '' : _ownWords(newest);
+      final met = await _calendar.lastMetWith([p.address], nowUtc: nowUtc);
+      out.add(BriefPerson(
+        name: p.name.isNotEmpty ? p.name : p.address,
+        address: p.address,
+        org: briefOrgOf(p.address),
+        isOrganizer: organiser.isNotEmpty && p.address == organiser,
+        response: event.isOrganizer
+            ? _answerWords(answers[p.address])
+            : 'response not known',
+        lastMet: met == null ? null : lastMetLabel(met, zone: zone, today: today),
+        threadCount: threadCount,
+        lastInboundAgo:
+            newest == null ? '' : briefAgo(newest.receivedAt ?? '', nowUtc),
+        lastSubject: newestSubject,
+        lastWords: words.isEmpty
+            ? ''
+            : wrapUntrusted('last_words', capAtWord(words, lastWordsCap)),
+        openAsk: askOf[p.address] ?? '',
+      ));
+    }
+    return out;
+  }
+
+  /// An attendee's answer on the owner's organiser copy, in words.
+  static String _answerWords(String? response) =>
+      switch (response?.trim().toLowerCase()) {
+        'accepted' => 'accepted',
+        'tentativelyaccepted' => 'tentative',
+        'declined' => 'declined',
+        _ => 'no answer yet',
+      };
 
   /// The mail messages on [chosen] whose files are not listed yet, newest
   /// first, at most [maxUnlisted]: the row says it carries attachments and
@@ -944,6 +1339,18 @@ class BriefGatherer {
         ? m.bodyText!
         : (m.bodyPreview ?? '');
     return stripLinkTargets(stripAttachmentMarkers(raw))
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  /// A message's own words as one line: [_plain]'s cleaning, but cut at the
+  /// first quoted-reply header first, which needs the line breaks [_plain]
+  /// closes up.
+  static String _ownWords(Message m) {
+    final raw = (m.bodyText?.isNotEmpty ?? false)
+        ? m.bodyText!
+        : (m.bodyPreview ?? '');
+    return askOwnWords(stripLinkTargets(stripAttachmentMarkers(raw)))
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
   }

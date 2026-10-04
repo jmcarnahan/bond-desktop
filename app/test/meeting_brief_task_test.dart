@@ -15,6 +15,8 @@ void main() {
     List<BriefThread> waiting = const [],
     List<BriefStoryline> storylines = const [],
     List<BriefMaterial> materials = const [],
+    List<BriefPerson> people = const [],
+    int peopleMore = 0,
     String? lastMet,
     String? invitePreview,
     DateTime? now,
@@ -49,6 +51,8 @@ void main() {
       waitingOn: waiting,
       storylines: storylines,
       materials: materials,
+      people: people,
+      peopleMore: peopleMore,
       lastMet: lastMet,
       invitePreview: invitePreview,
       inputsHash: 'h',
@@ -70,26 +74,54 @@ void main() {
     test('the prompt tells the model to name the day, never a relative one',
         () {
       expect(const MeetingBriefTask().systemPrompt,
-          contains('Never write today, tomorrow or yesterday; name the day.'));
+          contains('Name a day by its date, never by a relative word.'));
     });
 
-    test('the prompt names the materials and questions rules and still the '
-        'day rule', () {
+    test('the v3 prompt speaks to "you", asks for density, and names the '
+        'briefing, people and materials rules in schema order', () {
       final prompt = const MeetingBriefTask().systemPrompt;
+      expect(prompt, contains('Speak to the owner as "you"; never write '
+          '"the owner".'));
+      expect(prompt, contains('write it dense: every sentence carries '
+          'something the owner can use'));
       expect(prompt, contains('- evidence: ONE sentence'));
+      expect(prompt, contains('- briefing: at most 6 sentences, one per '
+          'entry'));
+      expect(prompt, contains('When the inputs are thin, write fewer, never '
+          'vaguer.'));
+      expect(prompt, contains('- people: one line for each person listed — one '
+          'line, at most about 25 words — in the order given'));
+      expect(prompt, contains('one per entry — each at most about 40 words — '
+          'that catch'));
+      expect(prompt, contains('gets the line "no recent mail"'));
       expect(prompt, contains('- materials: the numbered materials are files '
-          'sent ahead, by these people or by the owner; a material whose line '
-          'says "you" is one the owner sent'));
-      expect(prompt, contains('A material marked unread or not shown is named '
-          'as arrived, not summarised.'));
-      expect(prompt, contains('- questions: at most 3 questions'));
+          'sent ahead; the text of a file is shown when it has been read'));
+      expect(prompt, contains('up to 5 points, each a short line, of what it '
+          'SAYS'));
+      expect(prompt, contains('A material shown unread or not shown is named '
+          'as arrived in one point, not summarised.'));
+      expect(prompt, contains('- questions: at most 5 questions'));
       expect(prompt, contains('Never rhetorical, never generic.'));
+      expect(prompt, contains('Never invent: a number, a name, a date or a '
+          'claim that is not in the inputs does not go in.'));
       expect(prompt, contains('material numbers ONLY to the numbered '
           'materials list'));
-      expect(prompt,
-          contains('Never write today, tomorrow or yesterday; name the day.'));
-      expect(prompt.indexOf('- evidence:'),
-          lessThan(prompt.indexOf('- headline:')));
+      expect(prompt, isNot(contains('Never write today')));
+      const order = [
+        '- evidence:',
+        '- headline:',
+        '- briefing:',
+        '- people:',
+        '- materials:',
+        '- questions:',
+        '- open_asks:',
+        '- points:',
+        '- prep:',
+      ];
+      for (var i = 1; i < order.length; i++) {
+        expect(prompt.indexOf(order[i - 1]), lessThan(prompt.indexOf(order[i])),
+            reason: '${order[i - 1]} before ${order[i]}');
+      }
     });
 
     test('the schema is flat, strict, evidence first, and names every key',
@@ -100,10 +132,12 @@ void main() {
       const order = [
         'evidence',
         'headline',
-        'points',
-        'open_asks',
+        'briefing',
+        'people',
         'materials',
         'questions',
+        'open_asks',
+        'points',
         'prep',
       ];
       expect(schema['required'], order);
@@ -114,11 +148,23 @@ void main() {
 
       final materials = props['materials'] as Map;
       final materialItem = materials['items'] as Map;
-      expect(materialItem['required'], ['file', 'takeaway']);
+      expect(materialItem['required'], ['file', 'points']);
       expect(materialItem['additionalProperties'], false);
       expect((materialItem['properties'] as Map)['file'],
           containsPair('type', 'integer'));
+      final materialPoints = (materialItem['properties'] as Map)['points'] as Map;
+      expect(materialPoints['items'], {'type': 'string'});
+      expect(materialPoints.containsKey('maxItems'), isFalse,
+          reason: 'an array inside an array of objects carries no ceiling');
       expect(materials.containsKey('maxItems'), isFalse);
+      final people = props['people'] as Map;
+      final personItem = people['items'] as Map;
+      expect(personItem['required'], ['name', 'line']);
+      expect(personItem['additionalProperties'], false);
+      expect(people.containsKey('maxItems'), isFalse);
+      final briefing = props['briefing'] as Map;
+      expect(briefing['items'], {'type': 'string'});
+      expect(briefing['maxItems'], MeetingBriefTask.maxBriefing);
       final questions = props['questions'] as Map;
       expect(questions['items'], {'type': 'string'});
       expect(questions['maxItems'], MeetingBriefTask.maxQuestions);
@@ -136,11 +182,149 @@ void main() {
       expect(asks.containsKey('maxItems'), isFalse);
       expect((props['prep'] as Map)['maxItems'], MeetingBriefTask.maxPrep);
       expect(schema.toString(), isNot(contains('maxLength')));
+      // maxItems only on the three arrays of strings at the top.
+      expect('maxItems'.allMatches(schema.toString()).length, 3);
+      expect([
+        for (final MapEntry(:key, :value) in props.entries)
+          if ((value as Map).containsKey('maxItems')) key,
+      ], ['briefing', 'questions', 'prep']);
     });
 
     test('the call budget', () {
       expect(MeetingBriefTask.temperature, 0.2);
-      expect(MeetingBriefTask.maxTokens, 900);
+      expect(MeetingBriefTask.maxTokens, 2700);
+      expect(MeetingBriefTask.materialsBudget, 10000);
+    });
+
+    test('the output budget covers the caps', () {
+      // Every string the schema lets through at its cap, in characters;
+      // about four characters a token. A truncated answer is invalid JSON
+      // and a failed brief, so the token budget must cover the caps within
+      // a fifth (the keys and quotes ride on top; the prompt's own length
+      // hints aim the model well below the caps).
+      const sumOfOutputCaps = MeetingBriefTask.evidenceCap +
+          MeetingBriefTask.headlineCap +
+          MeetingBriefTask.maxBriefing * MeetingBriefTask.briefingCap +
+          MeetingBriefTask.maxPeople *
+              (MeetingBriefTask.personCap + MeetingBriefTask.personLineCap) +
+          MeetingBriefTask.maxMaterials *
+              MeetingBriefTask.maxMaterialPoints *
+              MeetingBriefTask.materialPointCap +
+          MeetingBriefTask.maxQuestions * MeetingBriefTask.questionCap +
+          MeetingBriefTask.maxAsks *
+              (MeetingBriefTask.personCap + MeetingBriefTask.askCap) +
+          MeetingBriefTask.maxPoints * MeetingBriefTask.pointCap +
+          MeetingBriefTask.maxPrep * MeetingBriefTask.prepCap;
+      expect(sumOfOutputCaps, 12920);
+      expect(sumOfOutputCaps / 4,
+          lessThanOrEqualTo(MeetingBriefTask.maxTokens * 1.2));
+    });
+
+    test('a maximal input fits the context beside the answer', () {
+      // 16384 tokens of context at three characters a token (names, dates
+      // and JSON-ish text tokenise denser than prose), minus the answer's
+      // maxTokens: about 41k characters. 35000 (about 11.7k tokens, 14.4k
+      // with the answer) keeps a margin under that for the digits the
+      // materials budget weights but the rest does not. Measured at about
+      // 35.0k with every cap full and 120-character subjects; a cap bump
+      // that moves it past this has to pay for itself elsewhere.
+      const promptCharBudget = 35000;
+      expect(promptCharBudget,
+          lessThanOrEqualTo((16384 - MeetingBriefTask.maxTokens) * 3));
+      String words(int n) => List.filled(n ~/ 5, 'word').join(' ');
+      final threads = [
+        for (var i = 0; i < BriefGatherer.maxThreads; i++)
+          BriefThread(
+            source: 'email',
+            conversationKey: 'c-$i',
+            subject: 'S' * 120,
+            state: 'needs_reply',
+            lastAt: '2026-09-28T10:00:00.000000Z',
+            snippets: [
+              for (var j = 0; j < 2; j++)
+                wrapUntrusted('message', 'x' * BriefGatherer.snippetCap),
+            ],
+            ranked: true,
+          ),
+      ];
+      final big = BriefInput(
+        event: CalendarEvent(id: 'evt-1', subject: 'M' * 120),
+        whenLocal: 'Wed 30 Sep 2026 · 10:00–10:30 AM PDT',
+        nowLocal: 'Tue 29 Sep 2026, 3:05 PM PDT',
+        now: DateTime.utc(2026, 9, 29, 22, 5),
+        attendees: [
+          for (var i = 0; i < briefMaxOthers; i++) 'A' * 40,
+        ],
+        threads: threads,
+        openAsks: [
+          for (var i = 0; i < BriefGatherer.maxAsks; i++)
+            BriefAsk(
+              person: 'P' * 40,
+              ask: wrapUntrusted('ask', 'a' * BriefGatherer.askCap),
+              intent: 'request',
+              threadIndex: i,
+            ),
+        ],
+        waitingOn: threads.take(BriefGatherer.maxWaiting).toList(),
+        storylines: [
+          for (var i = 0; i < BriefGatherer.maxStorylines; i++)
+            BriefStoryline(
+              id: 's-$i',
+              title: 'T' * 80,
+              summary:
+                  wrapUntrusted('storyline', 's' * BriefGatherer.storylineCap),
+            ),
+        ],
+        people: [
+          for (var i = 0; i < BriefGatherer.maxPeople; i++)
+            BriefPerson(
+              name: 'N' * 40,
+              address: 'p$i@fabrikam.com',
+              org: 'fabrikam',
+              isOrganizer: i == 0,
+              response: 'no answer yet',
+              lastMet: 'Last met 29 days ago',
+              threadCount: 6,
+              lastInboundAgo: '23 hours ago',
+              lastSubject: 'S' * 255,
+              lastWords:
+                  wrapUntrusted('last_words', 'w' * BriefGatherer.lastWordsCap),
+              openAsk: wrapUntrusted('ask', 'a' * BriefGatherer.askCap),
+            ),
+        ],
+        peopleMore: 7,
+        lastMet: 'Last met 2 days ago',
+        materials: [
+          for (var i = 0; i < BriefGatherer.maxMaterials; i++)
+            BriefMaterial(
+              source: 'email',
+              messageId: 'm-$i',
+              attachmentId: 'a-$i',
+              name: 'n' * 255,
+              sender: 'Dana Lee',
+              date: '2026-09-28',
+              textStatus: 'done',
+              digest: AttachmentDigest(
+                summary: 'x' * 400,
+                facts: [for (var f = 0; f < 6; f++) 'f' * 200],
+              ),
+              text: words(BriefGatherer.materialTextCap),
+              passages: [
+                for (var j = 0; j < BriefGatherer.passagesPerMaterial; j++)
+                  wrapUntrusted('passage', 'p' * BriefGatherer.passageCap),
+              ],
+            ),
+        ],
+        invitePreview:
+            wrapUntrusted('invite', 'i' * BriefGatherer.invitePreviewCap),
+        inputsHash: 'h',
+      );
+      const task = MeetingBriefTask();
+      final size =
+          task.systemPrompt.length + task.buildUserMessage(big).length;
+      // ignore: avoid_print
+      print('maximal brief prompt: $size characters');
+      expect(size, lessThanOrEqualTo(promptCharBudget));
     });
   });
 
@@ -233,13 +417,14 @@ void main() {
       expect(bare, isNot(contains('Last met')));
     });
 
-    test('materials are numbered, fenced, with the digest and passages, '
-        'inside the budget', () {
-      // Each digest + two passages is ~650 characters with the fences, so
-      // the 3000 budget holds four materials whole and the fifth only in
-      // part; the seventh is named and dated, nothing more.
+    test('materials are numbered, fenced, with the digest, the text and '
+        'passages, inside the budget', () {
+      // Each material: a digest, about 6000 characters of text, one
+      // passage. The first's digest and whole text fit the 10000 budget;
+      // the second's digest fits and its text is written as a head; the
+      // third gets nothing (named only).
       final materials = [
-        for (var i = 1; i <= 7; i++)
+        for (var i = 1; i <= 4; i++)
           BriefMaterial(
             source: 'email',
             messageId: 'm-$i',
@@ -252,14 +437,14 @@ void main() {
               summary: 'Summary $i ${'s' * 120}',
               facts: ['Fact $i.a', 'Fact $i.b'],
             ),
+            text: 'Text $i ${List.filled(1198, 'tttt').join(' ')}',
             passages: [
               wrapUntrusted('passage', '[slide 1] Passage $i.1 ${'p' * 180}'),
-              wrapUntrusted('passage', '[slide 2] Passage $i.2 ${'p' * 180}'),
             ],
           ),
       ];
-      final msg =
-          const MeetingBriefTask().buildUserMessage(input(materials: materials));
+      const task = MeetingBriefTask();
+      final msg = task.buildUserMessage(input(materials: materials));
       expect(msg, contains('Materials sent ahead, numbered ("you" is the owner):'));
       expect(
           msg,
@@ -267,28 +452,165 @@ void main() {
               'Dana Lee · 2026-09-21')}'));
       expect(
           msg,
-          contains('[7] (not shown) ${wrapUntrusted('material', 'deck-7.pptx · '
-              'Dana Lee · 2026-09-27')}'),
-          reason: 'read, but nothing of it fits: not claimed as read');
-      expect(
-          msg,
           contains(wrapUntrusted(
               'digest', 'Summary 1 ${'s' * 120}\nFact 1.a\nFact 1.b')));
-      expect(msg, contains('Passage 1.2'));
-      expect(msg, isNot(contains('Summary 7')),
-          reason: 'past the budget a material gets only its name line');
-      expect(msg, isNot(contains('Passage 7.1')));
+      expect(msg, contains(wrapUntrusted('material_text', materials[0].text)));
+      expect(msg, contains('Summary 2'));
+      expect(msg, contains('<untrusted_data source="material_text">\nText 2 '),
+          reason: "the second file's text does not fit whole: its head");
+      expect(msg, isNot(contains(wrapUntrusted('material_text', materials[1].text))));
+      expect(msg, isNot(contains('Summary 3')));
+      expect(msg, isNot(contains('Text 3 ')));
+      expect(msg, contains('[3] (not shown) '));
+      expect(msg.indexOf(wrapUntrusted('digest',
+              [materials[0].digest!.summary, ...materials[0].digest!.facts]
+                  .join('\n'))),
+          lessThan(msg.indexOf(wrapUntrusted('material_text', materials[0].text))),
+          reason: 'the digest, then the text');
 
-      // The budget holds over the digests and passages actually written.
-      final written = [
-        for (final m in materials) ...[
-          wrapUntrusted('digest',
-              [m.digest!.summary, ...m.digest!.facts].join('\n')),
-          ...m.passages,
+      // What the model saw of the files, as the activity row logs it.
+      final shown = MeetingBriefTask.materialTextCharsWritten(
+          input(materials: materials));
+      expect(shown, greaterThan(materials[0].text.length));
+      expect(shown, lessThan(materials[0].text.length + materials[1].text.length));
+    });
+
+    test('two files with a digest, 6000 characters of text and passages both '
+        'get their text', () {
+      // The production case: with embeddings wired every file carries two
+      // passages, which used to crowd out the second file's text.
+      final materials = [
+        for (var i = 1; i <= 2; i++)
+          BriefMaterial(
+            source: 'email',
+            messageId: 'm-$i',
+            attachmentId: 'a-$i',
+            name: 'deck-$i.pptx',
+            textStatus: 'done',
+            digest: AttachmentDigest(
+              summary: 'Summary $i ${'s' * 400}',
+              facts: [for (var f = 0; f < 2; f++) 'Fact $i.$f ${'f' * 150}'],
+            ),
+            text: 'Text $i ${List.filled(1198, 'tttt').join(' ')}',
+            passages: [
+              for (var j = 0; j < 2; j++)
+                wrapUntrusted('passage', '[slide $j] P$i.$j ${'p' * 330}'),
+            ],
+          ),
+      ];
+      final msg =
+          const MeetingBriefTask().buildUserMessage(input(materials: materials));
+      expect(msg, contains(wrapUntrusted('material_text', materials[0].text)));
+      expect(msg, contains('<untrusted_data source="material_text">\nText 2 '));
+      expect('source="material_text"'.allMatches(msg).length, 2);
+      expect(msg, contains('[2] (read) '));
+    });
+
+    test('a text that does not fit whole is written as a head, not dropped',
+        () {
+      final text = List.filled(1500, 'word').join(' ');
+      final material = BriefMaterial(
+        source: 'email',
+        messageId: 'm-1',
+        attachmentId: 'a-1',
+        name: 'memo.docx',
+        textStatus: 'done',
+        digest: AttachmentDigest(summary: 'Digest ${'d' * 4000}'),
+        text: text,
+      );
+      final msg = const MeetingBriefTask()
+          .buildUserMessage(input(materials: [material]));
+      final open = msg.indexOf('<untrusted_data source="material_text">\n');
+      expect(open, greaterThan(0));
+      final head = msg.substring(
+          open + '<untrusted_data source="material_text">\n'.length,
+          msg.indexOf('\n</untrusted_data>', open));
+      expect(text, startsWith(head));
+      expect(head.length, lessThan(text.length));
+      expect(head.length, greaterThan(5000));
+      expect(head, endsWith('word'), reason: 'cut at a word');
+      expect(msg, contains('[1] (read) '));
+      expect(MeetingBriefTask.materialTextCharsWritten(
+              input(materials: [material])),
+          head.length);
+    });
+
+    test('a digit-heavy block costs double', () {
+      BriefMaterial file(String text) => BriefMaterial(
+            source: 'email',
+            messageId: 'm-1',
+            attachmentId: 'a-1',
+            name: 'q3.xlsx',
+            textStatus: 'done',
+            text: text,
+          );
+      // 5600 characters either way. Letters fit whole; a sheet of digits
+      // costs about 10k and is written as a head.
+      final letters = List.filled(1120, 'abcd').join(' ');
+      final digits = List.filled(1120, '1234').join(' ');
+      const task = MeetingBriefTask();
+      expect(task.buildUserMessage(input(materials: [file(letters)])),
+          contains(wrapUntrusted('material_text', letters)));
+      final sheet = task.buildUserMessage(input(materials: [file(digits)]));
+      expect(sheet, isNot(contains(wrapUntrusted('material_text', digits))));
+      expect(sheet, contains('<untrusted_data source="material_text">\n1234 '));
+      final shown = MeetingBriefTask.materialTextCharsWritten(
+          input(materials: [file(digits)]));
+      expect(shown, lessThan(digits.length));
+      expect(shown + shown * 4 ~/ 5,
+          lessThanOrEqualTo(MeetingBriefTask.materialsBudget),
+          reason: 'four digits in five, each counted twice');
+    });
+
+    test('a long file name and last subject are capped in the message', () {
+      final msg = const MeetingBriefTask().buildUserMessage(input(
+        materials: [
+          BriefMaterial(
+            source: 'email',
+            messageId: 'm-1',
+            attachmentId: 'a-1',
+            name: 'n' * 255,
+          ),
         ],
-      ].where(msg.contains);
-      expect(written.fold<int>(0, (n, b) => n + b.length),
-          lessThanOrEqualTo(MeetingBriefTask.materialsBudget));
+        people: [
+          BriefPerson(
+            name: 'Dana Lee',
+            address: 'dana@fabrikam.com',
+            lastInboundAgo: '3 hours ago',
+            lastSubject: 's' * 255,
+          ),
+        ],
+      ));
+      expect(msg, contains(wrapUntrusted('material', 'n' * 120)));
+      expect(msg, isNot(contains('n' * 121)));
+      expect(msg, contains(wrapUntrusted('subject', 's' * 120)));
+      expect(msg, isNot(contains('s' * 121)));
+    });
+
+    test('a material past the budget is named only, and says not shown', () {
+      final big = 'w ' * 7000;
+      final materials = [
+        for (var i = 1; i <= 3; i++)
+          BriefMaterial(
+            source: 'email',
+            messageId: 'm-$i',
+            attachmentId: 'a-$i',
+            name: 'memo-$i.docx',
+            textStatus: 'done',
+            digest: AttachmentDigest(summary: 'Digest $i ${'d' * 4800}'),
+            text: big,
+          ),
+      ];
+      final msg =
+          const MeetingBriefTask().buildUserMessage(input(materials: materials));
+      expect(msg, contains('Digest 1'));
+      expect('source="material_text"'.allMatches(msg).length, 1,
+          reason: "the first file's head fills what its digest left");
+      expect(msg, isNot(contains('Digest 2')));
+      expect(msg, isNot(contains('Digest 3')));
+      expect(msg, contains('[2] (not shown) '));
+      expect(msg, contains('[3] (not shown) '),
+          reason: 'read, but nothing of it fits: not claimed as read');
     });
 
     test('an unread material says unread, and carries nothing else', () {
@@ -371,6 +693,55 @@ void main() {
           '</untrusted_data>'.allMatches(msg).length);
     });
 
+    test('the people block: numbered, the organiser first, the name, '
+        'subject and words fenced, the org and the answer outside', () {
+      // A consumer host, joined here so no literal reads as an address.
+      const gmail = 'gmail.com';
+      const samGmail = 'sam@$gmail';
+      final msg = const MeetingBriefTask().buildUserMessage(input(
+        people: [
+          BriefPerson(
+            name: 'Dana Lee',
+            address: 'dana@fabrikam.com',
+            org: 'fabrikam',
+            isOrganizer: true,
+            response: 'response not known',
+            lastMet: 'Last met 3 days ago',
+            threadCount: 2,
+            lastInboundAgo: '3 hours ago',
+            lastSubject: 'Fabrikam renewal',
+            lastWords: wrapUntrusted('last_words', 'Can you send the quote?'),
+            openAsk: wrapUntrusted('ask', 'Send the quote'),
+          ),
+          const BriefPerson(name: samGmail, address: samGmail),
+        ],
+        peopleMore: 3,
+      ));
+      expect(msg, contains('People, numbered, the organiser first:'));
+      expect(
+          msg,
+          contains('[1] ${wrapUntrusted('person_name', 'Dana Lee')} · fabrikam '
+              '· organiser · response not known'));
+      expect(msg, contains('Last met 3 days ago.'));
+      expect(msg, contains('in 2 of the threads'));
+      expect(msg, contains('last wrote 3 hours ago: '
+          '${wrapUntrusted('subject', 'Fabrikam renewal')}'));
+      expect(msg, contains(wrapUntrusted('last_words', 'Can you send the quote?')));
+      expect(msg, contains('open ask: yes (see Open asks)'));
+      expect(msg, isNot(contains('Send the quote')),
+          reason: 'the ask is said once, in Open asks');
+      expect(
+          msg,
+          contains('[2] ${wrapUntrusted('person_name', samGmail)} · no '
+              'organisation known · attendee · response not known'));
+      expect(msg, contains('+3 more'));
+      expect(msg.indexOf('With:'), lessThan(msg.indexOf('People,')));
+      expect(msg.indexOf('People,'), lessThan(msg.indexOf('Threads with')));
+
+      final bare = const MeetingBriefTask().buildUserMessage(input());
+      expect(bare, isNot(contains('People,')));
+    });
+
     test('no threads says so', () {
       final msg =
           const MeetingBriefTask().buildUserMessage(input(threads: const []));
@@ -379,6 +750,29 @@ void main() {
   });
 
   group('validate', () {
+    test('a second entry for the same file is dropped: the first stands', () {
+      final brief = const MeetingBriefTask(materialCount: 2).validate({
+        'headline': 'h',
+        'materials': [
+          {'file': 1, 'points': []},
+          {
+            'file': 1,
+            'points': ['First.'],
+          },
+          {
+            'file': 1,
+            'points': ['Second.'],
+          },
+          {
+            'file': 2,
+            'points': ['Other file.'],
+          },
+        ],
+      });
+      expect([for (final m in brief.materials) (m.file, m.points.single)],
+          [(0, 'First.'), (1, 'Other file.')]);
+    });
+
     test('1-based thread numbers become 0-based, and a number outside the '
         'list becomes -1', () {
       final brief = const MeetingBriefTask(threadCount: 2).validate({
@@ -404,7 +798,7 @@ void main() {
 
     test('clamps every string and every list, and drops empty strings', () {
       final brief = const MeetingBriefTask(threadCount: 1).validate({
-        'headline': '  ${'h' * 300}  ',
+        'headline': '  ${'h' * 400}  ',
         'points': [
           for (var i = 0; i < 8; i++) {'text': 'p$i ${'x' * 300}', 'thread': 1},
           {'text': '   ', 'thread': 1},
@@ -440,13 +834,14 @@ void main() {
     test('a long glance is cut at a word, never inside one', () {
       final words = [for (var i = 0; i < 60; i++) 'word$i'];
       final long = words.join(' ');
-      expect(long.length, greaterThan(300));
+      expect(long.length, greaterThan(MeetingBriefTask.headlineCap));
       final brief = const MeetingBriefTask().validate({
         'evidence': long,
         'headline': long,
       });
-      expect(brief.headline.length, lessThanOrEqualTo(240));
-      expect(brief.headline.length, greaterThan(200));
+      expect(brief.headline.length,
+          lessThanOrEqualTo(MeetingBriefTask.headlineCap));
+      expect(brief.headline.length, greaterThan(280));
       expect(long, startsWith(brief.headline));
       // The next character of the original is the space the cut stopped at.
       expect(long[brief.headline.length], ' ');
@@ -468,24 +863,42 @@ void main() {
       expect(brief.prep, isEmpty);
     });
 
-    test('validate clamps the glance to 240, materials to four with the index '
-        'rule, questions to three, and never throws', () {
+    test('validate caps every ceiling: the glance, the briefing, people, '
+        'materials with the index rule, questions, points and prep', () {
       final brief = const MeetingBriefTask(threadCount: 1, materialCount: 5)
           .validate({
         'evidence': 'e' * 400,
         'headline': 'g' * 400,
-        'materials': [
-          {'file': 1, 'takeaway': 'The deck asks for a decision on pricing.'},
-          {'file': 0, 'takeaway': 'Zero is not a number in the list.'},
-          {'file': 6, 'takeaway': 'Past the end of the list.'},
-          {'file': -1, 'takeaway': 'Minus one names no file.'},
-          {'file': 2, 'takeaway': '   '},
-          {'file': 2, 'takeaway': 't' * 300},
-          {'file': 3, 'takeaway': 'Three.'},
-          {'file': 4, 'takeaway': 'Four.'},
-          {'file': 5, 'takeaway': 'Five, over the cap of four.'},
+        'briefing': [
+          '',
+          for (var i = 0; i < 8; i++) 'b$i ${'word ' * 80}',
+        ],
+        'people': [
+          {'name': 'Dana', 'line': ''},
+          for (var i = 0; i < 10; i++)
+            {'name': 'N' * 200, 'line': 'l$i ${'z' * 300}'},
           'not a map',
-          {'file': 'two', 'takeaway': 'A string is no number.'},
+        ],
+        'materials': [
+          {
+            'file': 1,
+            'points': [
+              'The deck asks for a decision on pricing.',
+              '',
+              for (var i = 0; i < 6; i++) 'pt$i ${'x' * 300}',
+            ],
+          },
+          {'file': 0, 'points': ['Zero is not a number in the list.']},
+          {'file': 6, 'points': ['Past the end of the list.']},
+          {'file': -1, 'points': ['Minus one names no file.']},
+          {'file': 2, 'points': ['   ']},
+          {'file': 2, 'points': 'not a list'},
+          {'file': 2, 'points': ['Two.']},
+          {'file': 3, 'points': ['Three.']},
+          {'file': 4, 'points': ['Four.']},
+          {'file': 5, 'points': ['Five, over the cap of four.']},
+          'not a map',
+          {'file': 'two', 'points': ['A string is no number.']},
         ],
         'questions': [
           '',
@@ -493,26 +906,55 @@ void main() {
           'q' * 300,
           'Who signs?',
           'A fourth question.',
+          'A fifth question.',
+          'A sixth, over the cap.',
           7,
         ],
+        'points': [
+          for (var i = 0; i < 7; i++) {'text': 'p$i ${'y' * 300}', 'thread': 1},
+        ],
+        'prep': ['one', 'two', 'three', 'four', 'r' * 200],
       });
       expect(brief.evidence.length, MeetingBriefTask.evidenceCap);
       expect(brief.headline.length, MeetingBriefTask.headlineCap);
-      expect(MeetingBriefTask.headlineCap, 240);
+      expect(MeetingBriefTask.headlineCap, 320);
+      expect(brief.briefing, hasLength(MeetingBriefTask.maxBriefing));
+      expect(brief.briefing.first, startsWith('b0'));
+      expect(
+          brief.briefing.every((b) =>
+              b.length <= MeetingBriefTask.briefingCap && !b.endsWith(' ')),
+          isTrue);
+      expect(brief.people, hasLength(MeetingBriefTask.maxPeople));
+      expect(brief.people.first.name.length, MeetingBriefTask.personCap);
+      expect(brief.people.first.line.length, MeetingBriefTask.personLineCap);
       expect([for (final m in brief.materials) m.file], [0, 1, 2, 3],
           reason: '1-based to 0-based; out of range or empty dropped, never -1');
-      expect(brief.materials[1].takeaway.length, MeetingBriefTask.takeawayCap);
+      final first = brief.materials.first.points;
+      expect(first, hasLength(MeetingBriefTask.maxMaterialPoints));
+      expect(first.first, 'The deck asks for a decision on pricing.');
+      expect(first.skip(1).every((p) => p.length == MeetingBriefTask.materialPointCap),
+          isTrue);
+      expect(brief.materials[1].points, ['Two.']);
       expect(brief.questions, hasLength(MeetingBriefTask.maxQuestions));
       expect(brief.questions.first, 'Is the price final?');
       expect(brief.questions[1].length, MeetingBriefTask.questionCap);
+      expect(brief.points, hasLength(MeetingBriefTask.maxPoints));
+      expect(brief.points.every((p) => p.text.length == MeetingBriefTask.pointCap),
+          isTrue);
+      expect(brief.prep.take(3), ['one', 'two', 'three']);
+      expect(brief.prep, hasLength(MeetingBriefTask.maxPrep));
 
       final junk = const MeetingBriefTask().validate({
         'evidence': 3,
         'headline': 'Fine.',
+        'briefing': 'nope',
+        'people': {'a': 1},
         'materials': 'nope',
         'questions': {'a': 1},
       });
       expect(junk.evidence, '');
+      expect(junk.briefing, isEmpty);
+      expect(junk.people, isEmpty);
       expect(junk.materials, isEmpty);
       expect(junk.questions, isEmpty);
     });
@@ -536,25 +978,58 @@ void main() {
 
       final back = MeetingBrief.fromJson(v1.toJson());
       expect(back.toJson(), v1.toJson());
+      expect(v1.briefing, isEmpty);
+      expect(v1.people, isEmpty);
       expect(v1.toJson().keys, [
         'evidence',
         'headline',
-        'points',
-        'open_asks',
+        'briefing',
+        'people',
         'materials',
         'questions',
+        'open_asks',
+        'points',
         'prep',
         'threads',
         'material_refs',
       ]);
     });
 
-    test('a v2 brief round-trips with its materials and their refs', () {
+    test('a v2 stored brief decodes: its takeaway is one point', () {
+      final v2 = MeetingBrief.tryDecode(
+        '{"evidence":"E.","headline":"H.","points":[],"open_asks":[],'
+        '"materials":[{"file":0,"takeaway":"The deck proposes two tiers."}],'
+        '"questions":["Which tier?"],"prep":[],"threads":[],'
+        '"material_refs":[{"source":"email","message_id":"m-1",'
+        '"attachment_id":"a-1","name":"tiers.pptx"}]}',
+      )!;
+      expect(v2.materials.single.points, ['The deck proposes two tiers.']);
+      expect(v2.materials.single.takeaway, 'The deck proposes two tiers.');
+      expect(v2.briefing, isEmpty);
+      expect(v2.people, isEmpty);
+      expect(v2.questions, ['Which tier?']);
+      expect(v2.materialAt(0)?.name, 'tiers.pptx');
+      // Written back, it is v3: points, never a takeaway.
+      final json = v2.toJson();
+      expect((json['materials'] as List).single,
+          {'file': 0, 'points': ['The deck proposes two tiers.']});
+      expect(jsonEncodeKeys(json), isNot(contains('takeaway')));
+    });
+
+    test('a v3 brief round-trips with its briefing, people, material points '
+        'and their refs', () {
       final brief = const MeetingBriefTask(materialCount: 1).validate({
         'evidence': 'A renewal call; the quote is out.',
         'headline': 'The quote is out; pricing is the open decision.',
+        'briefing': ['Dana sent the quote on 28 Sep.', 'Pricing is open.'],
+        'people': [
+          {'name': 'Dana Lee', 'line': 'Fabrikam; sent the quote 28 Sep.'},
+        ],
         'materials': [
-          {'file': 1, 'takeaway': 'The deck proposes two tiers.'},
+          {
+            'file': 1,
+            'points': ['The deck proposes two tiers.', 'Tier B is 12k.'],
+          },
         ],
         'questions': ['Which tier do they want?'],
       }).withMaterials(const [
@@ -566,7 +1041,16 @@ void main() {
         ),
       ]);
       final back = MeetingBrief.fromJson(brief.toJson());
+      expect(back.toJson(), brief.toJson());
       expect(back.evidence, 'A renewal call; the quote is out.');
+      expect(back.briefing,
+          ['Dana sent the quote on 28 Sep.', 'Pricing is open.']);
+      expect(back.people.single.name, 'Dana Lee');
+      expect(back.people.single.line, 'Fabrikam; sent the quote 28 Sep.');
+      expect(back.materials.single.points,
+          ['The deck proposes two tiers.', 'Tier B is 12k.']);
+      expect(back.materials.single.takeaway,
+          'The deck proposes two tiers. Tier B is 12k.');
       expect(back.questions, ['Which tier do they want?']);
       final ref = back.materialAt(back.materials.single.file)!;
       expect(
@@ -609,3 +1093,13 @@ void main() {
     });
   });
 }
+
+/// Every key anywhere in [value], for asserting a key is never written.
+String jsonEncodeKeys(Object? value) => switch (value) {
+      Map() => [
+          for (final MapEntry(:key, value: v) in value.entries)
+            '$key ${jsonEncodeKeys(v)}',
+        ].join(' '),
+      List() => value.map(jsonEncodeKeys).join(' '),
+      _ => '',
+    };
