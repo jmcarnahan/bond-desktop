@@ -345,7 +345,7 @@ class MessageSearch {
       //
       // The subject is composed on rather than assumed: every
       // [EmbeddingsClient] reason is written as a PREDICATE of the embedding
-      // server ('is not reachable — run: make embed'), so naming it here is
+      // server ('is not reachable. Run: make embed'), so naming it here is
       // what turns the fragment into a clause a screen can print whole.
       final subject =
           'the embedding server ${result.reason ?? 'did not answer'}';

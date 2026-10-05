@@ -243,8 +243,8 @@ class ModelServerSupervisor {
   /// has changed under it.
   ///
   /// The preset is a function of the placement and the folder, and both move
-  /// while the app runs: choosing User defined drops the two chat models out
-  /// of memory, choosing Managed puts them back. [ensureRunning] returns at
+  /// while the app runs: moving the generative model to Your server drops it
+  /// out of memory, moving it back to This Mac puts it back. [ensureRunning] returns at
   /// once on a live server whatever it is serving, which is right at launch
   /// and wrong after a switch, so this is what the placement writers call. A
   /// server that is not up goes through [ensureRunning] as before; one that

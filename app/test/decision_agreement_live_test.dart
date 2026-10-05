@@ -54,7 +54,7 @@ void main() {
       }
       final headsPath = decideHeadsPath();
       if (!File(headsPath).existsSync()) {
-        fail('no decision heads at $headsPath — run make decide-install, or '
+        fail('no decision heads at $headsPath — run make decide-fetch, or '
             'pass --dart-define=DECIDE_HEADS=<path>');
       }
       final heads = await DecisionHeads.load(File(headsPath));

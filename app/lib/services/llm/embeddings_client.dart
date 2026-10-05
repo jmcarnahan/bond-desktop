@@ -218,7 +218,7 @@ class EmbeddingsClient {
   /// and every bench, which then behave exactly as before.
   final LlmTarget Function()? _resolveTarget;
 
-  /// What to say instead of "run: make embed" when this app is the one that
+  /// What to say instead of "Run: make embed" when this app is the one that
   /// should have started the server. Null, or a null answer, keeps the default
   /// sentence — which is the right one whenever the user runs the servers.
   final String? Function()? _describeUnavailable;
@@ -267,7 +267,7 @@ class EmbeddingsClient {
         if (said != null && said.isNotEmpty) return said;
       } catch (_) {}
     }
-    return 'is not reachable — run: make embed';
+    return 'is not reachable. Run: make embed';
   }
 
   /// One vector for [text], or null if anything at all went wrong.

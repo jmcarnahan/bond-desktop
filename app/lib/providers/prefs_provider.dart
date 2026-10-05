@@ -45,7 +45,13 @@ export '../models/home_sort.dart'
 /// [LlmWire] ride along for the same reason: the tests and the benches read
 /// and write them through this file; no screen does since Round H.
 export '../services/llm/model_slots.dart'
-    show LlmTarget, LlmTargetSpec, LlmWire, ModelSlot;
+    show
+        LlmTarget,
+        LlmTargetSpec,
+        LlmWire,
+        ModelSlot,
+        generativeNoAddressText,
+        registryId;
 
 /// Which Microsoft backend the app talks through.
 ///
@@ -170,8 +176,9 @@ class AppPrefs {
   final DraftPolicy draftPolicy;
 
   /// Where the GENERATIVE model runs. [defaultModelPlacement] by default,
-  /// which is the owner's box in any build compiled with an address for one
-  /// and this Mac in every other.
+  /// which is Your server in every build since the default-setup round
+  /// (2026-10): with no address anywhere the role is unavailable and parks
+  /// ([generativeSpec]) rather than coming home to this Mac.
   ///
   /// The key is Round H's `model_placement`, REUSED rather than renamed in the
   /// decision-model round: the one global placement became the generative
@@ -227,6 +234,37 @@ class AppPrefs {
   /// `box-decide`). Not persisted, on [boxBigKeyStored]'s rule.
   final bool decisionKeyStored;
 
+  /// The box address this build was compiled with ([boxUrlDefault]), as
+  /// passed, or what the notifier was handed in its place (`compiledBoxUrl:`,
+  /// the seam a test drives, since every define is empty under `flutter
+  /// test`). Not persisted: the notifier stamps it on every state it reads.
+  /// An ADDRESS, never a key.
+  final String compiledBoxUrl;
+
+  /// Whether this build carries a box access key ([boxKeyDefault]). A
+  /// presence flag and NOTHING more: the key itself lives only in the
+  /// notifier, because this object is a value that may be logged or
+  /// compared. Stamped by the notifier, like [compiledBoxUrl].
+  final bool boxKeyCompiled;
+
+  /// The model registry's base address, or EMPTY to follow the build
+  /// ([compiledRegistryUrl]), on [boxBigUrl]'s rule: a changed `local.mk`
+  /// must stay visible to an install that once saved the field.
+  /// [effectiveRegistryUrl] is the one place that resolves it.
+  final String registryUrl;
+
+  /// The registry address this build was compiled with
+  /// ([registryUrlDefault]), stamped by the notifier like [compiledBoxUrl].
+  final String compiledRegistryUrl;
+
+  /// Whether the registry token is in the keychain (entry `model-registry`).
+  /// Not persisted, on [boxBigKeyStored]'s rule.
+  final bool registryTokenStored;
+
+  /// Whether this build carries a registry token ([registryTokenDefault]).
+  /// A presence flag, on [boxKeyCompiled]'s rule.
+  final bool registryTokenCompiled;
+
   /// The optional cloud-drafts target: a chat-completions URL (or a Bedrock
   /// runtime host) and its discovered model. Empty [cloudDraftsUrl] means no
   /// cloud drafts at all. The ONE place a third-party service may serve, and
@@ -255,13 +293,13 @@ class AppPrefs {
   final MachineTier machineTier;
   /// Whether the model work runs at all.
   ///
-  /// ON by default and REMEMBERED, unlike the session switch it replaced: a
-  /// fresh install starts working the moment the wizard finishes, and somebody
-  /// who turns it off finds it off after a relaunch. What made it a session
-  /// flag was the risk of spending the first minutes on the wrong server, and
-  /// the placement rule closes that: the default server is the measured one,
-  /// and a missing key or a dead address parks with a sentence rather than
-  /// spending attempts.
+  /// OFF by default and REMEMBERED: a fresh install starts with the models
+  /// idle, so the servers, the downloads and the keys can be checked under
+  /// Settings, Models before anything is spent, and somebody who turns it on
+  /// (or off) finds it that way after a relaunch. The default-setup round
+  /// (2026-10, decision D8) flipped it from on, with no migration: only the
+  /// string `'true'` reads as on, so an install that never touched the
+  /// switch starts off once.
   final bool processingOn;
 
   /// How the People directory is ordered. [PeopleSort.recent] by default,
@@ -404,12 +442,18 @@ class AppPrefs {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.compiledBoxUrl = boxUrlDefault,
+    this.boxKeyCompiled = buildHasBoxKey,
+    this.registryUrl = '',
+    this.compiledRegistryUrl = registryUrlDefault,
+    this.registryTokenStored = false,
+    this.registryTokenCompiled = buildHasRegistryToken,
     this.cloudDraftsUrl = '',
     this.cloudDraftsModel = '',
     this.cloudDraftsKeyStored = false,
     this.servedManagedIds,
     this.machineTier = MachineTier.full,
-    this.processingOn = true,
+    this.processingOn = false,
     this.peopleSort = PeopleSort.recent,
     this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
@@ -449,7 +493,16 @@ class AppPrefs {
 
   /// The origin the build was compiled with, as the derived URLs are built
   /// from it. Empty in the test suite and in any build that passed no define.
-  static String get _compiledBase => normalizeBoxBaseUrl(boxUrlDefault);
+  String get compiledBoxBase => normalizeBoxBaseUrl(compiledBoxUrl);
+
+  /// Whether the build's box key may ride a request to [url]: the build
+  /// carries one, and [url] has the compiled box's ORIGIN (scheme, host,
+  /// port). A typed address on another host never receives it.
+  bool _buildKeyFor(String url) =>
+      boxKeyCompiled &&
+      url.isNotEmpty &&
+      compiledBoxBase.isNotEmpty &&
+      sameOrigin(url, compiledBoxBase);
 
   // ── Generative ─────────────────────────────────────────────────────────
 
@@ -465,9 +518,21 @@ class AppPrefs {
   /// URL when there is one, and the build's own `/prose` derivation otherwise.
   String get effectiveGenerativeUrl => boxBigUrl.isNotEmpty
       ? normalizeBoxBaseUrl(boxBigUrl)
-      : (_compiledBase.isEmpty
+      : (compiledBoxBase.isEmpty
           ? ''
-          : '$_compiledBase/prose/v1/chat/completions');
+          : '$compiledBoxBase/prose/v1/chat/completions');
+
+  /// Whether the generative remote's bearer is the BUILD's key: nothing is in
+  /// the keychain, and [effectiveGenerativeUrl] still has the compiled box's
+  /// origin (it follows the build, or a stored address names the same host).
+  /// A keychain entry always wins; Remove key falls back to this again.
+  ///
+  /// Read before the keychain prefetch answers too, when [boxBigKeyStored]
+  /// is still false: the build's key on the build's own origin is a key for
+  /// that host either way, and a keychain entry replaces it the moment it
+  /// arrives.
+  bool get generativeKeyFromBuild =>
+      !boxBigKeyStored && _buildKeyFor(effectiveGenerativeUrl);
 
   /// What the generative remote is asked for: the discovered name, or the
   /// constant the compiled box serves.
@@ -488,10 +553,15 @@ class AppPrefs {
   /// THE generative target — every text stage resolves here (drafts too,
   /// unless [cloudDraftsSpec] takes them).
   ///
-  /// Your server when the placement says so and there is an address to dial;
-  /// else this Mac: the managed router with the tier's chosen model, or the
-  /// hand-started prose server of a `BOND_DEV_HAND_SERVERS` build. The wire is
-  /// read off the host.
+  /// Your server when the placement says so and there is an address to dial.
+  /// Your server with NO address (nothing stored, nothing compiled) is still
+  /// the [boxProseId] spec, with an empty URL, and [unavailableFor] gives it
+  /// [generativeNoAddressText]: the client refuses it before any request and
+  /// the work parks, rather than falling through to this Mac's router and
+  /// demanding a 19 GB download nobody chose (decision D9). That holds in a
+  /// `BOND_DEV_HAND_SERVERS` build as well. Else this Mac: the managed router
+  /// with the tier's chosen model, or the hand-started prose server of a
+  /// `BOND_DEV_HAND_SERVERS` build. The wire is read off the host.
   ///
   /// The widths are sized to what is known about the server. Message text
   /// runs eight wide on Your server whether or not the address follows the
@@ -524,9 +594,17 @@ class AppPrefs {
         url: url,
         model: effectiveGenerativeModel,
         wire: wireForHost(url),
-        hasBearer: boxBigKeyStored,
+        hasBearer: boxBigKeyStored || generativeKeyFromBuild,
         parallel: boxBigUrl.isEmpty ? 4 : 1,
         textParallel: 8,
+      );
+    }
+    if (modelPlacement == ModelPlacement.box && url.isEmpty) {
+      return LlmTargetSpec(
+        id: boxProseId,
+        name: boxProseName,
+        url: '',
+        model: effectiveGenerativeModel,
       );
     }
     if (managedServer) {
@@ -555,7 +633,12 @@ class AppPrefs {
   /// or the build's own `/decide` derivation.
   String get effectiveDecisionUrl => decisionUrl.isNotEmpty
       ? normalizeBoxBaseUrl(decisionUrl)
-      : (_compiledBase.isEmpty ? '' : '$_compiledBase/decide/v1/embeddings');
+      : (compiledBoxBase.isEmpty ? '' : '$compiledBoxBase/decide/v1/embeddings');
+
+  /// Whether the decision remote's bearer is the build's key, on
+  /// [generativeKeyFromBuild]'s rule over [effectiveDecisionUrl].
+  bool get decisionKeyFromBuild =>
+      !decisionKeyStored && _buildKeyFor(effectiveDecisionUrl);
 
   /// What the decision remote is asked for.
   String get effectiveDecisionModel =>
@@ -577,7 +660,7 @@ class AppPrefs {
         url: url,
         model: effectiveDecisionModel,
         wire: wireForHost(url),
-        hasBearer: decisionKeyStored,
+        hasBearer: decisionKeyStored || decisionKeyFromBuild,
       );
     }
     if (managedServer) {
@@ -595,6 +678,29 @@ class AppPrefs {
       model: decideModelDefault,
     );
   }
+
+  // ── Model registry ─────────────────────────────────────────────────────
+
+  /// The registry address the build was compiled with, trimmed and with
+  /// every trailing slash gone.
+  String get compiledRegistryBase => normalizeBoxBaseUrl(compiledRegistryUrl);
+
+  /// Where the model registry is asked for files: the stored address when
+  /// there is one, else the build's, both through [normalizeBoxBaseUrl].
+  /// Empty when neither names one.
+  String get effectiveRegistryUrl => registryUrl.isNotEmpty
+      ? normalizeBoxBaseUrl(registryUrl)
+      : compiledRegistryBase;
+
+  /// Whether the registry's bearer is the BUILD's token: nothing is in the
+  /// keychain, the build carries one, and [effectiveRegistryUrl] has the
+  /// compiled registry's origin. [generativeKeyFromBuild]'s rule.
+  bool get registryTokenFromBuild =>
+      !registryTokenStored &&
+      registryTokenCompiled &&
+      compiledRegistryBase.isNotEmpty &&
+      effectiveRegistryUrl.isNotEmpty &&
+      sameOrigin(effectiveRegistryUrl, compiledRegistryBase);
 
   // ── Cloud drafts ───────────────────────────────────────────────────────
 
@@ -638,8 +744,13 @@ class AppPrefs {
 
   /// The sentence a MANAGED target carries when the router is not serving
   /// its model, or null when it is (or when this is not a managed target, or
-  /// the served set is not known yet). See [servedManagedIds].
+  /// the served set is not known yet). See [servedManagedIds]. The generative
+  /// Your server target with no address carries [generativeNoAddressText],
+  /// whatever the router serves.
   String? unavailableFor(LlmTargetSpec spec) {
+    if (spec.id == boxProseId && spec.url.isEmpty) {
+      return generativeNoAddressText;
+    }
     final served = servedManagedIds;
     if (served == null || !managedServer) return null;
     if (spec.id != localGenerativeId && spec.id != localDecisionId) {
@@ -648,13 +759,13 @@ class AppPrefs {
     if (served.contains(spec.model)) return null;
     return switch (spec.model) {
       routerDecideId =>
-        'The decision model is not installed. Run: make decide-install',
-      routerProseId => 'The Qwen3.8 27B is not downloaded on this Mac. Set '
-          'up again to download it.',
-      routerBulkId => 'The Qwen3 4B is not downloaded on this Mac. Set up '
-          'again to download it.',
-      final other => 'The model $other is not on this Mac. Set up again to '
-          'download it.',
+        'The decision model is not downloaded yet. Open Settings, Models.',
+      routerProseId => 'The Qwen3.8 27B is not downloaded on this Mac. Open '
+          'Settings, Models to download it.',
+      routerBulkId => 'The Qwen3 4B is not downloaded on this Mac. Open '
+          'Settings, Models to download it.',
+      final other => 'The model $other is not on this Mac. Open Settings, '
+          'Models to download it.',
     };
   }
 
@@ -698,6 +809,12 @@ class AppPrefs {
     String? decisionUrl,
     String? decisionModel,
     bool? decisionKeyStored,
+    String? compiledBoxUrl,
+    bool? boxKeyCompiled,
+    String? registryUrl,
+    String? compiledRegistryUrl,
+    bool? registryTokenStored,
+    bool? registryTokenCompiled,
     String? cloudDraftsUrl,
     String? cloudDraftsModel,
     bool? cloudDraftsKeyStored,
@@ -741,6 +858,13 @@ class AppPrefs {
         decisionUrl: decisionUrl ?? this.decisionUrl,
         decisionModel: decisionModel ?? this.decisionModel,
         decisionKeyStored: decisionKeyStored ?? this.decisionKeyStored,
+        compiledBoxUrl: compiledBoxUrl ?? this.compiledBoxUrl,
+        boxKeyCompiled: boxKeyCompiled ?? this.boxKeyCompiled,
+        registryUrl: registryUrl ?? this.registryUrl,
+        compiledRegistryUrl: compiledRegistryUrl ?? this.compiledRegistryUrl,
+        registryTokenStored: registryTokenStored ?? this.registryTokenStored,
+        registryTokenCompiled:
+            registryTokenCompiled ?? this.registryTokenCompiled,
         cloudDraftsUrl: cloudDraftsUrl ?? this.cloudDraftsUrl,
         cloudDraftsModel: cloudDraftsModel ?? this.cloudDraftsModel,
         cloudDraftsKeyStored: cloudDraftsKeyStored ?? this.cloudDraftsKeyStored,
@@ -859,6 +983,11 @@ const String boxUrlKey = 'box_url';
 /// Whether model work runs. Machine configuration on the same rule: a person
 /// who stood the models down did so about this Mac, not about the mailbox.
 const String processingOnKey = 'processing_on';
+
+/// The model registry's base address, empty for "follow the build". Machine
+/// configuration and out of `wipeAll`'s list on [modelPlacementKey]'s rule.
+/// Its token is in the keychain under [registryId], never here.
+const String registryUrlKey = 'registry_url';
 
 /// The one-shot flag over the Round G box rows, written once by
 /// [AppPrefsNotifier.read] after it has lifted a stored pair into
@@ -1050,6 +1179,15 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// `app_prefs`.
   final Map<String, String> _bearers = {};
 
+  /// The box access key and the registry token this build was compiled with
+  /// ([boxKeyDefault], [registryTokenDefault]), or what a test handed in
+  /// their place; `''` for none. SECRETS, held here and nowhere else: [state]
+  /// carries only whether each is present ([AppPrefs.boxKeyCompiled],
+  /// [AppPrefs.registryTokenCompiled]), and [bearerFor] hands one out only
+  /// while its origin rule holds. Never rendered, logged or persisted.
+  final String _compiledBoxKey;
+  final String _compiledRegistryToken;
+
   /// Completes when the stored settings have replaced the defaults this
   /// notifier starts on, AND the bearer prefetch has run. Already complete
   /// when [initial] was supplied and nothing has a token.
@@ -1065,13 +1203,34 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   ///
   /// [tokens] is the keychain. Optional because most callers have no target
   /// with a bearer and every one under `flutter test` has no keychain at all.
-  AppPrefsNotifier(this._store, {AppPrefs? initial, TokenStore? tokens})
-      // A named parameter cannot be an initializing formal for a private
+  ///
+  /// The four `compiled*` parameters are what this build was compiled with
+  /// (`local.mk` through the Makefile's defines), and they default to exactly
+  /// that. They are parameters because every define is `''` under `flutter
+  /// test`, so a test of the build's address or key hands its own here. The
+  /// two addresses and two presence flags are stamped on [state]; the two
+  /// secrets stay in this notifier.
+  AppPrefsNotifier(
+    this._store, {
+    AppPrefs? initial,
+    TokenStore? tokens,
+    String compiledBoxUrl = boxUrlDefault,
+    String compiledBoxKey = boxKeyDefault,
+    String compiledRegistryUrl = registryUrlDefault,
+    String compiledRegistryToken = registryTokenDefault,
+  })  // A named parameter cannot be an initializing formal for a private
       // field, which is the same reason `StorylineService` carries this
       // ignore.
       // ignore: prefer_initializing_formals
       : _tokens = tokens,
-        super(initial ?? const AppPrefs()) {
+        _compiledBoxKey = compiledBoxKey,
+        _compiledRegistryToken = compiledRegistryToken,
+        super((initial ?? const AppPrefs()).copyWith(
+          compiledBoxUrl: compiledBoxUrl,
+          boxKeyCompiled: compiledBoxKey.isNotEmpty,
+          compiledRegistryUrl: compiledRegistryUrl,
+          registryTokenCompiled: compiledRegistryToken.isNotEmpty,
+        )) {
     // The load FIRST and the prefetch after it, in that order and not in
     // parallel. With [initial] supplied the load already happened in
     // `main()`, which has no token store, so the one keychain step the
@@ -1088,12 +1247,19 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     final prefs = await read(_store, tokens: _tokens);
     if (!mounted) return;
     // The machine tier is not stored; a load must not reset one already
-    // learned.
-    state = prefs.copyWith(machineTier: state.machineTier);
+    // learned. Nor are the build's facts, which the constructor stamped.
+    state = prefs.copyWith(
+      machineTier: state.machineTier,
+      compiledBoxUrl: state.compiledBoxUrl,
+      boxKeyCompiled: state.boxKeyCompiled,
+      compiledRegistryUrl: state.compiledRegistryUrl,
+      registryTokenCompiled: state.registryTokenCompiled,
+    );
   }
 
   /// Fills the bearer cache from the keychain, once, and records which of
-  /// the three keyed targets have one.
+  /// the four keyed targets (the three roles' and the model registry's)
+  /// have one.
   ///
   /// A no-op with no keychain. Guarded whole: a keychain that refuses costs
   /// the header on the next request — one 401 the user can see and act on —
@@ -1114,6 +1280,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       if (!pending) boxProseId,
       boxDecideId,
       cloudDraftsId,
+      registryId,
     ]) {
       // The try sits INSIDE the loop: one key the keychain refuses costs that
       // one target its header, not every target after it.
@@ -1132,6 +1299,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       boxBigKeyStored: _bearers.containsKey(boxProseId),
       decisionKeyStored: _bearers.containsKey(boxDecideId),
       cloudDraftsKeyStored: _bearers.containsKey(cloudDraftsId),
+      registryTokenStored: _bearers.containsKey(registryId),
     );
   }
 
@@ -1145,22 +1313,34 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     final spec = state.specForStage(stageId);
     if (spec == null) return state.embedRequestTarget;
     return spec.toTarget(
-      bearer: spec.hasBearer ? _bearers[spec.id] : null,
+      bearer: spec.hasBearer ? bearerFor(spec.id) : null,
       unavailable: state.unavailableFor(spec),
     );
   }
 
-  /// One target's stored token, or null when there is none.
+  /// One target's token, or null when there is none: the keychain's entry,
+  /// else the BUILD's key or token while its origin rule holds
+  /// ([AppPrefs.generativeKeyFromBuild], [AppPrefs.decisionKeyFromBuild],
+  /// [AppPrefs.registryTokenFromBuild]).
   ///
-  /// The ONLY door onto [_bearers] besides [targetForStage], and it exists
-  /// for exactly two callers, both through `storedBearer`: the role rows'
-  /// **Check** and the form's **Connect**, which must reach a keyed endpoint
-  /// rather than report its 401. One token, by id, for one request.
+  /// The ONLY door onto [_bearers] and the compiled secrets, used by
+  /// [targetForStage] and through `storedBearer` by the role rows' **Check**
+  /// and the form's **Connect**, which must reach a keyed endpoint rather
+  /// than report its 401. One token, by id, for one request.
   /// What comes back never enters widget state, a `ProbeStatus`, a log line,
-  /// an activity row or a test expectation. Null when nothing is stored and
-  /// in every build with no keychain, which is every `flutter test` that
-  /// hands this notifier a `MemoryTokenStore` it never wrote to.
-  String? bearerFor(String targetId) => _bearers[targetId];
+  /// an activity row or a test expectation. Null when nothing applies, which
+  /// is every `flutter test` that hands this notifier a `MemoryTokenStore` it
+  /// never wrote to and no compiled key.
+  String? bearerFor(String targetId) {
+    final stored = _bearers[targetId];
+    if (stored != null) return stored;
+    return switch (targetId) {
+      boxProseId when state.generativeKeyFromBuild => _compiledBoxKey,
+      boxDecideId when state.decisionKeyFromBuild => _compiledBoxKey,
+      registryId when state.registryTokenFromBuild => _compiledRegistryToken,
+      _ => null,
+    };
+  }
 
   /// Reads every setting once. A stored value that does not parse —
   /// hand-edited, or written by a build that meant something else by the key —
@@ -1232,12 +1412,14 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       ),
       decisionUrl: _slotValue(await store.getPref(decisionUrlKey)),
       decisionModel: _slotValue(await store.getPref(decisionModelKey)),
+      registryUrl: _slotValue(await store.getPref(registryUrlKey)),
       cloudDraftsUrl: _slotValue(await store.getPref(cloudDraftsUrlKey)),
       cloudDraftsModel: _slotValue(await store.getPref(cloudDraftsModelKey)),
-      // Defaults ON, so the read is [contextSelectExpand]'s inverse: only the
-      // one spelling the setter writes reads as off, and an absent key leaves
-      // a fresh install working.
-      processingOn: await store.getPref(processingOnKey) != 'false',
+      // Defaults OFF since the default-setup round: only the one spelling the
+      // setter writes for on reads as on. An absent key, a hand-edited value
+      // and a string from a build that meant something else all leave the
+      // models idle until somebody has checked them under Settings.
+      processingOn: await store.getPref(processingOnKey) == 'true',
       peopleSort: _enumOrDefault(
         PeopleSort.values,
         await store.getPref(peopleSortKey),
@@ -1412,10 +1594,15 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         bigUrl: big,
         bigModel: bigModel,
         smallUrl: _slotValue(await store.getPref(boxSmallUrlKey)),
+        // FROZEN at the default this one-shot was written against: the box
+        // only in a build compiled with its address, this Mac otherwise. The
+        // default-setup round moved [defaultModelPlacement] to Your server
+        // for every build, and reading that here would adopt a vendor
+        // address an unplaced Round H install was never using.
         placement: _enumOrDefault(
           ModelPlacement.values,
           await store.getPref(modelPlacementKey),
-          defaultModelPlacement,
+          boxUrlDefault.isNotEmpty ? ModelPlacement.box : ModelPlacement.local,
         ),
         consent: await store.getPref(cloudDraftsConsentKey) == 'true',
         compiledBase: normalizeBoxBaseUrl(boxUrlDefault),
@@ -1868,7 +2055,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       if (!AppPrefs._ownServer(clean)) {
         throw ArgumentError.value(clean, 'url', generativeThirdPartyRefusal);
       }
-      final compiled = normalizeBoxBaseUrl(boxUrlDefault);
+      final compiled = state.compiledBoxBase;
       storedUrl =
           compiled.isNotEmpty && clean == '$compiled/prose/v1/chat/completions'
               ? ''
@@ -1956,7 +2143,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       if (!AppPrefs._ownServer(clean)) {
         throw ArgumentError.value(clean, 'url', decisionThirdPartyRefusal);
       }
-      final compiled = normalizeBoxBaseUrl(boxUrlDefault);
+      final compiled = state.compiledBoxBase;
       storedUrl =
           compiled.isNotEmpty && clean == '$compiled/decide/v1/embeddings'
               ? ''
@@ -2035,6 +2222,59 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(cloudDraftsUrlKey, clean);
     await _store.setPref(cloudDraftsModelKey, trimmed);
   }
+
+  /// Points the downloader at the model registry: its base address (an
+  /// Artifactory repository URL) and, optionally, its read token.
+  ///
+  /// [useDecision]'s shape exactly: everything is validated BEFORE anything
+  /// is written, so a refusal leaves the install as it was. Throws
+  /// [ArgumentError] on an address that is not an http or https origin, and
+  /// on a typed [token] no header can carry ([accessKeyCharsText], never
+  /// quoting it). An empty [url] means follow the build, and so does one
+  /// equal to the build's own address: both are stored as `''`
+  /// ([AppPrefs.registryUrl]). A blank [token] keeps the stored one, UNLESS
+  /// [clearToken] says the address moved to another host, when the old
+  /// host's token is forgotten, and an address on another origin forgets it
+  /// without being told. The keychain moves BEFORE the address, in
+  /// one state step with it, and a keychain that refuses costs the header,
+  /// never the write ([_writeToken]).
+  Future<void> useRegistry({
+    required String url,
+    String? token,
+    bool clearToken = false,
+  }) async {
+    final clean = normalizeBoxBaseUrl(url);
+    if (clean.isNotEmpty && !isBoxOrigin(clean)) {
+      throw ArgumentError.value(clean, 'url', 'must be an http or https URL');
+    }
+    final storedUrl = clean == state.compiledRegistryBase ? '' : clean;
+    // A stored token belongs to the host it was typed for. An address on
+    // another origin with no new token forgets it here, whatever the caller
+    // passed, so one registry's token is never sent to another.
+    final next = storedUrl.isEmpty ? state.compiledRegistryBase : storedUrl;
+    final current = state.effectiveRegistryUrl;
+    final moved = state.registryTokenStored &&
+        (token == null || token.trim().isEmpty) &&
+        current.isNotEmpty &&
+        !sameOrigin(next, current);
+    final move = await _keychainFirst(
+      registryId,
+      token,
+      clearKey: clearToken || moved,
+      flagged: state.registryTokenStored,
+    );
+    _applyKeyCache(registryId, move);
+    state = state.copyWith(
+      registryUrl: storedUrl,
+      registryTokenStored: move.flag,
+    );
+    await _store.setPref(registryUrlKey, storedUrl);
+  }
+
+  /// Forgets the registry token in the keychain. The build's token, when
+  /// this build carries one and the address still has its origin, applies
+  /// again at once ([AppPrefs.registryTokenFromBuild]).
+  Future<void> clearRegistryToken() => clearRoleKey(registryId);
 
   /// Forgets the cloud-drafts target: its address, its model and its token.
   /// The draft stages go back to the generative model at once. The consent is
@@ -2123,8 +2363,10 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   }
 
   /// Forgets one role's access key: [boxProseId] (the generative remote),
-  /// [boxDecideId] (the decision remote) or [cloudDraftsId]. The keychain
-  /// entry, the cache and the presence flag all go.
+  /// [boxDecideId] (the decision remote), [cloudDraftsId] or the model
+  /// registry's token ([registryId]). The keychain entry, the cache and the
+  /// presence flag all go; the build's key or token, where one applies,
+  /// answers [bearerFor] again from the next request.
   ///
   /// A no-op when there is nothing to forget, which is every install that
   /// never typed one. Not an optimisation: a keychain write is a platform
@@ -2137,6 +2379,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       boxProseId => state.boxBigKeyStored,
       boxDecideId => state.decisionKeyStored,
       cloudDraftsId => state.cloudDraftsKeyStored,
+      registryId => state.registryTokenStored,
       _ => throw ArgumentError.value(id, 'id', 'not a role key'),
     };
     if (!flagged && !_bearers.containsKey(id)) return;
@@ -2145,6 +2388,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     state = switch (id) {
       boxProseId => state.copyWith(boxBigKeyStored: false),
       boxDecideId => state.copyWith(decisionKeyStored: false),
+      registryId => state.copyWith(registryTokenStored: false),
       _ => state.copyWith(cloudDraftsKeyStored: false),
     };
   }

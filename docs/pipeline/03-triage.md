@@ -49,9 +49,14 @@ The activity row carries `urgency`, `category`, `needs_action`,
 urgency=<u> category=<c> na=<p> re=<p> ny=<p> (<ms> ms)`; its `llm_*` tally
 is the decision call's (`llm_label: decision`). There are no `action_items`
 or `deadline` keys any more — those ride on the text stage's `extract` row. A
-decision server that is down (or a heads file that is not installed) throws
-`DecisionUnavailableException`, which PARKS the drain under
-`decision_unavailable` without spending an attempt; an unusable vector is a
+decision server that is down throws `DecisionUnavailableException`, which
+PARKS the drain under `decision_unavailable` without spending an attempt (a
+heads file not downloaded yet, or a registry entry whose download rows are
+not current (`DownloadLedger.servable`: a pair half replaced, a Download
+again under way or failed), parks under its subclass's own
+`decision_not_installed`: "The decision model is not downloaded yet. Open
+Settings, Models.", and the model ensurer fetches it, see
+[10-model-routing.md](10-model-routing.md#ensured-outside-the-wizard)); an unusable vector is a
 format failure that spends one. `decisionClient` is a REQUIRED constructor
 argument: there is no triage without the decision model (tests pass a
 `FakeDecisionClient` / `ScriptedDecisionClient`).
@@ -72,8 +77,13 @@ A schema-1 file, meaning the first decision model's nine-field heads, is
 refused under its own park, `decision_older_model`, with a plain sentence and
 no command: "The installed decision model is an older version that this app
 no longer reads. Install the current decision model to resume sorting new
-mail."  `make decide-install` copies the v3 export (schema 2), so this park
-means an older install left in the models folder. A stored `message_decisions` row whose `qhash` is not
+mail."  The model registry's download is the v3 swap bundle (schema 2), so
+this park means a damaged or hand-placed older file in the decision model's
+folder; Settings, Models offers **Download again**, which re-hashes the
+decide entry's files and replaces a wrong one, and the rail says to press
+it. A hand-installed (`source: local`) entry has no such button, so its rail
+line and its heads refusal say to copy the current model files into the
+models folder instead (`DecisionHeadsFile.copyFilesText`). A stored `message_decisions` row whose `qhash` is not
 `decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
 as no decision.
 

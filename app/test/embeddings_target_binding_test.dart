@@ -100,11 +100,14 @@ void main() {
 
     final managed = EmbeddingsClient(
       baseUrl: dead,
-      describeUnavailable: () => 'is not running — see Settings, Models',
+      describeUnavailable: () => "is not running. Bond's model server is "
+          'starting or stopped. See Settings, Models',
     );
     final result = await managed.embedResult('one');
     expect(result.outcome, EmbedOutcome.unavailable);
-    expect(result.reason, 'is not running — see Settings, Models');
+    expect(result.reason,
+        "is not running. Bond's model server is starting or stopped. See "
+        'Settings, Models');
   });
 
   test('a describer that answers null keeps the default sentence', () async {
@@ -118,7 +121,8 @@ void main() {
     );
     final result = await client.embedResult('one');
     expect(result.outcome, EmbedOutcome.unavailable);
-    expect(result.reason, 'is not reachable — run: make embed');
+    expect(result.reason, 'is not reachable. Run: make embed');
+    expect(result.reason, isNot(contains('—')));
   });
 
   test('a describer that throws keeps the default sentence too', () async {
@@ -132,7 +136,7 @@ void main() {
     );
     expect(
       (await client.embedResult('one')).reason,
-      'is not reachable — run: make embed',
+      'is not reachable. Run: make embed',
     );
   });
 }

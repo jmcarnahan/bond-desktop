@@ -74,7 +74,10 @@ class LlmTarget {
   /// decision model not yet installed): the client then throws its
   /// not-installed exception WITHOUT a request, so the work PARKS under the
   /// reason `not_installed` rather than
-  /// taking the router's 400 for an unknown model, which is fatal.
+  /// taking the router's 400 for an unknown model, which is fatal. Also set
+  /// on the generative Your server target when it has no address at all
+  /// ([generativeNoAddressText], an empty [baseUrl]): the client refuses it
+  /// the same way and the reason is `no_address`.
   final String? unavailable;
 
   const LlmTarget({
@@ -183,23 +186,31 @@ const String cloudDraftsId = 'cloud-drafts';
 /// placement and `AppPrefs.decisionPlacement` the decision one.
 enum ModelPlacement { box, local }
 
-/// Where a fresh install runs its GENERATIVE model: the owner's box when this
-/// build was compiled with an address for one, and this Mac otherwise. The
-/// decision model defaults to this Mac whatever the build (it reads every
-/// message, and a local forward pass beats any network hop).
+/// Where a fresh install runs its GENERATIVE model: the owner's own server,
+/// whatever the build. The decision model defaults to this Mac whatever the
+/// build (it reads every message, and a local forward pass beats any network
+/// hop).
 ///
-/// The box is the default because it is the measured best answer for every
-/// stage but embeddings, and because a placement nobody has to find is a
-/// placement a tester actually uses. A build with no [boxUrlDefault] has no
-/// box to name, which includes the test suite and a plain `flutter run`, so
-/// there the default stays local.
+/// Your server is the default because it is the measured best answer for every
+/// stage but embeddings, and because the 27B on this Mac is a 19 GB download a
+/// new environment should not pay before anybody has asked for it (the
+/// default-setup round, 2026-10, decision D9). A build with no address for
+/// one, which includes the test suite and a plain `flutter run`, is NOT sent
+/// back to this Mac: the generative role is unavailable with
+/// [generativeNoAddressText] and parks until an address is typed under
+/// Settings, Models, rather than demanding the local download behind the
+/// owner's back.
 ///
-/// `length > 0` rather than `isNotEmpty` for one reason and no other: a
-/// constant expression may read a string's length and may not call
-/// `isNotEmpty`, and this value has to be const so the prefs default can be
-/// one too.
-const ModelPlacement defaultModelPlacement =
-    boxUrlDefault.length > 0 ? ModelPlacement.box : ModelPlacement.local;
+/// Const, because the prefs default is one too.
+const ModelPlacement defaultModelPlacement = ModelPlacement.box;
+
+/// What the generative role says when it is placed on Your server and
+/// neither a stored address nor the build's [boxUrlDefault] names one. The
+/// sentence `AppPrefs.unavailableFor` puts on the target, so the client
+/// refuses before any request and the work parks (`no_address`).
+const String generativeNoAddressText =
+    'The generative model has no server address. Add one under Settings, '
+    'Models.';
 
 /// Which of the three models a stage's work belongs to.
 ///
@@ -227,14 +238,66 @@ const String boxDecideId = 'box-decide';
 const String boxProseModel = 'qwen3.8';
 const String boxDecideModel = 'bond-decide-mbl-v3';
 
-/// The box address the wizard prefills, compiled in from `.env`'s
-/// `BOND_BOX_URL` through the Makefile's `APP_SECRET_DEFINE`.
+/// The box address the wizard prefills, compiled in from `local.mk`'s
+/// `BOND_BOX_URL` through the Makefile's `APP_LLM_DEFINES` (a `BOND_BOX_URL`
+/// line in `$(MS_ENV)` is read as a fallback by `APP_SECRET_DEFINE` when
+/// `local.mk` sets none).
 ///
 /// Empty in every build that did not pass the define, including the test
-/// suite, so a wizard on a plain `flutter run` asks for the address. The
-/// access key is NEVER compiled in: it is typed once and lives in the
-/// keychain.
+/// suite, so a wizard on a plain `flutter run` asks for the address. A test
+/// that needs a compiled address hands one to `AppPrefsNotifier`
+/// (`compiledBoxUrl:`) or to `AppPrefs` directly; nothing reads this constant
+/// past that seam.
 const String boxUrlDefault = String.fromEnvironment('BOND_BOX_URL');
+
+/// The box's access key, compiled in from `local.mk`'s `BOND_BOX_KEY` for a
+/// build made from the repo (`make app-run`, `make app-build`).
+///
+/// A SECRET, read in exactly one place: `AppPrefsNotifier`'s constructor
+/// default, which keeps it in the notifier and hands nothing of it to
+/// `AppPrefs` but a presence flag. A keychain entry beats it, and it is sent
+/// only while a role's address has the same origin as [boxUrlDefault], so a
+/// typed address on another host never receives it. A distributed build
+/// carries none: `dist/bundle.sh` passes no define. Empty under `flutter
+/// test`.
+const String boxKeyDefault = String.fromEnvironment('BOND_BOX_KEY');
+
+/// The model registry's base address (an Artifactory repository URL), from
+/// `local.mk`'s `BOND_REGISTRY_URL`. Empty when the build passed none; a
+/// stored `registry_url` beats it.
+const String registryUrlDefault = String.fromEnvironment('BOND_REGISTRY_URL');
+
+/// The registry's read token, from `local.mk`'s `BOND_REGISTRY_TOKEN`. A
+/// SECRET on [boxKeyDefault]'s rules: the notifier holds it, a keychain entry
+/// beats it, and it is sent only to [registryUrlDefault]'s own origin.
+const String registryTokenDefault =
+    String.fromEnvironment('BOND_REGISTRY_TOKEN');
+
+/// Whether this build carries [boxKeyDefault] / [registryTokenDefault]: the
+/// presence flags `AppPrefs` defaults to, and nothing of either secret.
+/// `length > 0` because a constant expression may not call `isNotEmpty`.
+const bool buildHasBoxKey = boxKeyDefault.length > 0;
+const bool buildHasRegistryToken = registryTokenDefault.length > 0;
+
+/// The keychain id the registry token is stored under, beside the role keys
+/// (`llm_target_bearer:model-registry`).
+const String registryId = 'model-registry';
+
+/// Whether [a] and [b] name the same ORIGIN: scheme, host and port, with the
+/// default port spelled out, so `https://h` and `https://h:443/x` agree and
+/// `http://h` or `https://h:8443` do not. False when either has no host.
+///
+/// The one rule a compiled key is gated on: it rides a request only to the
+/// origin it was compiled for.
+bool sameOrigin(String a, String b) {
+  final x = Uri.tryParse(a.trim());
+  final y = Uri.tryParse(b.trim());
+  if (x == null || y == null || x.host.isEmpty || y.host.isEmpty) return false;
+  // `Uri.port` already answers 443 / 80 for an unspelled https / http port.
+  return x.scheme.toLowerCase() == y.scheme.toLowerCase() &&
+      x.host.toLowerCase() == y.host.toLowerCase() &&
+      x.port == y.port;
+}
 
 /// A typed box address as the two completions URLs are built from it: trimmed,
 /// and with every trailing slash gone.
@@ -381,8 +444,7 @@ const String handServersDefine =
 /// `SetupGate.skipsSetup` reads its own define — somebody who wrote `=0` to
 /// turn it back off gets the app's own server rather than the opposite of what
 /// they typed. `length > 0` rather than `isNotEmpty` because a constant
-/// expression may read a string's length and may not call a getter on it,
-/// which is [defaultModelPlacement]'s rule and its reason.
+/// expression may read a string's length and may not call a getter on it.
 const bool handServersBuild = handServersDefine.length > 0 &&
     handServersDefine != '0' &&
     handServersDefine != 'false' &&

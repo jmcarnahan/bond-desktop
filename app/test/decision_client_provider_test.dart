@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:bond_inbox/data/app_paths.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/decision/decision_client.dart'
@@ -16,13 +17,16 @@ import 'package:bond_inbox/services/decision/decision_state.dart'
 import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
+import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/decision_heads_fixture.dart';
 import 'fixtures/memory_token_store.dart';
 import 'fixtures/test_db.dart';
@@ -54,17 +58,33 @@ void main() {
   String headsPath() =>
       p.join(support.path, 'models', decide.headsRelativePath!);
 
+  /// The rest of what makes the registry entry's heads readable
+  /// (`DownloadLedger.servable`): its GGUF beside them in [folder] and both
+  /// download rows current, written through the container's own store, the
+  /// one the heads reader asks.
+  Future<void> installDecide(ProviderContainer container,
+      {String? folder}) async {
+    final gguf = File(p.join(
+        folder ?? p.join(support.path, 'models'), decide.relativePath));
+    await gguf.parent.create(recursive: true);
+    await gguf.writeAsString('gguf');
+    await container
+        .read(setupStoreProvider)
+        .recordDownload(currentLedgerFor([decide]));
+  }
+
   ProviderContainer containerFor(
     AppPrefs prefs, {
     MemoryTokenStore? tokens,
     http.Client? httpClient,
+    ModelManifest? which,
   }) {
     final made = ProviderContainer(overrides: [
       if (httpClient != null)
         decisionHttpClientProvider.overrideWithValue(httpClient),
       dbProvider.overrideWithValue(db),
       appPathsProvider.overrideWithValue(AppPaths(support)),
-      modelManifestProvider.overrideWithValue(manifest),
+      modelManifestProvider.overrideWithValue(which ?? manifest),
       appPrefsProvider.overrideWith(
         (ref) => AppPrefsNotifier(
           MessageStore(db),
@@ -77,19 +97,88 @@ void main() {
     return made;
   }
 
-  test('the install folder is named only when the models folder moved',
-      () async {
-    final plain = containerFor(const AppPrefs());
-    expect(plain.read(decideInstallDirProvider), isNull);
+  // The model ensurer's set (D10): what the placements serve here, plus the
+  // decision model whenever the manifest has one. These replace the old
+  // `DECIDE_DIR=` folder cases: nothing tells anybody where to copy the
+  // decision model any more, the app downloads it.
+  Future<Set<String>> ensureIds(AppPrefs prefs) async {
+    final container = ProviderContainer(overrides: [
+      dbProvider.overrideWithValue(db),
+      appPathsProvider.overrideWithValue(AppPaths(support)),
+      modelManifestProvider.overrideWithValue(manifest),
+      appPrefsProvider.overrideWith(
+        (ref) => AppPrefsNotifier(
+          MessageStore(db),
+          initial: prefs,
+          tokens: MemoryTokenStore(),
+        ),
+      ),
+      // A full Mac, answered at once: the tier is what the set is cut from.
+      hardwareInfoProvider.overrideWith((ref) async => const HardwareInfo(
+            chip: 'Apple M2 Max',
+            memoryBytes: 64 * 1024 * 1024 * 1024,
+            appleSilicon: true,
+            rosetta: false,
+            osVersion: '15.6',
+          )),
+    ]);
+    addTearDown(container.dispose);
+    final set = await container.read(modelEnsureSetProvider.future);
+    return {for (final model in set.models) model.id};
+  }
 
-    final moved = p.join(support.path, 'elsewhere');
-    final custom = containerFor(AppPrefs(modelsFolder: moved));
-    expect(
-      custom.read(decideInstallDirProvider),
-      p.dirname(p.join(moved, decide.relativePath)),
-    );
-    expect(p.basename(custom.read(decideInstallDirProvider)!),
-        'local_bond-decide');
+  test('the ensure set holds the decision model when it runs on Your server, '
+      'and no generative model while that runs there too', () async {
+    final ids = await ensureIds(const AppPrefs(
+      decisionPlacement: ModelPlacement.box,
+      decisionUrl: 'https://box.example.com/decide/v1/embeddings',
+      modelPlacement: ModelPlacement.box,
+      boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
+    ));
+    // A ModernBERT server still reads this Mac's heads file, and the entry is
+    // one download: decide is ensured although the router does not serve it.
+    expect(ids, {routerEmbedId, routerDecideId});
+    expect(ids, isNot(contains(routerProseId)));
+    expect(ids, isNot(contains(routerBulkId)));
+  });
+
+  test('the ensure set on this Mac is what the router serves: embed, decide '
+      'and the chosen generative model', () async {
+    final local = await ensureIds(const AppPrefs(
+      modelPlacement: ModelPlacement.local,
+    ));
+    expect(local, {routerEmbedId, routerDecideId, routerProseId});
+
+    // Your server with no address still demands no local generative model.
+    final noAddress = await ensureIds(const AppPrefs(
+      modelPlacement: ModelPlacement.box,
+    ));
+    expect(noAddress, {routerEmbedId, routerDecideId});
+  });
+
+  test('under hand-started servers the ensure set is the decision model '
+      'alone: no embedding download', () async {
+    // `make embed` serves embeddings from the Homebrew/HF cache; the heads
+    // file is still read from the models folder, which `make decide` reads.
+    final ids = await ensureIds(const AppPrefs(
+      managedServer: false,
+      modelPlacement: ModelPlacement.local,
+    ));
+    expect(ids, {routerDecideId});
+    expect(ids, isNot(contains(routerEmbedId)));
+  });
+
+  test('the heads file is read from the registry entry\'s folder', () async {
+    final path = p.join(support.path, 'models',
+        'artifactory_bond-decide-mbl-v3swap', 'decide-heads.json');
+    expect(headsPath(), path);
+    final container = containerFor(const AppPrefs());
+    final heads = container.read(decisionHeadsProvider);
+    expect(heads.current, throwsA(anything), reason: 'nothing there yet');
+    await File(path).create(recursive: true);
+    await File(path).writeAsString(jsonEncode(syntheticHeadsJson()));
+    await installDecide(container);
+    expect(heads.current().model, 'bond-decide-synthetic');
   });
 
   test('on this Mac it dials the managed router under bond-decide', () async {
@@ -251,7 +340,9 @@ void main() {
             DecisionHeadsFile.notInstalledText,
           )),
     );
-    expect(DecisionHeadsFile.notInstalledText, contains('make decide-install'));
+    expect(DecisionHeadsFile.notInstalledText,
+        'The decision model is not downloaded yet. Open Settings, Models.');
+    expect(DecisionHeadsFile.notInstalledText, isNot(contains('make')));
     expect(DecisionHeadsFile.notInstalledText, isNot(contains('—')));
   });
 
@@ -261,6 +352,7 @@ void main() {
     final file = File(headsPath());
     await file.parent.create(recursive: true);
     await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+    await installDecide(container);
 
     final heads = container.read(decisionHeadsProvider);
     final first = heads.current();
@@ -280,6 +372,7 @@ void main() {
     final file = File(p.join(elsewhere, decide.headsRelativePath!));
     await file.parent.create(recursive: true);
     await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+    await installDecide(container, folder: elsewhere);
     final heads = container.read(decisionHeadsProvider);
 
     expect(heads.current, throwsA(isA<DecisionUnavailableException>()));
@@ -318,6 +411,7 @@ void main() {
         final file = File(headsPath());
         await file.parent.create(recursive: true);
         await file.writeAsString(contents);
+        await installDecide(container);
         final heads = container.read(decisionHeadsProvider);
 
         Object? first;
@@ -353,5 +447,127 @@ void main() {
         expect(heads.current().model, 'bond-decide-synthetic');
       });
     }
+  });
+
+  group('a registry entry\'s heads are read only while its download record '
+      'is current', () {
+    Future<void> writeBoth() async {
+      for (final (path, text) in [
+        (p.join(support.path, 'models', decide.relativePath), 'gguf'),
+        (headsPath(), jsonEncode(syntheticHeadsJson())),
+      ]) {
+        await File(path).parent.create(recursive: true);
+        await File(path).writeAsString(text);
+      }
+    }
+
+    Matcher notInstalled() => throwsA(isA<DecisionNotInstalledException>()
+        .having((e) => parkReasonFor(e), 'park word', 'decision_not_installed')
+        .having((e) => e.message, 'message',
+            DecisionHeadsFile.notInstalledText));
+
+    test('files on disk with no rows read as not installed, and are read '
+        'once the rows are current', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      final store = container.read(setupStoreProvider);
+      await store.recordDownload(DownloadLedger.empty);
+      final heads = container.read(decisionHeadsProvider);
+
+      expect(heads.current, notInstalled());
+
+      // What the model ensurer's pass records once it has hashed them.
+      await store.recordDownload(currentLedgerFor([decide]));
+      expect(heads.current().model, 'bond-decide-synthetic');
+    });
+
+    test('a quit between the two legs after a digest change reads as not '
+        'installed: the heads row is at the old digest', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      await container.read(setupStoreProvider).recordDownload(
+            currentLedgerFor([decide]).record(FileDownloadState(
+              id: DownloadLedger.headsId(decide.id),
+              status: DownloadStatus.done,
+              sha256: 'an-older-heads-digest',
+            )),
+          );
+
+      expect(container.read(decisionHeadsProvider).current, notInstalled());
+    });
+
+    test('a loaded file stops being read the moment a Download again takes '
+        'its rows out of done', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      await installDecide(container);
+      final heads = container.read(decisionHeadsProvider);
+      expect(heads.current().model, 'bond-decide-synthetic');
+
+      await container.read(setupStoreProvider).recordDownload(
+            currentLedgerFor([decide]).record(FileDownloadState(
+              id: DownloadLedger.headsId(decide.id),
+              status: DownloadStatus.pending,
+              sha256: decide.heads!.sha256,
+            )),
+          );
+
+      expect(heads.current, notInstalled(), reason: 'not the cached heads');
+    });
+
+    test('under an encoder-heads Your server the same rule holds', () async {
+      final container = containerFor(const AppPrefs(
+        decisionPlacement: ModelPlacement.box,
+        decisionUrl: 'https://box.example.com/decide/v1/embeddings',
+      ));
+      await writeBoth();
+      await container
+          .read(setupStoreProvider)
+          .recordDownload(DownloadLedger.empty);
+      final heads = container.read(decisionHeadsProvider);
+
+      expect(heads.current, notInstalled());
+      await installDecide(container);
+      expect(heads.current().model, 'bond-decide-synthetic');
+    });
+
+    test('a ledger the store has not read yet is loaded, and the call after '
+        'the load reads the file', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      // Written by ANOTHER store over the same database: the container's
+      // own has not read the row yet.
+      await SetupStore(db).recordDownload(currentLedgerFor([decide]));
+      final heads = container.read(decisionHeadsProvider);
+
+      expect(heads.current, notInstalled());
+      await container.read(setupStoreProvider).downloadLedger();
+      expect(heads.current().model, 'bond-decide-synthetic');
+    });
+
+    test('a source: local entry reads its heads whenever they are there, '
+        'with no ledger at all', () async {
+      final local = testLocalDecideFile();
+      final container = containerFor(
+        const AppPrefs(),
+        which: testManifest(decide: local),
+      );
+      final file =
+          File(p.join(support.path, 'models', local.headsRelativePath!));
+      await file.parent.create(recursive: true);
+      await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+
+      expect(container.read(decisionHeadsProvider).current().model,
+          'bond-decide-synthetic');
+
+      // A file it refuses says to copy the files: no button downloads it.
+      await file.writeAsString('{not json');
+      await file.setLastModified(DateTime.now().add(const Duration(minutes: 1)));
+      expect(
+        container.read(decisionHeadsProvider).current,
+        throwsA(isA<DecisionMisconfiguredException>().having((e) => e.message,
+            'message', startsWith(DecisionHeadsFile.mismatchLocalText))),
+      );
+    });
   });
 }

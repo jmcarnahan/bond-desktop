@@ -7,12 +7,15 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/ai_workers.dart';
+import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/settings_models_page.dart'
+    show SettingsModelsPage;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -238,15 +241,15 @@ void main() {
             waiting: 3,
             onBox: onBox,
           ),
-          'A model this Mac runs is not downloaded · 3 waiting · set up again '
-          'in Settings',
+          'A model this Mac runs is not downloaded · 3 waiting · open '
+          'Settings, Models',
           reason: 'onBox: $onBox',
         );
       }
     });
 
-    test('the decision model not installed says the command, on both '
-        'placements', () {
+    test('the decision model not downloaded says where to look, on both '
+        'placements, with no command', () {
       for (final onBox in [true, false]) {
         expect(
           railProgressLine(
@@ -256,8 +259,8 @@ void main() {
             waiting: 3,
             onBox: onBox,
           ),
-          'The decision model is not installed · 3 waiting · run make '
-          'decide-install, then Check in Settings',
+          'The decision model is not downloaded yet · 3 waiting · open '
+          'Settings, Models',
           reason: 'onBox: $onBox',
         );
       }
@@ -276,8 +279,8 @@ void main() {
         expect(
           line,
           'The decision server is not the decision model, or its heads file '
-          'does not match · 3 waiting · check its address in Settings, or run '
-          'make decide-install',
+          'does not match · 3 waiting · check its address in Settings, or '
+          'press Download again under Settings, Models',
           reason: 'onBox: $onBox',
         );
         expect(line, isNot(contains('retrying')));
@@ -297,13 +300,58 @@ void main() {
         expect(
           line,
           'The installed decision model is an older version that this app no '
-          'longer reads · 3 waiting · install the current decision model to '
-          'resume sorting new mail',
+          'longer reads · 3 waiting · open Settings, Models and press '
+          'Download again to resume sorting new mail',
           reason: 'onBox: $onBox',
         );
         expect(line, isNot(contains('make')));
         expect(line, isNot(contains('retrying')));
       }
+    });
+
+    test('a hand-installed decision model says to copy the files, never to '
+        'press a Download again it has no button for', () {
+      final misconfigured = railProgressLine(
+        on: true,
+        remaining: 3,
+        reason: 'decision_misconfigured',
+        waiting: 3,
+        onBox: false,
+        decisionLocal: true,
+      );
+      expect(
+        misconfigured,
+        'The decision server is not the decision model, or its heads file '
+        'does not match · 3 waiting · check its address in Settings, or copy '
+        'the current model files into the models folder',
+      );
+      final older = railProgressLine(
+        on: true,
+        remaining: 3,
+        reason: 'decision_older_model',
+        waiting: 3,
+        onBox: false,
+        decisionLocal: true,
+      );
+      expect(
+        older,
+        'The installed decision model is an older version that this app no '
+        'longer reads · 3 waiting · copy the current model files into the '
+        'models folder to resume sorting new mail',
+      );
+      for (final line in [misconfigured, older]) {
+        expect(line, isNot(contains('Download')));
+        expect(line, isNot(contains('—')));
+        expect(line, isNot(contains('(')));
+      }
+      // The heads refusal itself says the same, in Settings' one spelling.
+      expect(
+        DecisionHeadsFile.mismatchLocalText,
+        "The decision model's heads file does not match this build. "
+        '${DecisionHeadsFile.copyFilesText}.',
+      );
+      expect(SettingsModelsPage.decisionOlderModelLocalHint,
+          '${DecisionHeadsFile.copyFilesText}.');
     });
 
     test('a refused decision key names the decision server, whatever the '
@@ -618,9 +666,9 @@ void main() {
       tokens.values['granted_scopes'] = _readGrant;
       final auth = GraphAuth(httpClient: client, store: tokens);
       await store.setPref(backendModeKey, backendModeSdk);
-      if (placement == ModelPlacement.box) {
-        await store.setPref(modelPlacementKey, ModelPlacement.box.name);
-      }
+      // Written either way: the generative placement defaults to Your server
+      // since the default-setup round, so this Mac has to be said.
+      await store.setPref(modelPlacementKey, placement.name);
       final prefs = await AppPrefsNotifier.read(store);
 
       await tester.pumpWidget(ProviderScope(

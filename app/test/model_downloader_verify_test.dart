@@ -153,4 +153,29 @@ void main() {
         .writeAsBytes(hub.contents['${embed.repo}/${embed.file}']!);
     expect(await downloader.verify(embed), isTrue);
   });
+
+  test('verify wants a registry entry\'s heads file as well as its weights',
+      () async {
+    final weights = fakeWeights(1024, seed: 41);
+    final heads = fakeWeights(256, seed: 42);
+    final decide = testDecideFile(
+      sizeBytes: weights.length,
+      sha256: sha256Hex(weights),
+      headsSizeBytes: heads.length,
+      headsSha256: sha256Hex(heads),
+    );
+    final downloader = build();
+    final headsPath = p.join(folder(), decide.headsRelativePath!);
+
+    await Directory(p.dirname(destOf(decide))).create(recursive: true);
+    await File(destOf(decide)).writeAsBytes(weights);
+    // The weights hash right and the heads are not there.
+    expect(await downloader.verify(decide), isFalse);
+
+    await File(headsPath).writeAsBytes(utf8.encode('{"older": true}'));
+    expect(await downloader.verify(decide), isFalse);
+
+    await File(headsPath).writeAsBytes(heads);
+    expect(await downloader.verify(decide), isTrue);
+  });
 }

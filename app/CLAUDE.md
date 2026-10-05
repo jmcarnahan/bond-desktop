@@ -50,6 +50,16 @@ enforce the ones that are commands.
 - Never run `flutter test` or `flutter analyze` while a live `make` bench is
   running: any load moves the timings the bench exists to measure, and the
   run is spent.
+- `make app-run` and `make app-build` carry the box key and the registry
+  token from `local.mk` in the `flutter` command line (and its
+  `frontend_server` child's) for as long as they run, so never list a running
+  flutter process WITH its arguments either. The two recipes drop both from
+  the environment (`APP_NO_SECRET_ENV`), so the app and its llama-server do
+  not inherit them, and so does every recipe that uses neither (the
+  hand-started servers, `app-test`, the `dist-*` scripts): the Makefile's
+  `export` is global because GNU Make 3.81 has no target-specific `export
+  VAR`, and only `decide-fetch`, `app-doctor`, `app-run`, `app-build` and the
+  `BENCH_DEFINES` benches read them.
 - The Makefile resolves `BENCH_BEARER` into the `flutter test` command line,
   so never list a running bench's process WITH its arguments — `pgrep -f …
   >/dev/null` answers "is it running" without printing the key.
@@ -68,9 +78,12 @@ enforce the ones that are commands.
   inside.
 - Model work runs only while the session's processing switch is on
   (`processingProvider`), which is SEEDED from the remembered `processing_on`
-  preference and defaults ON. `AiWorker` and `TriageQueue` each take an
-  `enabled` closure and read it on every launch decision, so a test that builds
-  either one WITHOUT that argument is unaffected. Turning it off also calls
+  preference and defaults OFF since the default-setup round (only `'true'`
+  reads as on). `AiWorker` and `TriageQueue` each take an `enabled` closure
+  and read it on every launch decision, so a test that builds either one
+  WITHOUT that argument is unaffected; an inbox-level test that needs a drain
+  to run seeds `processing_on = 'true'` in its store before
+  `AppPrefsNotifier.read` (or overrides `processingProvider`). Turning it off also calls
   `stop()` on all four drains; `_setProcessing` on the inbox writes the
   preference LAST, after the drains are told, so a throwing write cannot leave
   lanes running under a switch that reads off. An inbox-level test that drives
@@ -394,10 +407,15 @@ enforce the ones that are commands.
   `/v1/embeddings` with `bond-decide`), else the `BOND_DEV_HAND_SERVERS`
   defines (`LLAMA_URL`, `DECIDE_URL`). A stored URL of `''` means follow the
   build (`$BOND_BOX_URL/prose/v1/chat/completions`,
-  `$BOND_BOX_URL/decide/v1/embeddings`); the generative remote is four wide
-  only while it follows the build, one for a stored address. A test asserting
-  where a stage resolves says which placement it means, since
-  `boxUrlDefault` is empty under `flutter test`. The writers are
+  `$BOND_BOX_URL/decide/v1/embeddings`, where `$BOND_BOX_URL` is `local.mk`'s,
+  passed by `APP_LLM_DEFINES`, with a `$(MS_ENV)` grep as the fallback); the
+  generative remote is four wide only while it follows the build, one for a
+  stored address. The generative placement defaults to `box` WHATEVER the
+  build, and Your server with no address is the `box-prose` spec with an
+  empty URL, unavailable with `generativeNoAddressText` (park `no_address`),
+  never this Mac. A test asserting where a stage resolves says which
+  placement it means (`modelPlacement: ModelPlacement.local` for this Mac),
+  since `boxUrlDefault` is empty under `flutter test`. The writers are
   `useGenerative({placement, managedModel, url, model, key, clearKey,
   hardwareTier})`, `useDecision({placement, url, model, key, clearKey})`,
   `useCloudDrafts` / `clearCloudDrafts` and `clearRoleKey(id)`: each validates
@@ -412,20 +430,55 @@ enforce the ones that are commands.
   store is there, and no `box-prose` token is attached while one is owed).
   `box_small_*`, `llm_targets`, `stage_targets`, `fast_llm_*` and
   `prose_llm_*` are inert.
+- Every compiled default (`boxUrlDefault`, `boxKeyDefault`,
+  `registryUrlDefault`, `registryTokenDefault`) is `''` under `flutter test`.
+  Nothing past `AppPrefsNotifier`'s constructor reads them: a test hands the
+  build's values to `AppPrefsNotifier(store, compiledBoxUrl:, compiledBoxKey:,
+  compiledRegistryUrl:, compiledRegistryToken:)`, which stamps the two
+  addresses and two PRESENCE flags (`boxKeyCompiled`,
+  `registryTokenCompiled`) on `AppPrefs` and keeps the two secrets to itself.
+- The build's key is used ONLY on the build's origin: `bearerFor(id)` is the
+  keychain's entry, else the compiled box key (`box-prose`, `box-decide`) or
+  registry token (`model-registry`) while the role's effective address has
+  the compiled address's origin (`sameOrigin`: scheme, host, port), never a
+  typed address on another host. `generativeKeyFromBuild` /
+  `decisionKeyFromBuild` / `registryTokenFromBuild` say so; `hasBearer` is
+  stored OR from the build; `boxBigKeyStored` and friends still mean "in the
+  keychain" (they drive `Stored. Type to replace` and Remove key, and Remove
+  key falls back to the build's). The form's `keyFromBuild` hints `Using the
+  key from this build. Type to replace`. The Makefile passes the secrets as
+  `"$$BOND_BOX_KEY"` shell references so `make -n app-run` never prints one.
 - What the managed router serves is `managedManifestProvider`
   (`ModelManifest.forRoles`): embed, plus `bond-decide` while the decision
   role is on this Mac, plus the chosen generative model while that role is
   (`managedGenerativeIdFor`: full tier → 27B, inbox → 4B, a stored 27B on the
   inbox tier falls back to the 4B). The supervisor's `buildPreset` serves only
-  `withPresentFiles(folder)`, because the server refuses a preset with a
+  `withPresentFiles(folder, ledger)`, because the server refuses a preset with a
   missing file and one absent model must not cost the others, and records the
   served ids with `setServedManagedIds`; `AppPrefs.unavailableFor(spec)` then
   puts a sentence on `LlmTarget.unavailable` for a managed target the router
   does not serve, and `LlmClient` and `DecisionClient` throw on it before any
   HTTP, so only that role parks (`not_installed`). `machineTierProvider` still
-  answers what this Mac could hold. The decide entry is `source: local` (repo
-  `local/bond-decide`, no download): the downloader and the ledger skip it,
-  and it is installed when the GGUF AND the heads file are both in the folder.
+  answers what this Mac could hold. The decide entry is a REGISTRY entry
+  (`source: artifactory`, repo `artifactory/bond-decide-mbl-v3swap`, bundle
+  `bond-decide-mbl-v3swap`): downloaded with its heads file, ledgered as
+  `bond-decide` and `bond-decide.heads`, and USABLE only when both rows are
+  current and both files are in the folder: `DownloadLedger.servable` is the
+  ONE rule the preset, the heads reader (`decisionHeadsProvider`, through
+  `SetupStore.knownLedger`, read synchronously per call) and the Models
+  page's `On disk` / `headsOnDisk` share, so a pair half replaced is never
+  served; a Hugging Face entry is served on its files, a local one on its
+  files. A Download again takes the entry's rows out of `done` as it starts
+  (`ModelDownloader._unsettle`), and files placed by `make decide-fetch`
+  join once a pass has hashed them in: the next launch or a Download press,
+  with a registry address set or not (`_withoutRegistry` hashes a present
+  file whose row is not `done` before it fails the leg). A fixture that puts
+  registry files on disk and expects them served writes
+  `currentLedgerFor([...])` (`test/fixtures/current_ledger.dart`) through
+  the container's own `setupStoreProvider`. A `source: local` entry (repo
+  `local/<name>`, no download, no ledger row, installed when its files are
+  present) is still parsed and handled everywhere, and its cases are tested
+  with `testLocalDecideFile()`.
 - Whether the app runs its own llama-server is `managedServerDefault`, a
   CONSTANT read off `--dart-define=BOND_DEV_HAND_SERVERS` the way
   `SetupGate.skipDefine` reads its own, not a preference: `AppPrefs
@@ -440,13 +493,29 @@ enforce the ones that are commands.
   server** (`settings-decision-mode`, `settings-generative-mode`);
   **Embeddings** is a status line (`settings-embed-status`). This Mac is a
   status block: `settings-decision-status` with **Check**
-  (`settings-role-check-decision`: `ensurePreset()` and refresh the status,
-  which is how a `make decide-install` done while the app runs is picked up;
-  the heads are re-read by the client when the file's mtime moves), and
-  `settings-generative-status` with the 27B | 4B pick
-  `settings-generative-managed` (the 27B disabled on the inbox tier). Also
-  `settings-models-status`, `settings-models-progress`, `settings-show-log`,
-  `settings-set-up-again` and `settings-idle-models`. Your server renders
+  (`settings-role-check-decision`: `ensurePreset()`, `ensure()` on the model
+  ensurer, and refresh the status, which is how a file that landed while the
+  app runs is picked up; the heads are re-read by the client when the file's
+  mtime moves) and, while the downloaded decision model is not on disk and
+  no download runs, **Download** (`settings-decision-download`, calling
+  `onDownloadModels` = `ensure()`); the status reads `On disk · loaded` /
+  `On disk · not loaded`, `Downloading NN%` (`EnsureState`), the failure's
+  `describeDownloadError` sentence (`EnsureState.errorFor(id)`, each entry's
+  own), or `Not downloaded yet.`; a `source: local` entry keeps `Installed ·
+  …` / `Not installed. Copy the model files into the models folder.` and no
+  button. `settings-generative-status` with the 27B | 4B pick
+  `settings-generative-managed` (the 27B disabled on the inbox tier) gets the
+  same download words and its own **Download**
+  (`settings-generative-download`). **Model registry**
+  (`ModelRegistryForm`, `widgets/model_registry_form.dart`) sits after
+  Embeddings, keyed `settings-registry-{url,token,save,remove-token,check,
+  refusal,status}`: the token field obscured, EMPTY after a Save, hints
+  `Stored. Type to replace` / `Using the token from this build. Type to
+  replace` / `A new address needs its own token`, another origin with a
+  blank token sends `clearToken`, Check is `registryProbeProvider` on the
+  heads file with `Range: bytes=0-0`. Also `settings-models-status`,
+  `settings-models-progress`, `settings-show-log`, `settings-set-up-again`
+  and `settings-idle-models`. Your server renders
   `ModelServersForm` (`widgets/model_servers_form.dart`), ONE one-address form
   per target, `ServerFormRole {decision, generative, cloudDrafts}`, keyed
   `servers-<decision|generative>-{url,key,model,model-text,refusal,error,connect,remove-key}`
@@ -460,10 +529,13 @@ enforce the ones that are commands.
   needs that file too; a Kev server does not, a kind not yet known names no
   install, and the kind line `settings-decision-kind` says which (the host
   asks `detectKind` once per address when it opens).
-  `SettingsHost` wires `onUseDecision`, `onUseGenerative`, `onCheckDecision`
-  and `onRemoveKey` (null takes a control off), and every role write is
-  followed by `supervisor.ensurePreset()`, which restarts the router only when
-  the preset hash changed. The Advanced fold, the stage picker, the targets
+  `SettingsHost` wires `onUseDecision`, `onUseGenerative`, `onCheckDecision`,
+  `onRemoveKey`, `onSaveRegistry` (`useRegistry`, an `ArgumentError` becomes
+  the refusal sentence, never the token), `onRemoveRegistryToken`,
+  `onCheckRegistry` and `onDownloadModels` (null takes a control off), and
+  every role or registry write is followed by `supervisor.ensurePreset()`
+  (role writes; it restarts the router only when the preset hash changed) and
+  `ensure()`. The Advanced fold, the stage picker, the targets
   list, the Local server card (Round H) and `useBox` / `usePlacement` /
   `RoleLine` (the decision-model round) are gone.
 - The wizard's Where step (`screens/setup/setup_where_body.dart`,
@@ -554,13 +626,84 @@ enforce the ones that are commands.
   or fails the test: the four entries, three by `-hf` repo (`MODEL_HF`,
   `FAST_HF`, `EMBED_HF`, the quant either from a `:quant` suffix or from the
   repo name having to carry the manifest file's own quant token) and the
-  source-local decide entry by folder, file and heads (`DECIDE_DIR`,
-  `DECIDE_FILE`, `DECIDE_QUANT` f16, `DECIDE_HEADS`) and by its server args
+  registry decide entry by folder, file, heads, bundle, remote names and
+  digests (`DECIDE_DIR`, `DECIDE_FILE`, `DECIDE_QUANT` f16, `DECIDE_HEADS`,
+  `DECIDE_BUNDLE`, `DECIDE_REMOTE_GGUF`, `DECIDE_REMOTE_HEADS`,
+  `DECIDE_GGUF_SHA`, `DECIDE_HEADS_SHA`) and by its server args
   (`DECIDE_ARGS`: pooling, `-c`, `-ub`, `-b`, `-np` against the preset);
   `CTX_SIZE`, `MODEL_CTX`, `SLOTS`, `FAST_SLOTS`, the embed `--pooling` word
   and the prose spec type. One blind spot remains: the recipes launch the
   servers from `MODEL_FLAGS` and `FAST_FLAGS`, so a literal written into those
   in place of `$(CTX_SIZE)` drifts past every assertion the test makes.
+- `ModelEnsurer` (`services/models/model_ensurer.dart`, `modelEnsurerProvider`)
+  downloads what the placements need and the disk lacks, outside the wizard:
+  the set is `modelEnsureSetProvider` (`managedManifestProvider` plus the
+  decide entry when absent, i.e. under Your server, D10, `.downloadable`;
+  no embed entry under `BOND_DEV_HAND_SERVERS`, where `make embed` serves it).
+  ONE ownership rule for the ONE downloader: nothing starts while
+  `setupShowingProvider` is up (the gate writes it from its decision's
+  callback, never in a build); another owner's run is WAITED for
+  (`EnsureState.waiting`, then `ModelDownloader.idle`, then the scan), never
+  dropped; `standDown()` (the gate, as it shows the wizard) cancels the
+  ensurer's OWN run keeping its parts; the wizard's `startDownload` waits for
+  `idle` too (`SetupState.downloadWaiting`). A PAUSED run
+  (`ModelDownloader.paused`) is never waited for: the wizard cancels its own
+  as it leaves the download step (any `_goTo` off it, Finish, Back to the
+  inbox), and both waiting loops cancel one they find, parts kept. It is
+  SINGLE-FLIGHT coalescing FORWARD (a call before the pass's scan joins it; a
+  call after gets ONE shared further pass, skipped on blocked, dispose or
+  `standDown`), AWAITS
+  `prefs.ready` before a run (a stored registry token is a synchronous cache
+  lookup), and calls `afterRun(landedIds)` after EVERY pass: the provider
+  restarts the router when a landed id is one it serves, else asks
+  `ensurePreset()` (which is what picks up a file the wizard's run landed
+  after Finish). `ensure(reverify: {id})` re-HASHES that entry's files
+  (`ModelDownloader.run(files, rehash)`), Settings' **Download again**. The
+  downloader is a LOOKUP (`downloader: () => …`), so reading the ensurer's
+  state builds no manifest. The gate kicks it when it shows the APP;
+  Settings on Check, Download, registry Save / Remove token and every
+  placement write. `modelEnsureStateProvider` exposes its `EnsureState`
+  (per-entry `fractionFor`, `landedIds`, `errorFor`), and
+  `managedModelsStatusProvider` re-reads when its phase moves or an entry
+  lands. Widget tests override `modelEnsurerProvider` with
+  `RecordingEnsurer` (`test/fixtures/recording_ensurer.dart`; it counts
+  `ensure`, `reverify` sets and `standDown`). A widget test that needs REAL
+  loopback HTTP (the in-process `FakeHubServer`) builds its client with
+  `HttpOverrides.global` briefly null: the test binding answers every
+  `HttpClient` with a 400, and the real ensurer path under the gate is
+  driven that way with `tester.runAsync` (`setup_gate_test.dart`). The wizard's Continue
+  waits on `downloadsComplete` (the GATING entries only, D7); a registry row
+  that failed shows `registryLaterText` and never holds it, and
+  `allDownloaded` decides whether arriving at the step starts a run.
+- Registry downloads (`ModelDownloader` with `registryBase` and
+  `registryToken`, both LOOKUPS read per registry entry: the provider's
+  `AppPrefs.effectiveRegistryUrl` and `registryToken(base)`, which answers
+  `bearerFor(registryId)` only when `base` has the current address's origin,
+  so the address and the token come from one snapshot). A registry
+  leg's URL is `ModelFile.registryUri(base)` / `headsRegistryUri(base)`
+  (`<base>/bundles/<bundle>/<remoteFile>`, the base through
+  `normalizeBoxBaseUrl`); `resolveUri` and `sidecarResolveUri` throw for a
+  registry entry, they are Hugging Face's. A leg carries `Authorization` to
+  its OWN origin only (`sameOrigin`): every registry leg follows redirects by
+  hand, so object storage never gets the token and each answer is judged by
+  the hop that gave it (a storage 403 re-resolves). `isRegistry` is the ONE
+  rule for owning a heads leg (`isCurrent`, `_specsFor`, `downloadBytes`,
+  the preflight, `_allFilesPresent`), and the parser refuses `heads` on a
+  Hugging Face entry. 401/403 from that origin is
+  `DownloadError.unauthorized` (no retry), a 404 from it is
+  `registry_not_found` (no retry), and a FIRST answer of 200/206 with a
+  `text/html` content type is `registry_not_a_model` at once (never a
+  Hugging Face leg); no base is `registry_not_configured` before any request.
+  `FakeHubServer.registryWebPage` serves the login page. The heads file is the
+  entry's LAST leg, ledger id `DownloadLedger.headsId(id)` = `<id>.heads`,
+  counted in `downloadBytes`, required by `isCurrent`, `verify`,
+  `_allFilesPresent` and the disk preflight. `ModelManifest.gating` (the
+  Hugging Face entries, `gatesSetup`) is what the wizard gate and the
+  resume's ledger check read (D7); `downloadable` (everything not local) is
+  what the wizard downloads. Tests serve a registry from
+  `FakeHubServer.registryContents` (`registryBase`, `registryBearer`,
+  `registryRedirect` + `startStorage()` for a second origin; `registryAuth`
+  / `storageAuth` record the header against the FAKE token only).
 - The MTP head is a nested `sidecar` record on the manifest's prose entry, not
   a fourth model: it carries its own revision, sha256 and size, lands in the
   parent's repo folder, and `downloadBytes` counts it so the wizard's total is
@@ -655,10 +798,14 @@ enforce the ones that are commands.
   answering yes answers `GET …/v1/models` too; without it (every older test)
   no listing is asked. The provider's HTTP client is
   `decisionHttpClientProvider`, the seam a wiring test overrides.
-- The heads file (`decide-heads.json`, installed beside the GGUF under
-  `<models>/local_bond-decide/` by `make decide-install`) is needed on THIS
+- The heads file (`decide-heads.json`, downloaded beside the GGUF under
+  `<models>/artifactory_bond-decide-mbl-v3swap/` from the registry's
+  `heads.json`; `make decide-fetch` fills the same folder) is needed on THIS
   Mac for the encoder-heads kind even when its server is remote: the heads, temperatures and
-  softmax run in Dart. It is SCHEMA 2 with 12 `questions`: the nine message
+  softmax run in Dart. It arrives as the decide entry's last download leg
+  (the wizard's run or the model ensurer's), sha-checked and ledgered as
+  `bond-decide.heads`, and the ensurer fetches it under Your server too
+  (D10). It is SCHEMA 2 with 12 `questions`: the nine message
   fields (renderer `message`, `decisionFields` order), then `same_effort`
   (`pair`), `member_of` (`membership`) and `charter_specific` (`charter`),
   each `yes`/`no`. `apply` answers the nine; `pYes(question, vector)` answers
@@ -668,8 +815,16 @@ enforce the ones that are commands.
   named). A schema-1 file (the older model) throws
   `DecisionOlderModelException` (in `llm_client.dart`, so `parkReasonFor`
   can name it), park `decision_older_model`, with `DecisionHeads.olderModelText`
-  in plain words and no command; Settings adds a quieter `For developers:
-  make decide-install` line. A missing file parks the decision pass. Tests
+  in plain words and no command; Settings adds a quieter `Press Download again to
+  replace it.` line. A missing file parks the decision pass
+  (`decision_not_installed`, "The decision model is not downloaded yet. Open
+  Settings, Models."), and so does a registry entry's file whose download
+  rows are not current (`DownloadLedger.servable`). A hand-installed entry's
+  refusals (the heads reader's `mismatchLocalText`, the rail's
+  `decisionLocal`, Settings' local sentences) say
+  `DecisionHeadsFile.copyFilesText` instead of Download again; a Kev server's
+  `decision_misconfigured` still reads the default rail sentence, because the
+  park carries no kind (the client drops its kind cache on that throw). Tests
   build heads from `test/fixtures/decision_heads_fixture.dart`
   (`syntheticHeadsJson`, schema 2, one axis per option, `yesAxisOf`).
   `MessageStore.decisionFor` answers null for a row stored under another

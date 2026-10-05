@@ -132,10 +132,35 @@ void main() {
     return testManifest(sizes: sizes, sha256s: digests);
   }
 
-  ModelDownloader buildDownloader() {
+  /// Serves the decision model's two files from the fake REGISTRY, puts the
+  /// registry entry describing them into [manifest] beside what [publish]
+  /// made, and returns it.
+  ModelFile publishDecide({int gguf = 3072}) {
+    const bundle = 'bond-decide-mbl-v3swap';
+    final weights = fakeWeights(gguf, seed: 31);
+    final heads = fakeWeights(1024, seed: 32);
+    hub.registryContents['$bundle/model-f16.gguf'] = weights;
+    hub.registryContents['$bundle/heads.json'] = heads;
+    final decide = testDecideFile(
+      sizeBytes: weights.length,
+      sha256: sha256Hex(weights),
+      headsSizeBytes: heads.length,
+      headsSha256: sha256Hex(heads),
+    );
+    manifest = testManifest(
+      sizes: {for (final m in manifest.models) m.id: m.sizeBytes},
+      sha256s: {for (final m in manifest.models) m.id: m.sha256},
+      decide: decide,
+    );
+    return decide;
+  }
+
+  ModelDownloader buildDownloader({String Function()? registryBase}) {
     final downloader = ModelDownloader(
       manifest: manifest,
       modelsFolder: folder,
+      registryBase: registryBase,
+      registryToken: (_) => 'test-token-123',
       readLedger: store.downloadLedger,
       writeLedger: store.recordDownload,
       // Null makes every verify fall through to the Dart digest, which is
@@ -154,6 +179,7 @@ void main() {
     SetupStore? over,
     ModelDownloader? downloader,
     Future<void> Function(ModelServersPayload server)? checkDecision,
+    Future<void> Function()? prefsReady,
   }) {
     final controller = SetupController(
       store: over ?? store,
@@ -163,6 +189,7 @@ void main() {
       supervisor: supervisor,
       paths: AppPaths(root),
       readPrefs: () => prefs,
+      prefsReady: prefsReady,
       setModelsFolder: (path) async {
         foldersSet.add(path);
         prefs = prefs.copyWith(modelsFolder: path);
@@ -226,8 +253,9 @@ void main() {
     }
   }
 
-  /// A ledger and the files that say THIS MACHINE's set is already here —
-  /// three on the full tier, two on the inbox one.
+  /// A ledger and the files that say THIS MACHINE's hub set is already here
+  /// — three on the full tier, two on the inbox one. A registry entry is
+  /// left out: the cases about it seed it themselves.
   Future<void> seedComplete() async {
     var ledger = DownloadLedger.empty;
     // Every file this Mac's TIER holds, the unchosen generative model
@@ -235,6 +263,7 @@ void main() {
     final wanted =
         manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes));
     for (final model in wanted.models) {
+      if (model.isRegistry) continue;
       final file = File(destOf(model));
       await file.parent.create(recursive: true);
       await file.writeAsBytes(hub.contents['${model.repo}/${model.file}']!);
@@ -267,7 +296,13 @@ void main() {
     decisionUses = [];
     boxRefuses = false;
     manifest = publish();
-    prefs = AppPrefs(modelsFolder: folder());
+    // This Mac, said out loud: the generative placement defaults to Your
+    // server since the default-setup round, and most of this file is about
+    // what this Mac downloads. The defaults test below reads the bare one.
+    prefs = AppPrefs(
+      modelsFolder: folder(),
+      modelPlacement: ModelPlacement.local,
+    );
     supervisor = ModelServerSupervisor(
       runner: runner,
       supportDir: root,
@@ -599,6 +634,243 @@ void main() {
     // The whole point: a relaunch after the download finished must not go
     // back to the hub to find out what it already knows.
     expect(hub.resolveCount, 0);
+  });
+
+  test('the download step fetches the registry decision model with its heads, '
+      'and the set is all here only once both are', () async {
+    final decide = publishDecide();
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+
+    final controller = build(
+      downloader: buildDownloader(registryBase: () => hub.registryBase),
+    );
+    await controller.init();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the run to finish',
+    );
+
+    expect(controller.state.downloads[routerDecideId]?.status,
+        DownloadStatus.done);
+    expect(File(destOf(decide)).existsSync(), isTrue);
+    final heads = File(p.join(folder(), decide.headsRelativePath!));
+    expect(heads.existsSync(), isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
+    expect(controller.state.allDownloaded, isTrue);
+    expect(hub.registryAuth, everyElement('Bearer test-token-123'));
+
+    // The heads file is part of "every file here": gone, the set is not all
+    // here, though the ledger still vouches for it. Continue is not held by
+    // it (decision D7): only the gating files hold Continue.
+    await heads.delete();
+    await controller.setFolder(folder());
+    expect(controller.state.allDownloaded, isFalse);
+    expect(controller.state.downloadsComplete, isTrue);
+  });
+
+  // Decision D7, the wizard half: a FAILED registry file never holds the
+  // download step's Continue. Its address is fixed in Settings, which the
+  // wizard cannot reach, and the model ensurer retries it after setup.
+  test('a failed registry file does not hold Continue, a missing hub file '
+      'still does', () async {
+    publishDecide();
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+
+    final controller = build(
+      downloader: buildDownloader(registryBase: () => ''),
+    );
+    await controller.init();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the run to finish',
+    );
+
+    final decide = controller.state.downloads[routerDecideId];
+    expect(decide?.status, DownloadStatus.failed);
+    expect(decide?.error, DownloadError.registryNotConfigured);
+    expect(controller.state.downloads[routerEmbedId]?.status,
+        DownloadStatus.done);
+    expect(hub.registryCount, 0);
+    expect(controller.state.downloadsComplete, isTrue,
+        reason: 'the registry row does not hold Continue');
+    expect(controller.state.allDownloaded, isFalse,
+        reason: 'but the set is not all here, and the step says so');
+
+    // A gating (Hugging Face) file that goes missing holds it again.
+    final embed = manifest.byRole(ModelRole.embed);
+    await File(destOf(embed)).delete();
+    await controller.setFolder(folder());
+    expect(controller.state.downloadsComplete, isFalse);
+  });
+
+  test('the download waits for the preferences to be ready before it asks '
+      'for anything, so a stored token is in hand', () async {
+    publishDecide();
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    final ready = Completer<void>();
+
+    final controller = build(
+      downloader: buildDownloader(registryBase: () => hub.registryBase),
+      prefsReady: () => ready.future,
+    );
+    unawaited(controller.init());
+    // Long enough for a run that did not wait to have asked the hub.
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(hub.requests, isEmpty);
+    expect(hub.registryCount, 0);
+
+    ready.complete();
+    await waitUntil(
+      () => controller.state.allDownloaded,
+      reason: 'the run to land everything',
+    );
+    expect(hub.registryAuth, everyElement('Bearer test-token-123'));
+  });
+
+  test('a download step that finds another owner\'s run going waits for it, '
+      'reading as running, then runs its own to the end', () async {
+    manifest = publish(embed: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = buildDownloader();
+    // The model ensurer's run, cancelled as the wizard opened and still
+    // winding down, or any other owner's.
+    final other = downloader.run([manifest.byRole(ModelRole.embed)]).toList();
+    final controller = build(downloader: downloader);
+    await controller.init();
+
+    final start = controller.startDownload();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(controller.state.downloadRunning, isTrue);
+    expect(controller.state.downloadWaiting, isTrue);
+    // A second press while it waits starts nothing more.
+    await controller.startDownload().timeout(const Duration(seconds: 1));
+
+    hub.chunkDelay = null;
+    await other;
+    await start;
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the step\'s own run to finish',
+    );
+
+    expect(controller.state.downloadWaiting, isFalse);
+    expect(controller.state.allDownloaded, isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
+  });
+
+  // A run PAUSED and then left behind would park for ever on the one
+  // downloader, holding the model ensurer out. Every way off the download
+  // step cancels it, parts kept; a run still moving is left alone.
+  for (final leave in <String, Future<void> Function(SetupController)>{
+    'Continue': (controller) => controller.next(),
+    'Back': (controller) => controller.back(),
+    'Finish': (controller) async => controller.finish(),
+    'Back to the inbox': (controller) async => controller.returnToInbox(),
+  }.entries) {
+    test('a paused run does not outlive the download step: ${leave.key} '
+        'cancels it and the downloader goes idle', () async {
+      final decide = publishDecide(gguf: 512 * 1024);
+      // The registry leg is HELD after its first chunk until released, so
+      // the pause lands mid-transfer whatever the machine's load.
+      final held = hub.hold = Completer<void>();
+      addTearDown(() => held.isCompleted ? null : held.complete());
+      await store.set(SetupStore.setupKey, SetupStep.download.name);
+      final downloader =
+          buildDownloader(registryBase: () => hub.registryBase);
+      final controller = build(downloader: downloader);
+
+      await controller.init();
+      final part = '${destOf(decide)}${ModelDownloader.partSuffix}';
+      await waitUntil(
+        () => File(part).existsSync() && File(part).lengthSync() > 0,
+        reason: 'the registry leg to be under way',
+      );
+      await controller.pauseDownload();
+      expect(downloader.paused, isTrue);
+      held.complete();
+
+      await leave.value(controller);
+      await downloader.idle.timeout(const Duration(seconds: 10));
+
+      expect(downloader.running, isFalse);
+      expect(File(part).existsSync(), isTrue, reason: 'the part is kept');
+      await waitUntil(
+        () => !controller.state.downloadRunning,
+        reason: 'the state to follow the cancel',
+      );
+      expect(controller.state.downloadPaused, isFalse);
+    });
+  }
+
+  test('a run still moving is left alone when the step is left', () async {
+    final decide = publishDecide(gguf: 512 * 1024);
+    // Held after its first chunk until released: still moving, never done.
+    final held = hub.hold = Completer<void>();
+    addTearDown(() => held.isCompleted ? null : held.complete());
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    final downloader = buildDownloader(registryBase: () => hub.registryBase);
+    final controller = build(downloader: downloader);
+
+    await controller.init();
+    final part = '${destOf(decide)}${ModelDownloader.partSuffix}';
+    await waitUntil(
+      () => File(part).existsSync() && File(part).lengthSync() > 0,
+      reason: 'the registry leg to be under way',
+    );
+    await controller.next();
+
+    expect(downloader.running, isTrue);
+    held.complete();
+    await downloader.idle.timeout(const Duration(seconds: 20));
+    expect(File(destOf(decide)).existsSync(), isTrue);
+  });
+
+  test('a paused run inherited from an earlier visit is cancelled, never '
+      'waited for, and the step runs its own to the end', () async {
+    manifest = publish(embed: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = buildDownloader();
+    final embed = manifest.byRole(ModelRole.embed);
+    final other = downloader.run([embed]).toList();
+    final part = '${destOf(embed)}${ModelDownloader.partSuffix}';
+    await waitUntil(
+      () => File(part).existsSync() && File(part).lengthSync() > 0,
+      reason: 'bytes to land',
+    );
+    await downloader.pause();
+    hub.chunkDelay = null;
+    final controller = build(downloader: downloader);
+    await controller.init();
+    var waited = false;
+    final remove = controller.addListener((state) {
+      if (state.downloadWaiting) waited = true;
+    });
+    addTearDown(remove);
+
+    await controller.startDownload().timeout(const Duration(seconds: 10));
+    await other;
+    await waitUntil(
+      () => !controller.state.downloadRunning && controller.state.allDownloaded,
+      reason: 'the step\'s own run to finish',
+    );
+
+    expect(waited, isFalse, reason: 'a paused run is never waited for');
+    expect(controller.state.downloadsComplete, isTrue);
+  });
+
+  test('a stored done whose only gap is the registry decision model resumes '
+      'at the top, not on the download step', () async {
+    // Decision D7: the ledger check that sends a finished install back to
+    // the download step reads the GATING entries only.
+    publishDecide();
+    await seedComplete();
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+
+    final controller = build();
+    await controller.init();
+
+    expect(controller.state.step, SetupStep.welcome);
+    expect(hub.registryCount, 0);
   });
 
   test('pause holds the run and resume finishes it', () async {
@@ -938,20 +1210,23 @@ void main() {
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('the defaults are the stored answers: decision here, generative as '
-        'the build decided', () async {
+    test('the defaults are the stored answers: decision here, generative on '
+        'Your server', () async {
+      // Nothing stored: the decision model on this Mac, the generative model
+      // on Your server whatever the build (decision D9).
+      prefs = AppPrefs(modelsFolder: folder());
       final controller = build();
       await controller.init();
       expect(controller.state.decisionPlacement, ModelPlacement.local);
-      expect(controller.placement, ModelPlacement.local);
+      expect(controller.placement, ModelPlacement.box);
 
       prefs = prefs.copyWith(
-        modelPlacement: ModelPlacement.box,
+        modelPlacement: ModelPlacement.local,
         decisionPlacement: ModelPlacement.box,
       );
       final again = build();
       await again.init();
-      expect(again.placement, ModelPlacement.box);
+      expect(again.placement, ModelPlacement.local);
       expect(again.state.decisionPlacement, ModelPlacement.box);
     });
 
@@ -1069,19 +1344,52 @@ void main() {
       expect(controller.state.step, SetupStep.welcome);
     });
 
-    test('the decision model on this Mac is listed apart from the downloads',
-        () async {
+    test('a hand-installed decision model on this Mac is listed apart from '
+        'the downloads', () async {
+      manifest = testManifest(
+        sizes: {for (final m in manifest.models) m.id: m.sizeBytes},
+        sha256s: {for (final m in manifest.models) m.id: m.sha256},
+        decide: testLocalDecideFile(),
+      );
       final controller = build();
       await controller.init();
       expect(
         controller.resolvedManifest.models.map((m) => m.role),
         isNot(contains(ModelRole.decide)),
       );
-      // The fixture manifest may or may not carry a decide entry; either way
-      // it is never downloaded, and on Your server it is not listed at all.
+      expect(controller.localDecisionModel?.isLocal, isTrue);
+      expect(controller.decisionInstalled, isFalse);
+      final decide = controller.localDecisionModel!;
+      for (final relative in [decide.relativePath, decide.headsRelativePath!]) {
+        final file = File(p.join(folder(), relative));
+        await file.parent.create(recursive: true);
+        await file.writeAsString('x');
+      }
+      expect(controller.decisionInstalled, isTrue);
+      // On Your server it is not listed at all.
       controller.chooseDecision(ModelPlacement.box);
       expect(controller.localDecisionModel, isNull);
       expect(controller.decisionInstalled, isFalse);
+    });
+
+    test('the registry decision model on this Mac is an ordinary download, '
+        'counted in the total', () async {
+      final decide = publishDecide();
+      final controller = build();
+      await controller.init();
+
+      // Not listed apart: it is in the downloads.
+      expect(controller.localDecisionModel, isNull);
+      expect(controller.resolvedManifest.byId(routerDecideId), decide);
+      expect(
+        controller.resolvedManifest.totalBytes,
+        greaterThanOrEqualTo(decide.sizeBytes + decide.heads!.sizeBytes),
+      );
+      final withoutDecide = controller.resolvedManifest.totalBytes -
+          decide.downloadBytes;
+      controller.chooseDecision(ModelPlacement.box);
+      expect(controller.resolvedManifest.totalBytes, withoutDecide);
+      expect(controller.localDecisionModel, isNull);
     });
 
     test('a user-defined install re-run choosing This Mac ends up local',

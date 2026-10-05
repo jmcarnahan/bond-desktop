@@ -15,6 +15,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/fake_system_info.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
@@ -110,19 +111,65 @@ void main() {
     expect(rows[1].onDisk, isFalse);
     expect(rows[2].onDisk, isTrue);
     expect(rows[2].displayName, embed.displayName);
-    // The decision model is hand-installed: its size is the weights and the
-    // heads, and it is not on disk until both are.
-    expect(rows[0].local, isTrue);
+    // The decision model is a registry download: its size is the weights and
+    // the heads, its download bytes, and it is not on disk without them.
+    expect(rows[0].local, isFalse);
     expect(rows[1].local, isFalse);
     expect(rows[0].bytes, decide.sizeBytes + decide.heads!.sizeBytes);
+    expect(rows[0].bytes, decide.downloadBytes);
     expect(rows[0].onDisk, isFalse);
     // Managed serves all three roles here.
     expect([for (final row in rows) row.inUse], [true, true, true]);
   });
 
-  test('the decision model is on disk when its GGUF AND heads are, with no '
-      'ledger', () async {
+  test('the registry decision model is on disk only when the ledger is current '
+      'for both files AND both are there', () async {
     final manifest = testManifest(withDecide: true);
+    final decide = manifest.byRole(ModelRole.decide);
+    final headsRow = FileDownloadState(
+      id: DownloadLedger.headsId(decide.id),
+      status: DownloadStatus.done,
+      sha256: decide.heads!.sha256,
+    );
+    final heads = File(p.join(models.path, decide.headsRelativePath!));
+
+    // Both files on disk, and no ledger: not vouched for.
+    await write(decide);
+    await heads.writeAsString('{}');
+    var rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.first.roleId, 'decision');
+    expect(rows.first.local, isFalse);
+    expect(rows.first.onDisk, isFalse, reason: 'no ledger rows');
+    expect(rows.first.headsOnDisk, isFalse,
+        reason: 'the heads reader reads them only on the same rule');
+
+    // The weights' row alone is not current: the heads row is wanted too.
+    await setup.recordDownload(DownloadLedger({decide.id: done(decide)}));
+    rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.first.onDisk, isFalse, reason: 'no heads row');
+
+    await setup.recordDownload(DownloadLedger({
+      decide.id: done(decide),
+      headsRow.id: headsRow,
+    }));
+    rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.first.onDisk, isTrue);
+    expect(rows.first.headsOnDisk, isTrue);
+
+    // And a heads file deleted under a current row is not on disk.
+    await heads.delete();
+    rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.first.onDisk, isFalse);
+    expect(rows.first.headsOnDisk, isFalse);
+  });
+
+  test('a hand-installed decision model is on disk when its GGUF AND heads '
+      'are, with no ledger', () async {
+    final manifest = testManifest(decide: testLocalDecideFile());
     final decide = manifest.byRole(ModelRole.decide);
 
     await write(decide);
@@ -138,6 +185,7 @@ void main() {
         await containerFor(manifest).read(managedModelsStatusProvider.future);
     expect(rows.first.onDisk, isTrue);
     expect(rows.first.headsOnDisk, isTrue);
+    expect(rows.first.local, isTrue);
   });
 
   test('a ledger row over a file somebody deleted is not on disk', () async {
@@ -225,16 +273,17 @@ void main() {
     expect(rows.last.routerId, routerEmbedId);
   });
 
-  test('your server with no address to dial is still this Mac', () async {
-    // The placement cannot be honoured, so the rule answers the router, and
-    // the row says the router is asked to hold the model.
+  test('your server with no address to dial is NOT this Mac', () async {
+    // The placement cannot be honoured, and since the default-setup round
+    // (decision D9) the role parks with a sentence rather than coming home:
+    // the row stays, and the router is not asked to hold the model.
     final rows = await containerFor(
       testManifest(),
       prefs: const AppPrefs(modelPlacement: ModelPlacement.box),
     ).read(managedModelsStatusProvider.future);
 
     expect(rows.first.roleId, 'generative');
-    expect(rows.first.inUse, isTrue);
+    expect(rows.first.inUse, isFalse);
   });
 
   test('Set up again re-reads it', () async {
@@ -277,7 +326,8 @@ void main() {
     final served = await container.read(managedManifestProvider.future);
     expect([for (final m in served.models) m.id], contains(routerBulkId));
 
-    final present = served.withPresentFiles(models.path);
+    final present =
+        served.withPresentFiles(models.path, currentLedgerFor([decide]));
     expect([for (final m in present.models) m.id],
         unorderedEquals([routerEmbedId, routerDecideId]));
     expect(present.toPreset(models.path).missingFiles(), isEmpty);

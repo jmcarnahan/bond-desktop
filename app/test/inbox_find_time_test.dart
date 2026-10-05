@@ -1434,9 +1434,21 @@ void main() {
       expect(find.byKey(ThreadActionBar.findTimeKey), findsOneWidget,
           reason: 'the thread stays open');
       // The day underneath moved: its row in the column is the selected one.
+      // The DAY row, not a slot: the suite's slots sit a week from today,
+      // which on a Monday is this very Monday, so the ask tile's slot rows
+      // carry the same date and come first in the tree.
+      final dated = find.textContaining(shortDate(monday));
+      final slotTexts = find
+          .descendant(of: find.byType(SchedulingAskTile), matching: dated)
+          .evaluate()
+          .toSet();
+      final dayRow = dated
+          .evaluate()
+          .where((e) => !slotTexts.contains(e))
+          .single;
       final row = find
           .ancestor(
-              of: find.textContaining(shortDate(monday)),
+              of: find.byElementPredicate((e) => e == dayRow),
               matching: find.byType(Material))
           .first;
       expect(tester.widget<Material>(row).color, BondColors.onDarkTint);

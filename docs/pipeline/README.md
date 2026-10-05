@@ -91,7 +91,9 @@ are in [10-model-routing.md](10-model-routing.md); `make bench-pipeline`
 measures the whole thing end to end.
 
 **One switch gates all of it.** The sidebar's **AI processing** switch is a
-remembered preference that starts ON (Round H; before it, off at every launch)
+remembered preference that starts OFF (the default-setup round, 2026-10, so a
+new environment's servers and downloads are checked before anything is spent;
+it started on from Round H until then, and was off at every launch before it)
 and gates all four drains through one `enabled` closure each, so turning it off
 leaves a launch reading and storing mail without spending a token.
 Sync, the read-ack queue, the Models page's Check and Connect probes and the
@@ -175,8 +177,11 @@ drafts target when one is set and either is the owner's own host or consent
 stands, and every other stage to the ONE generative target. By default the app
 runs its own router (the managed column): `bond-decide` for the decision
 model, `bond-prose` (27B) or `bond-bulk` (4B) for the generative model when it
-runs here, `bond-embed` for embeddings; a build compiled with `BOND_BOX_URL`
-sends the generative role to the box's `/prose` by default. The hand-servers
+runs here, `bond-embed` for embeddings. The generative role defaults to Your
+server in every build: a build compiled with `local.mk`'s `BOND_BOX_URL`
+sends it to the box's `/prose` (with `BOND_BOX_KEY` as its key until one is
+saved in the keychain), and with no address anywhere it is unavailable and
+parks (`no_address`) rather than running here. The hand-servers
 column above is a dev build's. The pre-round per-stage picks
 (`stage_targets`, `llm_targets`, the fast/prose slot prefs) are inert and read
 by nothing but the frozen one-shot migrations. See

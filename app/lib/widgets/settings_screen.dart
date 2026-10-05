@@ -22,11 +22,14 @@ import '../services/decision/needs_you_predicate.dart'
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../services/models/managed_model_status.dart' show ManagedModelStatus;
+import '../services/models/model_ensurer.dart' show EnsureState;
+import '../services/models/registry_probe.dart' show RegistryCheck;
 import '../services/reminders/tasks_availability.dart';
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
+import 'model_registry_form.dart' show RegistrySave;
 import 'model_servers_form.dart' show ModelServersForm, ServerFormRole;
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
@@ -253,6 +256,11 @@ class SettingsScreen extends StatefulWidget {
   final String decisionModel;
   final bool decisionKeyStored;
 
+  /// Whether, with nothing in the keychain, each remote's key is the one this
+  /// build carries, on the build's own origin. Flags, never keys.
+  final bool decisionKeyFromBuild;
+  final bool generativeKeyFromBuild;
+
   /// What the decision remote turned out to be, or null while unknown.
   final DecisionServerKind? decisionKind;
   final String generativeUrl;
@@ -262,10 +270,25 @@ class SettingsScreen extends StatefulWidget {
   /// This Mac's role models, or null while they are being read.
   final List<ManagedModelStatus>? modelStatuses;
 
-  /// Where `make decide-install` must put the decision model when the models
-  /// folder is not the default one; null while it is. See
-  /// [SettingsModelsPage.decideInstallDir].
-  final String? decideInstallDir;
+  /// The model registry as the host resolved it: the effective address and
+  /// two presence flags. Never a token. See [SettingsModelsPage.registryUrl].
+  final String registryUrl;
+  final bool registryTokenStored;
+  final bool registryTokenFromBuild;
+
+  /// The registry's write, token removal and Check. Null takes each off.
+  final RegistrySave? onSaveRegistry;
+  final Future<void> Function()? onRemoveRegistryToken;
+  final Future<RegistryCheck> Function()? onCheckRegistry;
+
+  /// What the model ensurer is doing, and the **Download** press that asks
+  /// it to fetch what is missing. See [SettingsModelsPage.ensureState].
+  final EnsureState? ensureState;
+  final Future<void> Function()? onDownloadModels;
+
+  /// The decision row's **Download again**. See
+  /// [SettingsModelsPage.onRedownloadDecision].
+  final Future<void> Function()? onRedownloadDecision;
 
   /// The decision role's write. **Null hides the whole Models section**, the
   /// same discipline every other optional section follows: a host that
@@ -313,6 +336,10 @@ class SettingsScreen extends StatefulWidget {
   /// Where the app's own llama-server stands, for the Managed status line,
   /// the loading bar and the collapsed summary.
   final ServerState serverState;
+
+  /// Whether this build runs its own llama-server, for the Models page's
+  /// Embeddings line (see [SettingsModelsPage.managedServer]).
+  final bool managedServer;
 
   /// Why the pipeline is parked and how much is waiting, for the Models
   /// page's status line. Null is the ordinary state.
@@ -581,12 +608,22 @@ class SettingsScreen extends StatefulWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKeyFromBuild = false,
+    this.generativeKeyFromBuild = false,
     this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
     this.generativeKeyStored = false,
     this.modelStatuses,
-    this.decideInstallDir,
+    this.registryUrl = '',
+    this.registryTokenStored = false,
+    this.registryTokenFromBuild = false,
+    this.onSaveRegistry,
+    this.onRemoveRegistryToken,
+    this.onCheckRegistry,
+    this.ensureState,
+    this.onDownloadModels,
+    this.onRedownloadDecision,
     this.onUseDecision,
     this.onUseGenerative,
     this.onCheckDecision,
@@ -599,6 +636,7 @@ class SettingsScreen extends StatefulWidget {
     this.onSetUpAgain,
     this.onShowLog,
     this.serverState = const ServerStopped(),
+    this.managedServer = true,
     this.parked,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -1284,15 +1322,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     inboxTier: widget.inboxTier,
     processingOn: widget.processingOn,
     serverState: widget.serverState,
+    managedServer: widget.managedServer,
     decisionUrl: widget.decisionUrl,
     decisionModel: widget.decisionModel,
     decisionKeyStored: widget.decisionKeyStored,
+    decisionKeyFromBuild: widget.decisionKeyFromBuild,
     decisionKind: widget.decisionKind,
     generativeUrl: widget.generativeUrl,
     generativeModel: widget.generativeModel,
     generativeKeyStored: widget.generativeKeyStored,
+    generativeKeyFromBuild: widget.generativeKeyFromBuild,
     statuses: widget.modelStatuses,
-    decideInstallDir: widget.decideInstallDir,
+    registryUrl: widget.registryUrl,
+    registryTokenStored: widget.registryTokenStored,
+    registryTokenFromBuild: widget.registryTokenFromBuild,
+    onSaveRegistry: widget.onSaveRegistry,
+    onRemoveRegistryToken: widget.onRemoveRegistryToken,
+    onCheckRegistry: widget.onCheckRegistry,
+    ensureState: widget.ensureState,
+    onDownloadModels: widget.onDownloadModels,
+    onRedownloadDecision: widget.onRedownloadDecision,
     probe: widget.probeServer,
     storedBearer: widget.storedBearer,
     onUseDecision: widget.onUseDecision,

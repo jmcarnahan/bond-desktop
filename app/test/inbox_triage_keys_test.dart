@@ -379,6 +379,9 @@ void main() {
       await store.setPref(backendModeKey, backendModeSdk);
     }
 
+    // Processing ON, which this file relied on while it was the default: a
+    // Needs You press refuses while it is off (`StateError`).
+    await store.setPref(processingOnKey, 'true');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

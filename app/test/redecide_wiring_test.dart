@@ -35,9 +35,12 @@ void main() {
   late BondDatabase db;
   late MessageStore store;
 
-  setUp(() {
+  setUp(() async {
     db = testDb();
     store = MessageStore(db);
+    // Processing ON, which these cases relied on while it was the default:
+    // the queue's pump and the re-decide both stand down while it is off.
+    await store.setPref(processingOnKey, 'true');
   });
 
   tearDown(() => db.close());

@@ -54,9 +54,9 @@ class SetupWelcomeBody extends StatelessWidget {
         ),
         const SizedBox(height: BondSpacing.s12),
         Text(
-          'The models that do the reading run on this Mac. Setup takes four '
-          'steps: check this Mac, download the models (about 22 GB), sign in, '
-          'and choose notifications.',
+          'The models that do the reading run on this Mac or on a server you '
+          'name. Setup takes four steps: check this Mac, download the models '
+          'it needs, sign in, and choose notifications.',
           style: BondType.body.copyWith(color: BondColors.inkSecondary),
         ),
         if (error != null) ...[

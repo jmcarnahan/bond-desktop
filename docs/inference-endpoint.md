@@ -124,8 +124,9 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
 --host 0.0.0.0 --port 8080 --alias bond-decide-mbl-v3 [--api-key-file /opt/bond/api.key]
 ```
 
-- **The file.** PATH is the GGUF `make decide-install` put on this Mac:
-  `~/Library/Application Support/com.bondinbox.app/models/local_bond-decide/bond-decide-mbl-v3-f16.gguf`
+- **The file.** PATH is the v3 swap GGUF the app downloaded from the model
+  registry (or `make decide-fetch` fetched into the same folder):
+  `~/Library/Application Support/com.bondinbox.app/models/artifactory_bond-decide-mbl-v3swap/bond-decide-mbl-v3-f16.gguf`
   (quote it, since the folder has a space, and write `"$HOME/Library/…"`
   rather than `~`, which does not expand inside quotes). `up` and `restart` copy it to
   `/opt/bond/decide/` on the box over scp, into `incoming/` first, and move it
@@ -140,13 +141,16 @@ GGUF as mean-pooled embeddings with exactly the local arguments:
 - **The heads stay on the Mac.** Only the GGUF travels. The heads (the nine
   message fields and the three storyline questions), temperatures and softmax
   run in the app, off `decide-heads.json` in the local models folder, so a Mac
-  pointed at a box's decision server still needs `make decide-install`.
-  `--decide-gguf` refuses a `.json`.
-- **The name.** Served as `bond-decide-mbl-v3` (`--decide-served`), the
-  name the app asks a box for. That is the v2 model, whose schema-1 heads file
-  this build refuses; the v3 install updates the file name and the export, and
-  until then a v2 decide slot parks the app's decision pass the same way a v2
-  install on the Mac does.
+  pointed at a box's decision server still downloads the decision model's
+  files from the registry. `--decide-gguf` refuses a `.json`.
+- **The name, and serve the v3 swap file.** Served as `bond-decide-mbl-v3`
+  (`--decide-served`), the name the app asks a box for. The raw v3 model and
+  the v3 swap model both carry that name, and the app's heads are the v3
+  swap's. Nothing checks which of the two a slot serves: raw v3 vectors under
+  v3 swap heads give wrong answers with no error. So before any Mac points its
+  Decision model at the box, publish the v3 swap GGUF to the slot
+  (`restart --decide-gguf PATH` with the path above) and restart it. The
+  same goes for a slot still serving an older v2 file under that name.
 - **Order and memory.** The decide slot starts after the vLLM slots, because
   vLLM measures free GPU memory when it starts. It needs about 1.5 GB: room
   enough beside the 27B alone (92% of the card) and tight beside the 27B and
@@ -337,14 +341,19 @@ https://box.example.com/prose/v1/chat/completions   model qwen3.8               
 https://box.example.com/decide/v1/embeddings        model bond-decide-mbl-v3   Decision model
 ```
 
-Each is a role's **Your server** address in Settings → Models. A build with
-`BOND_BOX_URL=https://box.example.com` in `.env` derives both itself
-(`/prose/v1/chat/completions` and `/decide/v1/embeddings`), so they need no
-typing. With ModernBERT in the decide slot, the Decision model's heads file
-stays on the Mac: run `make decide-install` there even when the decision
+Each is a role's **Your server** address in Settings → Models. A build made
+from the repository with `BOND_BOX_URL = https://box.example.com` and
+`BOND_BOX_KEY` in `local.mk` (see `QUICKSTART.md`) derives both addresses
+itself (`/prose/v1/chat/completions` and `/decide/v1/embeddings`) and carries
+the key, so nothing needs typing. Both are compiled defaults: an address or
+key saved under Settings → Models wins, a typed key is kept in the keychain,
+and **Remove key** returns to the build's. The build's key is sent only to
+the build's address; a typed address on another host needs its own key. An
+installer build carries no key, so there it is typed. With ModernBERT in the
+decide slot, the Decision model's heads file stays on the Mac: the app still
+downloads the decision model's files from the registry even when the decision
 server is the box. Kev on the box (below) needs no file on the Mac. The
-`/bulk/` slot is for the benches only. The key is typed into the app and kept
-in the keychain. From a terminal:
+`/bulk/` slot is for the benches only. From a terminal:
 
 ```sh
 tools/inference.sh test --url https://box.example.com/prose --bearer KEY --model qwen3.8
@@ -372,8 +381,10 @@ is enforced rather than merely accepted.
 - On a persistent box the access key is the credential. Every slot answers 401
   without it. Rotate it by running `persist` again with a new key file, which
   rewrites `/opt/bond/api.env` and `/opt/bond/api.key` and restarts the slots. The key belongs in no
-  committed file. It lives in a 600 file on this Mac, in the app's keychain
-  entry, and in `.env` for the bench recipes, and all three are outside git.
+  committed file. It lives in a 600 file on this Mac, in `local.mk`
+  (`BOND_BOX_KEY`, compiled into a build made from the repository), in the
+  app's keychain entry when typed, and in `.env` for the bench recipes, and
+  all of them are outside git.
 - Prompts carrying mail content cross the internet to a persistent box, under
   TLS, to an EC2 instance the owner of the install rents and runs. It is not a
   third-party model vendor, which is why the app does not treat the box as one

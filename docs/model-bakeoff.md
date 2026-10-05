@@ -3704,11 +3704,18 @@ it can be measured at all, let alone adopted.
 
 ## Open questions
 
-**Distribution.** The installer round answers this: the app bundles its own
-`llama-server`, built from a SHA-pinned llama.cpp source tarball, and ships as
-a DMG, with the weights downloaded on first run from a committed manifest.
-`docs/distribution.md` is the authority on how a checkout becomes an
-installable build.
+**Distribution.** Today a new machine runs Bond from the repository
+(`make app-run`, set up by `QUICKSTART.md` with one `local.mk`). The app
+downloads its models itself, at launch and from Settings, Models, each file
+sha256-pinned in `app/assets/models/manifest.json`: the decision model (the
+`bond-decide-mbl-v3swap` bundle, GGUF plus heads file) from the model registry
+(JFrog Artifactory) with a read token, and the embedding model from Hugging
+Face. The generative model runs on your server by default, so the 27B is
+downloaded only when it is placed on This Mac. The installer is still future
+work: the installer round built a DMG that bundles its own `llama-server`,
+built from a SHA-pinned llama.cpp source tarball, and `docs/distribution.md`
+is the authority on how a checkout becomes an installable build, but no DMG
+is distributed yet.
 
 **Reasoning models on oMLX.** oMLX needs per-model reasoning-parser
 configuration to separate reasoning tokens from the answer. Nothing in the

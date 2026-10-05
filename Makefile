@@ -137,18 +137,28 @@ FAST_SLOTS   ?= 4
 # port because 8090 is OMLX_PORT, and its own process because the embed server
 # pools `last` and one llama-server serves one pooling mode per model.
 DECIDE_PORT  ?= 8083
-# Where `make decide-install` copies from: the v3 export of the storyline-questions
-# training round (GGUF, heads JSON schema 2 with the twelve questions). Never downloaded — the weights
-# were trained on the owner's own mail (the plan's D12).
-DECIDE_SRC   ?= $(HOME)/projects/jev-prototype/runs/modernbert-large-v3/export
-# The app's models folder, where the managed server will look:
-# <models>/<repo with '/' as '_'>/<file> (RouterPreset.modelPath), for the repo
-# `local/bond-decide`. It holds a space, so every recipe quotes it.
-DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/local_bond-decide
+# The folder the app's downloader writes the decision model into, and where
+# the managed server will look: <models>/<repo with '/' as '_'>/<file>
+# (RouterPreset.modelPath), for the manifest repo
+# `artifactory/bond-decide-mbl-v3swap`. `make decide-fetch` fills the same
+# folder. It holds a space, so every recipe quotes it.
+DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/artifactory_bond-decide-mbl-v3swap
 DECIDE_QUANT ?= f16
 DECIDE_FILE  ?= bond-decide-mbl-v3-$(DECIDE_QUANT).gguf
 DECIDE_HEADS ?= decide-heads.json
 DECIDE_GGUF  ?= $(DECIDE_DIR)/$(DECIDE_FILE)
+# The weights' name inside the registry bundle (DECIDE_BUNDLE). On disk it is
+# renamed DECIDE_FILE, the name the heads file's `model` must prefix.
+DECIDE_REMOTE_GGUF  ?= model-f16.gguf
+# The heads file's name inside the bundle; on disk it is DECIDE_HEADS.
+DECIDE_REMOTE_HEADS ?= heads.json
+# The sha256 the downloaded GGUF must have — the manifest's `sha256` for the
+# decide entry, which the parity test holds equal. Bumped together, from the
+# bundle's bundle.json.
+DECIDE_GGUF_SHA  ?= e348ca9117036b8d8c79d93783d74092f5fcd3a8ac06bdc1ea153935243dfa88
+# The sha256 the downloaded heads file must have — the manifest's
+# `heads.sha256`, on DECIDE_GGUF_SHA's terms.
+DECIDE_HEADS_SHA ?= a38835a22858b28827561d1b9c85d752d14cb8277dc248699ec82ee82fa7ad72
 # 2048 because the heads were trained on states truncated at 2048 tokens: a
 # wider context would pool over text the model never saw in training. Batch and
 # ubatch match it because an embedding is one pass over the whole input.
@@ -178,9 +188,9 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
-        decide decide-stop decide-install _wait-decide \
+        decide decide-stop decide-fetch _wait-decide \
         app-install app-run app-test app-gen app-migrations app-analyze \
-        app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
+        app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
         ab drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
@@ -203,7 +213,7 @@ help:
 	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
 	@printf "  make decide       → start the decision-model server :$(DECIDE_PORT) ($(DECIDE_FILE))\n"
 	@printf "  make decide-stop  → stop the decision-model server on :$(DECIDE_PORT)\n"
-	@printf "  make decide-install → copy the decision model from DECIDE_SRC into the models folder\n"
+	@printf "  make decide-fetch → download the decision model from the model registry (BOND_REGISTRY_URL) into the models folder, sha-checked\n"
 	@printf "  make omlx         → start the oMLX bakeoff server :$(OMLX_PORT) (all cached models)\n"
 	@printf "  make omlx-stop    → stop the oMLX server on :$(OMLX_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
@@ -214,6 +224,7 @@ help:
 	@printf "  make verify       → SHA256 the downloaded weights against the HF cache\n"
 	@printf "  make clean-model  → delete the cached weights for a re-download\n"
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
+	@printf "  make app-doctor   → check this environment's local.mk and .env before the first app-run\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
 	@printf "  make foreground W=<worktree>   → check a round's branch out HERE for the manual pass (the worktree detaches)\n"
 	@printf "  make background W=<worktree>   → the reverse: this checkout back on main, the worktree back on its branch\n"
@@ -296,7 +307,8 @@ install:
 # bulk slot defaults to the fast server, so a setup that skipped it would hand
 # over benches that fail on their first call. The app itself needs neither by
 # default (it runs its own router); the decision model is not downloaded here
-# at all — `make decide-install` copies it, `make decide` serves it by hand.
+# at all — the app downloads it from the model registry (`make decide-fetch`
+# does the same for a bench), and `make decide` serves it by hand.
 setup:
 	@printf "$(BLUE)==>$(RESET) [1/7] installing prerequisites\n"
 	@$(MAKE) --no-print-directory install
@@ -396,7 +408,7 @@ model:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(MODEL_CTX))\n"; \
-	 nohup llama-server -hf $(MODEL_HF) $(MODEL_FLAGS) --port $(MODEL_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(MODEL_HF) $(MODEL_FLAGS) --port $(MODEL_PORT) \
 	   > $(LOG_DIR)/model-$(MODEL_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-model
 
@@ -463,7 +475,7 @@ embed:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_HF), embeddings)\n"; \
-	 nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
 	   $(EMBED_ARGS) \
 	   > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-embed
@@ -519,7 +531,7 @@ fast:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(FAST_PORT)  ($(FAST_HF), ctx $(CTX_SIZE))\n"; \
-	 nohup llama-server -hf $(FAST_HF) $(FAST_FLAGS) --port $(FAST_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(FAST_HF) $(FAST_FLAGS) --port $(FAST_PORT) \
 	   > $(LOG_DIR)/model-$(FAST_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-fast
 
@@ -553,8 +565,9 @@ fast-stop:
 
 # The decision-model server. Same port guard as `embed:`, same split between the
 # launch line and the wait line so `make -n decide` stays a dry run. -m rather
-# than -hf: the weights are a local install (`make decide-install`), so a
-# missing file is a missing install, said as one, not a download to wait for.
+# than -hf: the weights come from the model registry (the app's download, or
+# `make decide-fetch`), so a missing file is said as one, not a download to
+# wait for.
 # Like `embed:`, any llama-server already on the port counts as up, whichever
 # model it holds — `make decide-stop` first to swap the file.
 decide:
@@ -570,12 +583,12 @@ decide:
 	 fi; \
 	 if [ ! -f "$(DECIDE_GGUF)" ]; then \
 	   printf "  $(RED)✗$(RESET) no decision model at %s\n" "$(DECIDE_GGUF)"; \
-	   printf "    install it first: make decide-install\n"; \
+	   printf "    download it first: run the app once, or make decide-fetch\n"; \
 	   exit 1; \
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(DECIDE_PORT)  ($(DECIDE_FILE), decision embeddings)\n"; \
-	 nohup llama-server -m "$(DECIDE_GGUF)" --embeddings --host 127.0.0.1 --port $(DECIDE_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -m "$(DECIDE_GGUF)" --embeddings --host 127.0.0.1 --port $(DECIDE_PORT) \
 	   -ngl 99 $(DECIDE_ARGS) \
 	   > $(LOG_DIR)/model-$(DECIDE_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-decide
@@ -608,56 +621,63 @@ decide-stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(DECIDE_PORT) free\n"
 
-# Copies the GGUF and the heads file — the heads are needed even when the
-# decision server is remote, because the app applies them — from DECIDE_SRC
-# into the models folder, and refuses unless each is named exactly once in the
-# export's SHA256SUMS and matches it on both sides of the copy. Each file lands
-# as a dot-temp beside its final name and is renamed only once it verifies: a
-# running server has the installed GGUF mmapped, and overwriting it in place
-# can bring that server down or leave a half-written file behind. The two lines
-# it checked are kept as decide.sha256 beside them, so what is installed can be
-# named later.
-decide-install:
-	@src="$(DECIDE_SRC)"; dir="$(DECIDE_DIR)"; \
-	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
-	   if [ ! -f "$$src/$$f" ]; then \
-	     printf "  $(RED)✗$(RESET) %s is not in %s\n" "$$f" "$$src"; \
-	     printf "    the export is written by Phase 1 of tmp/PLAN-decision-model.md (distill/export/)\n"; \
-	     exit 1; \
-	   fi; \
-	 done; \
-	 if [ ! -f "$$src/SHA256SUMS" ]; then \
-	   printf "  $(RED)✗$(RESET) no SHA256SUMS in %s — refusing an unpinned copy\n" "$$src"; \
+# Downloads the decision model's two files — the GGUF and the heads file, which
+# are needed even when the decision server is remote, because the app applies
+# the heads — from the model registry into DECIDE_DIR, the folder the app's own
+# downloader fills, under the app's names. For a bench on a Mac where the app
+# has not run; the app needs none of this. Each file lands as the dot-temp
+# `.<name>.fetch` beside its final name — never the app's own `.part`, which
+# its downloader resumes from — and is renamed only once its sha256 matches
+# the pinned digest, so a running server's mmapped GGUF is never overwritten
+# in place; a failure of any kind deletes the temp and replaces nothing. A
+# file already present at its digest is skipped. Files placed this way have
+# no ledger row, so the app hashes them on its next download run and only
+# then counts them on disk. The token goes as the exported
+# "$$BOND_REGISTRY_TOKEN", so `make -n` prints the reference, never the
+# value; curl reads the header from a config on stdin (`-K -`), so it is not
+# in curl's argv for `ps` to show, and curl sends it only to the registry's
+# own host (it drops a custom Authorization header on a redirect elsewhere).
+# The two lines it checked are kept as decide.sha256 beside the files.
+decide-fetch:
+	@if [ -z "$(strip $(BOND_REGISTRY_URL))" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_URL is empty: set it in local.mk (see local.mk.example)\n"; \
 	   exit 1; \
 	 fi; \
-	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
-	   n=$$(awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a' "$$src/SHA256SUMS" | grep -c .); \
-	   if [ "$$n" -ne 1 ]; then \
-	     printf "  $(RED)✗$(RESET) SHA256SUMS must name %s exactly once (it names it %s times)\n" "$$f" "$$n"; \
+	 dir="$(DECIDE_DIR)"; base="$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)"; \
+	 mkdir -p "$$dir" || exit 1; \
+	 fetch() { \
+	   if [ -n "$$BOND_REGISTRY_TOKEN" ]; then \
+	     printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_REGISTRY_TOKEN" | $(CURL_CONFIG_ESCAPE))" | \
+	       curl -K - -fSL --retry 2 -o "$$2" "$$1"; \
+	   else \
+	     curl -fSL --retry 2 -o "$$2" "$$1"; \
+	   fi; \
+	 }; \
+	 for spec in "$(DECIDE_REMOTE_GGUF) $(DECIDE_FILE) $(DECIDE_GGUF_SHA)" \
+	             "$(DECIDE_REMOTE_HEADS) $(DECIDE_HEADS) $(DECIDE_HEADS_SHA)"; do \
+	   set -- $$spec; remote=$$1; name=$$2; want=$$3; dest="$$dir/$$name"; tmp="$$dir/.$$name.fetch"; \
+	   if [ -f "$$dest" ] && [ "$$(shasum -a 256 "$$dest" | cut -d' ' -f1)" = "$$want" ]; then \
+	     printf "  $(GREEN)✓$(RESET) %s already present at its digest\n" "$$name"; \
+	     continue; \
+	   fi; \
+	   printf "→ %s/%s\n" "$$base" "$$remote"; \
+	   rm -f "$$tmp"; \
+	   if ! fetch "$$base/$$remote" "$$tmp"; then \
+	     rm -f "$$tmp"; \
+	     printf "  $(RED)✗$(RESET) %s did not download: check BOND_REGISTRY_URL and BOND_REGISTRY_TOKEN (make app-doctor)\n" "$$remote"; \
 	     exit 1; \
 	   fi; \
-	 done; \
-	 sums=$$(awk -v a="$(DECIDE_FILE)" -v b="$(DECIDE_HEADS)" \
-	   '{ g = $$2; sub(/^\*/, "", g) } g == a || g == b' "$$src/SHA256SUMS"); \
-	 if ! (cd "$$src" && printf '%s\n' "$$sums" | shasum -a 256 -c - >/dev/null 2>&1); then \
-	   printf "  $(RED)✗$(RESET) checksum mismatch in %s\n" "$$src"; \
-	   exit 1; \
-	 fi; \
-	 mkdir -p "$$dir"; \
-	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
-	   want=$$(printf '%s\n' "$$sums" | awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a { print $$1 }'); \
-	   cp "$$src/$$f" "$$dir/.$$f.tmp" || { rm -f "$$dir/.$$f.tmp"; exit 1; }; \
-	   got=$$(shasum -a 256 "$$dir/.$$f.tmp" | cut -d' ' -f1); \
+	   got=$$(shasum -a 256 "$$tmp" | cut -d' ' -f1); \
 	   if [ "$$got" != "$$want" ]; then \
-	     rm -f "$$dir/.$$f.tmp"; \
-	     printf "  $(RED)✗$(RESET) the copy of %s does not match — nothing was replaced\n" "$$f"; \
+	     rm -f "$$tmp"; \
+	     printf "  $(RED)✗$(RESET) %s does not match its pinned sha256 (got %s): nothing was replaced\n" "$$remote" "$$got"; \
 	     exit 1; \
 	   fi; \
-	   mv -f "$$dir/.$$f.tmp" "$$dir/$$f"; \
+	   mv -f "$$tmp" "$$dest" || { rm -f "$$tmp"; exit 1; }; \
+	   printf "  $(GREEN)✓$(RESET) %s\n" "$$name"; \
 	 done; \
-	 printf '%s\n' "$$sums" > "$$dir/decide.sha256"; \
-	 printf "  $(GREEN)✓$(RESET) decision model installed in %s\n" "$$dir"; \
-	 printf '%s\n' "$$sums" | sed 's/^/    /'
+	 printf '%s  %s\n%s  %s\n' "$(DECIDE_GGUF_SHA)" "$(DECIDE_FILE)" "$(DECIDE_HEADS_SHA)" "$(DECIDE_HEADS)" > "$$dir/decide.sha256"; \
+	 printf "  $(GREEN)✓$(RESET) decision model in %s\n" "$$dir"
 
 # ~0.8GB from local disk: no download, so a timeout here is a failure worth the
 # log.
@@ -761,7 +781,7 @@ clean:
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
 # By default the app runs its OWN llama-server router (the decision model, the
-# embeddings and, unless the build names a box, the generative model) and
+# embeddings and, when it is set to This Mac, the generative model) and
 # none of the servers above is needed. A BOND_DEV_HAND_SERVERS build instead
 # talks to three hand-started servers: :$(DECIDE_PORT) for the decision model
 # (every kept message's classification), :$(MODEL_PORT) for every generative
@@ -789,6 +809,53 @@ clean:
 # BOND_MCP_SERVER_URL — the deployed bond-mcps endpoint, kept out of source
 # for the same public-repo reason as the ids.
 MS_ENV ?= $(CURDIR)/.env
+
+# ── this environment: the model registry and Your server ───────────────
+# The four values a new environment is configured with, all written in
+# local.mk (local.mk.example is the template; plain `=`, comments on their
+# own line). Each one is a compiled DEFAULT: `make app-run` and `make
+# app-build` pass it to the app as a --dart-define, and a value saved under
+# Settings, Models in the app beats it. `make app-doctor` checks them.
+#
+# The model registry's base address, an Artifactory repository URL; the app
+# downloads the decision model's files from <it>/bundles/<bundle>/<file>.
+BOND_REGISTRY_URL   ?=
+# The registry's READ token. A SECRET: exported below and handed to the app
+# and to curl as the shell's "$$BOND_REGISTRY_TOKEN", so `make -n` prints the
+# reference and never the value.
+BOND_REGISTRY_TOKEN ?=
+# Your server's origin, where the generative model runs (`/prose`) and a
+# decision server may (`/decide`). Empty falls back to a BOND_BOX_URL line in
+# $(MS_ENV), which is where it was read from before the default-setup round.
+BOND_BOX_URL        ?=
+# Your server's access key. A SECRET on BOND_REGISTRY_TOKEN's terms; the app
+# sends it only to BOND_BOX_URL's own origin, and a key saved in the app's
+# keychain beats it. A distributed build (dist/) carries none.
+BOND_BOX_KEY        ?=
+# The registry bundle the decision model is downloaded from, and the one
+# `make app-doctor` asks the registry for (its $(DECIDE_REMOTE_HEADS)).
+DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
+# The secrets travel as ENVIRONMENT, never as make text: every recipe that
+# needs one names it as a shell reference. Exported to every recipe because
+# GNU Make 3.81, the one macOS ships, has no target-specific `export VAR`, and
+# make hands a variable set on its command line to every recipe whatever this
+# line says. So the recipes that must NOT carry them take them out instead,
+# with $(APP_NO_SECRET_ENV): the hand-started servers (model, fast, embed,
+# decide, omlx), app-test's flutter test, the dist scripts, and app-run /
+# app-build after the shell has read them into the defines.
+export BOND_REGISTRY_TOKEN BOND_BOX_KEY
+# A secret written into a curl config (`-K -`) sits inside double quotes,
+# where curl reads a backslash or a double quote as an escape: both are
+# escaped first, through a pipe, so the value is never on a command line.
+CURL_CONFIG_ESCAPE := sed 's/[\\"]/\\&/g'
+
+# A Homebrew llama-server (`brew install llama.cpp`) is found on PATH, so a
+# new environment needs no BOND_LLAMA_SERVER line in local.mk; a plain `=`
+# there still wins. Empty when there is none, and the app then reports it.
+# `:=` under an origin check, so the lookup runs once and not on every use.
+ifeq ($(origin BOND_LLAMA_SERVER),undefined)
+BOND_LLAMA_SERVER := $(shell command -v llama-server 2>/dev/null)
+endif
 
 # ── the bakeoff: where a bench points ──────────────────────────────────
 # Every one of these is `?=`, so a durable override in local.mk (included at
@@ -971,11 +1038,11 @@ SWEEP_EMBED_PREFIX ?=
 # BENCH_BEARER and BENCH_BOX_KEY are the exceptions, and deliberately: `:=`
 # expands `$$` to a literal `$` once, here, so what is STORED is the text
 # `$(grep …)` and every recipe that uses BENCH_DEFINES has its own shell run
-# that grep at recipe time. A key therefore never sits in a make variable,
-# never appears in `make -n` output, and never reaches the environment of
-# anything but the one flutter test that needs it. BENCH_BOX_KEY is the shared
-# GPU box's access key, which a bench needs because it runs outside the app and
-# has no keychain to read it from; BOND_BOX_KEY lives in `.env` alone.
+# that grep at recipe time. A key therefore never appears in `make -n` output.
+# BENCH_BOX_KEY is the shared GPU box's access key, which a bench needs
+# because it runs outside the app and has no keychain to read it from: the
+# exported BOND_BOX_KEY from local.mk when it is set, else a BOND_BOX_KEY line
+# in $(BEDROCK_ENV), where it lived before the default-setup round.
 BENCH_DEFINES := \
   --dart-define=BENCH_URL='$(BENCH_URL)' \
   --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
@@ -1009,7 +1076,7 @@ BENCH_DEFINES := \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
   --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)" \
-  --dart-define=BENCH_BOX_KEY="$$(grep -m1 '^BOND_BOX_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
+  --dart-define=BENCH_BOX_KEY="$${BOND_BOX_KEY:-$$(grep -m1 '^BOND_BOX_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)}"
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
@@ -1073,7 +1140,7 @@ omlx:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ omlx serve on :$(OMLX_PORT)  (all cached models, guard $(OMLX_GUARD_GB)GB, $(OMLX_SLOTS) slots)\n"; \
-	 nohup $(OMLX_SERVE) \
+	 $(APP_NO_SECRET_ENV) nohup $(OMLX_SERVE) \
 	   > $(LOG_DIR)/omlx-$(OMLX_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-omlx
 
@@ -1109,11 +1176,13 @@ omlx-stop:
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
-# behavior). BOND_BOX_URL rides along: it makes the GPU server the build's
-# default place for the GENERATIVE model (`/prose`) and prefills both role
+# behavior). A BOND_BOX_URL line in $(MS_ENV) rides along as a FALLBACK, read
+# only while the make variable BOND_BOX_URL is empty, so the define is never
+# passed twice: the box's address and access key belong in local.mk now
+# (APP_LLM_DEFINES below passes them), and this grep keeps a setup that still
+# keeps the address in $(MS_ENV) working. The address prefills both role
 # addresses in the wizard and in Settings (`/prose` and `/decide`); the
-# decision model still defaults to this Mac. The box's access key is NOT here. It is typed in the app and kept
-# in the keychain.
+# access key is never read from $(MS_ENV) by the app's build.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
@@ -1122,8 +1191,8 @@ $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-)
    if [ -n "$$CID" ]; then printf -- '--dart-define=MS_CLIENT_ID=%s ' "$$CID"; fi; \
    if [ -n "$$TID" ]; then printf -- '--dart-define=MS_TENANT_ID=%s ' "$$TID"; fi; \
    if [ -n "$$MCPURL" ]; then printf -- '--dart-define=BOND_MCP_SERVER_URL=%s ' "$$MCPURL"; fi; \
-   BOXURL=$$(grep -m1 '^BOND_BOX_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
-   if [ -n "$$BOXURL" ]; then printf -- '--dart-define=BOND_BOX_URL=%s ' "$$BOXURL"; fi; \
+   $(if $(strip $(BOND_BOX_URL)),,BOXURL=$$(grep -m1 '^BOND_BOX_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   if [ -n "$$BOXURL" ]; then printf -- '--dart-define=BOND_BOX_URL=%s ' "$$BOXURL"; fi;) \
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 
@@ -1162,6 +1231,34 @@ endif
 ifneq ($(strip $(BOND_LLAMA_SERVER)),)
 APP_LLM_DEFINES += --dart-define=BOND_LLAMA_SERVER='$(BOND_LLAMA_SERVER)'
 endif
+# This environment's model registry and Your server (local.mk, see the block
+# beside MS_ENV): the two addresses as plain values, one block each for the
+# reason above.
+ifneq ($(strip $(BOND_REGISTRY_URL)),)
+APP_LLM_DEFINES += --dart-define=BOND_REGISTRY_URL='$(BOND_REGISTRY_URL)'
+endif
+ifneq ($(strip $(BOND_BOX_URL)),)
+APP_LLM_DEFINES += --dart-define=BOND_BOX_URL='$(BOND_BOX_URL)'
+endif
+# The two secrets as SHELL references: `+=` onto a `:=` variable expands `$$`
+# to one `$` here, so the recipe line holds the text "$BOND_BOX_KEY" and the
+# recipe's shell reads the exported value. `make -n app-run` therefore prints
+# the reference and never the key. Compiled into a from-repo build only; the
+# app sends each to its own address's origin alone.
+# The shell expands those two references BEFORE it runs the command, so the
+# build still gets its defines, and this prefix then takes both secrets out of
+# the environment flutter, the app and the llama-server the app starts would
+# otherwise inherit from the `export` beside MS_ENV. They are still in the
+# flutter process's ARGUMENTS for as long as `make app-run` lives (see
+# app/CLAUDE.md: never list that process with its arguments). Every other
+# recipe that uses neither secret carries the same prefix (see the `export`).
+APP_NO_SECRET_ENV := env -u BOND_BOX_KEY -u BOND_REGISTRY_TOKEN
+ifneq ($(strip $(BOND_REGISTRY_TOKEN)),)
+APP_LLM_DEFINES += --dart-define=BOND_REGISTRY_TOKEN="$$BOND_REGISTRY_TOKEN"
+endif
+ifneq ($(strip $(BOND_BOX_KEY)),)
+APP_LLM_DEFINES += --dart-define=BOND_BOX_KEY="$$BOND_BOX_KEY"
+endif
 # Read by the first-run setup gate (Phase 4) to skip the wizard on a machine
 # that is already set up. Defined here NOW, while the gate is still being
 # built, so the `local.mk` line a developer writes today keeps working when it
@@ -1191,7 +1288,7 @@ app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
 
 app-run:
-	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 
 # A round is built in a worktree under .claude/worktrees/<name> and tested by
 # hand from THIS checkout, where local.mk, .env, the signing config and the
@@ -1233,7 +1330,7 @@ background:
 	 printf "\n  main is back here; %s is on the worktree at %s.\n" "$$branch" "$$wt"
 
 app-test:
-	@cd $(APP_DIR) && $(FLUTTER) test
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) test
 
 # Regenerates Drift's code (*.g.dart) and migration snapshots. The output is
 # COMMITTED: app-analyze and app-test must stay green from a clean checkout
@@ -1641,6 +1738,70 @@ golden-judge-tally: golden-check
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
 
+# Is this environment configured? One line each, ✓ or ✗: flutter and its
+# version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
+# registry answering for $(DECIDE_BUNDLE) with the token (its first byte of
+# $(DECIDE_REMOTE_HEADS), a file the app really downloads, the way Settings'
+# Check asks: 200 or 206 is ✓ unless it is a `text/html` page, and a redirect
+# is a `!` warning, as Check words it, since the app's downloads follow one
+# though doctor itself does not), and Your server
+# answering /prose/v1/models with the key. It prints HTTP status codes only,
+# never a secret: the two tokens reach the shell as "$$BOND_…" references
+# through the `export` beside MS_ENV, so `make -n app-doctor` shows the
+# reference, and curl reads its header from a config on stdin (`-K -`), so
+# the token is never in curl's argv for `ps` to show. Exits non-zero when any line is ✗. Read-only: nothing is
+# downloaded, started or written.
+app-doctor:
+	@fail=0; \
+	 if v=$$($(FLUTTER) --version 2>/dev/null | grep -m1 '^Flutter') && [ -n "$$v" ]; then \
+	   printf "  $(GREEN)✓$(RESET) %s\n" "$$v"; \
+	 else \
+	   printf "  $(RED)✗$(RESET) flutter not found — install it, or set FLUTTER in local.mk\n"; fail=1; \
+	 fi; \
+	 if [ -n "$(BOND_LLAMA_SERVER)" ] && [ -x "$(BOND_LLAMA_SERVER)" ]; then \
+	   printf "  $(GREEN)✓$(RESET) llama-server at %s\n" "$(BOND_LLAMA_SERVER)"; \
+	 else \
+	   printf "  $(RED)✗$(RESET) llama-server not found — brew install llama.cpp, or set BOND_LLAMA_SERVER in local.mk\n"; fail=1; \
+	 fi; \
+	 if grep -q '^BOND_MCP_SERVER_URL=.' "$(MS_ENV)" 2>/dev/null; then \
+	   printf "  $(GREEN)✓$(RESET) BOND_MCP_SERVER_URL is set in %s\n" "$(MS_ENV)"; \
+	 else \
+	   printf "  $(RED)✗$(RESET) BOND_MCP_SERVER_URL is not set in %s\n" "$(MS_ENV)"; fail=1; \
+	 fi; \
+	 if [ -z "$(strip $(BOND_REGISTRY_URL))" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_URL is not set in local.mk\n"; fail=1; \
+	 elif [ -z "$$BOND_REGISTRY_TOKEN" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_TOKEN is not set in local.mk\n"; fail=1; \
+	 else \
+	   out=$$(printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_REGISTRY_TOKEN" | $(CURL_CONFIG_ESCAPE))" | \
+	     curl -K - -s -o /dev/null -w '%{http_code} %{content_type}' -m 8 -r 0-0 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/$(DECIDE_REMOTE_HEADS)"); \
+	   code=$${out%% *}; type=$$(printf '%s' "$${out#* }" | tr 'A-Z' 'a-z'); \
+	   case "$$code" in \
+	     200|206) case "$$type" in \
+	       text/html*) printf "  $(RED)✗$(RESET) the registry answered with a web page, not a model — check BOND_REGISTRY_URL\n"; fail=1;; \
+	       *) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
+	     esac;; \
+	     3[0-9][0-9]) printf "  $(YELLOW)!$(RESET) the registry answered with a redirect — HTTP %s; the app follows it, but the https address, or the one it redirects to, is steadier\n" "$$code";; \
+	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
+	     404) printf "  $(RED)✗$(RESET) the registry does not have $(DECIDE_BUNDLE) — HTTP 404; check BOND_REGISTRY_URL\n"; fail=1;; \
+	     *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for $(DECIDE_BUNDLE)\n" "$$code"; fail=1;; \
+	   esac; \
+	 fi; \
+	 if [ -z "$(strip $(BOND_BOX_URL))" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_BOX_URL is not set in local.mk\n"; fail=1; \
+	 elif [ -z "$$BOND_BOX_KEY" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_BOX_KEY is not set in local.mk\n"; fail=1; \
+	 else \
+	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_BOX_KEY" | $(CURL_CONFIG_ESCAPE))" | \
+	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 "$(BOND_BOX_URL:%/=%)/prose/v1/models"); \
+	   case "$$code" in \
+	     200) printf "  $(GREEN)✓$(RESET) your server answers at %s\n" "$(BOND_BOX_URL)";; \
+	     401|403) printf "  $(RED)✗$(RESET) your server refused the key — HTTP %s\n" "$$code"; fail=1;; \
+	     *) printf "  $(RED)✗$(RESET) your server answered HTTP %s at %s\n" "$$code" "$(BOND_BOX_URL)"; fail=1;; \
+	   esac; \
+	 fi; \
+	 exit $$fail
+
 # ── vendored sqlite-vec sources ────────────────────────────────────────
 # The four C/H files under $(VEC_SRC) are COMMITTED, not fetched at build
 # time. `flutter test` and `flutter build` compile them through the
@@ -1712,7 +1873,7 @@ vec-vendor:
 	 printf "  $(YELLOW)!$(RESET) these are committed — include them in the diff\n"
 
 app-build:
-	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 	@printf "  $(GREEN)✓$(RESET) \"$(APP_DIR)/build/macos/Build/Products/Release/Bond Desktop.app\"\n"
 
 # ── distribution ───────────────────────────────────────────────────────
@@ -1757,42 +1918,42 @@ DIST_NOTARY_TIMEOUT ?= 30m
 BOND_DIST_ALLOW_NO_MCP ?=
 
 dist-llama:
-	@dist/build-llama.sh
+	@$(APP_NO_SECRET_ENV) dist/build-llama.sh
 
 dist-app: dist-llama
-	@MS_ENV="$(MS_ENV)" VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
+	@$(APP_NO_SECRET_ENV) MS_ENV="$(MS_ENV)" VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
 	 AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" \
 	 BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/bundle.sh
 
 dist-sign: dist-app
-	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/sign.sh
+	@$(APP_NO_SECRET_ENV) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/sign.sh
 
 dist-notarize: dist-sign
-	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
+	@$(APP_NO_SECRET_ENV) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
 
 # A real DMG is built from the STAPLED app: the ticket is written INTO the
 # bundle, so a copy taken before notarization carries none. AD_HOC=1 has
 # nothing to notarize and drops the prerequisite. `.NOTPARALLEL` at the top of
 # this file is what keeps the two prerequisites in this order.
 dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
-	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
+	@$(APP_NO_SECRET_ENV) VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
 
 dist-check:
-	@MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+	@$(APP_NO_SECRET_ENV) MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
 # How a maintainer gets `generate_keys` without installing anything globally:
 # the pinned tools are staged under dist/stage/ and dist-clean takes them away
 # again. dist-appcast runs this itself; it is a target of its own only for the
 # one-off key generation in docs/distribution.md.
 dist-sparkle-tools:
-	@dist/sparkle-tools.sh
+	@$(APP_NO_SECRET_ENV) dist/sparkle-tools.sh
 
 # No prerequisite, deliberately. dist-app rebuilds the whole app on every run,
 # and re-running the appcast after a failed upload must not rebuild and
 # re-notarize an identical binary. What it needs is the DMG in dist/out/, which
 # the script checks for and names the command that produces.
 dist-appcast:
-	@VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/appcast.sh
+	@$(APP_NO_SECRET_ENV) VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/appcast.sh
 
 # Internal, hence the leading underscore (the `_wait-*` convention). The strict
 # report runs FIRST so a release never begins on a machine that cannot finish
@@ -1803,7 +1964,7 @@ _dist-preflight:
 	   printf "  $(RED)✗$(RESET) make dist is the signed, notarized release — for a tester build use: make dist-dmg AD_HOC=1\n"; \
 	   exit 1; \
 	 fi
-	@STRICT=1 MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+	@$(APP_NO_SECRET_ENV) STRICT=1 MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
 # No $(MAKE) sub-invocations here: the prerequisite chain already gives the
 # order, and a sub-make would rebuild the app once per invocation.

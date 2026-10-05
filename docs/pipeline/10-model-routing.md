@@ -154,16 +154,26 @@ Each role has its own placement (`ModelPlacement { box, local }`; `box` is
 
 | Role | Placement key | Default |
 |------|---------------|---------|
-| Generative | `model_placement` (Round H's key, reused) | `box` in a build compiled with `BOND_BOX_URL`, `local` otherwise (`defaultModelPlacement`) |
+| Generative | `model_placement` (Round H's key, reused) | `box` whatever the build (`defaultModelPlacement`, the default-setup round's D9, 2026-10); with no address anywhere the role is unavailable and parks, it never falls back to this Mac |
 | Decision | `decision_placement` | `local` whatever the build: it reads every message, and a local pass beats any network hop |
 
 Each role's spec resolves in the same order, per call:
 
 1. **Your server**, when the placement is `box` AND an address resolves AND it
    is the owner's own (not third party, not the Converse wire).
-2. **The managed router**, when the app runs its own server
+2. **Generative only: Your server with no address.** Placement `box` and no
+   address stored or compiled is still the `box-prose` spec, with an empty
+   URL, and `AppPrefs.unavailableFor` gives it `generativeNoAddressText`
+   (`The generative model has no server address. Add one under Settings,
+   Models.`). `LlmClient` refuses it before any request with
+   `ModelNoAddressException` and the drains park as `no_address`, spending no
+   attempt; the managed router serves no generative model for it, so no 27B
+   or 4B is demanded behind the owner's back. A `BOND_DEV_HAND_SERVERS` build
+   is the same: its hand server is reached only under `local`. (The decision
+   role keeps the older fall-through below: it defaults to this Mac.)
+3. **The managed router**, when the app runs its own server
    (`managedServer`, true unless the build says `BOND_DEV_HAND_SERVERS`).
-3. **The hand-started server** of a `BOND_DEV_HAND_SERVERS` build.
+4. **The hand-started server** of a `BOND_DEV_HAND_SERVERS` build.
 
 | | Generative (`generativeSpec`) | Decision (`decisionSpec`) |
 |---|---|---|
@@ -175,6 +185,11 @@ Each role's spec resolves in the same order, per call:
 | Managed: model | `managedGenerativeIdFor(tier, generative_managed_model)`: `bond-prose` (27B) or `bond-bulk` (4B) | `bond-decide` |
 | Hand servers | `LLAMA_URL` / `LLAMA_MODEL` (`:8080`, `qwen3.8`) | `DECIDE_URL` / `DECIDE_MODEL` (`:8083`, `bond-decide`, `make decide`) |
 
+- **Where `$BOND_BOX_URL` comes from.** `local.mk`'s `BOND_BOX_URL`, passed
+  by the Makefile's `APP_LLM_DEFINES` as `--dart-define=BOND_BOX_URL`
+  (`boxUrlDefault`); a `BOND_BOX_URL` line in `$(MS_ENV)` is read by
+  `APP_SECRET_DEFINE` only as a FALLBACK while the make variable is empty, so
+  the define is never passed twice. `local.mk.example` is the template.
 - **Empty means "follow the build".** `box_big_url`, `box_big_model`,
   `decision_url` and `decision_model` are stored EMPTY whenever the value
   equals what the build derives; the writers compare against
@@ -252,7 +267,8 @@ remote keep the shipped `needsYou`. The Models page and the wizard then call
 the preset's hash changed.
 
 **What travels.** On Your server, message text, attachment text and drafts go
-to the owner's own machine over TLS with an api-key from this Mac's keychain;
+to the owner's own machine over TLS with an api-key from this Mac's keychain,
+or the build's own key on the build's own origin (below);
 the decision model's input there is the rendered message state. The heads run
 here either way, and so does the embedding model. That is why Your server is
 not a third-party target and asks for no consent.
@@ -266,13 +282,38 @@ not a third-party target and asks for no consent.
 | `generative_managed_model` | `''`, `bond-prose` or `bond-bulk` |
 | `decision_placement`, `decision_url`, `decision_model` | decision placement, remote `/v1/embeddings` URL, discovered model |
 | `cloud_drafts_url`, `cloud_drafts_model`, `cloud_drafts_consent` | the cloud-drafts target and its consent |
+| `registry_url` | the model registry's base address, `''` to follow the build's `BOND_REGISTRY_URL` (`effectiveRegistryUrl`) |
 | `prose_parallel`, `router_port`, `models_folder` | managed width, port, folder |
 | `box_small_url`, `box_small_model`, `llm_targets`, `stage_targets`, `box_url`, `fast_llm_*`, `prose_llm_*` | INERT; read only by the frozen one-shots below |
 
-The bearers live in the keychain as `llm_target_bearer:<id>` for the three
-keyed ids: `box-prose` (generative remote), `box-decide` (decision remote) and
-`cloud-drafts`. The Round H small-server id `box-bulk` is read only by the
+The bearers live in the keychain as `llm_target_bearer:<id>` for the four
+keyed ids: `box-prose` (generative remote), `box-decide` (decision remote),
+`cloud-drafts` and `model-registry` (`registryId`, the registry's read
+token). The Round H small-server id `box-bulk` is read only by the
 role-split migration.
+
+**Key layering: the keychain, else the build's key on the build's origin.**
+Since the default-setup round a build made from the repo (`make app-run`,
+`make app-build`) carries `local.mk`'s `BOND_BOX_KEY` and
+`BOND_REGISTRY_TOKEN` (`boxKeyDefault`, `registryTokenDefault`); the Makefile
+`export`s them and the recipe passes them as `"$BOND_BOX_KEY"`, so `make -n`
+prints the reference and never the value. A distributed build carries none.
+`AppPrefsNotifier.bearerFor(id)` answers the keychain's entry when there is
+one; otherwise the compiled key for `box-prose` / `box-decide`, or the
+compiled token for `model-registry`, but ONLY while the role's effective
+address has the same ORIGIN (scheme, host, port: `sameOrigin`) as the build's
+compiled address, which includes an address that follows the build. A typed
+address on another host never receives it. `AppPrefs` carries presence flags
+only (`boxKeyCompiled`, `registryTokenCompiled`, and the derived
+`generativeKeyFromBuild`, `decisionKeyFromBuild`, `registryTokenFromBuild`);
+the secrets stay in the notifier (`compiledBoxKey:` / `compiledRegistryToken:`
+constructor parameters, the seam a test drives because every define is `''`
+under `flutter test`). A spec's `hasBearer` is "stored or from the build", and
+**Remove key** (`clearRoleKey`, `clearRegistryToken`) deletes the keychain
+entry so the build's key applies again. The registry address and token are
+written by `useRegistry({url, token, clearToken})`, `useDecision`'s shape
+(validate first, keychain before the address, `''` stored for the build's own
+address).
 
 ## Runtime overrides
 
@@ -296,7 +337,9 @@ flight.
   `_loadBearers` (the resolver is synchronous and the keychain is not). The
   specs carry only a presence flag (`boxBigKeyStored`, `decisionKeyStored`,
   `cloudDraftsKeyStored`), false until the prefetch answers, so a first drain
-  that beats it sends no half-claimed key. The token reaches the wire as the
+  that beats it sends no half-claimed key (the build's own key on the build's
+  origin may ride it: that is a key for that host either way, and a keychain
+  entry replaces it the moment it arrives). The token reaches the wire as the
   `Authorization` header and nowhere else: never `app_prefs`, never an
   `LlmCallRecord`, never an exception message, never `LlmTarget.toString()`.
   A keychain that refuses costs the header on the next request (a 401 park the
@@ -314,8 +357,12 @@ flight.
   `AppPrefs.embedRequestTarget` is what the wire carries: `bond-embed` at the
   router under managed mode, the literal `embed` at `EMBED_URL` (`:8081`)
   otherwise. `EmbeddingsClient` resolves it per request, and its
-  `describeUnavailable` says `is not running — see Settings, Models` under
-  managed mode and `run: make embed` otherwise.
+  `describeUnavailable` says `is not running. Bond's model server is
+  starting or stopped. See Settings, Models` under managed mode, and the
+  client's own `is not reachable. Run: make embed` otherwise (a
+  `BOND_DEV_HAND_SERVERS` build). The decision client says the same for the
+  managed router (`isManaged`), `Run: make decide.` for a hand-started
+  server, and nothing for Your server.
 - **The KV cache.** Every generative stage now shares one server, so each
   stage's byte-identical system prompt is its own prefix on it. A one-slot
   server evicts on every switch between stages; a GPU-served target with room
@@ -484,14 +531,28 @@ name the wrapper listed; `truncated` is always false.
 - **Timeout.** 15 s per HTTP request, not per decision, so the token path can
   take up to three requests.
 - **The heads file.** `decide-heads.json` in
-  `<models folder>/local_bond-decide/`, installed by `make decide-install`
-  beside the GGUF. `decisionHeadsProvider` loads it through
+  `<models folder>/artifactory_bond-decide-mbl-v3swap/`, downloaded from the
+  model registry as the decide entry's last leg, beside the GGUF (`make
+  decide-fetch` writes the same folder for a bench). The model ensurer
+  (below) downloads it when it is missing, whatever the decision placement.
+  `decisionHeadsProvider` loads it through
   `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
   needed even when an encoder-heads server is remote**, because the heads
   run here; a systemone server never reads it. Missing, it throws
-  `DecisionNotInstalledException` with "The decision model is not installed.
-  Run: make decide-install" (never cached, so an install is seen at the next
-  claim). On Your server the kind is asked BEFORE the heads are read, so a
+  `DecisionNotInstalledException` with "The decision model is not downloaded
+  yet. Open Settings, Models." (never cached, so a download is seen at the
+  next claim). A file this build refuses names Download instead: "The
+  decision model's heads file does not match this build. Open Settings,
+  Models and press Download again." (`DecisionHeadsFile.mismatchText`, before the
+  parser's own reason; a hand-installed `source: local` entry, which no
+  button downloads, says "Copy the current model files into the models
+  folder." instead, `mismatchLocalText`). A REGISTRY entry's heads are read
+  only while `DownloadLedger.servable` holds for it (both files here AND both
+  download rows current, the rule the router's preset uses), on This Mac and
+  under an encoder-heads Your server alike; otherwise the reader answers
+  exactly as for a missing file. It asks the store's `knownLedger`
+  synchronously on every call, so a row turning current is seen at the next
+  claim. On Your server the kind is asked BEFORE the heads are read, so a
   heads-less Mac whose ModernBERT server is down parks
   `decision_unavailable` (the listing failed) rather than
   `decision_not_installed`; the heads-file park follows once the server
@@ -514,9 +575,9 @@ What goes wrong, and what the owner sees:
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
-| Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
-| Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or press Download again under Settings, Models`; for a hand-installed entry `… or copy the current model files into the models folder` |
+| Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · open Settings, Models and press Download again to resume sorting new mail`; for a hand-installed entry `… · copy the current model files into the models folder to resume sorting new mail` |
+| Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not downloaded yet · N waiting · open Settings, Models` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
 | Any other 4xx (a systemone 413/422 included) | `LlmFormatException` | none: counted against the item | none |
 
@@ -594,11 +655,14 @@ roles want.
   at launch.
 - **The preset follows the placements at runtime.** Its `buildPreset` reads
   `managedManifestProvider` (below), tells the prefs the machine tier, and
-  serves only the entries whose files are on disk (`withPresentFiles`).
+  serves only the entries whose files are on disk (`withPresentFiles`), and a
+  registry entry only while its download rows are current
+  (`DownloadLedger.servable`).
   `ensurePreset()` is what the placement writers' callers use: it starts a server that is down, leaves one whose preset hash
   still matches alone, and restarts anything else. So moving the generative
-  role to Your server drops the chat model out of memory, and running
-  `make decide-install` while the app runs is picked up by the next
+  role to Your server drops the chat model out of memory, and a file that
+  lands while the app runs (the model ensurer's download, or `make
+  decide-fetch` into the same folder) is picked up by the next
   `ensurePreset` (a new hash) rather than by a relaunch.
 - **Four ids, one origin.** `bond-embed`, `bond-decide`, `bond-bulk` (the 4B),
   `bond-prose` (the 27B), named for the role and not the checkpoint, because
@@ -635,21 +699,37 @@ roles want.
 
 ### The manifest
 
-`app/assets/models/manifest.json` (`version: 2`) is the ONLY place the
+`app/assets/models/manifest.json` (`version: 3`) is the ONLY place the
 checkpoints are named, and `RouterPreset` knows how to write an INI and nothing
 about which models belong in one. One entry per model, in file order, which is
 the INI's section order and the router's load order: smallest first, so the
 embedding model is resident while the 27B is still mapping.
 
+Three sources. The embedding model, the 4B and the 27B come from Hugging Face.
+The decision model is a **registry** entry (`source: artifactory`): the
+`bond-decide-mbl-v3swap` bundle in the owner's model registry (Artifactory),
+fetched from `<registry base>/bundles/<bundle>/<remote file>` with
+`Authorization: Bearer <token>`, where the base and the token are
+`AppPrefs.effectiveRegistryUrl` and `bearerFor(registryId)` (Settings, else
+`local.mk`'s `BOND_REGISTRY_URL` / `BOND_REGISTRY_TOKEN`). Its two files keep
+the names the app reads (`model-f16.gguf` lands as
+`bond-decide-mbl-v3-f16.gguf`, `heads.json` as `decide-heads.json`, because
+the heads file's `model` must prefix the GGUF's name) in
+`<models folder>/artifactory_bond-decide-mbl-v3swap/`. A third source,
+`local`, is a model copied in by hand: never downloaded, no ledger row,
+installed when its files are present. The committed manifest ships none, and
+the parser and every reader still handle one.
+
 | Field | What it is |
 |-------|------------|
 | `id` | The router id: `bond-embed`, `bond-decide`, `bond-bulk`, `bond-prose`. |
 | `role` | `embed`, `decide`, `bulk` or `prose` (`ModelRole`). One model per role; the generative ROLE can be filled by either `bulk` or `prose`. |
-| `source` | Absent for a Hugging Face download; `local` for a model installed by hand (the decision model). A local entry has no `revision`, is never downloaded, and is served only once its files are present. |
-| `repo`, `file` | The Hugging Face repo and file (`local/bond-decide` for the local entry). On disk: `<repo with '/' → '_'>/<file>`. |
-| `revision` | A 40-character commit sha, never `main`, for every downloaded entry. |
-| `sizeBytes`, `sha256` | Measured size and LFS oid, checked against the hub's headers on the redirect. For the local entry, the installed file's. |
-| `heads` | The decide entry only: `file`, `sha256`, `sizeBytes` of `decide-heads.json`. `RouterPreset` ignores it; it is what the app reads. |
+| `source` | Absent for a Hugging Face download; `artifactory` for a registry download (the decision model); `local` for a model installed by hand. Anything else is refused. |
+| `repo`, `file` | The Hugging Face repo and file; `artifactory/<bundle>` for a registry entry and `local/<name>` for a local one, whose prefixes keep their folders apart. On disk: `<repo with '/' → '_'>/<file>`. |
+| `bundle`, `remoteFile` | A registry entry only, both required: the bundle id and the weights' name inside it. Each must be one URL path segment (`[A-Za-z0-9._-]+`, never `.` or `..`), as must `heads.remoteFile`; `repo` must be exactly `artifactory/<bundle>`, and a registry entry carries no `sidecar`. |
+| `revision` | A 40-character commit sha, never `main`, for every Hugging Face entry; optional for a registry entry, whose bytes `sha256` pins alone; absent for a local one. |
+| `sizeBytes`, `sha256` | Measured size and digest, checked against the hub's headers on the redirect (hub) and by the download's own sha256 (every source). For a local entry, the installed file's. |
+| `heads` | The decide entry only: `file`, `sha256`, `sizeBytes` of `decide-heads.json`, and for a registry entry its `remoteFile` in the bundle (`heads.json`). `RouterPreset` ignores it; it is what the app reads. For a registry entry it is a download leg of its own (below). Refused on a Hugging Face entry. |
 | `minRamBytes` | What the machine must have; informational (the tier decides). |
 | `license`, `licenseUrl`, `notice` | What the first-run screen shows. |
 | `sidecar` | Optional second file an entry cannot be served without: the 27B's MTP head. |
@@ -674,22 +754,33 @@ model always, the decision model when the decision spec is local, and the one
 managed generative model when the generative spec is local. It is
 `managedManifestProvider` in `app_providers.dart`, watched through `select`s on
 exactly those facts. Its `.downloadable` view (every entry but `source:
-local`) is what the wizard downloads and what `SetupGate` checks the ledger
-against, so a full-tier Mac on Managed downloads the embedding model and the
-27B, and the 4B only if chosen. The supervisor serves
-`forRoles(…).withPresentFiles(folder)`: any entry whose files (weights,
+local`, so the registry's decision model is in it) is what the wizard
+downloads, so a full-tier Mac with both roles here downloads the embedding
+model, the decision model and the 27B, and the 4B only if chosen. Its
+`.gating` view (the Hugging Face entries only, `ModelFile.gatesSetup`) is what
+`SetupGate` and the wizard's resume check the ledger against (decision D7): a
+registry file is best-effort, because its address is set under Settings, which
+the wizard cannot reach, so a missing or failed one never reopens the wizard;
+its role parks on its own reason instead. The supervisor serves
+`forRoles(…).withPresentFiles(folder, ledger)`: any entry whose files (weights,
 sidecar, heads, whichever it has) are not all in the folder is left out of the
-preset, except the embedding model, which every stage needs and whose absence
+preset, and so is a REGISTRY entry whose ledger rows are not current
+(`DownloadLedger.servable`: its GGUF and heads must belong together, so a quit
+between the two legs, a digest bump on the same file names or a Download again
+under way or failed is not served; files placed by `make decide-fetch` join
+once a pass has hashed them in place, at the next launch or a Download press
+under Settings, Models, with or without a registry address), except the embedding model, which every stage needs and whose absence
 should fail the start with the preflight's own sentence. The server refuses to
 start with a file the preset names missing, and one missing model must not
-take the others down with it: a decision model not yet installed by
-`make decide-install`, or a chosen generative model not yet downloaded, leaves
-the preset and that role parks on its own reason while the rest run. The park
-is the CLIENT's, not the router's: `buildPreset` tells the prefs which managed
-ids it served (`setServedManagedIds`), and a managed target whose model is not
-among them resolves with an `LlmTarget.unavailable` sentence ("The Qwen3 4B is
-not downloaded on this Mac. Set up again to download it.", "The decision model
-is not installed. Run: make decide-install"), so `LlmClient` and
+take the others down with it: a decision model whose download has not landed,
+or a chosen generative model not yet downloaded, leaves the preset and that
+role parks on its own reason while the rest run. The park is the CLIENT's, not
+the router's: `buildPreset` tells the prefs which managed ids it served
+(`setServedManagedIds`), and a managed target whose model is not among them
+resolves with an `LlmTarget.unavailable` sentence ("The Qwen3 4B is not
+downloaded on this Mac. Open Settings, Models to download it.", the 27B's the
+same, and for the decision model "The decision model is not downloaded yet.
+Open Settings, Models."), so `LlmClient` and
 `DecisionClient` throw their unavailable exception before any HTTP call. Asking
 the router for a model it does not serve would answer 400, and a 400 is fatal
 in both drains, so every message would end in error instead of waiting. The
@@ -726,28 +817,157 @@ comments:
 `ModelDownloader` (`app/lib/services/models/model_downloader.dart`) fills the
 models folder with the `.downloadable` set.
 
-- **One stream at a time, smallest first**; the wizard's Continue and the
-  server both wait for every file the set names.
+- **One stream at a time, smallest first**; the server serves only the files
+  that are here and, for a registry entry, current (`withPresentFiles`), and
+  the wizard's Continue waits for the
+  GATING (Hugging Face) files only: a registry file never holds it (D7).
 - **A failure moves on**: one file's failure is an event, the run continues.
+- **Legs.** One entry can cost several files, each its own transfer and its
+  own ledger row, and still ONE bar: the weights (row `<id>`), the 27B's MTP
+  sidecar (`<id>.draft`), and a registry entry's heads file (`<id>.heads`),
+  always last. Only the last leg's `done` is the entry's; the progress total
+  is `ModelFile.downloadBytes` (weights, sidecar, and a registry entry's
+  heads).
 - **`.part` beside the destination, HTTP Range resume**, the part's own length
   being the offset; a 200 to a ranged request truncates the part.
-- **Re-resolve on expiry**: a 403 mid-transfer is an aged-out CDN signature,
-  and the hub is asked again at once. No URL is ever stored.
+- **Re-resolve on expiry**: a 403 mid-transfer from the hub's CDN is an
+  aged-out signature, and the hub is asked again at once. No URL is ever
+  stored.
+- **The registry.** The base and the token are LOOKUPS the provider hands in
+  (`registryBase`, `registryToken`), both read per registry entry at the same
+  moment, and the token lookup is handed the base it will be sent to
+  (`registryToken(base)`; the provider answers only while that base has the
+  current registry address's origin), so a Save mid-run can never send one
+  host's token to another; neither is stored by the downloader. With no base the
+  entry fails at once as `registry_not_configured`, before any request (files
+  already here at the manifest's digests still count as done), and the rest
+  of the set downloads. `Authorization: Bearer <token>` goes to the registry's
+  own ORIGIN only (scheme, host, port: `sameOrigin`): every registry leg
+  follows its redirects by hand, one hop at a time (at most five after the
+  resolve, then `http_<code>`, never retried), so the object storage a hosted
+  registry redirects to never receives the token, and each answer is judged
+  by the hop that gave it. A 401 or 403 from the registry's own origin is
+  `unauthorized`, never retried; a 404 from it is `registry_not_found` (the
+  address names the wrong repository), never retried; a FIRST answer of 200
+  or 206 carrying `content-type: text/html` (a sign-in page or a proxy's) is
+  `registry_not_a_model` at once, never retried and never written to the
+  part; a 403 from another origin is the hub's aged-signature rule, a
+  re-resolve. No token sends no header, and the
+  registry's 401 says so. The hub's linked-size and etag checks and its
+  `GatedRepo` word are the hub's alone.
 - **sha256 on the platform side** (`SystemInfo.sha256`, CryptoKit); one
-  mismatch is retried from zero, a second is the wrong file.
+  mismatch is retried from zero, a second is the wrong file. `verify` checks
+  every leg, a registry entry's heads included.
 - **The ledger** is `setup_state['download']`: status, bytes and the manifest
-  sha each part belongs to; no URL, no host.
-- **A disk preflight with 10 GiB of headroom**; free space that cannot be
-  asked is not a refusal.
+  sha each part belongs to; no URL, no host, no token. A registry entry is
+  current (`isCurrent`) only when its `<id>.heads` row is done at the heads
+  digest as well.
+- **A disk preflight with 10 GiB of headroom**, counting each leg's remainder
+  (a registry entry's heads included); free space that cannot be asked is not
+  a refusal.
 - **The failure words**: `disk_full`, `checksum`, `network`, `gated`,
-  `manifest_mismatch`, `missing_folder`, `http_<code>`.
+  `manifest_mismatch`, `missing_folder`, `registry_not_configured`,
+  `unauthorized`, `registry_not_found`, `registry_not_a_model`, `http_<code>`.
+  Each is a sentence in `SetupDownloadBody.describeDownloadError`; the two
+  newest read "The model registry does not have this model. Check its address
+  under Settings, Models." and "The model registry answered with a web page,
+  not a model. Check its address under Settings, Models."
 
-The decision model is not downloaded this round: `make decide-install` copies
-the GGUF and the heads file from the training export, sha256-pinned, into
-`local_bond-decide/`. Distributing it is an open packaging question. It copies the v3
-export (schema 2, sha256-pinned in the manifest); an older schema-1 install
-is refused (`olderModelText`, park `decision_older_model`;
-[03-triage.md](03-triage.md)).
+### Ensured outside the wizard
+
+`ModelEnsurer` (`app/lib/services/models/model_ensurer.dart`, provider
+`modelEnsurerProvider`) downloads whatever the current placements need and the
+disk lacks, after setup (decision D6). The wizard downloads once; everything
+later is the ensurer's: a registry file the wizard could not fetch, a launch
+under `BOND_DEV_SKIP_SETUP` that never saw the wizard, a placement moved to
+this Mac, a manifest bump.
+
+- **When it runs.** `SetupGate` kicks `ensure()` (unawaited) whenever it lets
+  the APP through: a launch, the return after Finish or Back to the inbox,
+  and `BOND_DEV_SKIP_SETUP`. Settings kicks it on the decision model's
+  **Check**, on **Download** (the decision row's and the generative row's),
+  after a registry **Save** or **Remove token**, and after every placement or
+  managed-model write (beside the `ensurePreset()` those already fire).
+- **The ensure set** (`modelEnsureSetProvider`) is `managedManifestProvider`'s
+  answer, which is `forRoles` on the hardware tier with the placements'
+  generative choice, PLUS the manifest's decide entry whenever it is not
+  already there, which is exactly when the decision role is on Your server
+  (D10): a ModernBERT server still needs this Mac's heads file and the entry
+  is one download, so there is one rule and no heads-only path (a Kev server
+  ignores the files). Under `BOND_DEV_HAND_SERVERS` (no managed server) the
+  embedding entry is left out, because `make embed` serves it from the
+  Homebrew/Hugging Face cache; the decide entry stays, since the app reads the
+  heads file from the models folder and `make decide` reads the same folder.
+  Then `.downloadable`. An entry is missing when its
+  ledger rows are not current at this build's digests (`isCurrent`) or any of
+  its files is gone from the folder (`filesPresent`).
+- **One ownership rule.** The ONE `ModelDownloader` refuses a second run, so:
+  while the wizard shows (`setupShowingProvider`, written by the gate) the
+  ensurer starts nothing, at once; while somebody ELSE's run is in flight
+  (the wizard's, still going after Finish or Back to the inbox) it says so
+  (`EnsureState.waiting`, phase downloading with no fraction), awaits
+  `ModelDownloader.idle` and then does its scan, so a kick is never dropped;
+  and `standDown()`, which the gate calls as it shows the wizard, cancels a
+  run the ensurer OWNS, keeping its parts, so the wizard's run (whose
+  `startDownload` likewise waits for `idle`, reading as in progress) resumes
+  from the byte. A run that is PAUSED (`ModelDownloader.paused`) is never
+  waited for: the wizard cancels its own paused run as it leaves the download
+  step (Continue, Back, Finish, Back to the inbox), the ensurer cancels
+  another owner's paused run instead of awaiting it (it runs only while the
+  wizard is not showing, so nothing could resume it), and the wizard's
+  `startDownload` cancels one it inherits rather than showing it as waiting.
+  The parts are kept every time, so the next run resumes from the byte. It is
+  single-flight: ONE loop of passes is in flight and every call shares its
+  future. A call marks the ensurer dirty and merges its `reverify`; a pass
+  takes both at its scan, so a call while the pass still waits for another
+  owner's run joins that pass, and a call once the pass has scanned costs ONE
+  further pass, shared by every call made meanwhile, so a placement move, a
+  registry Save or a Download again mid-pass is seen. The loop ends (its
+  callers still complete) when no call is owed a pass, the wizard opened, the
+  ensurer was disposed, or `standDown()` was called.
+- **Download again.** `ensure(reverify: {id})` treats the entry as missing
+  whatever the ledger says, and the downloader's `run(files, rehash)` HASHES
+  those entries' files on disk instead of trusting a `done` row: a good file
+  is kept with no byte fetched, a wrong or damaged one replaced. The entry
+  stops being current at once: each `done` row of its legs goes back to
+  `pending` in one ledger write as the entry starts, a registry leg proven
+  wrong records `pending` too, and a row returns to `done` only when its leg
+  verifies or lands, so nothing serves the entry during a Download again or
+  after one that failed. A file proven wrong is deleted before its
+  replacement is fetched (a Hugging Face entry is served on its files alone).
+  With the registry down the role parks `decision_not_installed` until the
+  download lands.
+- **The token is ready first.** Before a run it awaits the prefs notifier's
+  `ready`, so a STORED registry token is in the cache the downloader's lookup
+  reads; the wizard's own run does the same (`SetupController.prefsReady`).
+- **After every pass**, the one that found nothing missing included, it calls
+  `afterRun(landedIds)`. The provider asks for `restart()` when a landed id
+  is one the router serves (`managedManifestProvider`: the preset hash covers
+  paths and arguments, not digests, so a re-landed file of the same name
+  needs it) and for `ensurePreset()` otherwise, which restarts only when the
+  preset hash moved. That second arm is what puts a decision model the
+  wizard's run landed AFTER Finish into the router (the scan finds it
+  present, and the preset now has it), and it leaves the router alone when
+  only the decide entry landed for a decision on Your server. Fire and
+  forget.
+- **What the user sees.** `modelEnsureStateProvider` exposes its
+  `EnsureState` (phase `idle | downloading | failed | done`, `waiting`, the
+  entry being fetched (the smallest first), a monotonic fraction across the
+  run, each entry's own fraction, the ids landed, the first error and each
+  failed entry's own). `managedModelsStatusProvider` re-reads when the phase
+  moves or an entry lands. Each Models row reads its own `Downloading NN%`
+  (plain `Downloading` while waiting), then `On disk · …`, or the failure's
+  sentence with **Download** beside it unless the fix is the registry block; the rail keeps saying `decision_not_installed`'s sentence until
+  triage next drains. A failure is retried by the next `ensure()`: a failed
+  ledger row is simply not current. It never logs or stores a token.
+
+The decision model is the `bond-decide-mbl-v3swap` registry bundle: its GGUF
+and heads file (schema 2) are sha256-pinned in the manifest and downloaded
+into `artifactory_bond-decide-mbl-v3swap/`; `make decide-fetch` fetches the
+same two files into the same folder for a bench, checked against the same
+digests (`DECIDE_GGUF_SHA`, `DECIDE_HEADS_SHA`, held equal by the parity
+test). An older schema-1 heads file is refused (`olderModelText`, park
+`decision_older_model`; [03-triage.md](03-triage.md)).
 
 ### First run
 
@@ -759,9 +979,11 @@ strings are in `docs/settings.md` (**First run**). Finish writes what the
 Where step chose through the role writers above, then records `'done'`, and
 only a finish that saved asks for the server, fire-and-forget: `restart()`
 when the folder moved or weights landed during the run, `ensurePreset()`
-otherwise. `BOND_DEV_SKIP_SETUP=1` skips the wizard. "Set up again" (Settings
-→ Models) clears `setup_state` except the migration record and the download
-ledger.
+otherwise. `BOND_DEV_SKIP_SETUP=1` skips the wizard, and the model ensurer
+still downloads the models in the background. Only the GATING entries decide
+whether a stored `done` passes (`ModelManifest.gating`, D7). "Set up again"
+(Settings → Models) clears `setup_state` except the migration record and the
+download ledger.
 
 ## Failure policy: park, never fall back
 
@@ -789,11 +1011,13 @@ ledger.
   to a server that is answering fine. `parkReasonFor` maps the closed set to
   one word each, subclasses first. `ModelNotInstalledException` (thrown by
   `LlmClient` for a managed generative target carrying
-  `LlmTarget.unavailable`) is `not_installed`; the decision client's own
+  `LlmTarget.unavailable`) is `not_installed`; `ModelNoAddressException`
+  (the same refusal for a target with an empty URL: the generative role on
+  Your server with no address) is `no_address`; the decision client's own
   `DecisionNotInstalledException` is `decision_not_installed`, because its fix
-  is a command rather than a download; `DecisionOlderModelException` (the
+  is the decision model's own download rather than the generative one; `DecisionOlderModelException` (the
   heads schema-1 refusal) is `decision_older_model`, ahead of its parent,
-  because its fix is an install rather than an address;
+  because its fix is a download rather than an address;
   `DecisionMisconfiguredException` is
   `decision_misconfigured`, because waiting fixes neither of its causes (the
   address or the heads file), so its sentence claims no retry;
@@ -824,10 +1048,11 @@ ledger.
   | `unauthorized` | this Mac | `Model server refused the access key · N waiting` |
   | `embed_unavailable` | either | `Embedding server unreachable · N waiting · retrying each minute` |
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
-  | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
-  | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
-  | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
-  | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+  | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · open Settings, Models` |
+  | `no_address` | Your server | `The generative model has no server address · N waiting · add one under Settings, Models` |
+  | `decision_not_installed` | either | `The decision model is not downloaded yet · N waiting · open Settings, Models` |
+  | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · open Settings, Models and press Download again to resume sorting new mail` (a hand-installed entry: `… · copy the current model files into the models folder to resume sorting new mail`) |
+  | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or press Download again under Settings, Models` (a hand-installed entry: `… or copy the current model files into the models folder`) |
   | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |
 
@@ -887,7 +1112,9 @@ arriving mid-backlog was extracted 7.2 s after it landed on the box, against
 not, and the number has not been re-taken on one generative model.
 
 **…and one switch.** Model work runs only while **AI processing** is on
-(`processingProvider`, remembered in `processing_on`, default on). It reaches
+(`processingProvider`, remembered in `processing_on`, default OFF since the
+default-setup round, so a new environment's servers and downloads are checked
+under Settings before anything is spent; only `true` reads as on). It reaches
 each drain as one `enabled` closure read on every launch decision; an off
 `pump()` returns at once but still EMITS the waiting count for the rail's
 `Processing is off · N waiting`. Off stops the queue and the three lanes; on

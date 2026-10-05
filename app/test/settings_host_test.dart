@@ -295,6 +295,9 @@ void main() {
 
   testWidgets("Forget all Needs You answers undoes every press and the line "
       'says so', (tester) async {
+    // Forget refuses while processing is off, which is the default since the
+    // default-setup round; this case is about what it does when it runs.
+    await store.setPref(processingOnKey, 'true');
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': 'conv-1',

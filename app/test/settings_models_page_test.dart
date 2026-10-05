@@ -5,7 +5,10 @@ import 'package:bond_inbox/services/decision/decision_client.dart'
     show DecisionServerKind, noTokenizeText, notDecisionModelText;
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/screens/setup/setup_download_body.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/managed_model_status.dart';
+import 'package:bond_inbox/services/models/model_ensurer.dart';
 import 'package:bond_inbox/services/server/server_state.dart';
 import 'package:bond_inbox/widgets/model_servers_form.dart';
 import 'package:bond_inbox/widgets/settings_models_page.dart';
@@ -64,10 +67,14 @@ ManagedModelStatus _row(
 void main() {
   late List<Write> writes;
   late int checks;
+  late int downloads;
+  late int redownloads;
 
   setUp(() {
     writes = [];
     checks = 0;
+    downloads = 0;
+    redownloads = 0;
   });
 
   RoleWrite recorder(String role) => ({
@@ -96,13 +103,15 @@ void main() {
     bool inboxTier = false,
     bool processingOn = true,
     ServerState serverState = const ServerStopped(),
+    bool managedServer = true,
     bool decisionKeyStored = false,
     DecisionServerKind? decisionKind,
     bool generativeKeyStored = false,
     String generativeUrl = _generativeUrl,
     List<ManagedModelStatus>? statuses,
     ParkedFact? parked,
-    String? decideInstallDir,
+    EnsureState? ensureState,
+    bool wireDownload = true,
     Future<ModelProbeResult> Function(String, {String? bearer})? probe,
     Future<void> Function()? onCheckDecision,
     VoidCallback? onShowLog,
@@ -122,6 +131,7 @@ void main() {
             inboxTier: inboxTier,
             processingOn: processingOn,
             serverState: serverState,
+            managedServer: managedServer,
             decisionUrl: _decisionUrl,
             decisionModel: 'bond-decide-fixture',
             decisionKeyStored: decisionKeyStored,
@@ -131,7 +141,10 @@ void main() {
             generativeKeyStored: generativeKeyStored,
             statuses: statuses,
             parked: parked,
-            decideInstallDir: decideInstallDir,
+            ensureState: ensureState,
+            onDownloadModels: wireDownload ? () async => downloads++ : null,
+            onRedownloadDecision:
+                wireDownload ? () async => redownloads++ : null,
             probe: probe ??
                 (url, {bearer}) async => const ModelProbeResult(
                       reachable: true,
@@ -207,8 +220,8 @@ void main() {
   });
 
   group('the decision model', () {
-    testWidgets('on this Mac, not installed, says how to install it',
-        (tester) async {
+    testWidgets('a hand-installed one that is missing says how it gets here, '
+        'with no command and no Download', (tester) async {
       await open(tester, statuses: [
         _row('decision', onDisk: false, local: true),
       ]);
@@ -218,38 +231,291 @@ void main() {
         SettingsModelsPage.decisionNotInstalledText,
       );
       expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
-          'Not installed · run make decide-install');
+          'Not installed. Copy the model files into the models folder.');
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing);
       expect(find.byKey(ModelServersForm.urlKey(ServerFormRole.decision)),
           findsNothing);
     });
 
-    testWidgets('a moved models folder is named in the command, park or not',
+    testWidgets('a downloaded one that is missing says so and offers Download',
         (tester) async {
-      const dir = '/Volumes/Models/bond/local_bond-decide';
-      const sentence =
-          "Not installed · run make decide-install DECIDE_DIR='$dir'";
-      await open(
-        tester,
-        decideInstallDir: dir,
-        statuses: [_row('decision', onDisk: false, local: true)],
-      );
-      expect(textOf(tester, SettingsModelsPage.decisionStatusKey), sentence);
+      await open(tester, statuses: [_row('decision', onDisk: false)]);
 
-      await open(
-        tester,
-        decideInstallDir: dir,
-        parked: const ParkedFact(reason: 'decision_not_installed', waiting: 3),
-      );
-      expect(textOf(tester, SettingsModelsPage.decisionStatusKey), sentence);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Not downloaded yet.');
+      await tester.tap(find.byKey(SettingsModelsPage.decisionDownloadKey));
+      await tester.pump();
+      expect(downloads, 1);
     });
 
-    test("a folder with an apostrophe is quoted the shell's way", () {
-      expect(
-        SettingsModelsPage.decisionNotInstalledIn(
-            "/Volumes/Sam's Models/local_bond-decide"),
-        'Not installed · run make decide-install '
-        "DECIDE_DIR='/Volumes/Sam'\\''s Models/local_bond-decide'",
+    testWidgets('while it downloads the line counts up and Download is off',
+        (tester) async {
+      await open(
+        tester,
+        statuses: [_row('decision', onDisk: false)],
+        ensureState: const EnsureState(
+          phase: EnsurePhase.downloading,
+          modelId: routerEmbedId,
+          fraction: 0.8,
+          fractions: {routerEmbedId: 1, routerDecideId: 0.426},
+        ),
       );
+
+      // ITS entry's percentage, not the run's, whichever entry is current.
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          'Downloading 42%');
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing);
+    });
+
+    testWidgets('a failed download says its own reason, and offers Download '
+        'again', (tester) async {
+      await open(
+        tester,
+        statuses: [_row('decision', onDisk: false)],
+        ensureState: const EnsureState(
+          phase: EnsurePhase.failed,
+          modelId: routerEmbedId,
+          error: DownloadError.network,
+          failedIds: {routerEmbedId, routerDecideId},
+          errors: {
+            routerEmbedId: DownloadError.unauthorized,
+            routerDecideId: DownloadError.network,
+          },
+        ),
+      );
+
+      // Its OWN reason, not the first failure's.
+      expect(
+        textOf(tester, SettingsModelsPage.decisionStatusKey),
+        SetupDownloadBody.describeDownloadError(DownloadError.network),
+      );
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsOneWidget);
+    });
+
+    testWidgets('a failure whose fix is the registry address or token offers '
+        'no Download: the sentence carries the fix', (tester) async {
+      for (final error in [
+        DownloadError.registryNotConfigured,
+        DownloadError.unauthorized,
+        DownloadError.registryNotFound,
+        DownloadError.registryNotAModel,
+      ]) {
+        await open(
+          tester,
+          statuses: [_row('decision', onDisk: false)],
+          ensureState: EnsureState(
+            phase: EnsurePhase.failed,
+            modelId: routerDecideId,
+            error: error,
+            failedIds: const {routerDecideId},
+            errors: {routerDecideId: error},
+          ),
+        );
+        expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+            SetupDownloadBody.describeDownloadError(error));
+        expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing,
+            reason: error);
+      }
+    });
+
+    testWidgets('another owner\'s run reads as Downloading on every missing '
+        'row, with no button anywhere', (tester) async {
+      await open(
+        tester,
+        statuses: [
+          _row('decision', onDisk: false),
+          _row('generative', onDisk: false),
+          _row('embed', onDisk: false),
+        ],
+        ensureState: const EnsureState(
+          phase: EnsurePhase.downloading,
+          waiting: true,
+        ),
+      );
+
+      for (final key in [
+        SettingsModelsPage.decisionStatusKey,
+        SettingsModelsPage.generativeStatusKey,
+        SettingsModelsPage.embedStatusKey,
+      ]) {
+        expect(textOf(tester, key), 'Downloading');
+      }
+      for (final key in [
+        SettingsModelsPage.decisionDownloadKey,
+        SettingsModelsPage.generativeDownloadKey,
+        SettingsModelsPage.embedDownloadKey,
+      ]) {
+        expect(find.byKey(key), findsNothing);
+      }
+    });
+
+    testWidgets('a missing embedding model offers Download like the others',
+        (tester) async {
+      await open(tester, statuses: [_row('embed', onDisk: false)]);
+
+      expect(textOf(tester, SettingsModelsPage.embedStatusKey),
+          'Not downloaded yet.');
+      await tester.tap(find.byKey(SettingsModelsPage.embedDownloadKey));
+      await tester.pump();
+      expect(downloads, 1);
+    });
+
+    testWidgets('with no managed server the embedding model is served by the '
+        'owner\'s own server: no Download, no Not downloaded yet',
+        (tester) async {
+      await open(
+        tester,
+        managedServer: false,
+        statuses: [
+          _row('decision', onDisk: false),
+          _row('embed', onDisk: false),
+        ],
+      );
+
+      expect(textOf(tester, SettingsModelsPage.embedStatusKey),
+          'Served by your own embedding server.');
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsNothing);
+      // The decision model still downloads under hand servers.
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsOneWidget);
+      expect(SettingsModelsPage.embedHandServedText, isNot(contains('—')));
+      expect(SettingsModelsPage.embedHandServedText, isNot(contains('(')));
+    });
+
+    testWidgets('a refused heads file on a downloaded entry offers Download '
+        'again; a hand-installed one says to copy the files', (tester) async {
+      for (final reason in ['decision_older_model', 'decision_misconfigured']) {
+        await open(
+          tester,
+          statuses: [_row('decision')],
+          parked: ParkedFact(reason: reason, waiting: 3),
+        );
+        await tester.tap(find.byKey(SettingsModelsPage.decisionRedownloadKey));
+        await tester.pump();
+      }
+      expect(redownloads, 2);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionMisconfiguredText);
+      expect(SettingsModelsPage.decisionMisconfiguredText,
+          endsWith('or press Download again.'));
+
+      await open(
+        tester,
+        statuses: [_row('decision', local: true)],
+        parked: const ParkedFact(reason: 'decision_misconfigured', waiting: 3),
+      );
+      expect(find.byKey(SettingsModelsPage.decisionRedownloadKey), findsNothing);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionMisconfiguredLocalText);
+      expect(SettingsModelsPage.decisionMisconfiguredLocalText,
+          isNot(contains('Download')));
+
+      await open(
+        tester,
+        statuses: [_row('decision', local: true)],
+        parked: const ParkedFact(reason: 'decision_older_model', waiting: 3),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionOlderHintKey),
+          'Copy the current model files into the models folder.');
+    });
+
+    testWidgets('Download again is off while a run is in flight',
+        (tester) async {
+      await open(
+        tester,
+        statuses: [_row('decision')],
+        parked: const ParkedFact(reason: 'decision_older_model', waiting: 3),
+        ensureState: const EnsureState(
+          phase: EnsurePhase.downloading,
+          waiting: true,
+        ),
+      );
+      expect(find.byKey(SettingsModelsPage.decisionRedownloadKey), findsNothing);
+    });
+
+    testWidgets('a downloaded one on disk reads On disk, loaded or not',
+        (tester) async {
+      await open(
+        tester,
+        statuses: [_row('decision')],
+        serverState: const ServerLoading(
+          port: 8080,
+          pid: 1,
+          loaded: {routerDecideId: true},
+        ),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.onDiskLoadedText);
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing);
+
+      await open(tester, statuses: [_row('decision')]);
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.onDiskNotLoadedText);
+    });
+
+    testWidgets('the not-installed park names the download, not a command',
+        (tester) async {
+      await open(
+        tester,
+        statuses: [_row('decision', onDisk: false, headsOnDisk: false)],
+        parked: const ParkedFact(reason: 'decision_not_installed', waiting: 3),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.notDownloadedYetText);
+
+      await open(
+        tester,
+        statuses: [
+          _row('decision', onDisk: false, headsOnDisk: false, local: true),
+        ],
+        parked: const ParkedFact(reason: 'decision_not_installed', waiting: 3),
+      );
+      expect(textOf(tester, SettingsModelsPage.decisionStatusKey),
+          SettingsModelsPage.decisionNotInstalledText);
+    });
+
+    testWidgets('no Download button without the wiring', (tester) async {
+      await open(
+        tester,
+        wireDownload: false,
+        statuses: [_row('decision', onDisk: false)],
+      );
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing);
+    });
+
+    testWidgets('a generative model this Mac runs that is missing offers '
+        'Download too', (tester) async {
+      await open(tester, statuses: [_row('generative', onDisk: false)]);
+
+      expect(textOf(tester, SettingsModelsPage.generativeStatusKey),
+          SettingsModelsPage.notDownloadedYetText);
+      await tester.tap(find.byKey(SettingsModelsPage.generativeDownloadKey));
+      await tester.pump();
+      expect(downloads, 1);
+    });
+
+    testWidgets('the Model registry block sits after Embeddings and only '
+        'with its wiring', (tester) async {
+      await open(tester);
+      expect(find.text('Model registry'), findsNothing);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: SettingsModelsPage(
+              registryUrl: 'https://artifactory.example.com/artifactory/x',
+              onSaveRegistry: ({required url, token, required clearToken})
+                  async => null,
+              onSetUpAgain: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final registry = tester.getTopLeft(find.text('Model registry'));
+      final embed = tester.getTopLeft(find.text(SettingsModelsPage.embedTitle));
+      final again = tester.getTopLeft(find.byKey(SettingsModelsPage.setUpAgainKey));
+      expect(embed.dy, lessThan(registry.dy));
+      expect(registry.dy, lessThan(again.dy));
     });
 
     testWidgets('installed reads loaded or not from the router',
@@ -560,7 +826,7 @@ void main() {
       expect(writes, isEmpty);
     });
 
-    testWidgets('a chosen model not on disk says to set up again',
+    testWidgets('a chosen model not on disk says so and offers Download',
         (tester) async {
       await open(
         tester,
@@ -570,7 +836,9 @@ void main() {
       );
 
       expect(textOf(tester, SettingsModelsPage.generativeStatusKey),
-          'Not downloaded · Set up again to download it');
+          'Not downloaded yet.');
+      expect(find.byKey(SettingsModelsPage.generativeDownloadKey),
+          findsOneWidget);
       expect(find.byKey(SettingsModelsPage.setUpAgainKey), findsOneWidget);
     });
 
@@ -714,7 +982,7 @@ void main() {
       });
     }
 
-    testWidgets('the older decision model says it plainly, with the command '
+    testWidgets('the older decision model says it plainly, with Download '
         'on a quieter line of its own', (tester) async {
       await open(
         tester,
@@ -726,7 +994,7 @@ void main() {
       expect(SettingsModelsPage.decisionOlderModelText,
           isNot(contains('make')));
       expect(textOf(tester, SettingsModelsPage.decisionOlderHintKey),
-          'For developers: make decide-install');
+          'Press Download again to replace it.');
     });
 
     testWidgets('no other park shows the developer line', (tester) async {
@@ -879,7 +1147,12 @@ void main() {
       SettingsModelsPage.managedCaption,
       SettingsModelsPage.inboxTierCaption,
       SettingsModelsPage.decisionNotInstalledText,
-      SettingsModelsPage.decisionNotInstalledIn('/Volumes/Models/x'),
+      SettingsModelsPage.notDownloadedYetText,
+      SettingsModelsPage.decisionOlderModelHint,
+      SettingsModelsPage.decisionOlderModelLocalHint,
+      SettingsModelsPage.decisionMisconfiguredLocalText,
+      SettingsModelsPage.downloadingPlainText,
+      SettingsModelsPage.redownloadLabel,
       SettingsModelsPage.decisionMisconfiguredText,
       SettingsModelsPage.systemOneKindText,
       SettingsModelsPage.encoderKindText,

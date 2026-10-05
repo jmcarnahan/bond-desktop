@@ -2,9 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/current_ledger.dart';
 
 /// An asset bundle with exactly one asset in it.
 ///
@@ -86,7 +89,9 @@ Map<String, Object?> inboxTierJson() => {
       },
     };
 
-/// The hand-installed decision model, as the committed asset spells it.
+/// A HAND-INSTALLED decision model (`source: local`), as an older asset
+/// spelled it. The committed asset ships the registry entry now; the local
+/// source is still read, and these are its cases.
 Map<String, Object?> decideJson() => {
       'id': 'bond-decide',
       'role': 'decide',
@@ -110,9 +115,36 @@ Map<String, Object?> decideJson() => {
       'serverArgs': {'embedding': 'true', 'pooling': 'mean'},
     };
 
+/// The registry decision model, as the committed asset spells it.
+Map<String, Object?> registryDecideJson() => {
+      'id': 'bond-decide',
+      'role': 'decide',
+      'source': 'artifactory',
+      'displayName': 'Bond decision model',
+      'repo': 'artifactory/bond-decide-mbl-v3swap',
+      'bundle': 'bond-decide-mbl-v3swap',
+      'remoteFile': 'model-f16.gguf',
+      'file': 'bond-decide-mbl-v3-f16.gguf',
+      'sizeBytes': 791461056,
+      'sha256':
+          'e348ca9117036b8d8c79d93783d74092f5fcd3a8ac06bdc1ea153935243dfa88',
+      'minRamBytes': 0,
+      'license': 'Apache-2.0',
+      'licenseUrl': 'https://huggingface.co/answerdotai/ModernBERT-large',
+      'notice': null,
+      'heads': {
+        'file': 'decide-heads.json',
+        'remoteFile': 'heads.json',
+        'sha256':
+            'a38835a22858b28827561d1b9c85d752d14cb8277dc248699ec82ee82fa7ad72',
+        'sizeBytes': 1032653,
+      },
+      'serverArgs': {'embedding': 'true', 'pooling': 'mean'},
+    };
+
 String manifestText(
   List<Map<String, Object?>> models, {
-  int version = 2,
+  int version = ModelManifest.manifestVersion,
   List<Map<String, Object?>>? tiers,
 }) =>
     jsonEncode({
@@ -125,39 +157,50 @@ void main() {
   group('the committed asset', () {
     test('parses, and names the four router ids in file order', () {
       final manifest = realManifest();
-      expect(manifest.version, 2);
+      expect(manifest.version, 3);
+      expect(manifest.version, ModelManifest.manifestVersion);
       expect(
         [for (final m in manifest.models) m.id],
         [routerEmbedId, routerDecideId, routerBulkId, routerProseId],
       );
     });
 
-    test('the decision model is hand-installed, with its heads beside it', () {
+    test('the decision model is the v3 swap bundle from the registry, with '
+        'its heads as a second download', () {
       final decide = realManifest().byRole(ModelRole.decide);
 
       expect(decide.id, routerDecideId);
-      expect(decide.isLocal, isTrue);
-      expect(decide.source, sourceLocal);
-      expect(decide.repo, 'local/bond-decide');
+      expect(decide.isRegistry, isTrue);
+      expect(decide.isLocal, isFalse);
+      expect(decide.gatesSetup, isFalse);
+      expect(decide.source, sourceArtifactory);
+      expect(decide.repo, 'artifactory/bond-decide-mbl-v3swap');
+      expect(decide.bundle, 'bond-decide-mbl-v3swap');
+      expect(decide.remoteFile, 'model-f16.gguf');
       expect(decide.revision, '');
+      expect(decide.displayName, 'Bond decision model');
       expect(decide.file, 'bond-decide-mbl-v3-f16.gguf');
       expect(decide.sizeBytes, 791461056);
       expect(
         decide.sha256,
-        '1c3083e89bb39cf346b4b509ecaf6da1237c4e7b3cde4e92fb7289b816aa4aa5',
+        'e348ca9117036b8d8c79d93783d74092f5fcd3a8ac06bdc1ea153935243dfa88',
       );
       expect(decide.heads!.file, 'decide-heads.json');
+      expect(decide.heads!.remoteFile, 'heads.json');
       expect(decide.heads!.sizeBytes, 1032653);
       expect(
         decide.heads!.sha256,
-        '94b60a0b6ccf2c781f85dcdb0b130f41519924a28ae36df642370176cc37ae95',
+        'a38835a22858b28827561d1b9c85d752d14cb8277dc248699ec82ee82fa7ad72',
       );
-      // The folder `make decide-install` writes into.
+      // The folder the downloader and `make decide-fetch` write into, with
+      // the names the app reads: the heads file's `model` must prefix the
+      // GGUF's name, so the bundle's `model-f16.gguf` is renamed on disk.
       expect(decide.relativePath,
-          'local_bond-decide/bond-decide-mbl-v3-f16.gguf');
-      expect(decide.headsRelativePath, 'local_bond-decide/decide-heads.json');
-      // Never downloaded, so it costs no download bytes.
-      expect(decide.downloadBytes, 0);
+          'artifactory_bond-decide-mbl-v3swap/bond-decide-mbl-v3-f16.gguf');
+      expect(decide.headsRelativePath,
+          'artifactory_bond-decide-mbl-v3swap/decide-heads.json');
+      // Both files are downloaded, so both count.
+      expect(decide.downloadBytes, 791461056 + 1032653);
       expect(decide.serverArgs, {
         'embedding': 'true',
         'pooling': 'mean',
@@ -177,13 +220,141 @@ void main() {
       expect(embed.headsRelativePath, isNull);
     });
 
-    test('a local entry round-trips through toJson', () {
+    test('a registry entry round-trips through toJson', () {
       final decide = realManifest().byRole(ModelRole.decide);
+      final json = decide.toJson();
+      final again =
+          ModelFile.fromJson(jsonDecode(jsonEncode(json)) as Map<String, Object?>);
+      expect(again, decide);
+      expect(again.hashCode, decide.hashCode);
+      expect(json.containsKey('revision'), isFalse);
+      expect(json['source'], 'artifactory');
+      expect(json['bundle'], 'bond-decide-mbl-v3swap');
+      expect(json['remoteFile'], 'model-f16.gguf');
+      expect((json['heads'] as Map)['remoteFile'], 'heads.json');
+      // And it is a different entry from the same one without its bundle
+      // names, so `==` carries them.
+      expect(
+        again,
+        isNot(ModelFile.fromJson({
+          ...registryDecideJson(),
+          'remoteFile': 'other.gguf',
+        })),
+      );
+    });
+
+    test('a local entry round-trips through toJson', () {
+      final decide = ModelFile.fromJson(decideJson());
       final again =
           ModelFile.fromJson(jsonDecode(jsonEncode(decide.toJson())) as Map<String, Object?>);
       expect(again, decide);
+      expect(decide.isLocal, isTrue);
+      expect(decide.isRegistry, isFalse);
+      expect(decide.gatesSetup, isFalse);
+      expect(decide.source, sourceLocal);
+      expect(decide.bundle, isNull);
+      expect(decide.remoteFile, isNull);
       expect(decide.toJson().containsKey('revision'), isFalse);
+      expect(decide.toJson().containsKey('bundle'), isFalse);
       expect(decide.toJson()['source'], 'local');
+      // Its folder is `local_<name>`, and it costs no download bytes.
+      expect(decide.relativePath,
+          'local_bond-decide/bond-decide-mbl-v3-f16.gguf');
+      expect(decide.headsRelativePath, 'local_bond-decide/decide-heads.json');
+      expect(decide.downloadBytes, 0);
+    });
+
+    test('the registry URLs are <base>/bundles/<bundle>/<remote name>, with '
+        'or without a trailing slash on the base', () {
+      final decide = realManifest().byRole(ModelRole.decide);
+      const base = 'https://artifactory.example.com/artifactory/bond-models';
+      for (final typed in [base, '$base/', '  $base//  ']) {
+        expect(
+          decide.registryUri(typed).toString(),
+          '$base/bundles/bond-decide-mbl-v3swap/model-f16.gguf',
+        );
+        expect(
+          decide.headsRegistryUri(typed).toString(),
+          '$base/bundles/bond-decide-mbl-v3swap/heads.json',
+        );
+      }
+      expect(
+        decide.registryUri('http://localhost:18082/artifactory/bond-models/')
+            .toString(),
+        'http://localhost:18082/artifactory/bond-models/bundles/'
+        'bond-decide-mbl-v3swap/model-f16.gguf',
+      );
+    });
+
+    test('heads without a remote name are asked for by their own name', () {
+      final json = registryDecideJson();
+      final heads = Map.of(json['heads']! as Map<String, Object?>)
+        ..remove('remoteFile');
+      final decide = ModelFile.fromJson({...json, 'heads': heads});
+      expect(decide.heads!.remoteFile, isNull);
+      expect(
+        decide.headsRegistryUri('https://artifactory.example.com/r')
+            .toString(),
+        'https://artifactory.example.com/r/bundles/bond-decide-mbl-v3swap/'
+        'decide-heads.json',
+      );
+      expect((decide.toJson()['heads'] as Map).containsKey('remoteFile'),
+          isFalse);
+    });
+
+    test('the registry URLs refuse an empty base and a hub entry, and the hub '
+        'URLs refuse a registry entry', () {
+      final manifest = realManifest();
+      final decide = manifest.byRole(ModelRole.decide);
+      final embed = manifest.byRole(ModelRole.embed);
+      expect(() => decide.registryUri(''), throwsStateError);
+      expect(() => decide.registryUri('  /  '), throwsStateError);
+      expect(() => decide.headsRegistryUri(''), throwsStateError);
+      expect(() => embed.registryUri('https://artifactory.example.com/r'),
+          throwsStateError);
+      expect(() => embed.headsRegistryUri('https://artifactory.example.com/r'),
+          throwsStateError);
+      expect(() => decide.resolveUri, throwsStateError);
+      expect(() => decide.sidecarResolveUri, throwsStateError);
+    });
+
+    test('toString never cuts an empty revision', () {
+      final decide = realManifest().byRole(ModelRole.decide);
+      expect(decide.revision, '');
+      expect(decide.toString, returnsNormally);
+      expect('$decide', contains('bond-decide-mbl-v3swap'));
+      expect('${ModelFile.fromJson(decideJson())}', contains('local'));
+      // A hub entry built in code with no revision does not throw either.
+      const bare = ModelFile(
+        id: 'bond-embed',
+        role: ModelRole.embed,
+        displayName: 'Bare',
+        repo: 'owner/name',
+        file: 'x.gguf',
+        revision: '',
+        sizeBytes: 1,
+        sha256: '',
+        minRamBytes: 0,
+        license: 'Fictional-1.0',
+        licenseUrl: 'https://example.invalid/licence',
+      );
+      expect(bare.toString, returnsNormally);
+    });
+
+    test('the gating view leaves the registry entry out, the downloadable '
+        'view keeps it', () {
+      final manifest = realManifest();
+      expect([for (final m in manifest.gating.models) m.id],
+          [routerEmbedId, routerBulkId, routerProseId]);
+      expect([for (final m in manifest.downloadable.models) m.id],
+          [routerEmbedId, routerDecideId, routerBulkId, routerProseId]);
+      // A hand-installed entry is in neither.
+      final local = ModelManifest.parse(manifestText(
+          [embedJson(), decideJson(), bulkJson(), proseJson()]));
+      expect([for (final m in local.gating.models) m.id],
+          isNot(contains(routerDecideId)));
+      expect([for (final m in local.downloadable.models) m.id],
+          isNot(contains(routerDecideId)));
     });
 
     test('carries the measured sizes and digests', () {
@@ -206,7 +377,8 @@ void main() {
       );
       expect(
         manifest.totalBytes,
-        639150592 + 4280403520 + 18973870432 + 1680271648,
+        639150592 + 791461056 + 1032653 + 4280403520 + 18973870432 +
+            1680271648,
       );
     });
 
@@ -255,9 +427,10 @@ void main() {
       expect(prose.downloadBytes, 18973870432 + 1680271648);
     });
 
-    test('every downloaded revision is a commit sha, never a branch', () {
+    test('every hub revision is a commit sha, never a branch', () {
+      // A registry entry pins its bytes by digest alone and carries none.
       for (final model in realManifest().models) {
-        if (model.isLocal) continue;
+        if (model.isLocal || model.isRegistry) continue;
         expect(model.revision, isNot('main'));
         expect(model.revision, matches(RegExp(r'^[0-9a-f]{40}$')));
       }
@@ -313,7 +486,7 @@ pooling = last
 load-on-startup = true
 
 [bond-decide]
-model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v3-f16.gguf
+model = /tmp/Bond Models/artifactory_bond-decide-mbl-v3swap/bond-decide-mbl-v3-f16.gguf
 embedding = true
 pooling = mean
 c = 2048
@@ -486,22 +659,26 @@ spec-type = draft-mtp
       final inbox = manifest.forTier(MachineTier.inbox);
 
       // The inbox tier never takes the writing model, so it never takes the
-      // head either; the decision model is hand-installed and costs no
-      // download bytes on either tier.
-      expect(inbox.totalBytes, 639150592 + 4280403520);
+      // head either; the decision model is downloaded on both tiers, its
+      // GGUF and its heads file.
+      expect(inbox.totalBytes, 639150592 + 791461056 + 1032653 + 4280403520);
       expect(
         manifest.totalBytes,
-        639150592 + 4280403520 + 18973870432 + 1680271648,
+        639150592 + 791461056 + 1032653 + 4280403520 + 18973870432 +
+            1680271648,
       );
       expect([for (final m in inbox.downloadable.bySize) m.id],
-          [routerEmbedId, routerBulkId]);
+          [routerEmbedId, routerDecideId, routerBulkId]);
       expect(
         [
           for (final m in manifest.forTier(MachineTier.full).downloadable.bySize)
             m.id,
         ],
-        [routerEmbedId, routerBulkId, routerProseId],
+        [routerEmbedId, routerDecideId, routerBulkId, routerProseId],
       );
+      // And the gating view never holds it, on either tier.
+      expect([for (final m in inbox.gating.models) m.id],
+          [routerEmbedId, routerBulkId]);
     });
 
     group('forRoles', () {
@@ -560,8 +737,10 @@ spec-type = draft-mtp
           generativeManagedId: null,
         );
         expect(ids(view), [routerEmbedId, routerDecideId]);
-        // And the download view drops the hand-installed one.
-        expect(ids(view.downloadable), [routerEmbedId]);
+        // The download view keeps the registry's decision model; the gating
+        // view does not.
+        expect(ids(view.downloadable), [routerEmbedId, routerDecideId]);
+        expect(ids(view.gating), [routerEmbedId]);
       });
     });
 
@@ -573,8 +752,14 @@ spec-type = draft-mtp
       void touch(String relative) =>
           File('${folder.path}/$relative')..createSync(recursive: true);
 
-      List<String> kept(ModelManifest manifest) => [
-            for (final m in manifest.withPresentFiles(folder.path).models) m.id,
+      /// Against a ledger whose rows are current for every entry unless
+      /// [ledger] says otherwise: a registry entry is served on its rows too.
+      List<String> kept(ModelManifest manifest, {DownloadLedger? ledger}) => [
+            for (final m in manifest
+                .withPresentFiles(
+                    folder.path, ledger ?? currentLedgerFor(manifest.models))
+                .models)
+              m.id,
           ];
 
       test('drops the decision model until both of its files are there', () {
@@ -586,6 +771,19 @@ spec-type = draft-mtp
         expect(kept(manifest), isNot(contains(routerDecideId)));
         touch(decide.headsRelativePath!);
         expect(kept(manifest), contains(routerDecideId));
+      });
+
+      test('drops the decision model, both files there, until its rows are '
+          'current', () {
+        final manifest = realManifest().forTier(MachineTier.full);
+        final decide = manifest.byId(routerDecideId);
+        touch(decide.relativePath);
+        touch(decide.headsRelativePath!);
+
+        expect(kept(manifest, ledger: DownloadLedger.empty),
+            isNot(contains(routerDecideId)));
+        expect(kept(manifest, ledger: currentLedgerFor([decide])),
+            contains(routerDecideId));
       });
 
       test('a chosen generative model that was never downloaded leaves the '
@@ -609,7 +807,9 @@ spec-type = draft-mtp
         expect(kept(served), containsAll([routerEmbedId, routerDecideId]));
         // And the preset built from it names no missing file, so the
         // server's preflight lets the other models start.
-        final preset = served.withPresentFiles(folder.path).toPreset(folder.path);
+        final preset = served
+            .withPresentFiles(folder.path, currentLedgerFor(served.models))
+            .toPreset(folder.path);
         expect(preset.missingFiles(), isEmpty);
 
         touch(served.byId(routerBulkId).relativePath);
@@ -638,7 +838,9 @@ spec-type = draft-mtp
         );
         expect(kept(served), [routerEmbedId]);
         expect(
-          served.withPresentFiles(folder.path).toPreset(folder.path)
+          served
+              .withPresentFiles(folder.path, DownloadLedger.empty)
+              .toPreset(folder.path)
               .missingFiles(),
           isNotEmpty,
         );
@@ -681,7 +883,8 @@ spec-type = draft-mtp
 
     test('a manifest with no tiers resolves to itself', () {
       // What a fixture of one model is, and what `manifestFor` builds.
-      const one = ModelManifest(version: 2, models: []);
+      const one =
+          ModelManifest(version: ModelManifest.manifestVersion, models: []);
       expect(identical(one.forTier(MachineTier.inbox), one), isTrue);
     });
   });
@@ -889,7 +1092,7 @@ spec-type = draft-mtp
 
     refuses(
       'no tiers at all',
-      jsonEncode({'version': 2, 'models': models}),
+      jsonEncode({'version': ModelManifest.manifestVersion, 'models': models}),
       contains('tiers'),
     );
 
@@ -1021,7 +1224,147 @@ spec-type = draft-mtp
         ...models,
         {...decideJson(), 'source': 's3'},
       ]),
-      contains('"source"'),
+      allOf(contains('"source"'), contains('artifactory'), contains('s3')),
+    );
+
+    refuses(
+      'a registry entry outside the artifactory/ repo namespace',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'repo': 'bond-decide-mbl-v3swap'},
+      ]),
+      allOf(contains('artifactory'), contains('bond-decide-mbl-v3swap')),
+    );
+
+    refuses(
+      'a registry entry with no bundle',
+      manifestText([
+        ...models,
+        Map.of(registryDecideJson())..remove('bundle'),
+      ]),
+      contains('"bundle"'),
+    );
+
+    refuses(
+      'a registry entry with an empty bundle',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'bundle': ''},
+      ]),
+      contains('"bundle"'),
+    );
+
+    refuses(
+      'a registry entry with no remote file',
+      manifestText([
+        ...models,
+        Map.of(registryDecideJson())..remove('remoteFile'),
+      ]),
+      contains('"remoteFile"'),
+    );
+
+    refuses(
+      'a registry entry whose revision is not a commit sha',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'revision': 'main'},
+      ]),
+      contains('revision'),
+    );
+
+    refuses(
+      'a heads record on a Hugging Face entry',
+      manifestText([
+        {
+          ...embedJson(),
+          'heads': registryDecideJson()['heads'],
+        },
+        bulkJson(),
+        proseJson(),
+      ]),
+      allOf(contains('"heads"'), contains('artifactory')),
+    );
+
+    for (final bad in ['a/b', 'a b', 'x?y', 'x#y', '..', '.', 'é']) {
+      refuses(
+        'a registry bundle "$bad"',
+        manifestText([
+          ...models,
+          {
+            ...registryDecideJson(),
+            'bundle': bad,
+            'repo': 'artifactory/$bad',
+          },
+        ]),
+        contains('"bundle"'),
+      );
+    }
+
+    refuses(
+      'a registry remote file that walks out of the bundle',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'remoteFile': '../model-f16.gguf'},
+      ]),
+      contains('"remoteFile"'),
+    );
+
+    refuses(
+      'a registry remote file of ".."',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'remoteFile': '..'},
+      ]),
+      contains('"remoteFile"'),
+    );
+
+    refuses(
+      'a heads remote file with a query in it',
+      manifestText([
+        ...models,
+        {
+          ...registryDecideJson(),
+          'heads': {
+            ...(registryDecideJson()['heads']! as Map<String, Object?>),
+            'remoteFile': 'heads.json?x=1',
+          },
+        },
+      ]),
+      contains('heads.remoteFile'),
+    );
+
+    refuses(
+      'a sidecar on a registry entry',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'sidecar': sidecarJson()},
+      ]),
+      allOf(contains('artifactory'), contains('sidecar')),
+    );
+
+    refuses(
+      'a registry repo that is not artifactory/<bundle>',
+      manifestText([
+        ...models,
+        {...registryDecideJson(), 'repo': 'artifactory/another-bundle'},
+      ]),
+      allOf(contains('artifactory/bond-decide-mbl-v3swap'),
+          contains('artifactory/another-bundle')),
+    );
+
+    refuses(
+      'a heads record with an empty remote file',
+      manifestText([
+        ...models,
+        {
+          ...registryDecideJson(),
+          'heads': {
+            ...(registryDecideJson()['heads']! as Map<String, Object?>),
+            'remoteFile': '',
+          },
+        },
+      ]),
+      contains('heads.remoteFile'),
     );
 
     refuses(
@@ -1063,6 +1406,24 @@ spec-type = draft-mtp
         manifestText([embedJson(), bulkJson(), proseJson()]),
       );
       expect(manifest.byRoleOrNull(ModelRole.decide), isNull);
+    });
+
+    test('a hand-installed decision model in place of the registry one', () {
+      final manifest = ModelManifest.parse(manifestText(
+          [embedJson(), decideJson(), bulkJson(), proseJson()]));
+      expect(manifest.byRole(ModelRole.decide).isLocal, isTrue);
+    });
+
+    test('a bundle on a hub entry is ignored, as every unknown key is', () {
+      final embed = ModelFile.fromJson({
+        ...embedJson(),
+        'bundle': 'x',
+        'remoteFile': 'y',
+      });
+      expect(embed.bundle, isNull);
+      expect(embed.remoteFile, isNull);
+      expect(embed.isRegistry, isFalse);
+      expect(embed.gatesSetup, isTrue);
     });
   });
 }

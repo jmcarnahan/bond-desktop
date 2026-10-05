@@ -3,15 +3,18 @@ import 'dart:io';
 import 'package:bond_inbox/data/app_paths.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/fake_system_info.dart';
 import 'fixtures/memory_token_store.dart';
 import 'fixtures/test_db.dart';
@@ -73,14 +76,18 @@ void main() {
       ];
 
   test('everything managed on a full Mac: embed, decide and the 27B', () async {
-    expect(await served(containerFor(const AppPrefs())),
+    // This Mac said out loud: the generative placement defaults to Your
+    // server since the default-setup round.
+    expect(
+        await served(containerFor(
+            const AppPrefs(modelPlacement: ModelPlacement.local))),
         [routerEmbedId, routerDecideId, routerProseId]);
   });
 
   test('a small Mac serves the 4B', () async {
     expect(
       await served(containerFor(
-        const AppPrefs(),
+        const AppPrefs(modelPlacement: ModelPlacement.local),
         memoryBytes: 16 * 1024 * 1024 * 1024,
       )),
       [routerEmbedId, routerDecideId, routerBulkId],
@@ -97,6 +104,7 @@ void main() {
     );
     expect(
       await served(containerFor(const AppPrefs(
+        modelPlacement: ModelPlacement.local,
         decisionPlacement: ModelPlacement.box,
         decisionUrl: 'https://box.example.com/decide/v1/embeddings',
       ))),
@@ -104,20 +112,24 @@ void main() {
     );
   });
 
-  test('a placement with no address to dial keeps its model here', () async {
+  test('with no address to dial the decision model stays here and the '
+      'generative model does not', () async {
+    // The decision role falls back to this Mac, its default. The generative
+    // role parks with a sentence since the default-setup round (decision D9):
+    // no 27B or 4B is demanded behind the owner's back.
     expect(
       await served(containerFor(const AppPrefs(
         modelPlacement: ModelPlacement.box,
         decisionPlacement: ModelPlacement.box,
       ))),
-      [routerEmbedId, routerDecideId, routerProseId],
+      [routerEmbedId, routerDecideId],
     );
   });
 
   test('the supervisor\'s preset teaches the prefs the tier, and leaves out '
       'every model whose files are not on disk', () async {
     final container = containerFor(
-      const AppPrefs(),
+      const AppPrefs(modelPlacement: ModelPlacement.local),
       memoryBytes: 16 * 1024 * 1024 * 1024,
     );
     final supervisor = container.read(modelServerSupervisorProvider);
@@ -165,6 +177,8 @@ void main() {
       await file.parent.create(recursive: true);
       await file.writeAsString('x');
     }
+    // A registry entry is served on its current download record as well.
+    await SetupStore(db).recordDownload(currentLedgerFor([decide]));
 
     preset = await supervisor.buildPreset();
     expect(preset.modelIds, [routerEmbedId, routerDecideId, routerBulkId]);
@@ -172,5 +186,81 @@ void main() {
         {routerEmbedId, routerDecideId, routerBulkId});
     // The heads never enter the INI.
     expect(preset.toIni(), isNot(contains('decide-heads.json')));
+  });
+
+  group('a registry entry is served only while its download record is '
+      'current', () {
+    late ProviderContainer container;
+    late String folder;
+    late ModelFile decide;
+
+    setUp(() async {
+      container = containerFor(
+          const AppPrefs(modelPlacement: ModelPlacement.box));
+      folder = p.join(support.path, 'models');
+      decide = manifest.byRole(ModelRole.decide);
+      for (final relative in [decide.relativePath, decide.headsRelativePath!]) {
+        final file = File(p.join(folder, relative));
+        await file.parent.create(recursive: true);
+        await file.writeAsString('x');
+      }
+    });
+
+    test('files on disk with no rows are left out, and joining moves the '
+        'hash so ensurePreset restarts the router', () async {
+      final supervisor = container.read(modelServerSupervisorProvider);
+
+      final without = await supervisor.buildPreset();
+      expect(without.modelIds, [routerEmbedId]);
+      expect(container.read(appPrefsProvider).servedManagedIds,
+          {routerEmbedId});
+      expect(
+        container.read(appPrefsProvider.notifier).targetForStage('decision')
+            .unavailable,
+        isNotNull,
+        reason: 'the decision role parks not_installed',
+      );
+
+      await SetupStore(db).recordDownload(currentLedgerFor([decide]));
+      final current = await supervisor.buildPreset();
+
+      expect(current.modelIds, [routerEmbedId, routerDecideId]);
+      expect(current.hash, isNot(without.hash));
+      expect(
+        container.read(appPrefsProvider.notifier).targetForStage('decision')
+            .unavailable,
+        isNull,
+      );
+    });
+
+    test('a quit between the two legs after a digest change is not served: '
+        'the GGUF row is at the new digest, the heads row at the old', () async {
+      final ledger = currentLedgerFor([decide]).record(FileDownloadState(
+        id: DownloadLedger.headsId(decide.id),
+        status: DownloadStatus.done,
+        sha256: 'an-older-heads-digest',
+      ));
+      await SetupStore(db).recordDownload(ledger);
+
+      final preset =
+          await container.read(modelServerSupervisorProvider).buildPreset();
+
+      expect(preset.modelIds, [routerEmbedId]);
+    });
+
+    test('a row that is not done is not served, whatever its digest',
+        () async {
+      final ledger = currentLedgerFor([decide]).record(FileDownloadState(
+        id: decide.id,
+        status: DownloadStatus.pending,
+        sha256: decide.sha256,
+      ));
+      await SetupStore(db).recordDownload(ledger);
+
+      final preset =
+          await container.read(modelServerSupervisorProvider).buildPreset();
+
+      expect(preset.modelIds, [routerEmbedId]);
+    });
   });
 }

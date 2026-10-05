@@ -17,8 +17,10 @@ import 'setup_controls.dart';
 /// sentence, so a person on a small Mac is told what is coming before the
 /// rows say it and before the total is a number they have to compare.
 ///
-/// The decision model, when it runs here, heads the list with its install
-/// state rather than a size: it is installed by hand and never downloaded.
+/// The decision model, when it runs here, is an ordinary download row from
+/// the model registry. A hand-installed (`source: local`) decide entry
+/// instead heads the list with its install state rather than a size, since
+/// it is never downloaded.
 ///
 /// The rows are in MANIFEST order (embed, bulk, prose) rather than by size,
 /// because this screen is about what each model does and that order is the
@@ -34,9 +36,10 @@ class SetupModelsBody extends StatelessWidget {
 
   final VoidCallback onContinue;
 
-  /// The decision model's entry when it runs on this Mac, or null. It is
-  /// installed by hand and never downloaded, so it is listed apart from the
-  /// downloads and counts toward neither the sentence nor the total.
+  /// A hand-installed decision model's entry when it runs on this Mac, or
+  /// null. It is never downloaded, so it is listed apart from the downloads
+  /// and counts toward neither the sentence nor the total. Null for the
+  /// registry's decision model, which is a row of [manifest].
   final ModelFile? decisionModel;
 
   /// Whether [decisionModel]'s files are already in the models folder.
@@ -63,14 +66,16 @@ class SetupModelsBody extends StatelessWidget {
         _ => '$count',
       };
 
-  /// The opening sentence, which has to agree with itself about number: no
-  /// tier ships one model today, and a sentence reading "one models" would be
-  /// the first thing a person saw.
+  /// The opening sentence, which has to agree with itself about number: a
+  /// sentence reading "one models" would be the first thing a person saw. It
+  /// names no source, because the set mixes two: the embedding and writing
+  /// models come from Hugging Face, the decision model from the model
+  /// registry.
   static String downloadsSentence(int count) => count == 1
-      ? 'Bond downloads one model from Hugging Face. It runs on this Mac and '
-          'never sends your mail anywhere.'
-      : 'Bond downloads ${countWord(count)} models from Hugging Face. They '
-          'run on this Mac and never send your mail anywhere.';
+      ? 'Bond downloads one model. It runs on this Mac and never sends your '
+          'mail anywhere.'
+      : 'Bond downloads ${countWord(count)} models. They run on this Mac and '
+          'never send your mail anywhere.';
 
   /// What each role is FOR, in the user's terms. Held here rather than in the
   /// manifest because it is copy about this app's pipeline, not a fact about
@@ -85,10 +90,12 @@ class SetupModelsBody extends StatelessWidget {
 
   static const Key decisionRowKey = ValueKey('setup-models-decision');
 
-  /// What the decision model's row says in place of a size.
+  /// What a hand-installed (`source: local`) decision model's row says in
+  /// place of a size. The registry's decision model is a download row and
+  /// never says either.
   static const String installedText = 'Installed';
   static const String notInstalledText =
-      'Not installed · run make decide-install';
+      'Not installed. Copy the model files into the models folder.';
 
   /// What a checkpoint's second file adds, under its size. Named here so a
   /// test can pin the sentence rather than rebuild it.
@@ -127,9 +134,14 @@ class SetupModelsBody extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: BondSpacing.s12),
-              Text(
-                decisionInstalled ? installedText : notInstalledText,
-                style: BondType.small,
+              // Flexible: the not-installed state is a sentence, and a
+              // column that could not wrap would run off the pane.
+              Flexible(
+                child: Text(
+                  decisionInstalled ? installedText : notInstalledText,
+                  style: BondType.small,
+                  textAlign: TextAlign.right,
+                ),
               ),
             ],
           ),

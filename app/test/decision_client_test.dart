@@ -1429,7 +1429,7 @@ void main() {
         baseUrl: 'http://127.0.0.1:8080/v1/embeddings',
         model: 'bond-decide',
         unavailable:
-            'The decision model is not installed. Run: make decide-install',
+            'The decision model is not downloaded yet. Open Settings, Models.',
       ),
       heads: syntheticHeads,
       client: MockClient((request) async {
@@ -1447,7 +1447,7 @@ void main() {
           .having(
             (e) => e.message,
             'message',
-            contains('make decide-install'),
+            contains('Open Settings, Models'),
           )),
     );
     await expectLater(

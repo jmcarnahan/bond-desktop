@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../providers/app_providers.dart' show ParkedFact;
+import '../screens/setup/setup_download_body.dart' show SetupDownloadBody;
 import '../services/decision/decision_client.dart' show DecisionServerKind;
+import '../services/decision/decision_heads_file.dart' show DecisionHeadsFile;
 import '../services/llm/llm_client.dart' as llm show decisionOlderModelText;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart'
@@ -11,16 +13,21 @@ import '../services/llm/model_slots.dart'
         ModelPlacement,
         boxDecideId,
         boxProseId,
+        generativeNoAddressText,
         handServersBuild,
         hostPort,
         isLoopbackHost,
         routerBulkId,
         routerDecideId,
         routerProseId;
+import '../services/models/download_state.dart' show DownloadError;
 import '../services/models/managed_model_status.dart' show ManagedModelStatus;
+import '../services/models/model_ensurer.dart' show EnsurePhase, EnsureState;
+import '../services/models/registry_probe.dart' show RegistryCheck;
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
+import 'model_registry_form.dart' show ModelRegistryForm, RegistrySave;
 import 'model_servers_form.dart' show ModelServersForm, ServerFormRole;
 import 'settings_segments.dart';
 
@@ -45,7 +52,9 @@ typedef RoleWrite = Future<void> Function({
 /// question, where it runs: **This Mac** or **Your server**. This Mac is a
 /// status block (and, for the generative model, the choice of the 27B or the
 /// 4B); Your server is the one-address [ModelServersForm]. **Embeddings**
-/// always run on this Mac and are a status line only.
+/// always run on this Mac and are a status line only. **Model registry**
+/// under them is where the decision model is downloaded from
+/// ([ModelRegistryForm]).
 ///
 /// PROP-ONLY, like every other body here: nothing reaches for a provider, the
 /// host resolves every fact and takes every write back as a closure. The
@@ -69,21 +78,32 @@ class SettingsModelsPage extends StatefulWidget {
   /// Where the app's own llama-server stands.
   final ServerState serverState;
 
+  /// Whether this build runs its own llama-server. False under
+  /// `BOND_DEV_HAND_SERVERS`, where `make embed` serves embeddings and
+  /// nothing downloads them, so the Embeddings block offers no Download.
+  final bool managedServer;
+
   /// The decision remote's effective address and model, and whether its key
   /// is stored. Never a key.
   final String decisionUrl;
   final String decisionModel;
   final bool decisionKeyStored;
 
+  /// Whether, with nothing in the keychain, the decision remote's key is the
+  /// one this build carries (its address on the build's origin). A flag,
+  /// never a key.
+  final bool decisionKeyFromBuild;
+
   /// What the decision remote turned out to be, once a Connect or a call has
   /// asked it; null before then, and the page says what it said before
   /// there were two kinds.
   final DecisionServerKind? decisionKind;
 
-  /// The same three for the generative remote.
+  /// The same four for the generative remote.
   final String generativeUrl;
   final String generativeModel;
   final bool generativeKeyStored;
+  final bool generativeKeyFromBuild;
 
   /// This Mac's role models (`decision`, `generative`, `embed`), or null
   /// while they are still being read.
@@ -103,9 +123,9 @@ class SettingsModelsPage extends StatefulWidget {
   /// The generative role's write, for either placement.
   final RoleWrite? onUseGenerative;
 
-  /// **Check** under This Mac's decision model: re-reads the heads file and
-  /// the install state and asks the router to pick up a model installed
-  /// while the app runs. Null takes the button off.
+  /// **Check** under This Mac's decision model: re-reads the disk, asks the
+  /// router to pick up a model that landed while the app runs, and asks the
+  /// model ensurer to fetch what is missing. Null takes the button off.
   final Future<void> Function()? onCheckDecision;
 
   /// Forgets one role's stored key, by target id. Null takes **Remove key**
@@ -122,11 +142,34 @@ class SettingsModelsPage extends StatefulWidget {
   /// Why the pipeline is parked and how much is waiting.
   final ParkedFact? parked;
 
-  /// Where `make decide-install` has to put the decision model when that is
-  /// NOT the Makefile's default: the `local_bond-decide` folder inside the
-  /// models folder the app reads, which the wizard may have moved. Null while
-  /// the models folder is the default one.
-  final String? decideInstallDir;
+  /// The model registry's effective address and whether its token is in the
+  /// keychain or comes from the build. Flags, never a token.
+  final String registryUrl;
+  final bool registryTokenStored;
+  final bool registryTokenFromBuild;
+
+  /// The registry's write. **Null takes the Model registry block off.**
+  final RegistrySave? onSaveRegistry;
+
+  /// Forgets the stored registry token. Null takes **Remove token** off.
+  final Future<void> Function()? onRemoveRegistryToken;
+
+  /// Asks the saved registry for the decision model's file. Null takes
+  /// **Check** off the registry block.
+  final Future<RegistryCheck> Function()? onCheckRegistry;
+
+  /// What the model ensurer is doing: a download's percentage, or why the
+  /// last one failed. Null reads as idle.
+  final EnsureState? ensureState;
+
+  /// **Download**: asks the model ensurer to fetch what the placements need
+  /// and the disk lacks. Null takes every Download button off.
+  final Future<void> Function()? onDownloadModels;
+
+  /// **Download again** on the decision row, in the two states a refused
+  /// heads file parks in: the decide entry is fetched as though missing and
+  /// the files already here are hashed again. Null takes the button off.
+  final Future<void> Function()? onRedownloadDecision;
 
   const SettingsModelsPage({
     super.key,
@@ -136,13 +179,16 @@ class SettingsModelsPage extends StatefulWidget {
     this.inboxTier = false,
     this.processingOn = true,
     this.serverState = const ServerStopped(),
+    this.managedServer = true,
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKeyFromBuild = false,
     this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
     this.generativeKeyStored = false,
+    this.generativeKeyFromBuild = false,
     this.statuses,
     this.probe,
     this.storedBearer,
@@ -153,7 +199,15 @@ class SettingsModelsPage extends StatefulWidget {
     this.onSetUpAgain,
     this.onShowLog,
     this.parked,
-    this.decideInstallDir,
+    this.registryUrl = '',
+    this.registryTokenStored = false,
+    this.registryTokenFromBuild = false,
+    this.onSaveRegistry,
+    this.onRemoveRegistryToken,
+    this.onCheckRegistry,
+    this.ensureState,
+    this.onDownloadModels,
+    this.onRedownloadDecision,
   });
 
   static const Key decisionModeKey = ValueKey('settings-decision-mode');
@@ -162,11 +216,17 @@ class SettingsModelsPage extends StatefulWidget {
       ValueKey('settings-generative-managed');
   static const Key decisionStatusKey = ValueKey('settings-decision-status');
   static const Key decisionKindKey = ValueKey('settings-decision-kind');
+  static const Key decisionRedownloadKey =
+      ValueKey('settings-decision-redownload');
+  static const Key embedDownloadKey = ValueKey('settings-embed-download');
   static const Key decisionOlderHintKey =
       ValueKey('settings-decision-older-hint');
   static const Key generativeStatusKey = ValueKey('settings-generative-status');
   static const Key embedStatusKey = ValueKey('settings-embed-status');
   static const Key checkDecisionKey = ValueKey('settings-role-check-decision');
+  static const Key decisionDownloadKey = ValueKey('settings-decision-download');
+  static const Key generativeDownloadKey =
+      ValueKey('settings-generative-download');
   static const Key statusKey = ValueKey('settings-models-status');
   static const Key progressKey = ValueKey('settings-models-progress');
   static const Key showLogKey = ValueKey('settings-show-log');
@@ -227,21 +287,28 @@ class SettingsModelsPage extends StatefulWidget {
   /// waiting fixes neither.
   static const String decisionMisconfiguredText =
       'The decision server is not the decision model, or its heads file does '
-      'not match this build. Check its address here, or run make '
-      'decide-install.';
+      'not match this build. Check its address here, or press Download again.';
+
+  /// [decisionMisconfiguredText] for a hand-installed (`source: local`)
+  /// decision model, which no button downloads.
+  static const String decisionMisconfiguredLocalText =
+      'The decision server is not the decision model, or its heads file does '
+      'not match this build. Check its address here, or copy the current '
+      'model files into the models folder.';
 
   /// The installed heads file is the older decision model's, which this
   /// build no longer reads: the same plain sentence the rail and the heads
   /// refusal say, with no command in it.
   static const String decisionOlderModelText = llm.decisionOlderModelText;
 
-  /// The quieter line under [decisionOlderModelText], for a developer who
-  /// installs the model by hand: the same command, and folder, that
-  /// [decisionNotInstalledIn] names.
-  static String decisionOlderModelHintIn(String? dir) => dir == null
-      ? 'For developers: make decide-install'
-      : 'For developers: make decide-install '
-          "DECIDE_DIR='${dir.replaceAll("'", "'\\''")}'";
+  /// The quieter line under [decisionOlderModelText]: the **Download again**
+  /// button beside it fetches the current model over the old file.
+  static const String decisionOlderModelHint =
+      'Press Download again to replace it.';
+
+  /// [decisionOlderModelHint] for a hand-installed decision model.
+  static const String decisionOlderModelLocalHint =
+      '${DecisionHeadsFile.copyFilesText}.';
 
   /// Under Your server's decision form, what the server is.
   static const String systemOneKindText =
@@ -258,8 +325,7 @@ class SettingsModelsPage extends StatefulWidget {
   /// disk. Said on this Mac's server line, on the page that has the button,
   /// so it names the button rather than the way here.
   static const String notInstalledText =
-      'A model this Mac runs is not downloaded. Press Set up again to download '
-      'it.';
+      'A model this Mac runs is not downloaded. Press Download to get it.';
 
   /// Your server's status before a key has been pasted, and after one has.
   static const String keyNeededText =
@@ -267,29 +333,45 @@ class SettingsModelsPage extends StatefulWidget {
   static String connectedText(String model, String url) =>
       'Connected · $model at ${hostPort(url)}';
 
-  /// This Mac's install states.
+  /// A hand-installed (`source: local`) decision model that is not in the
+  /// models folder: the files are copied there by hand, nothing downloads it.
   static const String decisionNotInstalledText =
-      'Not installed · run make decide-install';
+      'Not installed. Copy the model files into the models folder.';
 
-  /// [decisionNotInstalledText] for a models folder the Makefile does not
-  /// know: `make decide-install` writes to `DECIDE_DIR`, the default folder,
-  /// and the app would never read what it put there. The folder is
-  /// shell-quoted, `'\''` for an apostrophe in it, so the command pastes as
-  /// one argument whatever the folder is called.
-  static String decisionNotInstalledIn(String? dir) => dir == null
-      ? decisionNotInstalledText
-      : 'Not installed · run make decide-install '
-          "DECIDE_DIR='${dir.replaceAll("'", "'\\''")}'";
+  /// A downloaded model (the registry's decision model, a generative model
+  /// this Mac runs) that is not on disk and is not downloading, with nothing
+  /// failed: the Download button beside it fetches it.
+  static const String notDownloadedYetText = 'Not downloaded yet.';
+
+  /// A download the model ensurer is running for this row.
+  static String downloadingText(double fraction) =>
+      'Downloading ${(fraction * 100).floor()}%';
+
+  /// A download is running whose percentage this row does not know: the
+  /// wizard's run, still going, that the model ensurer is waiting for.
+  static const String downloadingPlainText = 'Downloading';
+
+  static const String downloadLabel = 'Download';
+  static const String redownloadLabel = 'Download again';
   static const String installedLoadedText = 'Installed · loaded';
   static const String installedNotLoadedText = 'Installed · not loaded';
 
   /// Installed since the park that still says otherwise: the files are on
   /// disk and the router is on its way to serving them.
   static const String installedLoadingText = 'Installed · loading';
-  static const String notDownloadedText =
-      'Not downloaded · Set up again to download it';
+  /// The Embeddings row's missing line, the same words as the other two
+  /// roles' now that the model ensurer fetches it too.
+  static const String notDownloadedText = notDownloadedYetText;
+
+  /// The Embeddings row on a build with no managed server: `make embed`
+  /// serves the model, and nothing here downloads it.
+  static const String embedHandServedText =
+      'Served by your own embedding server.';
   static const String onDiskLoadedText = 'On disk · loaded';
   static const String onDiskNotLoadedText = 'On disk · not loaded';
+
+  /// [installedLoadingText] for a downloaded decision model.
+  static const String onDiskLoadingText = 'On disk · loading';
   static const String checkingText = 'Checking…';
 
   /// The server line, one sentence per state of the app's own server.
@@ -418,10 +500,12 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
       'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
       'not_installed' => SettingsModelsPage.notInstalledText,
-      'decision_not_installed' =>
-        SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir),
+      'no_address' => generativeNoAddressText,
+      'decision_not_installed' => _decisionNotHere(_row('decision')),
       'decision_older_model' => SettingsModelsPage.decisionOlderModelText,
-      'decision_misconfigured' => SettingsModelsPage.decisionMisconfiguredText,
+      'decision_misconfigured' => _decisionLocal
+          ? SettingsModelsPage.decisionMisconfiguredLocalText
+          : SettingsModelsPage.decisionMisconfiguredText,
       'decision_unauthorized' => SettingsModelsPage.decisionUnauthorizedText,
       _ => null,
     };
@@ -454,6 +538,18 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         ],
         const SizedBox(height: BondSpacing.s24),
         ..._embedBlock(),
+        if (widget.onSaveRegistry case final save?) ...[
+          const SizedBox(height: BondSpacing.s24),
+          ModelRegistryForm(
+            key: const ValueKey('settings-registry-form'),
+            url: widget.registryUrl,
+            tokenStored: widget.registryTokenStored,
+            tokenFromBuild: widget.registryTokenFromBuild,
+            onSave: save,
+            onRemoveToken: widget.onRemoveRegistryToken,
+            onCheck: widget.onCheckRegistry,
+          ),
+        ],
         if (widget.onSetUpAgain case final again?) ...[
           const SizedBox(height: BondSpacing.s16),
           Align(
@@ -538,6 +634,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           url: widget.decisionUrl,
           model: widget.decisionModel,
           keyStored: widget.decisionKeyStored,
+          keyFromBuild: widget.decisionKeyFromBuild,
           probe: widget.probe,
           storedBearer: widget.storedBearer,
           onConnect: ({required url, required model, key, required clearKey}) =>
@@ -578,6 +675,18 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
               style: BondType.small,
             ),
           ),
+          if (_decisionDownloadable(row)) ...[
+            const SizedBox(width: BondSpacing.s12),
+            _downloadButton(SettingsModelsPage.decisionDownloadKey),
+          ],
+          if (_decisionRedownloadable(row)) ...[
+            const SizedBox(width: BondSpacing.s12),
+            OutlinedButton(
+              key: SettingsModelsPage.decisionRedownloadKey,
+              onPressed: () => unawaited(widget.onRedownloadDecision!()),
+              child: const Text(SettingsModelsPage.redownloadLabel),
+            ),
+          ],
           if (!onServer && check != null) ...[
             const SizedBox(width: BondSpacing.s12),
             OutlinedButton(
@@ -592,21 +701,118 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         const SizedBox(height: BondSpacing.s4),
         Text(
           key: SettingsModelsPage.decisionOlderHintKey,
-          SettingsModelsPage.decisionOlderModelHintIn(widget.decideInstallDir),
+          _decisionLocal
+              ? SettingsModelsPage.decisionOlderModelLocalHint
+              : SettingsModelsPage.decisionOlderModelHint,
           style: BondType.caption,
         ),
       ],
     ];
   }
 
+  /// A run is in flight, whoever owns it: the model ensurer's own, or the
+  /// wizard's that it is waiting for. No Download button while it is.
+  bool get _downloading =>
+      widget.ensureState?.phase == EnsurePhase.downloading;
+
+  /// The decision model is a hand-installed (`source: local`) entry, which
+  /// no button downloads.
+  bool get _decisionLocal => _row('decision')?.local ?? false;
+
+  /// A **Download** button, wired to the model ensurer.
+  Widget _downloadButton(Key key) => OutlinedButton(
+        key: key,
+        onPressed: () => unawaited(widget.onDownloadModels!()),
+        child: const Text(SettingsModelsPage.downloadLabel),
+      );
+
+  /// The failures whose fix is the registry's address or token: the
+  /// sentence names it, and the registry block's Save retries the download,
+  /// so a Download button would only repeat the same refusal.
+  static const Set<String> _registryFixes = {
+    DownloadError.registryNotConfigured,
+    DownloadError.unauthorized,
+    DownloadError.registryNotFound,
+    DownloadError.registryNotAModel,
+  };
+
+  /// Whether a missing downloaded model's row offers **Download**: not
+  /// while any run is in flight, and not after a failure whose fix is in
+  /// the registry block.
+  bool _offersDownload(String routerId) {
+    if (widget.onDownloadModels == null || _downloading) return false;
+    final ensure = widget.ensureState;
+    if (ensure != null && ensure.failedIds.contains(routerId)) {
+      return !_registryFixes.contains(ensure.errorFor(routerId));
+    }
+    return true;
+  }
+
+  /// Whether the decision row offers **Download**: a downloaded (not hand
+  /// installed) decision model whose files this Mac needs and lacks. This
+  /// Mac needs the whole entry; Your server needs only the heads file, and
+  /// only for a ModernBERT server.
+  bool _decisionDownloadable(ManagedModelStatus? row) {
+    if (row == null || row.local || _decisionEditing) return false;
+    final needed = widget.decisionPlacement == ModelPlacement.box
+        ? widget.decisionKind == DecisionServerKind.encoderHeads &&
+            !row.headsOnDisk
+        : !row.onDisk;
+    return needed && _offersDownload(row.routerId);
+  }
+
+  /// Whether the decision row offers **Download again**: the heads file is
+  /// here and was REFUSED (the older model's, or one that does not match
+  /// this build), on a downloaded entry whose heads this Mac reads.
+  bool _decisionRedownloadable(ManagedModelStatus? row) {
+    if (widget.onRedownloadDecision == null || _downloading) return false;
+    if (row == null || row.local || _decisionEditing) return false;
+    final reason = widget.parked?.reason;
+    if (_parked(const {'decision_older_model', 'decision_misconfigured'}) ==
+            null ||
+        (reason != 'decision_older_model' &&
+            reason != 'decision_misconfigured')) {
+      return false;
+    }
+    if (widget.decisionPlacement == ModelPlacement.box) {
+      return widget.decisionKind == DecisionServerKind.encoderHeads &&
+          row.headsOnDisk;
+    }
+    return row.onDisk;
+  }
+
+  /// What a downloaded model that is not on disk says, by what the model
+  /// ensurer is doing for it: ITS percentage while it downloads, plain
+  /// `Downloading` while another owner's run is going, why it failed, or
+  /// that it has not landed yet.
+  String _downloadStatus(String routerId) {
+    final ensure = widget.ensureState;
+    if (ensure != null && ensure.phase == EnsurePhase.downloading) {
+      final own = ensure.fractionFor(routerId);
+      if (own != null) return SettingsModelsPage.downloadingText(own);
+      if (ensure.waiting) return SettingsModelsPage.downloadingPlainText;
+    }
+    if (ensure != null && ensure.failedIds.contains(routerId)) {
+      return SetupDownloadBody.describeDownloadError(ensure.errorFor(routerId));
+    }
+    return SettingsModelsPage.notDownloadedYetText;
+  }
+
+  /// The decision model is missing on this Mac: a hand-installed one says
+  /// how it gets here, a downloaded one says where its download stands.
+  String _decisionNotHere(ManagedModelStatus? row) =>
+      row == null || row.local
+          ? SettingsModelsPage.decisionNotInstalledText
+          : _downloadStatus(row.routerId);
+
   String _decisionStatus(ManagedModelStatus? row) {
     final onServer = widget.decisionPlacement == ModelPlacement.box;
-    // A not-installed park outlives the install that fixed it: it clears
+    // A not-installed park outlives the download that fixed it: it clears
     // only when triage next drains, and on this Mac that waits for the router
     // to restart onto a preset with the decision model in it, behind whatever
     // else that preset loads. Once the files are on disk the row is the
-    // fresher fact, so a Check after `make decide-install` stops saying Not
-    // installed. A Kev server reads no file on this Mac, so for it the park
+    // fresher fact, so the line stops saying the model is missing the moment
+    // it lands. A Kev server reads no file on this Mac, so for it the park
     // is stale the moment the role is on it.
     final kev = onServer && widget.decisionKind == DecisionServerKind.systemOne;
     final stale =
@@ -625,9 +831,15 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       // Off the server `stale` already implies a row; this says so to the
       // type system.
       if (!onServer && !_decisionEditing && row != null) {
-        return SettingsModelsPage.loaded(row, widget.serverState)
-            ? SettingsModelsPage.installedLoadedText
-            : SettingsModelsPage.installedLoadingText;
+        final loaded = SettingsModelsPage.loaded(row, widget.serverState);
+        if (row.local) {
+          return loaded
+              ? SettingsModelsPage.installedLoadedText
+              : SettingsModelsPage.installedLoadingText;
+        }
+        return loaded
+            ? SettingsModelsPage.onDiskLoadedText
+            : SettingsModelsPage.onDiskLoadingText;
       }
     }
     if (_decisionEditing) return SettingsModelsPage.untilConnectText;
@@ -635,35 +847,39 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       // An encoder-heads server's heads run here (D12): without the heads
       // file it still cannot decide anything. A Kev server answers there and
       // needs none, and a server whose kind is not known yet is not told to
-      // install a file it may not need: the host is asking it.
+      // fetch a file it may not need: the host is asking it.
       if (widget.decisionKind == DecisionServerKind.encoderHeads &&
           row != null &&
           !row.headsOnDisk) {
-        return SettingsModelsPage.decisionNotInstalledIn(
-            widget.decideInstallDir);
+        return _decisionNotHere(row);
       }
       return _remoteStatus(
         widget.decisionUrl,
         widget.decisionModel,
-        widget.decisionKeyStored,
+        widget.decisionKeyStored || widget.decisionKeyFromBuild,
       );
     }
     if (_checking) return SettingsModelsPage.checkingText;
     if (row == null) {
       return '${SettingsModelsPage.localModelNames[routerDecideId]} on this Mac';
     }
-    if (!row.onDisk) {
-      return SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir);
+    if (!row.onDisk) return _decisionNotHere(row);
+    final loaded = SettingsModelsPage.loaded(row, widget.serverState);
+    if (row.local) {
+      return loaded
+          ? SettingsModelsPage.installedLoadedText
+          : SettingsModelsPage.installedNotLoadedText;
     }
-    return SettingsModelsPage.loaded(row, widget.serverState)
-        ? SettingsModelsPage.installedLoadedText
-        : SettingsModelsPage.installedNotLoadedText;
+    return loaded
+        ? SettingsModelsPage.onDiskLoadedText
+        : SettingsModelsPage.onDiskNotLoadedText;
   }
 
-  /// Your server's line: a key is needed unless the server is on this
+  /// Your server's line: a key is needed unless one is at hand (the
+  /// keychain's, or this build's on its own origin) or the server is on this
   /// machine, which needs none.
-  String _remoteStatus(String url, String model, bool keyStored) {
-    if (!keyStored && !isLoopbackHost(url)) {
+  String _remoteStatus(String url, String model, bool hasKey) {
+    if (!hasKey && !isLoopbackHost(url)) {
       return SettingsModelsPage.keyNeededText;
     }
     return SettingsModelsPage.connectedText(model, url);
@@ -719,6 +935,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           url: widget.generativeUrl,
           model: widget.generativeModel,
           keyStored: widget.generativeKeyStored,
+          keyFromBuild: widget.generativeKeyFromBuild,
           probe: widget.probe,
           storedBearer: widget.storedBearer,
           onConnect: ({required url, required model, key, required clearKey}) =>
@@ -755,10 +972,25 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         const SizedBox(height: BondSpacing.s8),
         ?_detail(chosen),
       ],
-      Text(
-        key: SettingsModelsPage.generativeStatusKey,
-        _generativeStatus(chosen),
-        style: BondType.small,
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              key: SettingsModelsPage.generativeStatusKey,
+              _generativeStatus(chosen),
+              style: BondType.small,
+            ),
+          ),
+          // A generative model this Mac runs that is not on disk: the model
+          // ensurer fetches it as it fetches the decision model.
+          if (!onServer &&
+              chosen != null &&
+              !chosen.onDisk &&
+              _offersDownload(chosen.routerId)) ...[
+            const SizedBox(width: BondSpacing.s12),
+            _downloadButton(SettingsModelsPage.generativeDownloadKey),
+          ],
+        ],
       ),
       // The weights a switch to Your server left behind: on the disk, and
       // nothing holding them in memory.
@@ -781,14 +1013,19 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     // Under This Mac the server line above is already saying what the
     // router is doing, so only Your server speaks for these two parks.
     if (box) {
-      if (_parked(const {'model_unavailable', 'unauthorized'})
+      if (_parked(const {'model_unavailable', 'unauthorized', 'no_address'})
           case final parked?) {
         return parked;
+      }
+      // Your server with no address anywhere: the role is unavailable and
+      // says what fixes it, whether or not anything is waiting yet.
+      if (widget.generativeUrl.isEmpty && !_generativeEditing) {
+        return generativeNoAddressText;
       }
       return _remoteStatus(
         widget.generativeUrl,
         widget.generativeModel,
-        widget.generativeKeyStored,
+        widget.generativeKeyStored || widget.generativeKeyFromBuild,
       );
     }
     if (_generativeEditing) return SettingsModelsPage.untilConnectText;
@@ -798,7 +1035,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
               widget.generativeManagedId;
       return '$name on this Mac';
     }
-    if (!row.onDisk) return SettingsModelsPage.notDownloadedText;
+    if (!row.onDisk) return _downloadStatus(row.routerId);
     return SettingsModelsPage.loaded(row, widget.serverState)
         ? SettingsModelsPage.onDiskLoadedText
         : SettingsModelsPage.onDiskNotLoadedText;
@@ -812,10 +1049,12 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     final String status;
     if (parked != null) {
       status = parked;
+    } else if (!widget.managedServer) {
+      status = SettingsModelsPage.embedHandServedText;
     } else if (row == null) {
       status = '${SettingsModelsPage.embedModelName} on this Mac';
     } else if (!row.onDisk) {
-      status = SettingsModelsPage.notDownloadedText;
+      status = _downloadStatus(row.routerId);
     } else {
       status = SettingsModelsPage.loaded(row, widget.serverState)
           ? SettingsModelsPage.onDiskLoadedText
@@ -826,10 +1065,24 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       Text(SettingsModelsPage.embedCaption, style: BondType.caption),
       const SizedBox(height: BondSpacing.s4),
       ?_detail(row),
-      Text(
-        key: SettingsModelsPage.embedStatusKey,
-        status,
-        style: BondType.small,
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              key: SettingsModelsPage.embedStatusKey,
+              status,
+              style: BondType.small,
+            ),
+          ),
+          if (parked == null &&
+              widget.managedServer &&
+              row != null &&
+              !row.onDisk &&
+              _offersDownload(row.routerId)) ...[
+            const SizedBox(width: BondSpacing.s12),
+            _downloadButton(SettingsModelsPage.embedDownloadKey),
+          ],
+        ],
       ),
     ];
   }

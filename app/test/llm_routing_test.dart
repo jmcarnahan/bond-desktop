@@ -91,9 +91,14 @@ void main() {
   late BondDatabase db;
   late MessageStore store;
 
-  setUp(() {
+  setUp(() async {
     db = testDb();
     store = MessageStore(db);
+    // The world this file was written in, said out loud since the
+    // default-setup round moved both defaults: the generative model on this
+    // Mac (the router's target) and processing ON.
+    await store.setPref(modelPlacementKey, ModelPlacement.local.name);
+    await store.setPref(processingOnKey, 'true');
   });
 
   tearDown(() => db.close());
@@ -882,9 +887,10 @@ void main() {
       // `enabled` closure would run the moment anything pumped it, and the
       // switch at the top of the rail would be a control over nothing.
       //
-      // The switch is a REMEMBERED preference that starts on since Round H, so
-      // this writes it off FIRST and reads it back: a drain that took work
-      // here is a lane that was wired without the closure.
+      // The switch is a REMEMBERED preference (it starts off since the
+      // default-setup round), and this writes it off FIRST and reads it back
+      // rather than lean on the default: a drain that took work here is a
+      // lane that was wired without the closure.
       await store.setPref(processingOnKey, 'false');
       final container = ProviderContainer(
         overrides: [

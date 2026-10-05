@@ -4,8 +4,8 @@
 /// `DecisionClient` asks for its heads SYNCHRONOUSLY at the top of every
 /// call, so this answers synchronously too: a `stat` per call (cheap), and a
 /// parse only on the first call and whenever the file's path or modification
-/// time moved — which is what `make decide-install` over an older export
-/// looks like. The heads are needed even when a remote server embeds (the
+/// time moved — which is what a fresh download over an older file looks
+/// like. The heads are needed even when a remote server embeds (the
 /// plan's D12): the heads always run here.
 library;
 
@@ -25,20 +25,45 @@ class DecisionHeadsFile {
   /// move, so it is asked on every call rather than captured.
   final String Function() _path;
 
-  DecisionHeadsFile(this._path);
+  /// Whether the file at [_path] may be read at all, asked SYNCHRONOUSLY on
+  /// every call ahead of the cache: false answers exactly as a missing file
+  /// does. The provider answers `DownloadLedger.servable` for a registry
+  /// entry, whose heads belong to one GGUF and are used only while both
+  /// download rows are current; a row turning current is seen on the next
+  /// call. Null always reads.
+  final bool Function()? usable;
+
+  /// Whether the decide entry is installed by hand (`source: local`), asked
+  /// when a refusal is worded: no button downloads such a model, so its
+  /// sentence says to copy the files rather than to press Download again.
+  final bool Function()? local;
+
+  DecisionHeadsFile(this._path, {this.usable, this.local});
 
   /// What a missing file says. It reaches the rail through the
-  /// `decision_not_installed` park, so the fix is in the sentence.
+  /// `decision_not_installed` park, so the fix is in the sentence: the model
+  /// ensurer downloads it, and Settings, Models says how that is going.
   static const String notInstalledText =
-      'The decision model is not installed. Run: make decide-install';
+      'The decision model is not downloaded yet. Open Settings, Models.';
 
   /// What a file this build cannot use says, before the parser's own
   /// reason. It parks under `decision_misconfigured`. The older model's file
   /// throws [DecisionOlderModelException] with `DecisionHeads.olderModelText`
   /// alone instead, and parks under its own `decision_older_model`.
   static const String mismatchText =
-      "The decision model's heads file does not match this build. Run: make "
-      'decide-install';
+      "The decision model's heads file does not match this build. Open "
+      'Settings, Models and press Download again.';
+
+  /// How a hand-installed (`source: local`) decision model is replaced: a
+  /// fragment, so the rail can say it in its own shape and Settings with a
+  /// full stop. The one spelling.
+  static const String copyFilesText =
+      'Copy the current model files into the models folder';
+
+  /// [mismatchText] for a hand-installed decision model.
+  static const String mismatchLocalText =
+      "The decision model's heads file does not match this build. "
+      '$copyFilesText.';
 
   DecisionHeads? _heads;
   String? _loadedPath;
@@ -62,7 +87,7 @@ class DecisionHeadsFile {
     final file = File(path);
     final DateTime modified;
     try {
-      if (!file.existsSync()) {
+      if (!file.existsSync() || !(usable?.call() ?? true)) {
         throw const DecisionNotInstalledException(notInstalledText);
       }
       modified = file.lastModifiedSync();
@@ -126,7 +151,10 @@ class DecisionHeadsFile {
       _remember(
         path,
         modified,
-        DecisionMisconfiguredException('$mismatchText. $why'),
+        DecisionMisconfiguredException(
+          '${(local?.call() ?? false) ? mismatchLocalText : mismatchText} '
+          '$why',
+        ),
       );
 
   DecisionMisconfiguredException _remember(

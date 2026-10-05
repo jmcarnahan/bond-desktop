@@ -27,6 +27,7 @@ import 'fixtures/fake_auth_session.dart';
 import 'fixtures/fake_desktop_notifier.dart';
 import 'fixtures/fake_process_runner.dart';
 import 'fixtures/fake_system_info.dart';
+import 'fixtures/recording_ensurer.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -65,6 +66,9 @@ void main() {
       authSessionProvider.overrideWithValue(auth),
       desktopNotifierProvider.overrideWithValue(notifier),
       desktopNotificationServiceProvider.overrideWithValue(notifications),
+      // The gate kicks the ensurer when it shows the inbox; a fake, so no
+      // download can start over real sockets.
+      modelEnsurerProvider.overrideWithValue(RecordingEnsurer()),
     ]);
     addTearDown(container.dispose);
   }

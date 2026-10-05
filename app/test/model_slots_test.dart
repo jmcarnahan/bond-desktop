@@ -444,15 +444,18 @@ void main() {
           routerBulkId);
     });
 
-    test('a build with no compiled address defaults to this Mac', () {
-      // `defaultModelPlacement` is const-evaluated from `boxUrlDefault`, which
-      // is empty under `flutter test`, so the whole suite runs local unless a
-      // test says otherwise.
-      expect(defaultModelPlacement, ModelPlacement.local);
+    test('every build defaults the generative model to Your server', () {
+      // The default-setup round's D9: Your server whatever the build, a
+      // build with no compiled address included (`boxUrlDefault` is empty
+      // under `flutter test`). With no address anywhere the role parks
+      // rather than coming home to this Mac, so a test that means this Mac
+      // says so.
+      expect(boxUrlDefault, isEmpty);
+      expect(defaultModelPlacement, ModelPlacement.box);
       // And it is genuinely const: this list would not compile otherwise, and
       // `AppPrefs`'s default parameter could not name it.
       const placements = [defaultModelPlacement];
-      expect(placements, [ModelPlacement.local]);
+      expect(placements, [ModelPlacement.box]);
     });
 
     test('the fixed target constants are the ids, names and models the '

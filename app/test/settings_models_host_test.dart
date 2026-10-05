@@ -17,6 +17,12 @@ import 'package:bond_inbox/services/decision/decision_client.dart'
     show DecisionServerKind;
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
+import 'package:bond_inbox/services/models/model_manifest.dart'
+    show ModelManifest;
+import 'package:bond_inbox/services/models/managed_model_status.dart';
+import 'package:bond_inbox/services/models/model_ensurer.dart';
+import 'package:bond_inbox/services/models/registry_probe.dart';
+import 'package:bond_inbox/widgets/model_registry_form.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
 import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/model_servers_form.dart';
@@ -30,6 +36,8 @@ import 'package:path/path.dart' as p;
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/fake_process_runner.dart';
+import 'fixtures/memory_token_store.dart';
+import 'fixtures/recording_ensurer.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -151,7 +159,16 @@ void main() {
   late FakeProcessRunner runner;
   late ModelServerSupervisor supervisor;
 
+  /// Every widget case here kicks this rather than the real model ensurer,
+  /// which would start a download over real sockets in a fake-async body.
+  late RecordingEnsurer ensurer;
+
+  /// What Settings' registry Check asked, and with which token.
+  late List<({Uri url, String? token})> registryProbes;
+
   setUp(() async {
+    ensurer = RecordingEnsurer();
+    registryProbes = [];
     db = testDb();
     store = MessageStore(db);
     support = await Directory.systemTemp.createTemp('models-host');
@@ -205,6 +222,10 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
+    // This Mac, said out loud: every case here starts from the generative
+    // model on this Mac, which was the default until the default-setup round
+    // moved it to Your server.
+    await store.setPref(modelPlacementKey, ModelPlacement.local.name);
     final prefs = await AppPrefsNotifier.read(store);
     await tester.pumpWidget(ProviderScope(
       overrides: [
@@ -232,6 +253,7 @@ void main() {
         // the manifest, and `modelManifestProvider` throws unless a host
         // overrides it.
         modelManifestProvider.overrideWithValue(testManifest()),
+        modelEnsurerProvider.overrideWithValue(ensurer),
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -253,11 +275,21 @@ void main() {
     bool withServer = false,
     ModelServerSupervisor? server,
     FakeDecisionClient? decision,
+    ModelManifest? manifest,
+    MemoryTokenStore? tokens,
+    bool managedServer = true,
+    List<Override> extra = const [],
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    final prefs = await AppPrefsNotifier.read(store);
+    // This Mac, said out loud: every case here starts from the generative
+    // model on this Mac, which was the default until the default-setup round
+    // moved it to Your server.
+    await store.setPref(modelPlacementKey, ModelPlacement.local.name);
+    final read = await AppPrefsNotifier.read(store);
+    final prefs =
+        managedServer ? read : read.copyWith(managedServer: false);
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
@@ -268,7 +300,19 @@ void main() {
           noCommandHeads(),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
-        modelManifestProvider.overrideWithValue(testManifest()),
+        modelManifestProvider.overrideWithValue(manifest ?? testManifest()),
+        modelEnsurerProvider.overrideWithValue(ensurer),
+        ...extra,
+        registryProbeProvider.overrideWithValue(({required url, token}) async {
+          registryProbes.add((url: url, token: token));
+          return RegistryCheck.reachable;
+        }),
+        // An in-memory keychain for the cases that store a token: the real
+        // plugin throws under `flutter test`.
+        if (tokens != null)
+          appPrefsProvider.overrideWith(
+            (ref) => AppPrefsNotifier(store, initial: prefs, tokens: tokens),
+          ),
         // The app's own server, for the case that watches it follow the
         // placement. Left alone everywhere else: the other cases are about
         // preferences and clients, and a supervisor over a fake runner would
@@ -638,6 +682,8 @@ void main() {
     expect(prefs.generativeManagedModel, routerBulkId);
     expect(prefs.generativeSpec.model, routerBulkId);
     expect(server.presets, greaterThanOrEqualTo(1));
+    // And whatever the new choice needs on disk is asked for.
+    expect(ensurer.calls, greaterThanOrEqualTo(1));
   });
 
   testWidgets('Check on the decision model asks the supervisor for the '
@@ -651,15 +697,238 @@ void main() {
     await tapKey(tester, SettingsModelsPage.checkDecisionKey);
     await settle(tester);
 
-    // The make-decide-install-while-running path: the router is asked to
-    // pick up the placements' preset, which restarts it only when the hash
-    // moved.
+    // A file that landed while the app runs: the router is asked to pick up
+    // the placements' preset, which restarts it only when the hash moved,
+    // and the model ensurer is asked for whatever is still missing.
     expect(server.presets, before + 1);
+    expect(ensurer.calls, 1);
     // And the heads cache is left alone: it re-reads on a new mtime by
     // itself, and rebuilding it would rebuild the decision client and the
     // triage queue under it mid-drain.
     expect(identical(container.read(decisionHeadsProvider), heads), isTrue);
     expect(tester.takeException(), isNull);
+  });
+
+  group('the Model registry and Download', () {
+    const registry = 'https://artifactory.example.com/artifactory/bond-models';
+    const fakeToken = 'test-token-123';
+
+    List<String> rendered(WidgetTester tester) => [
+          for (final t in tester.widgetList<Text>(find.byType(Text)))
+            t.data ?? '',
+        ];
+
+    testWidgets('Save writes the address and the token, empties the field, '
+        'and asks for the models', (tester) async {
+      final tokens = MemoryTokenStore();
+      await pumpHost(tester, probe: _ScriptedProbe(const {}), tokens: tokens);
+      await openHostSection(tester, 'Models');
+      final before = ensurer.calls;
+
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), registry);
+      await tester.enterText(find.byKey(ModelRegistryForm.tokenKey), fakeToken);
+      await tester.pump();
+      await tapKey(tester, ModelRegistryForm.saveKey);
+      await settle(tester);
+
+      final prefs = container.read(appPrefsProvider);
+      expect(prefs.effectiveRegistryUrl, registry);
+      expect(prefs.registryTokenStored, isTrue);
+      expect(
+        container.read(appPrefsProvider.notifier).bearerFor(registryId),
+        fakeToken,
+      );
+      expect(ensurer.calls, before + 1);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(ModelRegistryForm.tokenKey))
+            .controller!
+            .text,
+        isEmpty,
+      );
+      expect(find.text(ModelRegistryForm.storedHint), findsOneWidget);
+      expect(rendered(tester), everyElement(isNot(contains(fakeToken))));
+    });
+
+    testWidgets('an address that is not one is refused under the field and '
+        'nothing is written', (tester) async {
+      await pumpHost(tester,
+          probe: _ScriptedProbe(const {}), tokens: MemoryTokenStore());
+      await openHostSection(tester, 'Models');
+
+      await tester.enterText(
+          find.byKey(ModelRegistryForm.urlKey), 'ftp://artifactory.example.com');
+      await tester.pump();
+      await tapKey(tester, ModelRegistryForm.saveKey);
+      await settle(tester);
+
+      expect(find.byKey(ModelRegistryForm.refusalKey), findsOneWidget);
+      expect(container.read(appPrefsProvider).registryUrl, isEmpty);
+      expect(ensurer.calls, 0);
+    });
+
+    testWidgets('Remove token forgets it and asks for the models again',
+        (tester) async {
+      final tokens = MemoryTokenStore();
+      await pumpHost(tester, probe: _ScriptedProbe(const {}), tokens: tokens);
+      await container.read(appPrefsProvider.notifier).useRegistry(
+            url: registry,
+            token: fakeToken,
+          );
+      await tester.pump();
+      await openHostSection(tester, 'Models');
+      final before = ensurer.calls;
+
+      await tapKey(tester, ModelRegistryForm.removeTokenKey);
+      await settle(tester);
+
+      expect(container.read(appPrefsProvider).registryTokenStored, isFalse);
+      expect(
+        container.read(appPrefsProvider.notifier).bearerFor(registryId),
+        isNull,
+      );
+      expect(ensurer.calls, before + 1);
+    });
+
+    testWidgets('Check asks the saved registry for the decision model\'s '
+        'heads file, with the token, and says what it found', (tester) async {
+      final tokens = MemoryTokenStore();
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        tokens: tokens,
+        manifest: testManifest(withDecide: true),
+      );
+      await container.read(appPrefsProvider.notifier).useRegistry(
+            url: registry,
+            token: fakeToken,
+          );
+      await tester.pump();
+      await openHostSection(tester, 'Models');
+
+      await tapKey(tester, ModelRegistryForm.checkKey);
+      await settle(tester);
+
+      expect(registryProbes, hasLength(1));
+      expect(
+        registryProbes.single.url.toString(),
+        '$registry/bundles/bond-decide-mbl-v3swap/heads.json',
+      );
+      // The token rides to the probe, and to nothing on the screen.
+      expect(registryProbes.single.token, fakeToken);
+      expect(find.text(ModelRegistryForm.reachableText), findsOneWidget);
+      expect(rendered(tester), everyElement(isNot(contains(fakeToken))));
+    });
+
+    testWidgets('Check with no registry address asks nothing', (tester) async {
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        tokens: MemoryTokenStore(),
+        manifest: testManifest(withDecide: true),
+      );
+      await openHostSection(tester, 'Models');
+
+      await tapKey(tester, ModelRegistryForm.checkKey);
+      await settle(tester);
+
+      expect(registryProbes, isEmpty);
+      expect(find.text(ModelRegistryForm.notConfiguredText), findsOneWidget);
+    });
+
+    testWidgets('Download again under a refused heads file asks the ensurer '
+        'to re-verify the decision model', (tester) async {
+      // A park is said only while processing is on and work waits.
+      await store.setPref(processingOnKey, 'true');
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        manifest: testManifest(withDecide: true),
+        extra: [
+          parkedProvider.overrideWith((ref) => Stream.value(
+                const ParkedFact(reason: 'decision_older_model', waiting: 3),
+              )),
+          managedModelsStatusProvider.overrideWith((ref) async => const [
+                ManagedModelStatus(
+                  roleId: 'decision',
+                  displayName: 'Bond decision model',
+                  bytes: 1024,
+                  onDisk: true,
+                  routerId: routerDecideId,
+                  inUse: true,
+                ),
+              ]),
+        ],
+      );
+      await openHostSection(tester, 'Models');
+      await settle(tester);
+
+      expect(
+        tester.widget<Text>(find.byKey(SettingsModelsPage.decisionOlderHintKey))
+            .data,
+        'Press Download again to replace it.',
+      );
+      await tapKey(tester, SettingsModelsPage.decisionRedownloadKey);
+
+      expect(ensurer.calls, 1);
+      expect(ensurer.reverified.single, {routerDecideId});
+    });
+
+    testWidgets('Download under a missing decision model asks the ensurer, '
+        'and the line follows its state', (tester) async {
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        manifest: testManifest(withDecide: true),
+      );
+      await openHostSection(tester, 'Models');
+      await settle(tester);
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(SettingsModelsPage.decisionStatusKey))
+            .data,
+        SettingsModelsPage.notDownloadedYetText,
+      );
+      await tapKey(tester, SettingsModelsPage.decisionDownloadKey);
+      expect(ensurer.calls, 1);
+
+      ensurer.publish(const EnsureState(
+        phase: EnsurePhase.downloading,
+        modelId: routerDecideId,
+        fraction: 0.5,
+        fractions: {routerDecideId: 0.5},
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(SettingsModelsPage.decisionStatusKey))
+            .data,
+        'Downloading 50%',
+      );
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing);
+    });
+
+    testWidgets('a build with no managed server says its own server serves '
+        'embeddings and offers no Download for them', (tester) async {
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        managedServer: false,
+      );
+      await openHostSection(tester, 'Models');
+      await settle(tester);
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(SettingsModelsPage.embedStatusKey))
+            .data,
+        SettingsModelsPage.embedHandServedText,
+      );
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsNothing);
+    });
   });
 
   testWidgets('About shows what the two providers resolved', (tester) async {

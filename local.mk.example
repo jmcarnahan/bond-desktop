@@ -1,0 +1,45 @@
+# Copy this file to local.mk (git-ignored) and fill in the four lines below.
+# The Makefile reads local.mk before anything else, so every value here is
+# this environment's own; `make app-doctor` checks them, then `make app-run`.
+#
+# Write each value with a plain `=`, and put a comment on its OWN line above
+# the value, never after it: make keeps the spaces between a value and a
+# trailing `#`, so `BOND_BOX_URL = https://box.example.com   # mine` would
+# carry the spaces into the address. For the same reason a value cannot
+# contain a `#`, and a `$` in a key is written `$$`.
+#
+# Every value is a DEFAULT the app is built with. Each one can be changed in
+# the app under Settings, Models, and a value saved there wins over this
+# file; removing it there returns to the one here. The two secrets are
+# compiled only into a build made from this checkout (`make app-run`,
+# `make app-build`), never into a distributed one, and `make -n` never prints
+# them. Ask the project owner for all four.
+
+# The model registry the app downloads the decision model from: an
+# Artifactory repository URL. A local stand-in answers on
+# http://localhost:18082/artifactory/bond-models.
+BOND_REGISTRY_URL = https://artifactory.example.com/artifactory/bond-models
+
+# A READ token for that registry. Paste the READ token after the = sign.
+# Never an admin token.
+BOND_REGISTRY_TOKEN =
+
+# Your server, where the generative model runs: its origin, with no path.
+BOND_BOX_URL = https://box.example.com
+
+# Your server's access key. Paste your server's access key after the = sign.
+BOND_BOX_KEY =
+
+# ── optional ─────────────────────────────────────────────────────────────
+
+# A llama-server that is not on PATH. A Homebrew install
+# (`brew install llama.cpp`) is found without this line.
+# BOND_LLAMA_SERVER = /path/to/llama-server
+
+# Skip the first-run wizard on a machine that is already set up. The models
+# the current placements need still download in the background.
+# BOND_DEV_SKIP_SETUP = 1
+
+# Where the Microsoft lines and BOND_MCP_SERVER_URL are read from, when that
+# is not the .env beside the Makefile.
+# MS_ENV = /path/to/another/.env

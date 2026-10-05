@@ -106,12 +106,14 @@ import '../services/calendar/write_rules.dart'
         checkDrop,
         writeDoneMessage,
         writeSummary;
+import '../services/decision/decision_heads_file.dart' show DecisionHeadsFile;
 import '../services/external_sender.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; [ModelPlacement] is not re-exported, and the rail's AI
 // stop needs it to say whether the models run on the box.
 import '../services/llm/model_slots.dart' show ModelPlacement;
+import '../services/models/model_manifest.dart' show ModelRole;
 import '../services/llm/storyline_tasks.dart' show NameStorylineTask;
 import '../services/needs_you_edits.dart' show NeedsYouPress;
 import '../services/profile_photos.dart' show photoKeyFor;
@@ -283,18 +285,25 @@ typedef _Selection = ({
 /// under either placement, `decision_unavailable`, `decision_not_installed`,
 /// `decision_older_model`, `decision_misconfigured` and
 /// `decision_unauthorized` name the decision
-/// model rather than a machine, and `not_installed` is a generative model this Mac has not
-/// downloaded, which no server restart fixes.
+/// model rather than a machine, `not_installed` is a generative model this Mac has not
+/// downloaded, which no server restart fixes, and `no_address` is a
+/// generative model on Your server with no address to dial.
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
 /// `onReady`, and it is the only cadence this sentence may claim: nothing
 /// polls a user-defined server's health.
+///
+/// [decisionLocal] is a hand-installed (`source: local`) decision model,
+/// which no button downloads: its two refusals say to copy the files, in
+/// [DecisionHeadsFile.copyFilesText]'s words, where a downloaded one's say
+/// Download again.
 String railProgressLine({
   required bool on,
   required int remaining,
   required String? reason,
   required int waiting,
   required bool onBox,
+  bool decisionLocal = false,
 }) {
   // [waiting] rather than [remaining], because the switch is about the whole
   // pipeline and the worker lanes have backlogs of their own. The two numbers
@@ -322,20 +331,21 @@ String railProgressLine({
     case 'decision_unavailable':
       return 'Decision model unreachable · $waiting waiting · retrying each '
           'minute';
-    // The decision model's own install is missing (the router is not serving
-    // it, or its heads file is not there). Its fix is a command, not the
-    // generative download below, so it says which.
+    // The decision model's own files are missing (the router is not serving
+    // it, or its heads file is not there). The model ensurer downloads it,
+    // and Settings, Models says how that is going and offers Download.
     case 'decision_not_installed':
-      return 'The decision model is not installed · $waiting waiting · run '
-          'make decide-install, then Check in Settings';
+      return 'The decision model is not downloaded yet · $waiting waiting · '
+          'open Settings, Models';
     // The installed decision model is the older one, whose heads file this
-    // build no longer reads. Its fix is an install, not an address, and the
+    // build no longer reads. Its fix is a download, not an address, and the
     // sentence says so in plain words, with no command: whoever reads the
     // rail may not be a developer. No retry cadence either.
     case 'decision_older_model':
       return 'The installed decision model is an older version that this '
-          'app no longer reads · $waiting waiting · install the current '
-          'decision model to resume sorting new mail';
+          'app no longer reads · $waiting waiting · '
+          '${decisionLocal ? _copyFilesFragment : 'open Settings, Models '
+              'and press Download again'} to resume sorting new mail';
     // A server that answers, but not as the decision model does (another
     // model's tokenizer, normalised vectors, no /tokenize), or a heads file
     // this build refuses. Waiting fixes neither, so no retry cadence is
@@ -343,7 +353,9 @@ String railProgressLine({
     case 'decision_misconfigured':
       return 'The decision server is not the decision model, or its heads '
           'file does not match · $waiting waiting · check its address in '
-          'Settings, or run make decide-install';
+          'Settings, or '
+          '${decisionLocal ? _copyFilesFragment : 'press Download again '
+              'under Settings, Models'}';
     // Named for the decision server whichever way the generative model is
     // placed: that placement says nothing about where this key went.
     case 'decision_unauthorized':
@@ -354,7 +366,12 @@ String railProgressLine({
     // no retry cadence is claimed and the sentence says what to do.
     case 'not_installed':
       return 'A model this Mac runs is not downloaded · $waiting waiting · '
-          'set up again in Settings';
+          'open Settings, Models';
+    // The generative model is placed on Your server and nothing names one.
+    // An address fixes it and waiting does not, so no retry cadence.
+    case 'no_address':
+      return 'The generative model has no server address · $waiting waiting · '
+          'add one under Settings, Models';
     // Named for the machine that refused, like the arm above it: a local
     // server behind a reverse proxy can answer 401 too, and telling that
     // person to go and look at a server they named would send them to the
@@ -367,6 +384,12 @@ String railProgressLine({
       return 'Triaging $remaining remaining…';
   }
 }
+
+/// [DecisionHeadsFile.copyFilesText] in the rail's shape: a fragment after a
+/// `·`, lower case.
+final String _copyFilesFragment =
+    '${DecisionHeadsFile.copyFilesText[0].toLowerCase()}'
+    '${DecisionHeadsFile.copyFilesText.substring(1)}';
 
 /// How long a calendar write's Undo is honoured: the toast's own window, and
 /// the same again for `z` after the bar has gone.
@@ -5138,6 +5161,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final parked = ref.watch(parkedProvider).valueOrNull;
     final onBox =
         ref.watch(appPrefsProvider).modelPlacement == ModelPlacement.box;
+    // Off the MANIFEST, never a target: a hand-installed decision model's
+    // refusals say to copy the files, because no button downloads it.
+    bool decisionLocal;
+    try {
+      decisionLocal = ref
+              .read(modelManifestProvider)
+              .byRoleOrNull(ModelRole.decide)
+              ?.isLocal ??
+          false;
+    } catch (_) {
+      decisionLocal = false;
+    }
     return StreamBuilder<TriageProgress>(
       stream: ref.watch(triageQueueProvider).progress,
       builder: (context, snapshot) {
@@ -5164,6 +5199,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               reason: parked?.reason,
               waiting: waiting,
               onBox: onBox,
+              decisionLocal: decisionLocal,
             ),
             style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
           ),

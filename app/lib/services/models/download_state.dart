@@ -25,6 +25,24 @@ abstract final class DownloadError {
   static const String manifestMismatch = 'manifest_mismatch';
   static const String missingFolder = 'missing_folder';
 
+  /// A registry entry with no registry address to fetch it from. Said before
+  /// any request, because there is nowhere to send one.
+  static const String registryNotConfigured = 'registry_not_configured';
+
+  /// The registry answered 401 or 403 to its own address: no token, or one
+  /// it refused. Never retried, because asking again changes nothing.
+  static const String unauthorized = 'unauthorized';
+
+  /// The registry answered 404 to its own address: no such bundle or file
+  /// there, which is an address pointing at the wrong repository. Never
+  /// retried, because the file will not appear by asking again.
+  static const String registryNotFound = 'registry_not_found';
+
+  /// The registry's FIRST answer was a 200 or 206 carrying a web page
+  /// (`text/html`): a login page or a proxy's, never a model. Never retried,
+  /// because a retry budget spent on a login page is minutes of nothing.
+  static const String registryNotAModel = 'registry_not_a_model';
+
   /// Everything the hub or the CDN answered that has no word of its own.
   static String http(int code) => 'http_$code';
 }
@@ -239,6 +257,10 @@ class DownloadLedger {
   /// spell it three ways.
   static String draftId(String id) => '$id.draft';
 
+  /// The row a registry entry's heads file is kept under, on [draftId]'s
+  /// reasoning: fetched, resumed and verified apart from the weights.
+  static String headsId(String id) => '$id.heads';
+
   DownloadLedger record(FileDownloadState state) => DownloadLedger(
         Map.unmodifiable({...files, state.id: state}),
       );
@@ -259,23 +281,57 @@ class DownloadLedger {
   /// eighteen gigabytes to open a window is not a thing this app may do.
   /// A checkpoint with a SIDECAR is current only when both rows are: the
   /// preset names the draft as well as the weights and the server is started
-  /// `--offline`, so half a set is a server that does not start.
+  /// `--offline`, so half a set is a server that does not start. A REGISTRY
+  /// entry with a heads file wants its `.heads` row too: the decision
+  /// model's answers come from the heads, not the GGUF alone. `isRegistry`
+  /// is the one rule for "owns a heads leg", the downloader's and the
+  /// preflight's as well.
   bool isCurrent(ModelFile file) {
     if (!_rowIsCurrent(files[file.id], file.sha256)) return false;
     final head = file.sidecar;
-    if (head == null) return true;
-    return _rowIsCurrent(files[draftId(file.id)], head.sha256);
+    if (head != null &&
+        !_rowIsCurrent(files[draftId(file.id)], head.sha256)) {
+      return false;
+    }
+    final heads = file.heads;
+    if (heads != null &&
+        file.isRegistry &&
+        !_rowIsCurrent(files[headsId(file.id)], heads.sha256)) {
+      return false;
+    }
+    return true;
   }
 
   static bool _rowIsCurrent(FileDownloadState? row, String sha256) =>
       row != null && row.status == DownloadStatus.done && row.sha256 == sha256;
+
+  /// Whether [file] may be USED from [modelsFolder]: the ONE rule the
+  /// router's preset, the decision heads reader and the Models page's
+  /// `On disk` share.
+  ///
+  /// Every entry needs its files in the folder. A REGISTRY entry needs
+  /// [isCurrent] as well: its GGUF and heads file are a PAIR that must belong
+  /// together, and existence alone would let a new GGUF run with old heads
+  /// (a quit between the two legs, a digest bump on the same file names), and
+  /// the decisions written that way are never redone. A file placed by hand
+  /// with no row (`make decide-fetch`) is used once a model ensurer pass, at
+  /// the next launch or a Download press, has hashed it in place and recorded
+  /// it, with or without a registry address. A `source: local` entry has
+  /// no rows, and a Hugging Face entry is served on its files as it always
+  /// was.
+  bool servable(ModelFile file, String modelsFolder) {
+    if (!ModelManifest.filesPresent(file, modelsFolder)) return false;
+    return !file.isRegistry || isCurrent(file);
+  }
 
   /// Every file in [manifest] is [isCurrent] — the whole set, at this build's
   /// digests. What the gate and the wizard's resume both ask.
   ///
   /// A `source: local` entry is SKIPPED: it is installed by hand and never
   /// has a row, and a decision model that is not installed must not send a
-  /// finished setup back through the wizard.
+  /// finished setup back through the wizard. The wizard gate hands this the
+  /// manifest's `gating` view, which leaves the registry entries out on the
+  /// same reasoning (decision D7).
   bool matches(ModelManifest manifest) {
     for (final file in manifest.models) {
       if (file.isLocal) continue;

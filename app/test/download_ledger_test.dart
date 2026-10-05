@@ -1,11 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/setup_store.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show routerEmbedId;
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -75,6 +79,38 @@ void main() {
       expect(written, isNot(contains('http')));
       expect(written, isNot(contains('cdn')));
       expect(written, isNot(contains('127.0.0.1')));
+    });
+
+    test('knownLedger is what the store last read or wrote, and nothing '
+        'after a raw write of the row', () async {
+      expect(store.knownLedger, isNull);
+      final ledger = DownloadLedger.empty.record(state('bond-embed'));
+
+      await store.recordDownload(ledger);
+      expect(store.knownLedger, ledger);
+
+      await store.set(SetupStore.downloadKey, 'not json at all');
+      expect(store.knownLedger, isNull);
+      await store.downloadLedger();
+      expect(store.knownLedger, DownloadLedger.empty);
+
+      await store.recordDownload(ledger);
+      await store.clearExcept(const {});
+      expect(store.knownLedger, isNull);
+    });
+
+    test('knownLedger never goes empty across a recordDownload, so a decision '
+        'call landing mid-write still sees the model', () async {
+      final first = DownloadLedger.empty.record(state('bond-embed'));
+      await store.recordDownload(first);
+      final second = first.record(state('bond-decide'));
+
+      final write = store.recordDownload(second);
+      expect(store.knownLedger, second,
+          reason: 'the copy leads the row rather than clearing across it');
+      await write;
+      expect(store.knownLedger, second);
+      expect(await store.downloadLedger(), second);
     });
   });
 
@@ -153,9 +189,9 @@ void main() {
     });
 
     test('matches never asks for a hand-installed entry', () {
-      // The decision model is installed by `make decide-install` and has no
+      // A `source: local` decision model is copied in by hand and has no
       // row: a ledger complete for the downloads is complete.
-      final manifest = testManifest(withDecide: true);
+      final manifest = testManifest(decide: testLocalDecideFile());
       var ledger = DownloadLedger.empty;
       for (final model in manifest.models) {
         if (model.isLocal) continue;
@@ -163,6 +199,92 @@ void main() {
       }
       expect(ledger['bond-decide'], isNull);
       expect(ledger.matches(manifest), isTrue);
+    });
+
+    test('isCurrent wants the heads row too for a registry entry', () {
+      final decide = testDecideFile();
+      final headsId = DownloadLedger.headsId(decide.id);
+      expect(headsId, 'bond-decide.heads');
+
+      final weightsOnly =
+          DownloadLedger.empty.record(state(decide.id, sha: decide.sha256));
+      expect(weightsOnly.isCurrent(decide), isFalse);
+
+      final both = weightsOnly.record(state(headsId, sha: decide.heads!.sha256));
+      expect(both.isCurrent(decide), isTrue);
+
+      // A heads row from another bundle is not this one's.
+      expect(
+        weightsOnly.record(state(headsId, sha: 'f' * 63 + '0')).isCurrent(decide),
+        isFalse,
+      );
+      expect(
+        weightsOnly
+            .record(state(headsId,
+                sha: decide.heads!.sha256, status: DownloadStatus.failed))
+            .isCurrent(decide),
+        isFalse,
+      );
+    });
+
+    test('a heads record on a non-registry entry asks for no heads row', () {
+      // `isRegistry` is the one rule for owning a heads leg: only a registry
+      // entry's heads are downloaded, so only theirs can be ledgered. A hub
+      // entry built in code with a heads record is current on its own row.
+      const hub = ModelFile(
+        id: 'bond-embed',
+        role: ModelRole.embed,
+        displayName: 'Hub with heads',
+        repo: 'owner/name',
+        file: 'x.gguf',
+        revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        sizeBytes: 1,
+        sha256: 'abc',
+        minRamBytes: 0,
+        license: 'Fictional-1.0',
+        licenseUrl: 'https://example.invalid/licence',
+        heads: ModelHeads(file: 'h.json', sha256: 'def', sizeBytes: 1),
+      );
+      final ledger = DownloadLedger.empty.record(state(hub.id, sha: 'abc'));
+      expect(ledger['bond-embed.heads'], isNull);
+      expect(ledger.isCurrent(hub), isTrue);
+    });
+
+    test('matches on the gating view ignores the registry entry, and on the '
+        'downloadable view does not', () {
+      final manifest = testManifest(withDecide: true);
+      var ledger = DownloadLedger.empty;
+      for (final model in manifest.models) {
+        if (model.isRegistry) continue;
+        ledger = ledger.record(state(model.id, sha: model.sha256));
+      }
+      expect(ledger['bond-decide'], isNull);
+      expect(ledger.matches(manifest.gating), isTrue);
+      expect(ledger.matches(manifest.downloadable), isFalse);
+      // A FAILED registry row does not reopen the gate either.
+      final failed = ledger.record(state('bond-decide',
+          status: DownloadStatus.failed,
+          error: DownloadError.unauthorized));
+      expect(failed.matches(manifest.gating), isTrue);
+    });
+
+    test('the registry errors round-trip through the ledger JSON', () {
+      for (final word in [
+        DownloadError.registryNotConfigured,
+        DownloadError.unauthorized,
+        DownloadError.registryNotFound,
+        DownloadError.registryNotAModel,
+      ]) {
+        final ledger = DownloadLedger.empty.record(state('bond-decide.heads',
+            status: DownloadStatus.failed, error: word));
+        final again = DownloadLedger.parse(jsonEncode(ledger.toJson()));
+        expect(again, ledger);
+        expect(again['bond-decide.heads']?.error, word);
+      }
+      expect(DownloadError.registryNotConfigured, 'registry_not_configured');
+      expect(DownloadError.unauthorized, 'unauthorized');
+      expect(DownloadError.registryNotFound, 'registry_not_found');
+      expect(DownloadError.registryNotAModel, 'registry_not_a_model');
     });
 
     test('parse tolerates null, empty and rubbish', () {
@@ -253,6 +375,70 @@ void main() {
       );
       expect(progress.fraction, 0);
       expect(progress.isTerminal, isFalse);
+    });
+  });
+
+  group('servable: may this entry be used from disk', () {
+    late Directory folder;
+
+    setUp(() async {
+      folder = await Directory.systemTemp.createTemp('ledger-servable');
+    });
+
+    tearDown(() async {
+      if (folder.existsSync()) await folder.delete(recursive: true);
+    });
+
+    Future<void> put(String? relative) async {
+      if (relative == null) return;
+      final file = File(p.join(folder.path, relative));
+      await file.parent.create(recursive: true);
+      await file.writeAsString('x');
+    }
+
+    test('a registry entry wants both files AND both rows current', () async {
+      final decide = testDecideFile();
+      await put(decide.relativePath);
+      await put(decide.headsRelativePath);
+
+      expect(DownloadLedger.empty.servable(decide, folder.path), isFalse,
+          reason: 'files placed with no rows are not used until hashed in');
+      expect(currentLedgerFor([decide]).servable(decide, folder.path), isTrue);
+
+      // A quit between the legs after a digest change: the GGUF row at the
+      // new digest, the heads row at the old one.
+      final halfway = currentLedgerFor([decide]).record(state(
+        DownloadLedger.headsId(decide.id),
+        sha: 'an-older-heads-digest',
+      ));
+      expect(halfway.servable(decide, folder.path), isFalse);
+
+      // A Download again under way: a row back at pending.
+      final rehashing = currentLedgerFor([decide]).record(state(
+        decide.id,
+        status: DownloadStatus.pending,
+        sha: decide.sha256,
+      ));
+      expect(rehashing.servable(decide, folder.path), isFalse);
+
+      await File(p.join(folder.path, decide.headsRelativePath!)).delete();
+      expect(currentLedgerFor([decide]).servable(decide, folder.path), isFalse,
+          reason: 'a current row over a deleted file');
+    });
+
+    test('a hand-installed entry and a Hugging Face entry are used on their '
+        'files alone', () async {
+      final local = testLocalDecideFile();
+      final embed = testManifest().byId(routerEmbedId);
+      expect(DownloadLedger.empty.servable(local, folder.path), isFalse);
+      expect(DownloadLedger.empty.servable(embed, folder.path), isFalse);
+
+      await put(local.relativePath);
+      await put(local.headsRelativePath);
+      await put(embed.relativePath);
+
+      expect(DownloadLedger.empty.servable(local, folder.path), isTrue);
+      expect(DownloadLedger.empty.servable(embed, folder.path), isTrue);
     });
   });
 }

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 
 import '../llm/model_slots.dart';
 import '../server/router_preset.dart';
+import 'download_state.dart' show DownloadLedger;
 
 /// Which job a checkpoint fills — one FILE per role.
 ///
@@ -42,10 +43,13 @@ const Map<ModelRole, String> _idForRole = {
   ModelRole.decide: routerDecideId,
 };
 
-/// Where a checkpoint's bytes come from: the Hugging Face hub, or INSTALLED
-/// by hand into the models folder (`make decide-install`), never downloaded.
+/// Where a checkpoint's bytes come from: the Hugging Face hub, INSTALLED by
+/// hand into the models folder and never downloaded, or the owner's model
+/// REGISTRY (Artifactory), which serves a bundle's files at
+/// `<registry base>/bundles/<bundle>/<remote file>` behind a bearer token.
 const String sourceHf = 'hf';
 const String sourceLocal = 'local';
+const String sourceArtifactory = 'artifactory';
 
 /// The tier ids the `tiers` array may use, spelled exactly as [MachineTier]
 /// spells them, so the JSON and the enum cannot drift apart.
@@ -60,6 +64,21 @@ MachineTier _tierFrom(String value) {
 }
 
 final RegExp _hex64 = RegExp(r'^[0-9a-f]{64}$');
+
+final RegExp _segment = RegExp(r'^[A-Za-z0-9._-]+$');
+
+/// [value] when it can stand as one segment of a registry URL path — letters,
+/// digits, `.`, `_`, `-`, and never `.` or `..` — so a bundle or file name
+/// can neither change the URL's shape nor walk out of the bundle.
+String _checkSegment(String value, String field) {
+  if (!_segment.hasMatch(value) || value == '.' || value == '..') {
+    throw FormatException(
+      'manifest: "$field" must be letters, digits, ".", "_" or "-", and not '
+      '"." or "..", not "$value"',
+    );
+  }
+  return value;
+}
 final RegExp _hex40 = RegExp(r'^[0-9a-f]{40}$');
 
 /// A SECOND file a checkpoint cannot be served without — today the MTP head
@@ -170,9 +189,11 @@ class ModelSidecar {
 /// that turn the pooled vector into answers, applied in Dart.
 ///
 /// A sidecar of kind heads, NOT a [ModelSidecar]: `RouterPreset` never
-/// names it (it is not a draft model and llama-server never reads it), the
-/// downloader never fetches it (the entry is `source: local`), and it is
-/// needed even when a remote server embeds, because the heads run here.
+/// names it (it is not a draft model and llama-server never reads it), and it
+/// is needed even when a remote server embeds, because the heads run here.
+/// For a registry entry the downloader fetches it as the entry's LAST leg,
+/// sha-checked and ledgered under `<id>.heads`; for a `source: local` entry
+/// it is installed by hand beside the GGUF.
 @immutable
 class ModelHeads {
   /// The file's name inside the parent's repo folder.
@@ -183,10 +204,15 @@ class ModelHeads {
 
   final int sizeBytes;
 
+  /// The file's name in the registry bundle, when it is not [file]: the
+  /// bundle says `heads.json`, and on disk it keeps the name the app reads.
+  final String? remoteFile;
+
   const ModelHeads({
     required this.file,
     required this.sha256,
     required this.sizeBytes,
+    this.remoteFile,
   });
 
   factory ModelHeads.fromJson(Map<String, Object?> json) {
@@ -208,11 +234,25 @@ class ModelHeads {
         'manifest: "heads.sizeBytes" must be a positive number',
       );
     }
-    return ModelHeads(file: file, sha256: digest, sizeBytes: size.toInt());
+    final remote = json['remoteFile'];
+    if (remote != null && (remote is! String || remote.isEmpty)) {
+      throw const FormatException(
+        'manifest: "heads.remoteFile" must be a non-empty string or absent',
+      );
+    }
+    return ModelHeads(
+      file: file,
+      sha256: digest,
+      sizeBytes: size.toInt(),
+      remoteFile: remote == null
+          ? null
+          : _checkSegment(remote as String, 'heads.remoteFile'),
+    );
   }
 
   Map<String, Object?> toJson() => {
         'file': file,
+        if (remoteFile != null) 'remoteFile': remoteFile,
         'sha256': sha256,
         'sizeBytes': sizeBytes,
       };
@@ -222,10 +262,11 @@ class ModelHeads {
       other is ModelHeads &&
       other.file == file &&
       other.sha256 == sha256 &&
-      other.sizeBytes == sizeBytes;
+      other.sizeBytes == sizeBytes &&
+      other.remoteFile == remoteFile;
 
   @override
-  int get hashCode => Object.hash(file, sha256, sizeBytes);
+  int get hashCode => Object.hash(file, sha256, sizeBytes, remoteFile);
 
   @override
   String toString() => 'ModelHeads($file, $sizeBytes B)';
@@ -245,7 +286,9 @@ class ModelFile {
   final ModelRole role;
   final String displayName;
 
-  /// The Hugging Face repo, `owner/name`.
+  /// The Hugging Face repo, `owner/name`; `local/<name>` for a hand-installed
+  /// entry and `artifactory/<bundle>` for a registry one, whose prefixes keep
+  /// their folders apart from every downloaded repo's.
   final String repo;
 
   /// The artefact inside it. Kept apart from [repo] because the resolve URL
@@ -253,7 +296,8 @@ class ModelFile {
   final String file;
 
   /// The repo revision as a COMMIT SHA, never `main`. EMPTY for a
-  /// `source: local` entry, which has no repo to pin.
+  /// `source: local` entry, which has no repo to pin, and optional for a
+  /// registry entry, whose bytes [sha256] pins on its own.
   ///
   /// A branch name is a moving target: the file behind `main` can be replaced
   /// upstream, and a download that resolved through it would fetch bytes that
@@ -290,14 +334,25 @@ class ModelFile {
   /// rather than being a fourth entry in `models`.
   final ModelSidecar? sidecar;
 
-  /// [sourceHf] (the default) or [sourceLocal]. A local entry is installed
-  /// by hand, never downloaded: its repo is `local/<name>`, it has no
-  /// revision, it costs no download bytes, and the ledger never records it —
-  /// whether it is installed is whether its files are on disk.
+  /// [sourceHf] (the default), [sourceLocal] or [sourceArtifactory]. A
+  /// local entry is installed by hand, never downloaded: its repo is
+  /// `local/<name>`, it has no revision, it costs no download bytes, and the
+  /// ledger never records it — whether it is installed is whether its files
+  /// are on disk. A registry entry is downloaded like a hub one, from
+  /// [registryUri], and the ledger records each of its files.
   final String source;
 
   /// The decision model's heads file, or null for every other entry.
   final ModelHeads? heads;
+
+  /// The registry bundle this entry's files are published in, for a
+  /// [sourceArtifactory] entry; null for every other source.
+  final String? bundle;
+
+  /// The weights' name inside [bundle] (`model-f16.gguf`). On disk the file
+  /// keeps [file], the name the heads file's `model` must prefix. Null for
+  /// every non-registry entry.
+  final String? remoteFile;
 
   const ModelFile({
     required this.id,
@@ -316,10 +371,21 @@ class ModelFile {
     this.sidecar,
     this.source = sourceHf,
     this.heads,
+    this.bundle,
+    this.remoteFile,
   });
 
   /// Whether this entry is installed by hand rather than downloaded.
   bool get isLocal => source == sourceLocal;
+
+  /// Whether this entry is downloaded from the model registry.
+  bool get isRegistry => source == sourceArtifactory;
+
+  /// Whether a missing or stale copy of this entry sends a finished install
+  /// back through the wizard: Hugging Face entries only. Decision D7: a
+  /// registry file is best-effort, because its address is set in Settings,
+  /// which the wizard cannot reach, so it never reopens or blocks the wizard.
+  bool get gatesSetup => source == sourceHf;
 
   static String _string(Map<String, Object?> json, String field) {
     final value = json[field];
@@ -328,6 +394,10 @@ class ModelFile {
     }
     return value;
   }
+
+  /// A non-empty string that is safe as ONE segment of a registry URL path.
+  static String _pathSegment(Map<String, Object?> json, String field) =>
+      _checkSegment(_string(json, field), field);
 
   static int _int(Map<String, Object?> json, String field) {
     final value = json[field];
@@ -341,14 +411,17 @@ class ModelFile {
     final id = _string(json, 'id');
     final role = _roleFrom(_string(json, 'role'));
     final rawSource = json['source'] ?? sourceHf;
-    if (rawSource != sourceHf && rawSource != sourceLocal) {
+    if (rawSource != sourceHf &&
+        rawSource != sourceLocal &&
+        rawSource != sourceArtifactory) {
       throw FormatException(
-        'manifest: "source" must be "$sourceHf" or "$sourceLocal", not '
-        '"$rawSource"',
+        'manifest: "source" must be "$sourceHf", "$sourceLocal" or '
+        '"$sourceArtifactory", not "$rawSource"',
       );
     }
     final source = rawSource as String;
     final local = source == sourceLocal;
+    final registry = source == sourceArtifactory;
     final repo = _string(json, 'repo');
     // A local entry has no hub repo, and the `local/` prefix is what keeps its
     // folder (`local_<name>`) from ever colliding with a downloaded one.
@@ -358,8 +431,15 @@ class ModelFile {
         '"local/<name>", not "$repo"',
       );
     }
+    // The same rule for a registry entry's folder (`artifactory_<bundle>`).
+    if (registry && !repo.startsWith('artifactory/')) {
+      throw FormatException(
+        'manifest: a "source": "artifactory" entry must have a "repo" of '
+        '"artifactory/<bundle>", not "$repo"',
+      );
+    }
     final String revision;
-    if (local && json['revision'] == null) {
+    if ((local || registry) && json['revision'] == null) {
       revision = '';
     } else {
       revision = _string(json, 'revision');
@@ -414,6 +494,32 @@ class ModelFile {
     if (rawHeads != null && rawHeads is! Map) {
       throw const FormatException('manifest: "heads" must be an object or null');
     }
+    // A heads file belongs to a registry entry, which downloads it as a leg
+    // of its own, or to a hand-installed one. A hub entry has no way to fetch
+    // one, and an entry that named it could never be current.
+    if (rawHeads != null && !registry && !local) {
+      throw const FormatException(
+        'manifest: "heads" belongs to a "source": "artifactory" or "local" '
+        'entry, not a Hugging Face one',
+      );
+    }
+    // The registry's leg list is the weights and the heads: a sidecar has no
+    // registry address to come from.
+    if (registry && rawSidecar != null) {
+      throw const FormatException(
+        'manifest: a "source": "artifactory" entry cannot carry a "sidecar"',
+      );
+    }
+    // Where the registry publishes the bytes. Not read on any other source,
+    // the way every key this parser does not know is ignored.
+    final bundle = registry ? _pathSegment(json, 'bundle') : null;
+    final remoteFile = registry ? _pathSegment(json, 'remoteFile') : null;
+    if (registry && repo != 'artifactory/$bundle') {
+      throw FormatException(
+        'manifest: a "source": "artifactory" entry must have the "repo" '
+        '"artifactory/$bundle", not "$repo"',
+      );
+    }
     return ModelFile(
       id: id,
       role: role,
@@ -435,15 +541,19 @@ class ModelFile {
       heads: rawHeads is Map
           ? ModelHeads.fromJson(rawHeads.cast<String, Object?>())
           : null,
+      bundle: bundle,
+      remoteFile: remoteFile,
     );
   }
 
   Map<String, Object?> toJson() => {
         'id': id,
         'role': _roleName(role),
-        if (isLocal) 'source': source,
+        if (source != sourceHf) 'source': source,
         'displayName': displayName,
         'repo': repo,
+        if (bundle != null) 'bundle': bundle,
+        if (remoteFile != null) 'remoteFile': remoteFile,
         'file': file,
         if (revision.isNotEmpty) 'revision': revision,
         'sizeBytes': sizeBytes,
@@ -462,9 +572,43 @@ class ModelFile {
   /// download is obvious to a person looking at the directory.
   String get relativePath => '${repo.replaceAll('/', '_')}/$file';
 
-  /// The hub URL that redirects to the CDN copy of these exact bytes.
-  Uri get resolveUri =>
-      Uri.parse('https://huggingface.co/$repo/resolve/$revision/$file');
+  /// The hub URL that redirects to the CDN copy of these exact bytes. Hugging
+  /// Face's alone: a registry entry is fetched from [registryUri].
+  Uri get resolveUri {
+    if (isRegistry) {
+      throw StateError('manifest: $id is a registry entry, use registryUri');
+    }
+    return Uri.parse('https://huggingface.co/$repo/resolve/$revision/$file');
+  }
+
+  /// The registry URL of this entry's weights,
+  /// `<base>/bundles/<bundle>/<remoteFile>`, with [base] trimmed and its
+  /// trailing slashes dropped (`normalizeBoxBaseUrl`). Throws [StateError]
+  /// on a non-registry entry or an empty base.
+  Uri registryUri(String base) => _registryUri(base, remoteFile);
+
+  /// The registry URL of the heads file, by [registryUri]'s rule, or null
+  /// for a registry entry without one. The bundle's name for it
+  /// ([ModelHeads.remoteFile]) when it has one, else its name on disk.
+  Uri? headsRegistryUri(String base) {
+    if (!isRegistry) {
+      throw StateError('manifest: $id is not a registry entry');
+    }
+    final h = heads;
+    if (h == null) return null;
+    return _registryUri(base, h.remoteFile ?? h.file);
+  }
+
+  Uri _registryUri(String base, String? name) {
+    if (!isRegistry || bundle == null || name == null) {
+      throw StateError('manifest: $id is not a registry entry');
+    }
+    final root = normalizeBoxBaseUrl(base);
+    if (root.isEmpty) {
+      throw StateError('manifest: no registry address for $id');
+    }
+    return Uri.parse('$root/bundles/$bundle/$name');
+  }
 
   /// The sidecar's path, by the same two rules, in the PARENT's repo folder —
   /// null when there is no sidecar. One folder per repo means the head lands
@@ -478,6 +622,9 @@ class ModelFile {
 
   /// The hub URL for the sidecar's bytes, at the SIDECAR's revision.
   Uri? get sidecarResolveUri {
+    if (isRegistry) {
+      throw StateError('manifest: $id is a registry entry, use registryUri');
+    }
     final head = sidecar;
     if (head == null) return null;
     return Uri.parse(
@@ -493,11 +640,16 @@ class ModelFile {
     return '${repo.replaceAll('/', '_')}/${h.file}';
   }
 
-  /// Every byte this entry costs a download — the weights and the sidecar.
-  /// What the wizard's total, the disk preflight and one progress bar all
-  /// count, because one entry is one row on the screen whatever it fetches.
-  /// ZERO for a local entry, which is never downloaded.
-  int get downloadBytes => isLocal ? 0 : sizeBytes + (sidecar?.sizeBytes ?? 0);
+  /// Every byte this entry costs a download — the weights and the sidecar,
+  /// and for a registry entry the heads file too, its last leg. What the
+  /// wizard's total, the disk preflight and one progress bar all count,
+  /// because one entry is one row on the screen whatever it fetches. ZERO for
+  /// a local entry, which is never downloaded.
+  int get downloadBytes {
+    if (isLocal) return 0;
+    final weights = sizeBytes + (sidecar?.sizeBytes ?? 0);
+    return isRegistry ? weights + (heads?.sizeBytes ?? 0) : weights;
+  }
 
   RouterModelSpec toSpec() => RouterModelSpec(
         id: id,
@@ -533,6 +685,8 @@ class ModelFile {
       sidecar: sidecar,
       source: source,
       heads: heads,
+      bundle: bundle,
+      remoteFile: remoteFile,
     );
   }
 
@@ -554,6 +708,8 @@ class ModelFile {
       other.sidecar == sidecar &&
       other.source == source &&
       other.heads == heads &&
+      other.bundle == bundle &&
+      other.remoteFile == remoteFile &&
       _sameArgs(other.serverArgs, serverArgs);
 
   static bool _sameArgs(Map<String, String> a, Map<String, String> b) {
@@ -581,6 +737,8 @@ class ModelFile {
         sidecar,
         source,
         heads,
+        bundle,
+        remoteFile,
         Object.hashAll([
           for (final key in serverArgs.keys.toList()..sort())
             '$key=${serverArgs[key]}',
@@ -588,8 +746,15 @@ class ModelFile {
       );
 
   @override
-  String toString() => 'ModelFile($id, $repo/$file @ '
-      '${isLocal ? 'local' : revision.substring(0, 7)}, $sizeBytes B)';
+  String toString() => 'ModelFile($id, $repo/$file @ $_pin, $sizeBytes B)';
+
+  /// What the entry is pinned at, for [toString]: never a substring of an
+  /// empty revision, which a registry entry usually has.
+  String get _pin {
+    if (isLocal) return 'local';
+    if (isRegistry) return 'bundle $bundle';
+    return revision.length > 7 ? revision.substring(0, 7) : revision;
+  }
 }
 
 /// One rung of the machine ladder: which checkpoints a machine of this size
@@ -776,7 +941,8 @@ class ManifestTier {
 /// apart from each other.
 ///
 /// It is versioned so a shape change can refuse an old file loudly rather
-/// than read half of it. Version 2 added [tiers]; version 1 is refused.
+/// than read half of it. Version 2 added [tiers], version 3 the registry
+/// source (`artifactory`); older versions are refused.
 ///
 /// TWO VIEWS of the same class. The one `main()` loads is the MASTER list:
 /// every checkpoint this build knows, exactly one per role. [forTier] returns
@@ -807,7 +973,7 @@ class ModelManifest {
 
   /// The only shape this build reads. Bumped when the file's shape changes,
   /// which is what lets an older app refuse a newer manifest loudly.
-  static const int manifestVersion = 2;
+  static const int manifestVersion = 3;
 
   factory ModelManifest.fromJson(Map<String, Object?> json) {
     final version = json['version'];
@@ -841,9 +1007,9 @@ class ModelManifest {
     // asks for a role — a second prose model would have no way to be chosen
     // and a missing one would leave a slot pointing at nothing.
     //
-    // The decision model is the one role that may be ABSENT: it is installed
-    // by hand rather than downloaded, and a build that ships none simply has
-    // no managed decision model (the decision pass parks). At most once all
+    // The decision model is the one role that may be ABSENT: a build that
+    // ships none simply has no managed decision model (the decision pass
+    // parks). At most once all
     // the same, for the router's reason.
     for (final role in ModelRole.values) {
       final forRole = models.where((m) => m.role == role);
@@ -1084,9 +1250,9 @@ class ModelManifest {
   }
 
   /// The entries this build DOWNLOADS: every one but the `source: local`
-  /// ones. The wizard's rows and total, the disk preflight, the download run
-  /// and the ledger check all read this view, so a decision model that is not
-  /// installed never forces the wizard and never shows a bar that cannot move.
+  /// ones, so a registry entry is here. The wizard's rows and total, the disk
+  /// preflight and the download run read this view, so a hand-installed
+  /// model never shows a bar that cannot move.
   ModelManifest get downloadable => ModelManifest(
         version: version,
         models: List.unmodifiable([
@@ -1096,9 +1262,23 @@ class ModelManifest {
         tiers: tiers,
       );
 
+  /// The entries that GATE setup, [ModelFile.gatesSetup]: the Hugging Face
+  /// ones. What the wizard gate's ledger check reads. Decision D7: a
+  /// registry file is best-effort, so a missing or failed one never reopens
+  /// or blocks the wizard; its role parks on its own reason instead.
+  ModelManifest get gating => ModelManifest(
+        version: version,
+        models: List.unmodifiable([
+          for (final model in models)
+            if (model.gatesSetup) model,
+        ]),
+        tiers: tiers,
+      );
+
   /// This manifest without the entries whose files are not all in
   /// [modelsFolder] (the GGUF, the MTP sidecar and the heads file, whichever
-  /// the entry has), EXCEPT the embedding model.
+  /// the entry has), or that [ledger] does not call current for a REGISTRY
+  /// entry ([DownloadLedger.servable]), EXCEPT the embedding model.
   ///
   /// What the managed server's preset is built from. The server refuses to
   /// start with a file the preset names missing, and one missing model must
@@ -1107,17 +1287,22 @@ class ModelManifest {
   /// (the 4B on a full Mac, since only the chosen one is fetched), leaves the
   /// preset and that role parks on its own reason while the rest run. The
   /// next `ensurePreset` after the file lands sees a new hash and restarts.
+  /// A registry entry whose files are here but whose ledger rows are not
+  /// current (a pair half replaced, a Download again under way or failed) is
+  /// left out exactly as a missing file is, and joins when the model
+  /// ensurer's pass makes it current.
   ///
   /// The embedding model is KEPT whatever the disk says: every stage needs
   /// it, and a router started without it would look healthy while nothing
   /// could work. Left in, its absence fails the start with the preflight's
   /// own `Model files are missing` sentence, which is the true report.
-  ModelManifest withPresentFiles(String modelsFolder) => ModelManifest(
+  ModelManifest withPresentFiles(String modelsFolder, DownloadLedger ledger) =>
+      ModelManifest(
         version: version,
         models: List.unmodifiable([
           for (final model in models)
             if (model.role == ModelRole.embed ||
-                filesPresent(model, modelsFolder))
+                ledger.servable(model, modelsFolder))
               model,
         ]),
         tiers: tiers,

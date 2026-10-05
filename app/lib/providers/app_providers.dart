@@ -89,9 +89,12 @@ import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_tasks_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/models/download_state.dart' show DownloadLedger;
 import '../services/models/managed_model_status.dart';
 import '../services/models/model_downloader.dart';
+import '../services/models/model_ensurer.dart';
 import '../services/models/model_manifest.dart';
+import '../services/models/registry_probe.dart';
 import '../services/server/llama_binary.dart';
 import '../services/server/model_server_supervisor.dart';
 import '../services/server/process_runner.dart';
@@ -150,14 +153,14 @@ final sessionStartProvider = Provider<DateTime?>((ref) => null);
 
 /// Whether this session is allowed to run model work at all.
 ///
-/// A REMEMBERED preference that starts on, seeded here from
-/// [AppPrefs.processingOn]. It was session state until Round H, off at every
-/// launch so the owner could point the stages at the right servers before
-/// anything was spent on the wrong one. The placement rule answers that now:
-/// the default server IS the measured one, and a missing key or a dead address
-/// parks with a sentence instead of spending attempts. Turning it off still
-/// stands the models down for the rest of the session, and it is remembered,
-/// so a machine left off comes back off.
+/// A REMEMBERED preference that starts OFF, seeded here from
+/// [AppPrefs.processingOn]. It was session state until Round H and a
+/// remembered switch that started on until the default-setup round
+/// (2026-10, decision D8), which flipped it: a new environment opens with the
+/// models idle so the servers, the downloads and the keys can be checked
+/// under Settings, Models before anything is spent, and the owner turns it on
+/// once they are. Either way it is remembered, so a machine left off comes
+/// back off and a machine left on comes back on.
 ///
 /// `read` and never `watch`. A watch would rebuild this notifier on every
 /// unrelated preference write and reset the switch mid-drain, which is
@@ -369,7 +372,10 @@ final machineTierProvider = FutureProvider<MachineTier>((ref) async {
 /// the embedding model always, the decision model when it runs here, and the
 /// managed generative model (the 27B or the 4B, by `managedGenerativeIdFor`)
 /// when that runs here. The hardware tier's view, so a Mac under the full
-/// tier's floor is never asked for the 27B.
+/// tier's floor is never asked for the 27B. A generative role on Your server
+/// is never served here, with an address or without one: without one its
+/// spec is still `boxProseId`, unavailable and parked, so no 27B or 4B is
+/// demanded behind the owner's back.
 ///
 /// [machineTierProvider] still answers what this MAC could hold and stays the
 /// question for the Settings fact line and the wizard. This one answers what
@@ -464,16 +470,26 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     // It is also where the prefs LEARN the machine tier (`setMachineTier`):
     // the managed generative target's model id depends on it, and this build
     // precedes every request the managed router can answer. And an entry
-    // whose files are missing (the decision model before `make
-    // decide-install`, a chosen generative model not yet downloaded) is left
+    // whose files are missing (the decision model before its download
+    // lands, a chosen generative model not yet downloaded) is left
     // out, because the server refuses to start with a preset file missing and
-    // that must not cost the other models: that role parks on its own.
+    // that must not cost the other models: that role parks on its own. So is
+    // a registry entry whose download record is not current
+    // (`DownloadLedger.servable`): its GGUF and heads must belong together.
     buildPreset: () async {
       final tier = await ref.read(machineTierProvider.future);
       ref.read(appPrefsProvider.notifier).setMachineTier(tier);
       final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+      var ledger = DownloadLedger.empty;
+      try {
+        ledger = await ref.read(setupStoreProvider).downloadLedger();
+      } on Object catch (e) {
+        // No ledger serves no registry entry, which parks that role with its
+        // own sentence; it must not cost the start of the others.
+        debugPrint('model server: could not read the download ledger: $e');
+      }
       final served = (await ref.read(managedManifestProvider.future))
-          .withPresentFiles(folder);
+          .withPresentFiles(folder, ledger);
       // What the router will serve, so a managed target naming a model left
       // out (not downloaded, not installed) parks rather than 400s.
       ref.read(appPrefsProvider.notifier).setServedManagedIds({
@@ -537,24 +553,6 @@ final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
 
-/// Where `make decide-install` must put the decision model for this app to
-/// read it, when that is not the Makefile's `DECIDE_DIR` default: the decide
-/// entry's folder inside a models folder the wizard moved. Null while the
-/// models folder is the default one, where the plain command already lands —
-/// and then the manifest is never read, so a host that did not override it
-/// still builds.
-final decideInstallDirProvider = Provider<String?>((ref) {
-  final paths = ref.watch(appPathsProvider);
-  final folder = ref.watch(
-    appPrefsProvider.select((prefs) => prefs.effectiveModelsFolder(paths)),
-  );
-  if (p.equals(folder, paths.models.path)) return null;
-  final decide =
-      ref.watch(modelManifestProvider).byRoleOrNull(ModelRole.decide);
-  if (decide == null) return null;
-  return p.dirname(p.join(folder, decide.relativePath));
-});
-
 /// The three role models this Mac would run, with what each costs and
 /// whether it is on disk.
 ///
@@ -565,25 +563,33 @@ final decideInstallDirProvider = Provider<String?>((ref) {
 /// frame, which is why the ledger check keeps its `existsSync` — a file can
 /// be deleted under a row the ledger still calls done.
 ///
-/// Re-read on exactly two events: **Set up again**, through
-/// [setupRestartProvider], because a download can have re-run; and the server
+/// Re-read on three events: **Set up again**, through
+/// [setupRestartProvider], because a download can have re-run; the server
 /// reaching ready, because that is when weights that landed during a wizard
-/// have certainly been read. Watched through a `select` onto a bool so the
-/// states on the way there — one per model as each loads — do not re-run it.
+/// have certainly been read; and the model ensurer's phase moving, because a
+/// run that ends has changed the disk. Watched through `select`s so the
+/// states on the way there — one per model as each loads, one per progress
+/// tick — do not re-run it.
 ///
 /// Three rows keyed `decision`, `generative` and `embed`. The generative row
 /// is the managed model this Mac's tier would serve (the 27B on the full
 /// tier unless the owner chose the 4B; the 4B on the inbox tier).
 /// [ManagedModelStatus.inUse] says whether the placements actually serve it:
 /// a role on the owner's server keeps its weights on this disk and holds none
-/// of them in memory. The decision row is hand-installed: on disk means the
-/// GGUF AND its heads file are in the models folder, with no ledger.
+/// of them in memory. The decision row is a registry download: on disk means
+/// the ledger is current for the GGUF AND its heads file and both are in the
+/// models folder. A hand-installed (`source: local`) decide entry has no
+/// ledger: on disk is both files in the folder.
 final managedModelsStatusProvider =
     FutureProvider<List<ManagedModelStatus>>((ref) async {
   ref.watch(setupRestartProvider);
   ref.watch(
     serverStateProvider.select((state) => state.valueOrNull is ServerReady),
   );
+  // The phase, and each entry as it lands: a row says `On disk` the moment
+  // its own entry is done, while another is still downloading.
+  ref.watch(modelEnsureStateProvider
+      .select((state) => (state.phase, state.landedIds.length)));
   final paths = ref.watch(appPathsProvider);
   final master = ref.watch(modelManifestProvider);
   final storedGenerative =
@@ -611,15 +617,20 @@ final managedModelsStatusProvider =
       bytes: local
           ? file.sizeBytes + (file.heads?.sizeBytes ?? 0)
           : file.downloadBytes,
-      onDisk: local
-          ? ModelManifest.localInstalled(file, folder)
+      // The router's own rule for a registry or hand-installed entry
+      // (`DownloadLedger.servable`), so the page never says `On disk` for a
+      // pair the router leaves out.
+      onDisk: local || file.isRegistry
+          ? ledger.servable(file, folder)
           : ledger.isCurrent(file) &&
               File(p.join(folder, file.relativePath)).existsSync(),
       routerId: file.id,
       inUse: served.contains(file.id),
       local: local,
+      // A registry entry's heads are read only on the same rule.
       headsOnDisk: switch (file.headsRelativePath) {
         null => true,
+        _ when file.isRegistry => ledger.servable(file, folder),
         final heads => File(p.join(folder, heads)).existsSync(),
       },
     ));
@@ -657,9 +668,141 @@ final modelDownloaderProvider = Provider<ModelDownloader>((ref) {
     sha256: system.sha256,
     beginActivity: system.beginActivity,
     endActivity: system.endActivity,
+    // Both LOOKUPS, read per registry entry at the same moment: the address
+    // as Settings or the build has it now, and the token through the one
+    // door that knows whether the build's may go to that address, and only
+    // for the base the entry will really be sent to. A Save between the two
+    // reads sends no token rather than one host's token to another.
+    registryBase: () => ref.read(appPrefsProvider).effectiveRegistryUrl,
+    registryToken: (base) =>
+        sameOrigin(base, ref.read(appPrefsProvider).effectiveRegistryUrl)
+            ? ref.read(appPrefsProvider.notifier).bearerFor(registryId)
+            : null,
   );
   ref.onDispose(downloader.dispose);
   return downloader;
+});
+
+/// Whether the first-run wizard is on screen. `SetupGate` writes it, true
+/// while it shows the wizard and false once it shows the app, from the
+/// callback its decision resolves in (never during a build). The model
+/// ensurer reads it: while the wizard shows, the ONE downloader is the
+/// wizard's.
+final setupShowingProvider = StateProvider<bool>((ref) => false);
+
+/// What the model ensurer downloads: what this Mac SERVES under the role
+/// placements ([managedManifestProvider], the same tier rule and the same
+/// generative choice, so nothing is decided twice) PLUS the decision model
+/// whenever the manifest has one, which adds it exactly when the decision
+/// role is on Your server (decision D10): a ModernBERT server still needs
+/// this Mac's heads file, and the entry is one download, so there is one
+/// rule and no heads-only path. A Kev server ignores the files. Then only
+/// what downloads (`downloadable`).
+///
+/// Under `BOND_DEV_HAND_SERVERS` (no managed server) the embedding model is
+/// left out: `make embed` serves it from the Homebrew/Hugging Face cache, and
+/// nothing reads it from the models folder. The decision model stays, since
+/// the app reads its heads file there and `make decide` reads the same folder.
+final modelEnsureSetProvider = FutureProvider<ModelManifest>((ref) async {
+  final manifest = ref.watch(modelManifestProvider);
+  final served = await ref.watch(managedManifestProvider.future);
+  final decide = manifest.byRoleOrNull(ModelRole.decide);
+  // A build constant, so a read is as good as a watch.
+  final managed = ref.read(appPrefsProvider).managedServer;
+  return ModelManifest(
+    version: served.version,
+    models: List.unmodifiable([
+      for (final model in served.models)
+        if (managed || model.role != ModelRole.embed) model,
+      if (decide != null && !served.models.any((m) => m.id == decide.id))
+        decide,
+    ]),
+    tiers: served.tiers,
+  ).downloadable;
+});
+
+/// Downloads what the placements need and the disk lacks, outside the
+/// wizard: at launch once the app shows, on Settings' Check and Download,
+/// and after a registry or placement change. See [ModelEnsurer].
+///
+/// It watches what it is BUILT from and reads every preference at call
+/// time, on [modelDownloaderProvider]'s rule. Tests override it with a
+/// recording fake.
+final modelEnsurerProvider = Provider<ModelEnsurer>((ref) {
+  final store = ref.watch(setupStoreProvider);
+  final paths = ref.watch(appPathsProvider);
+  // Captured once, at build: the closures below run long after it.
+  final notifier = ref.read(appPrefsProvider.notifier);
+  final ensurer = ModelEnsurer(
+    // LOOKUPS, read when a pass runs: reading the ensurer's state (every
+    // Settings pane does) must not build the downloader, the manifest behind
+    // it, or the supervisor.
+    downloader: () => ref.read(modelDownloaderProvider),
+    wanted: () => ref.read(modelEnsureSetProvider.future),
+    modelsFolder: () =>
+        ref.read(appPrefsProvider).effectiveModelsFolder(paths),
+    readLedger: store.downloadLedger,
+    // The keychain prefetch, so a STORED registry token is in the cache the
+    // downloader's lookup reads (review S2).
+    beforeRun: () => notifier.ready,
+    // After EVERY pass. A file the router serves that landed in this pass
+    // wants a RESTART (the wizard's Finish rule: the preset hash covers
+    // paths and arguments, not digests, so a router serving a file of that
+    // name would go on serving the old bytes). Anything else asks for the
+    // preset, which restarts only when its hash moved: that is what picks up
+    // a file the wizard's run landed after Finish, and it leaves the router
+    // alone when only the decide entry landed for a decision on Your server.
+    // Fire and forget, like Finish: a restart is tens of seconds.
+    afterRun: (landedIds) async {
+      final supervisor = ref.read(modelServerSupervisorProvider);
+      var served = const <String>{};
+      if (landedIds.isNotEmpty) {
+        try {
+          served = {
+            for (final model
+                in (await ref.read(managedManifestProvider.future)).models)
+              model.id,
+          };
+        } on Object catch (e) {
+          debugPrint('model ensure: could not read what the router serves: $e');
+        }
+      }
+      final restart = landedIds.any(served.contains);
+      unawaited(
+        (restart ? supervisor.restart() : supervisor.ensurePreset())
+            .catchError((Object e) {
+          debugPrint('model ensure: the server was not nudged: $e');
+        }),
+      );
+    },
+    blocked: () => ref.read(setupShowingProvider),
+  );
+  ref.onDispose(ensurer.dispose);
+  return ensurer;
+});
+
+/// The ensurer's state, for the widgets that draw it: the Models page's
+/// decision line and its Download button.
+final modelEnsureStateProvider = Provider<EnsureState>((ref) {
+  final listenable = ref.watch(modelEnsurerProvider).state;
+  void changed() => ref.state = listenable.value;
+  listenable.addListener(changed);
+  ref.onDispose(() => listenable.removeListener(changed));
+  return listenable.value;
+});
+
+/// Settings' registry **Check**: one GET of a file for its first byte.
+/// A provider so a widget test hands a fake and opens no socket.
+typedef RegistryProbe = Future<RegistryCheck> Function({
+  required Uri url,
+  String? token,
+});
+
+final registryProbeProvider = Provider<RegistryProbe>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return ({required url, token}) =>
+      probeRegistry(url: url, token: token, client: client);
 });
 
 /// How a picked folder stays readable after a relaunch. The real one is a
@@ -1463,7 +1606,8 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
     // does, the fix is a card in Settings and naming a Makefile target would
     // send them to a workflow they have opted out of.
     describeUnavailable: () => ref.read(appPrefsProvider).managedServer
-        ? 'is not running — see Settings, Models'
+        ? "is not running. Bond's model server is starting or stopped. See "
+            'Settings, Models'
         : null,
     // One row per distinct reason, which is what the client's own dedupe
     // already guarantees. `read` and not `watch`: the callback outlives this
@@ -1498,22 +1642,53 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
 /// triage queue holds the decision client, so a container that never loaded
 /// a manifest (a widget test that builds the queue and never triages) must
 /// still be able to build it. An unreadable manifest reads as not installed.
+///
+/// A REGISTRY decide entry's heads are read only while
+/// `DownloadLedger.servable` holds for it, the rule the router's preset uses,
+/// on This Mac and under an encoder-heads Your server alike: a pair half
+/// replaced, or a Download again under way or failed, reads as not installed.
+/// The ledger is the store's [SetupStore.knownLedger], kept current by every
+/// write the downloader makes, so a row turning current is seen on the next
+/// call. Before the store has read it once, a load is started and the call
+/// reads as not installed, which parks the pass until the next pump. A
+/// `source: local` entry reads its heads file whenever it is there.
 final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
   final paths = ref.watch(appPathsProvider);
-  return DecisionHeadsFile(() {
-    final ModelManifest manifest;
+  ModelFile? decide() {
     try {
-      manifest = ref.read(modelManifestProvider);
+      return ref.read(modelManifestProvider).byRoleOrNull(ModelRole.decide);
     } catch (_) {
-      return '';
+      return null;
     }
-    final heads = manifest.byRoleOrNull(ModelRole.decide)?.headsRelativePath;
-    if (heads == null) return '';
-    return p.join(
-      ref.read(appPrefsProvider).effectiveModelsFolder(paths),
-      heads,
-    );
-  });
+  }
+
+  String folder() => ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+  return DecisionHeadsFile(
+    () {
+      final heads = decide()?.headsRelativePath;
+      if (heads == null) return '';
+      return p.join(folder(), heads);
+    },
+    usable: () {
+      try {
+        final file = decide();
+        if (file == null || !file.isRegistry) return true;
+        final store = ref.read(setupStoreProvider);
+        final ledger = store.knownLedger;
+        if (ledger == null) {
+          unawaited(store.downloadLedger().then<void>(
+                (_) {},
+                onError: (Object _, StackTrace _) {},
+              ));
+          return false;
+        }
+        return ledger.servable(file, folder());
+      } catch (_) {
+        return false;
+      }
+    },
+    local: () => decide()?.isLocal ?? false,
+  );
 });
 
 /// The decision client's HTTP client: the one seam a test overrides with a
@@ -1547,6 +1722,9 @@ final decisionClientProvider = Provider<DecisionClient>((ref) {
     // address. READ at the call, on the resolver's rule; a container torn
     // down mid-drain answers no, and the call takes the encoder path it
     // took before there was a second kind.
+    // The app's own router, whose unreachable sentence points at Settings
+    // rather than at a command nobody runs.
+    isManaged: () => ref.read(appPrefsProvider).managedServer,
     isYourServer: (target) {
       try {
         final spec = ref.read(appPrefsProvider).decisionSpec;
