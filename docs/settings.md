@@ -513,9 +513,11 @@ the `decision_older_model` or `decision_misconfigured` park's sentence
 on a downloaded entry, on This Mac or under a ModernBERT Your server): it
 calls `ensure(reverify: {'bond-decide'})`, so the decide entry is fetched as
 though missing and the downloader HASHES the files already there, keeping a
-good one without a byte fetched and replacing a wrong or damaged one. The
-wrong file stays on disk until its replacement is renamed over it, so a
-registry that is down leaves the old file and its sentence in place. The
+good one without a byte fetched and replacing a wrong or damaged one. A
+file proven wrong is deleted before its replacement is fetched, because the
+router and the heads reader ask only whether a file exists: with the
+registry down the role parks as not downloaded rather than answering from a
+wrong file. The
 older-model park adds the quieter line `Press Download again to replace it.`
 (`settings-decision-older-hint`); a hand-installed entry says `Copy the
 current model files into the models folder.` instead and has no button.

@@ -911,10 +911,11 @@ this Mac, a manifest bump.
 - **Download again.** `ensure(reverify: {id})` treats the entry as missing
   whatever the ledger says, and the downloader's `run(files, rehash)` HASHES
   those entries' files on disk instead of trusting a `done` row: a good file
-  is kept with no byte fetched, a wrong or damaged one replaced. The wrong
-  file stays on disk until its replacement is renamed over it, its ledger row
-  no longer `done` meanwhile, so a registry that is down never turns a file
-  into none.
+  is kept with no byte fetched, a wrong or damaged one replaced. A file
+  proven wrong is deleted before its replacement is fetched: the router and
+  the heads reader ask only whether a file exists, never the ledger, so a
+  wrong file left in place would be served. With the registry down the role
+  parks `decision_not_installed` until the download lands.
 - **The token is ready first.** Before a run it awaits the prefs notifier's
   `ready`, so a STORED registry token is in the cache the downloader's lookup
   reads; the wizard's own run does the same (`SetupController.prefsReady`).

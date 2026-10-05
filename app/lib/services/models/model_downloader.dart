@@ -694,12 +694,11 @@ class ModelDownloader {
         await _finish(leg, DownloadStatus.done, total, total);
         return true;
       }
-      // The wrong file STAYS until its replacement is renamed over it: a
-      // registry that is down must not turn a file on disk into none. Its row
-      // stops being `done` here, so nothing trusts it meanwhile and a retry
-      // hashes it again rather than taking it for a finished download.
-      await _record(leg, DownloadStatus.pending, _lengthOf(part), total,
-          force: true);
+      // A file proven wrong goes NOW, before its replacement is fetched: the
+      // router and the heads reader ask only whether a file exists, never the
+      // ledger, so one left in place would be served. No file parks the role
+      // with a sentence; a wrong one answers wrongly without a word.
+      _deleteQuietly(dest);
     }
 
     var attempts = 0;

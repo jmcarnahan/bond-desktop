@@ -1564,34 +1564,28 @@ void main() {
       expect(hub.registryCount, greaterThan(asked));
     });
 
-    test('a rehash whose replacement cannot be fetched leaves the old file '
-        'where it was, trusted by nothing, and a later run replaces it',
-        () async {
+    test('a rehash that proves a file wrong deletes it before the fetch, so a '
+        'replacement that never arrives leaves nothing to serve, and a later '
+        'run fetches it', () async {
       final decide = publishDecide();
       final downloader = buildRegistry();
       await downloader.run([decide]).toList();
-      final wrong = List<int>.filled(16, 1);
-      await File(headsDestOf(decide)).writeAsBytes(wrong);
+      await File(headsDestOf(decide)).writeAsBytes(List<int>.filled(16, 1));
 
       // The registry refuses the token: the replacement never arrives.
       hub.registryBearer = 'another-fake-token';
       final refused = await downloader.run([decide], {decide.id}).toList();
 
       expect(refused.last.status, DownloadStatus.failed);
-      expect(File(headsDestOf(decide)).readAsBytesSync(), wrong,
-          reason: 'the old file is not deleted before its replacement exists');
-      expect(ledger.isCurrent(decide), isFalse,
-          reason: 'its row no longer vouches for it');
-      expect(ledger[DownloadLedger.headsId(decide.id)]?.status,
-          isNot(DownloadStatus.done));
+      expect(File(headsDestOf(decide)).existsSync(), isFalse,
+          reason: 'the router and the heads reader ask only whether the file '
+              'exists, so a file proven wrong must not stay');
+      expect(ledger.isCurrent(decide), isFalse);
 
-      // A plain run, no rehash: the old file is not taken for a finished one.
       hub.registryBearer = null;
       final fixed = await downloader.run([decide]).toList();
 
       expect(fixed.last.status, DownloadStatus.done);
-      expect(File(headsDestOf(decide)).readAsBytesSync(),
-          hub.registryContents['$bundle/heads.json']);
       expect(sha256Hex(File(headsDestOf(decide)).readAsBytesSync()),
           decide.heads!.sha256);
       expect(ledger.isCurrent(decide), isTrue);
