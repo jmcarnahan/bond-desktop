@@ -33,6 +33,16 @@ abstract final class DownloadError {
   /// it refused. Never retried, because asking again changes nothing.
   static const String unauthorized = 'unauthorized';
 
+  /// The registry answered 404 to its own address: no such bundle or file
+  /// there, which is an address pointing at the wrong repository. Never
+  /// retried, because the file will not appear by asking again.
+  static const String registryNotFound = 'registry_not_found';
+
+  /// The registry's FIRST answer was a 200 or 206 carrying a web page
+  /// (`text/html`): a login page or a proxy's, never a model. Never retried,
+  /// because a retry budget spent on a login page is minutes of nothing.
+  static const String registryNotAModel = 'registry_not_a_model';
+
   /// Everything the hub or the CDN answered that has no word of its own.
   static String http(int code) => 'http_$code';
 }

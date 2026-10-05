@@ -171,8 +171,9 @@ class ModelNoAddressException extends LlmUnavailableException {
 /// The DECISION model is not installed on this Mac: the router is not
 /// serving it, or its heads file is missing. A [DecisionUnavailableException]
 /// so every decision arm keeps treating it as its own park; its own reason,
-/// `decision_not_installed`, because the fix (`make decide-install`) is not
-/// the generative download that `not_installed` asks for.
+/// `decision_not_installed`, because its fix (the decision model's own
+/// download, under Settings, Models) is not the generative one that
+/// `not_installed` asks for.
 class DecisionNotInstalledException extends DecisionUnavailableException {
   const DecisionNotInstalledException(super.message);
 }

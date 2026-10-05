@@ -606,8 +606,10 @@ bundle lands in a new folder beside the old one, as a Hugging Face bump does.
 4. The ledger keys the heads file as `bond-decide.heads`; a changed digest on
    either row makes the entry stale and the downloader fetches it again. A
    registry file never reopens setup (it is not in the gate's `gating`
-   view), so the new bundle is fetched when the wizard's download step runs
-   (Set up again); nothing else downloads it yet.
+   view); the model ensurer picks the new pin up instead, at the next launch
+   once the app shows (and on Settings, Models' Check or Download), and the
+   router restarts onto it when it lands
+   ([10-model-routing.md](pipeline/10-model-routing.md#ensured-outside-the-wizard)).
 
 ### What an installed copy does with the bump
 

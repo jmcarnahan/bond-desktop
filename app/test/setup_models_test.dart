@@ -79,8 +79,8 @@ void main() {
 
     expect(find.text('Total download: 23.8 GB'), findsOneWidget);
     expect(
-      find.text('Bond downloads three models from Hugging Face. They run on '
-          'this Mac and never send your mail anywhere.'),
+      find.text('Bond downloads three models. They run on this Mac and never '
+          'send your mail anywhere.'),
       findsOneWidget,
     );
   });
@@ -92,8 +92,8 @@ void main() {
     await open(tester, which: manifest.forTier(MachineTier.inbox));
 
     expect(
-      find.text('Bond downloads two models from Hugging Face. They run on '
-          'this Mac and never send your mail anywhere.'),
+      find.text('Bond downloads two models. They run on this Mac and never '
+          'send your mail anywhere.'),
       findsOneWidget,
     );
     expect(find.text('Finds related messages'), findsOneWidget);
@@ -194,6 +194,9 @@ void main() {
     expect(find.byKey(SetupModelsBody.licenseKey(decide.id)), findsOneWidget);
     expect(withDecide.models, hasLength(4));
     expect(find.text(SetupModelsBody.downloadsSentence(4)), findsOneWidget);
+    // The set mixes the hub and the model registry, so the sentence names
+    // neither.
+    expect(find.textContaining('Hugging Face'), findsNothing);
     // The heads file is in the total, beside the weights.
     expect(withDecide.totalBytes, manifest.totalBytes + 791461056 + 1032653);
     expect(find.text('Total download: ${formatBytes(withDecide.totalBytes)}'),
@@ -208,8 +211,11 @@ void main() {
     expect(find.byKey(SetupModelsBody.decisionRowKey), findsOneWidget);
     expect(find.text(decide.displayName), findsOneWidget);
     expect(find.text('Sorts and flags every message'), findsOneWidget);
-    expect(find.text('Not installed · run make decide-install'),
+    expect(
+        find.text(
+            'Not installed. Copy the model files into the models folder.'),
         findsOneWidget);
+    expect(find.textContaining('make'), findsNothing);
     // Neither the sentence nor the total moves.
     expect(find.text('Total download: 23.8 GB'), findsOneWidget);
     expect(find.textContaining('Bond downloads three models'), findsOneWidget);

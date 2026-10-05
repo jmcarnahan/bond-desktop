@@ -151,8 +151,8 @@ class SetupWhereBody extends StatelessWidget {
       'A server of your own, on this Mac or on a machine you name. Message '
       'text and drafts travel to it.';
   static const String decisionManagedBlurb =
-      'Runs on this Mac in a few milliseconds a message. It is installed '
-      'with make decide-install.';
+      'Runs on this Mac in a few milliseconds a message. Bond downloads it '
+      'from your model registry.';
   static const String decisionCustomBlurb =
       'A server of your own that serves the decision model. Every message '
       'travels to it.';

@@ -17,6 +17,7 @@ import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
+import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -78,36 +79,63 @@ void main() {
     return made;
   }
 
-  test('a hand-installed decision model\'s folder is named only when the '
-      'models folder moved', () async {
-    final local = testManifest(decide: testLocalDecideFile());
-    final plain = containerFor(const AppPrefs(), which: local);
-    expect(plain.read(decideInstallDirProvider), isNull);
+  // The model ensurer's set (D10): what the placements serve here, plus the
+  // decision model whenever the manifest has one. These replace the old
+  // `DECIDE_DIR=` folder cases: nothing tells anybody where to copy the
+  // decision model any more, the app downloads it.
+  Future<Set<String>> ensureIds(AppPrefs prefs) async {
+    final container = ProviderContainer(overrides: [
+      dbProvider.overrideWithValue(db),
+      appPathsProvider.overrideWithValue(AppPaths(support)),
+      modelManifestProvider.overrideWithValue(manifest),
+      appPrefsProvider.overrideWith(
+        (ref) => AppPrefsNotifier(
+          MessageStore(db),
+          initial: prefs,
+          tokens: MemoryTokenStore(),
+        ),
+      ),
+      // A full Mac, answered at once: the tier is what the set is cut from.
+      hardwareInfoProvider.overrideWith((ref) async => const HardwareInfo(
+            chip: 'Apple M2 Max',
+            memoryBytes: 64 * 1024 * 1024 * 1024,
+            appleSilicon: true,
+            rosetta: false,
+            osVersion: '15.6',
+          )),
+    ]);
+    addTearDown(container.dispose);
+    final set = await container.read(modelEnsureSetProvider.future);
+    return {for (final model in set.models) model.id};
+  }
 
-    final moved = p.join(support.path, 'elsewhere');
-    final custom = containerFor(AppPrefs(modelsFolder: moved), which: local);
-    expect(
-      custom.read(decideInstallDirProvider),
-      p.dirname(p.join(
-          moved, local.byRole(ModelRole.decide).relativePath)),
-    );
-    expect(p.basename(custom.read(decideInstallDirProvider)!),
-        'local_bond-decide');
+  test('the ensure set holds the decision model when it runs on Your server, '
+      'and no generative model while that runs there too', () async {
+    final ids = await ensureIds(const AppPrefs(
+      decisionPlacement: ModelPlacement.box,
+      decisionUrl: 'https://box.example.com/decide/v1/embeddings',
+      modelPlacement: ModelPlacement.box,
+      boxBigUrl: 'https://box.example.com/prose/v1/chat/completions',
+    ));
+    // A ModernBERT server still reads this Mac's heads file, and the entry is
+    // one download: decide is ensured although the router does not serve it.
+    expect(ids, {routerEmbedId, routerDecideId});
+    expect(ids, isNot(contains(routerProseId)));
+    expect(ids, isNot(contains(routerBulkId)));
   });
 
-  test('the registry decision model names no install folder, moved or not',
-      () async {
-    // The app downloads it itself, so there is no folder to tell anybody to
-    // copy into, and no `DECIDE_DIR=` hint pointing at the old one.
-    expect(decide.isRegistry, isTrue);
-    expect(containerFor(const AppPrefs()).read(decideInstallDirProvider),
-        isNull);
-    final moved = p.join(support.path, 'elsewhere');
-    expect(
-      containerFor(AppPrefs(modelsFolder: moved))
-          .read(decideInstallDirProvider),
-      isNull,
-    );
+  test('the ensure set on this Mac is what the router serves: embed, decide '
+      'and the chosen generative model', () async {
+    final local = await ensureIds(const AppPrefs(
+      modelPlacement: ModelPlacement.local,
+    ));
+    expect(local, {routerEmbedId, routerDecideId, routerProseId});
+
+    // Your server with no address still demands no local generative model.
+    final noAddress = await ensureIds(const AppPrefs(
+      modelPlacement: ModelPlacement.box,
+    ));
+    expect(noAddress, {routerEmbedId, routerDecideId});
   });
 
   test('the heads file is read from the registry entry\'s folder', () async {
@@ -281,7 +309,9 @@ void main() {
             DecisionHeadsFile.notInstalledText,
           )),
     );
-    expect(DecisionHeadsFile.notInstalledText, contains('make decide-install'));
+    expect(DecisionHeadsFile.notInstalledText,
+        'The decision model is not downloaded yet. Open Settings, Models.');
+    expect(DecisionHeadsFile.notInstalledText, isNot(contains('make')));
     expect(DecisionHeadsFile.notInstalledText, isNot(contains('—')));
   });
 

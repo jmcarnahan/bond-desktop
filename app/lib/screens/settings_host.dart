@@ -22,8 +22,18 @@ import '../services/llm/model_probe.dart';
 // [ModelSlot] and [LlmTargetSpec] arrive with `prefs_provider.dart`, which
 // re-exports them; the placement enum is not re-exported.
 import '../services/llm/model_slots.dart'
-    show MachineTier, ModelPlacement, boxDecideId, managedGenerativeIdFor;
+    show
+        MachineTier,
+        ModelPlacement,
+        boxDecideId,
+        managedGenerativeIdFor,
+        registryId,
+        routerDecideId;
+import '../services/models/model_manifest.dart' show ModelRole;
+import '../services/models/registry_probe.dart' show RegistryCheck;
 import '../services/reminders/tasks_availability.dart';
+import '../widgets/model_registry_form.dart' show ModelRegistryForm;
+import '../widgets/model_servers_form.dart' show ModelServersForm;
 import '../widgets/settings_screen.dart';
 
 /// Whether an older build left Needs You rules text in `needs_you_rules`. The
@@ -410,7 +420,19 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       serverState: serverState,
       parked: ref.watch(parkedProvider).valueOrNull,
       modelStatuses: statuses,
-      decideInstallDir: ref.watch(decideInstallDirProvider),
+      // The model registry: where the decision model is downloaded from.
+      // The address the form opens on and two presence flags, never a token.
+      registryUrl: prefs.effectiveRegistryUrl,
+      registryTokenStored: prefs.registryTokenStored,
+      registryTokenFromBuild: prefs.registryTokenFromBuild,
+      onSaveRegistry: _saveRegistry,
+      onRemoveRegistryToken: _removeRegistryToken,
+      onCheckRegistry: _checkRegistry,
+      // Watched, so a download's percentage moves on the decision line while
+      // the pane is open.
+      ensureState: ref.watch(modelEnsureStateProvider),
+      onDownloadModels: _downloadModels,
+      onRedownloadDecision: _redownloadDecision,
       onUseDecision: ({
         required placement,
         managedModel,
@@ -440,8 +462,10 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
         );
         // The decision model enters or leaves this Mac's preset. Fire and
         // forget on `ServerBootstrap`'s reasoning: a load is tens of seconds
-        // and the press has to return.
+        // and the press has to return. And whatever the new placement needs
+        // and the disk lacks is fetched.
         unawaited(supervisor.ensurePreset());
+        _ensureModels();
       },
       // This Mac's HARDWARE tier, READ at the press rather than closed over,
       // so a press cannot write last frame's answer.
@@ -466,6 +490,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
           hardwareTier: tier,
         );
         unawaited(supervisor.ensurePreset());
+        _ensureModels();
       },
       onCheckDecision: _checkDecision,
       onRemoveKey: notifier.clearRoleKey,
@@ -642,12 +667,13 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
 
   /// The Decision model's **Check** on This Mac.
   ///
-  /// `make decide-install` can land while the app runs, and nothing else
-  /// notices: the install state was read once and the router's preset left
-  /// the decision model out while its files were missing. So Check asks the
-  /// supervisor for the placements' preset (which restarts the router only
-  /// when the hash moved, which a newly installed model makes it do) and
-  /// re-reads the disk, and the press returns once the disk has answered.
+  /// A file can land while the app runs (a download the model ensurer
+  /// finished, or `make decide-fetch` into the same folder), and the router's
+  /// preset left the decision model out while its files were missing. So
+  /// Check asks the supervisor for the placements' preset (which restarts
+  /// the router only when the hash moved, which a newly landed model makes
+  /// it do), asks the model ensurer to fetch whatever is still missing, and
+  /// re-reads the disk; the press returns once the disk has answered.
   ///
   /// The heads cache is NOT dropped: `DecisionHeadsFile` re-reads on a new
   /// modification time and never caches a missing file, and invalidating
@@ -658,8 +684,89 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     // Fire and forget: a restart onto the new preset is tens of seconds, the
     // bar above says so, and the status provider re-reads again at ready.
     unawaited(ref.read(modelServerSupervisorProvider).ensurePreset());
+    _ensureModels();
     ref.invalidate(managedModelsStatusProvider);
     await ref.read(managedModelsStatusProvider.future);
+  }
+
+  /// The Models page's **Download**: the model ensurer fetches what the
+  /// placements need and the disk lacks. The press returns at once; the
+  /// decision line follows the download through [modelEnsureStateProvider].
+  Future<void> _downloadModels() async => _ensureModels();
+
+  /// Asks the model ensurer for whatever is missing, without waiting for
+  /// it: a download is minutes, and every caller is a press that returns.
+  void _ensureModels() {
+    if (!mounted) return;
+    unawaited(ref.read(modelEnsurerProvider).ensure());
+  }
+
+  /// The decision row's **Download again**: the decide entry is fetched as
+  /// though missing, and the downloader HASHES the files already there, so
+  /// a good file is kept and a damaged or older one replaced.
+  Future<void> _redownloadDecision() async {
+    if (!mounted) return;
+    unawaited(
+      ref.read(modelEnsurerProvider).ensure(reverify: const {routerDecideId}),
+    );
+  }
+
+  /// The Model registry's **Save**: [AppPrefsNotifier.useRegistry], which
+  /// validates before it writes and moves the keychain before the address,
+  /// then a download of whatever the new address can now supply. A refused
+  /// write comes back as its sentence for the form to draw under the field;
+  /// the token is never in it.
+  Future<String?> _saveRegistry({
+    required String url,
+    String? token,
+    required bool clearToken,
+  }) async {
+    if (!mounted) return null;
+    final notifier = ref.read(appPrefsProvider.notifier);
+    final ensurer = ref.read(modelEnsurerProvider);
+    try {
+      await notifier.useRegistry(
+        url: url,
+        token: token,
+        clearToken: clearToken,
+      );
+    } on ArgumentError catch (e) {
+      // The address's own sentence for a refused address; the writer's for a
+      // token no header can carry, which never quotes it.
+      if (e.name == 'url') return ModelRegistryForm.addressRefusalText;
+      final message = e.message;
+      return message is String ? message : ModelServersForm.saveFailedText;
+    }
+    unawaited(ensurer.ensure());
+    return null;
+  }
+
+  /// **Remove token**: the keychain's token goes, the build's applies again
+  /// when it may, and the download is tried with whichever that leaves.
+  Future<void> _removeRegistryToken() async {
+    if (!mounted) return;
+    final notifier = ref.read(appPrefsProvider.notifier);
+    final ensurer = ref.read(modelEnsurerProvider);
+    await notifier.clearRegistryToken();
+    unawaited(ensurer.ensure());
+  }
+
+  /// The Model registry's **Check**: the SAVED address asked for the
+  /// decision model's small file, with the token [AppPrefsNotifier.bearerFor]
+  /// answers at the press. The token goes to the probe and nowhere else.
+  Future<RegistryCheck> _checkRegistry() async {
+    if (!mounted) return RegistryCheck.unreachable;
+    final base = ref.read(appPrefsProvider).effectiveRegistryUrl;
+    final decide =
+        ref.read(modelManifestProvider).byRoleOrNull(ModelRole.decide);
+    if (base.isEmpty || decide == null || !decide.isRegistry) {
+      return RegistryCheck.notConfigured;
+    }
+    final url = decide.headsRegistryUri(base) ?? decide.registryUri(base);
+    return ref.read(registryProbeProvider)(
+      url: url,
+      token: ref.read(appPrefsProvider.notifier).bearerFor(registryId),
+    );
   }
 
   /// Settings' **Clear AI results**: every verdict, summary, storyline, draft

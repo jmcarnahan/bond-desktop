@@ -238,15 +238,15 @@ void main() {
             waiting: 3,
             onBox: onBox,
           ),
-          'A model this Mac runs is not downloaded · 3 waiting · set up again '
-          'in Settings',
+          'A model this Mac runs is not downloaded · 3 waiting · open '
+          'Settings, Models',
           reason: 'onBox: $onBox',
         );
       }
     });
 
-    test('the decision model not installed says the command, on both '
-        'placements', () {
+    test('the decision model not downloaded says where to look, on both '
+        'placements, with no command', () {
       for (final onBox in [true, false]) {
         expect(
           railProgressLine(
@@ -256,8 +256,8 @@ void main() {
             waiting: 3,
             onBox: onBox,
           ),
-          'The decision model is not installed · 3 waiting · run make '
-          'decide-install, then Check in Settings',
+          'The decision model is not downloaded yet · 3 waiting · open '
+          'Settings, Models',
           reason: 'onBox: $onBox',
         );
       }
@@ -276,8 +276,8 @@ void main() {
         expect(
           line,
           'The decision server is not the decision model, or its heads file '
-          'does not match · 3 waiting · check its address in Settings, or run '
-          'make decide-install',
+          'does not match · 3 waiting · check its address in Settings, or '
+          'press Download again under Settings, Models',
           reason: 'onBox: $onBox',
         );
         expect(line, isNot(contains('retrying')));

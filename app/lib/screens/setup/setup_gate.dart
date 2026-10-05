@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -63,7 +65,36 @@ class SetupGate extends ConsumerStatefulWidget {
 }
 
 class _SetupGateState extends ConsumerState<SetupGate> {
-  late Future<bool> _done = _decide();
+  late Future<bool> _done = _decideAndSay();
+
+  /// [_decide], and then what follows from the answer, said in the callback
+  /// the answer arrives in rather than during a build: [setupShowingProvider]
+  /// follows what is on screen, and a gate that lets the APP through kicks
+  /// the model ensurer, which downloads what the placements need and the
+  /// disk lacks (decision D6). That covers a launch, the return after
+  /// Finish, and `BOND_DEV_SKIP_SETUP`. A gate that shows the WIZARD hands
+  /// it the one downloader instead ([_handToWizard]).
+  Future<bool> _decideAndSay() async {
+    final done = await _decide();
+    if (mounted) {
+      if (done) {
+        ref.read(setupShowingProvider.notifier).state = false;
+        unawaited(ref.read(modelEnsurerProvider).ensure());
+      } else {
+        _handToWizard();
+      }
+    }
+    return done;
+  }
+
+  /// The wizard owns the downloader from here: the flag goes up, so the
+  /// model ensurer starts nothing, and a run the ensurer has in flight is
+  /// cancelled with its parts kept, so the wizard's own run resumes from the
+  /// byte (its `startDownload` waits for the cancelled run to end).
+  void _handToWizard() {
+    ref.read(setupShowingProvider.notifier).state = true;
+    unawaited(ref.read(modelEnsurerProvider).standDown());
+  }
 
   /// Set up, AND set up against the models this build ships FOR THIS MAC.
   ///
@@ -136,7 +167,7 @@ class _SetupGateState extends ConsumerState<SetupGate> {
 
   void _reload() {
     setState(() {
-      _done = _decide();
+      _done = _decideAndSay();
     });
   }
 
@@ -147,6 +178,8 @@ class _SetupGateState extends ConsumerState<SetupGate> {
       // and a second run over the first one's `SetupState` would open at the
       // step the last run finished on.
       ref.invalidate(setupControllerProvider);
+      // At once, not when the new answer arrives: the wizard is coming.
+      _handToWizard();
       _reload();
     });
     return FutureBuilder<bool>(

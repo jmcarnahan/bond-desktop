@@ -179,6 +179,7 @@ void main() {
     SetupStore? over,
     ModelDownloader? downloader,
     Future<void> Function(ModelServersPayload server)? checkDecision,
+    Future<void> Function()? prefsReady,
   }) {
     final controller = SetupController(
       store: over ?? store,
@@ -188,6 +189,7 @@ void main() {
       supervisor: supervisor,
       paths: AppPaths(root),
       readPrefs: () => prefs,
+      prefsReady: prefsReady,
       setModelsFolder: (path) async {
         foldersSet.add(path);
         prefs = prefs.copyWith(modelsFolder: path);
@@ -635,7 +637,7 @@ void main() {
   });
 
   test('the download step fetches the registry decision model with its heads, '
-      'and the set is complete only once both are here', () async {
+      'and the set is all here only once both are', () async {
     final decide = publishDecide();
     await store.set(SetupStore.setupKey, SetupStep.download.name);
 
@@ -654,19 +656,23 @@ void main() {
     final heads = File(p.join(folder(), decide.headsRelativePath!));
     expect(heads.existsSync(), isTrue);
     expect(controller.state.downloadsComplete, isTrue);
+    expect(controller.state.allDownloaded, isTrue);
     expect(hub.registryAuth, everyElement('Bearer test-token-123'));
 
-    // The heads file is part of "every file here": gone, the set is not
-    // complete, though the ledger still vouches for it.
+    // The heads file is part of "every file here": gone, the set is not all
+    // here, though the ledger still vouches for it. Continue is not held by
+    // it (decision D7): only the gating files hold Continue.
     await heads.delete();
     await controller.setFolder(folder());
-    expect(controller.state.downloadsComplete, isFalse);
+    expect(controller.state.allDownloaded, isFalse);
+    expect(controller.state.downloadsComplete, isTrue);
   });
 
-  // Phase 2 records today's wizard rule rather than D7's: a FAILED registry
-  // file leaves `downloadsComplete` false, which is what holds the download
-  // step's Continue. Phase 3 makes Continue wait only for gating rows.
-  test('today a failed registry file leaves the set incomplete', () async {
+  // Decision D7, the wizard half: a FAILED registry file never holds the
+  // download step's Continue. Its address is fixed in Settings, which the
+  // wizard cannot reach, and the model ensurer retries it after setup.
+  test('a failed registry file does not hold Continue, a missing hub file '
+      'still does', () async {
     publishDecide();
     await store.set(SetupStore.setupKey, SetupStep.download.name);
 
@@ -685,7 +691,71 @@ void main() {
     expect(controller.state.downloads[routerEmbedId]?.status,
         DownloadStatus.done);
     expect(hub.registryCount, 0);
+    expect(controller.state.downloadsComplete, isTrue,
+        reason: 'the registry row does not hold Continue');
+    expect(controller.state.allDownloaded, isFalse,
+        reason: 'but the set is not all here, and the step says so');
+
+    // A gating (Hugging Face) file that goes missing holds it again.
+    final embed = manifest.byRole(ModelRole.embed);
+    await File(destOf(embed)).delete();
+    await controller.setFolder(folder());
     expect(controller.state.downloadsComplete, isFalse);
+  });
+
+  test('the download waits for the preferences to be ready before it asks '
+      'for anything, so a stored token is in hand', () async {
+    publishDecide();
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    final ready = Completer<void>();
+
+    final controller = build(
+      downloader: buildDownloader(registryBase: () => hub.registryBase),
+      prefsReady: () => ready.future,
+    );
+    unawaited(controller.init());
+    // Long enough for a run that did not wait to have asked the hub.
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(hub.requests, isEmpty);
+    expect(hub.registryCount, 0);
+
+    ready.complete();
+    await waitUntil(
+      () => controller.state.allDownloaded,
+      reason: 'the run to land everything',
+    );
+    expect(hub.registryAuth, everyElement('Bearer test-token-123'));
+  });
+
+  test('a download step that finds another owner\'s run going waits for it, '
+      'reading as running, then runs its own to the end', () async {
+    manifest = publish(embed: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = buildDownloader();
+    // The model ensurer's run, cancelled as the wizard opened and still
+    // winding down, or any other owner's.
+    final other = downloader.run([manifest.byRole(ModelRole.embed)]).toList();
+    final controller = build(downloader: downloader);
+    await controller.init();
+
+    final start = controller.startDownload();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(controller.state.downloadRunning, isTrue);
+    expect(controller.state.downloadWaiting, isTrue);
+    // A second press while it waits starts nothing more.
+    await controller.startDownload().timeout(const Duration(seconds: 1));
+
+    hub.chunkDelay = null;
+    await other;
+    await start;
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the step\'s own run to finish',
+    );
+
+    expect(controller.state.downloadWaiting, isFalse);
+    expect(controller.state.allDownloaded, isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
   });
 
   test('a stored done whose only gap is the registry decision model resumes '

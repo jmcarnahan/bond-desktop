@@ -12,12 +12,13 @@ import 'setup_controls.dart';
 /// downloader actually works in — so the bar that is moving is the one at the
 /// top rather than somewhere in the middle.
 ///
-/// Continue is enabled only when EVERY file is done, not at the "usable" pair
-/// (embed + bulk). Two reasons, and the first is decisive:
-/// `ModelServerSupervisor._launch` refuses to start while any file the preset
-/// names is missing, so a partial set could not serve the inbox anyway; and
-/// finishing early would leave a non-engineer looking at an idle inbox with
-/// no progress bar left to explain it.
+/// Continue is enabled only when every GATING file is done ([complete]: the
+/// Hugging Face files), not at the "usable" pair. Finishing early would leave
+/// a non-engineer looking at an idle inbox with no progress bar left to
+/// explain it. A model REGISTRY file never holds Continue (decision D7): its
+/// address lives in Settings, which the wizard cannot reach, so a failed
+/// registry row says why and [registryLaterText], and Bond keeps trying
+/// after setup.
 class SetupDownloadBody extends StatelessWidget {
   final List<ModelFile> files;
 
@@ -27,7 +28,17 @@ class SetupDownloadBody extends StatelessWidget {
 
   final bool running;
   final bool paused;
+
+  /// Another owner's run is winding down and this step starts as soon as it
+  /// ends: drawn as in progress, with no controls to press.
+  final bool waiting;
+
+  /// Every gating file is here: what enables Continue.
   final bool complete;
+
+  /// Every file in [files] is here, registry files included. Null reads as
+  /// [complete], for a set with no registry file.
+  final bool? allDownloaded;
 
   final VoidCallback onStart;
   final VoidCallback onPause;
@@ -41,7 +52,9 @@ class SetupDownloadBody extends StatelessWidget {
     required this.progress,
     required this.running,
     required this.paused,
+    this.waiting = false,
     required this.complete,
+    this.allDownloaded,
     required this.onStart,
     required this.onPause,
     required this.onResume,
@@ -53,6 +66,23 @@ class SetupDownloadBody extends StatelessWidget {
   static const Key pauseKey = ValueKey('setup-download-pause');
   static const Key resumeKey = ValueKey('setup-download-resume');
   static const Key cancelKey = ValueKey('setup-download-cancel');
+
+  /// The caption over the rows. True of every set the wizard can download:
+  /// the downloader works smallest first, one file at a time.
+  static const String orderText =
+      'The models arrive one at a time, smallest first.';
+
+  /// Under a model registry row that failed: it does not hold Continue, and
+  /// the app retries it after setup.
+  static const String registryLaterText =
+      'Bond tries again after setup, and under Settings, Models. You can '
+      'continue.';
+
+  /// While [waiting]: the download already running ends first.
+  static const String waitingText =
+      'Finishing the download already running, then starting.';
+
+  bool get _allHere => allDownloaded ?? complete;
 
   /// How long is left, said the way a person would say it.
   ///
@@ -98,6 +128,12 @@ class SetupDownloadBody extends StatelessWidget {
         DownloadError.unauthorized =>
           'The model registry refused the access token. Check it under '
               'Settings, Models.',
+        DownloadError.registryNotFound =>
+          'The model registry does not have this model. Check its address '
+              'under Settings, Models.',
+        DownloadError.registryNotAModel =>
+          'The model registry answered with a web page, not a model. Check '
+              'its address under Settings, Models.',
         _ => _httpOrGeneric(error),
       };
 
@@ -145,11 +181,7 @@ class SetupDownloadBody extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'The two models the inbox needs come first; the writing model is '
-          'the big one.',
-          style: BondType.caption,
-        ),
+        Text(orderText, style: BondType.caption),
         const SizedBox(height: BondSpacing.s16),
         for (final file in files) ..._row(file),
         ..._buttons(),
@@ -160,7 +192,7 @@ class SetupDownloadBody extends StatelessWidget {
           'You can quit — the download resumes next launch.',
           style: BondType.caption,
         ),
-        if (complete) ...[
+        if (_allHere) ...[
           const SizedBox(height: BondSpacing.s12),
           Text('All models are on this Mac.', style: BondType.body),
         ],
@@ -182,7 +214,7 @@ class SetupDownloadBody extends StatelessWidget {
     // See [_status]: an entry-less file on a complete set is a file that is
     // all here, and its bar and its byte count have to say the same thing the
     // word does.
-    final received = entry?.receivedBytes ?? (complete ? total : 0);
+    final received = entry?.receivedBytes ?? (_allHere ? total : 0);
     final detail = StringBuffer()
       ..write(formatBytes(received).isEmpty ? '0 B' : formatBytes(received))
       ..write(' of ')
@@ -215,7 +247,7 @@ class SetupDownloadBody extends StatelessWidget {
           Expanded(
             flex: 2,
             child: Text(
-              _status(entry, complete: complete),
+              _status(entry, complete: _allHere),
               style: BondType.caption,
               textAlign: TextAlign.right,
             ),
@@ -223,9 +255,13 @@ class SetupDownloadBody extends StatelessWidget {
         ],
       ),
       const SizedBox(height: BondSpacing.s4),
-      LinearProgressIndicator(value: entry?.fraction ?? (complete ? 1 : 0)),
+      LinearProgressIndicator(value: entry?.fraction ?? (_allHere ? 1 : 0)),
       const SizedBox(height: BondSpacing.s4),
       Text('$detail', style: BondType.caption),
+      if (file.isRegistry && entry?.status == DownloadStatus.failed) ...[
+        const SizedBox(height: BondSpacing.s4),
+        Text(registryLaterText, style: BondType.caption),
+      ],
       const SizedBox(height: BondSpacing.s16),
     ];
   }
@@ -234,6 +270,13 @@ class SetupDownloadBody extends StatelessWidget {
   /// it offers Resume and Cancel, never Start, because starting a second run
   /// over a paused one is not a thing the downloader allows.
   List<Widget> _buttons() {
+    if (waiting) {
+      return [
+        const LinearProgressIndicator(),
+        const SizedBox(height: BondSpacing.s4),
+        Text(waitingText, style: BondType.caption),
+      ];
+    }
     final buttons = <Widget>[
       if (running && !paused)
         OutlinedButton(
@@ -253,7 +296,7 @@ class SetupDownloadBody extends StatelessWidget {
           onPressed: onCancel,
           child: const Text('Cancel'),
         ),
-      if (!running && !complete)
+      if (!running && !_allHere)
         FilledButton(
           key: startKey,
           onPressed: onStart,

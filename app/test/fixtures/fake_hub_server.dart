@@ -69,6 +69,14 @@ class FakeHubServer {
   /// Redirect every registry request to the second origin ([startStorage]).
   bool registryRedirect = false;
 
+  /// Answer every registry request 200 with a `text/html` login page, which
+  /// is what a registry address behind a sign-in proxy looks like.
+  bool registryWebPage = false;
+
+  /// The second origin answers 200 with a `text/html` sign-in page: an SSO
+  /// redirect from the registry to a login host.
+  bool storageWebPage = false;
+
   int registryCount = 0;
 
   /// The `Authorization` header of every registry request, in order — null
@@ -122,6 +130,14 @@ class FakeHubServer {
           await request.response.close();
           return;
         }
+        if (storageWebPage) {
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers
+              .set(HttpHeaders.contentTypeHeader, 'text/html; charset=utf-8');
+          request.response.write('<html><body>Sign in</body></html>');
+          await request.response.close();
+          return;
+        }
         if (storageForbidden > 0) {
           storageForbidden--;
           request.response.statusCode = HttpStatus.forbidden;
@@ -163,6 +179,14 @@ class FakeHubServer {
     if (override != null) {
       registryStatusOverride = null;
       request.response.statusCode = override;
+      await request.response.close();
+      return;
+    }
+    if (registryWebPage) {
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers
+          .set(HttpHeaders.contentTypeHeader, 'text/html; charset=utf-8');
+      request.response.write('<html><body>Sign in</body></html>');
       await request.response.close();
       return;
     }

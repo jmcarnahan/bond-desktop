@@ -68,8 +68,21 @@ class SetupState {
 
   final bool downloadPaused;
 
-  /// Every file in the manifest is done in the ledger AND present on disk.
+  /// Another owner's run holds the one downloader (the model ensurer's,
+  /// cancelled as the wizard opened, still winding down): this step waits for
+  /// it and then starts its own. Drawn as a download in progress with no
+  /// controls, never as a dead Start button.
+  final bool downloadWaiting;
+
+  /// Every GATING file (the Hugging Face ones) is done in the ledger AND
+  /// present on disk: what enables the download step's Continue. A model
+  /// registry file never holds it (decision D7).
   final bool downloadsComplete;
+
+  /// Every file the step downloads is here, registry files included: what
+  /// decides whether arriving at the step starts a run, and whether it says
+  /// every model is on this Mac.
+  final bool allDownloaded;
 
   final bool signedIn;
 
@@ -123,7 +136,9 @@ class SetupState {
     this.downloads = const {},
     this.downloadRunning = false,
     this.downloadPaused = false,
+    this.downloadWaiting = false,
     this.downloadsComplete = false,
+    this.allDownloaded = false,
     this.signedIn = false,
     this.accountName,
     this.notificationsGranted,
@@ -149,7 +164,9 @@ class SetupState {
     Map<String, DownloadProgress>? downloads,
     bool? downloadRunning,
     bool? downloadPaused,
+    bool? downloadWaiting,
     bool? downloadsComplete,
+    bool? allDownloaded,
     bool? signedIn,
     String? accountName,
     bool clearAccountName = false,
@@ -174,7 +191,9 @@ class SetupState {
         downloads: downloads ?? this.downloads,
         downloadRunning: downloadRunning ?? this.downloadRunning,
         downloadPaused: downloadPaused ?? this.downloadPaused,
+        downloadWaiting: downloadWaiting ?? this.downloadWaiting,
         downloadsComplete: downloadsComplete ?? this.downloadsComplete,
+        allDownloaded: allDownloaded ?? this.allDownloaded,
         signedIn: signedIn ?? this.signedIn,
         accountName:
             clearAccountName ? null : (accountName ?? this.accountName),
@@ -203,7 +222,9 @@ class SetupState {
       _sameDownloads(other.downloads, downloads) &&
       other.downloadRunning == downloadRunning &&
       other.downloadPaused == downloadPaused &&
+      other.downloadWaiting == downloadWaiting &&
       other.downloadsComplete == downloadsComplete &&
+      other.allDownloaded == allDownloaded &&
       other.signedIn == signedIn &&
       other.accountName == accountName &&
       other.notificationsGranted == notificationsGranted &&
@@ -239,8 +260,9 @@ class SetupState {
             Object.hash(key, downloads[key]),
         ]),
         downloadRunning,
-        downloadPaused,
-        downloadsComplete,
+        Object.hash(downloadPaused, downloadWaiting),
+        // Paired: `Object.hash` takes twenty values at most.
+        Object.hash(downloadsComplete, allDownloaded),
         signedIn,
         accountName,
         notificationsGranted,
@@ -312,6 +334,7 @@ class SetupController extends StateNotifier<SetupState> {
     required this.supervisor,
     required this.paths,
     required this.readPrefs,
+    this.prefsReady,
     required this.setModelsFolder,
     this.probe,
     this.storedBearer,
@@ -333,6 +356,14 @@ class SetupController extends StateNotifier<SetupState> {
   final ModelServerSupervisor supervisor;
   final AppPaths paths;
   final AppPrefs Function() readPrefs;
+
+  /// The prefs notifier's `ready`: the stored settings read AND the keychain
+  /// prefetched. Awaited before a run, because the registry token is a
+  /// synchronous lookup of that cache and a run started before it filled
+  /// would send no token and fail `unauthorized`. Null waits for nothing,
+  /// which is a test's controller.
+  final Future<void> Function()? prefsReady;
+
   final Future<void> Function(String) setModelsFolder;
 
   /// Asks a model server what it serves. Handed DOWN, through [SetupFlow], to
@@ -456,7 +487,8 @@ class SetupController extends StateNotifier<SetupState> {
       migration: migration,
       modelsFolder: folder,
       routerPort: prefs.routerPort,
-      downloadsComplete: _allFilesPresent(folder),
+      downloadsComplete: _allFilesPresent(folder, gatingOnly: true),
+      allDownloaded: _allFilesPresent(folder),
       canReturnToInbox: canReturn,
     );
     await _onEnter(step);
@@ -623,7 +655,9 @@ class SetupController extends StateNotifier<SetupState> {
       case SetupStep.storage:
         await checkStorage();
       case SetupStep.download:
-        if (!state.downloadsComplete) await startDownload();
+        // Everything, registry files included: a registry file that failed
+        // last time is tried again on arrival, though it holds nothing up.
+        if (!state.allDownloaded) await startDownload();
       case SetupStep.signIn:
         await probeSignIn();
       case SetupStep.done:
@@ -784,15 +818,52 @@ class SetupController extends StateNotifier<SetupState> {
       modelsFolder: folder,
       downloadRunning: false,
       downloadPaused: false,
-      downloadsComplete: _allFilesPresent(folder),
+      downloadsComplete: _allFilesPresent(folder, gatingOnly: true),
+      allDownloaded: _allFilesPresent(folder),
     );
     await checkStorage();
   }
 
+  /// A [startDownload] is between its first line and its run: a second
+  /// press, or a second arrival, must not start another.
+  bool _starting = false;
+
   Future<void> startDownload() async {
-    if (downloader.running) return;
+    // This step's OWN run is already going: nothing to start.
+    if (_starting || (_progress != null && state.downloadRunning)) return;
+    _starting = true;
+    try {
+      await _startDownload();
+    } finally {
+      _starting = false;
+    }
+  }
+
+  Future<void> _startDownload() async {
+    // Somebody else's run holds the downloader (the model ensurer's, which
+    // the gate cancelled as the wizard opened): wait for it to end, reading
+    // as a download in progress meanwhile, then start this step's own.
+    if (downloader.running) {
+      if (mounted) {
+        state = state.copyWith(downloadRunning: true, downloadWaiting: true);
+      }
+      while (downloader.running) {
+        await downloader.idle;
+      }
+      if (!mounted) return;
+      state = state.copyWith(downloadRunning: false, downloadWaiting: false);
+    }
     await _progress?.cancel();
     _progress = null;
+    // The keychain prefetch first, so a stored registry token is in the
+    // notifier's cache when the run looks it up. Either way: a prefs load
+    // that failed is one refused file the row explains, not no download.
+    try {
+      await prefsReady?.call();
+    } on Object catch (e) {
+      debugPrint('setup: preferences not ready before the download: $e');
+    }
+    if (downloader.running) return;
     // The mounted check comes BEFORE the run, not after it: a controller
     // disposed across that `await` would otherwise start a transfer whose
     // stream nothing is left to listen to.
@@ -830,7 +901,9 @@ class SetupController extends StateNotifier<SetupState> {
         state = state.copyWith(
           downloadRunning: false,
           downloadPaused: false,
-          downloadsComplete: _allFilesPresent(state.modelsFolder),
+          downloadsComplete:
+              _allFilesPresent(state.modelsFolder, gatingOnly: true),
+          allDownloaded: _allFilesPresent(state.modelsFolder),
         );
       },
     );
@@ -1012,10 +1085,18 @@ class SetupController extends StateNotifier<SetupState> {
   /// The digest is what makes a model bump visible. A row that merely says
   /// done can describe the checkpoint before this build's, and a Continue
   /// granted on it would hand over an inbox serving the old weights.
-  bool _allFilesPresent(String folder) {
+  ///
+  /// [gatingOnly] asks about the GATING entries alone (the Hugging Face
+  /// ones), which is what Continue waits for (decision D7): a registry file
+  /// that failed or is still missing never traps anybody in the wizard,
+  /// because its address is fixed in Settings, which the wizard cannot
+  /// reach, and the model ensurer retries it after setup.
+  bool _allFilesPresent(String folder, {bool gatingOnly = false}) {
     if (folder.isEmpty) return false;
     final ledger = _currentLedger;
-    for (final model in resolvedManifest.models) {
+    final manifest =
+        gatingOnly ? resolvedManifest.gating : resolvedManifest;
+    for (final model in manifest.models) {
       if (!ledger.isCurrent(model)) return false;
       if (!File(p.join(folder, model.relativePath)).existsSync()) return false;
       // The sidecar as well, on the same reasoning: the preset names it as
@@ -1078,6 +1159,7 @@ final setupControllerProvider =
     // that is hours in. Every preference here is consulted at the top of a
     // step, never cached.
     readPrefs: () => ref.read(appPrefsProvider),
+    prefsReady: () => ref.read(appPrefsProvider.notifier).ready,
     setModelsFolder: (path) =>
         ref.read(appPrefsProvider.notifier).setModelsFolder(path),
     probe: ModelServerProbe().probe,

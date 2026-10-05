@@ -357,8 +357,12 @@ flight.
   `AppPrefs.embedRequestTarget` is what the wire carries: `bond-embed` at the
   router under managed mode, the literal `embed` at `EMBED_URL` (`:8081`)
   otherwise. `EmbeddingsClient` resolves it per request, and its
-  `describeUnavailable` says `is not running — see Settings, Models` under
-  managed mode and `run: make embed` otherwise.
+  `describeUnavailable` says `is not running. Bond's model server is
+  starting or stopped. See Settings, Models` under managed mode, and the
+  client's own `is not reachable. Run: make embed` otherwise (a
+  `BOND_DEV_HAND_SERVERS` build). The decision client says the same for the
+  managed router (`isManaged`), `Run: make decide.` for a hand-started
+  server, and nothing for Your server.
 - **The KV cache.** Every generative stage now shares one server, so each
   stage's byte-identical system prompt is its own prefix on it. A one-slot
   server evicts on every switch between stages; a GPU-served target with room
@@ -529,16 +533,18 @@ name the wrapper listed; `truncated` is always false.
 - **The heads file.** `decide-heads.json` in
   `<models folder>/artifactory_bond-decide-mbl-v3swap/`, downloaded from the
   model registry as the decide entry's last leg, beside the GGUF (`make
-  decide-fetch` writes the same folder for a bench). The missing-file
-  sentence below still names the hand-install command the registry download
-  replaced, and is reworded with the other park sentences.
+  decide-fetch` writes the same folder for a bench). The model ensurer
+  (below) downloads it when it is missing, whatever the decision placement.
   `decisionHeadsProvider` loads it through
   `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
   needed even when an encoder-heads server is remote**, because the heads
   run here; a systemone server never reads it. Missing, it throws
-  `DecisionNotInstalledException` with "The decision model is not installed.
-  Run: make decide-install" (never cached, so an install is seen at the next
-  claim). On Your server the kind is asked BEFORE the heads are read, so a
+  `DecisionNotInstalledException` with "The decision model is not downloaded
+  yet. Open Settings, Models." (never cached, so a download is seen at the
+  next claim). A file this build refuses names Download instead: "The
+  decision model's heads file does not match this build. Open Settings,
+  Models and press Download again." (`DecisionHeadsFile.mismatchText`, before the
+  parser's own reason). On Your server the kind is asked BEFORE the heads are read, so a
   heads-less Mac whose ModernBERT server is down parks
   `decision_unavailable` (the listing failed) rather than
   `decision_not_installed`; the heads-file park follows once the server
@@ -561,9 +567,9 @@ What goes wrong, and what the owner sees:
 | Failure | Exception | Park reason | Rail |
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
-| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+| Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or press Download again under Settings, Models` |
 | Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
-| Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+| Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not downloaded yet · N waiting · open Settings, Models` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
 | Any other 4xx (a systemone 413/422 included) | `LlmFormatException` | none: counted against the item | none |
 
@@ -644,8 +650,9 @@ roles want.
   serves only the entries whose files are on disk (`withPresentFiles`).
   `ensurePreset()` is what the placement writers' callers use: it starts a server that is down, leaves one whose preset hash
   still matches alone, and restarts anything else. So moving the generative
-  role to Your server drops the chat model out of memory, and running
-  `make decide-install` while the app runs is picked up by the next
+  role to Your server drops the chat model out of memory, and a file that
+  lands while the app runs (the model ensurer's download, or `make
+  decide-fetch` into the same folder) is picked up by the next
   `ensurePreset` (a new hash) rather than by a relaunch.
 - **Four ids, one origin.** `bond-embed`, `bond-decide`, `bond-bulk` (the 4B),
   `bond-prose` (the 27B), named for the role and not the checkpoint, because
@@ -756,9 +763,9 @@ role parks on its own reason while the rest run. The park is the CLIENT's, not
 the router's: `buildPreset` tells the prefs which managed ids it served
 (`setServedManagedIds`), and a managed target whose model is not among them
 resolves with an `LlmTarget.unavailable` sentence ("The Qwen3 4B is not
-downloaded on this Mac. Set up again to download it.", and for the decision
-model a sentence that still names the hand-install command, reworded with the
-other park sentences), so `LlmClient` and
+downloaded on this Mac. Open Settings, Models to download it.", the 27B's the
+same, and for the decision model "The decision model is not downloaded yet.
+Open Settings, Models."), so `LlmClient` and
 `DecisionClient` throw their unavailable exception before any HTTP call. Asking
 the router for a model it does not serve would answer 400, and a 400 is fatal
 in both drains, so every message would end in error instead of waiting. The
@@ -795,8 +802,9 @@ comments:
 `ModelDownloader` (`app/lib/services/models/model_downloader.dart`) fills the
 models folder with the `.downloadable` set.
 
-- **One stream at a time, smallest first**; the server waits for every file
-  the set names, and so, today, does the wizard's Continue.
+- **One stream at a time, smallest first**; the server serves only the files
+  that are here (`withPresentFiles`), and the wizard's Continue waits for the
+  GATING (Hugging Face) files only: a registry file never holds it (D7).
 - **A failure moves on**: one file's failure is an event, the run continues.
 - **Legs.** One entry can cost several files, each its own transfer and its
   own ledger row, and still ONE bar: the weights (row `<id>`), the 27B's MTP
@@ -820,8 +828,12 @@ models folder with the `.downloadable` set.
   resolve, then `http_<code>`, never retried), so the object storage a hosted
   registry redirects to never receives the token, and each answer is judged
   by the hop that gave it. A 401 or 403 from the registry's own origin is
-  `unauthorized`, never retried; a 403 from another origin is the hub's
-  aged-signature rule, a re-resolve. No token sends no header, and the
+  `unauthorized`, never retried; a 404 from it is `registry_not_found` (the
+  address names the wrong repository), never retried; a FIRST answer of 200
+  or 206 carrying `content-type: text/html` (a sign-in page or a proxy's) is
+  `registry_not_a_model` at once, never retried and never written to the
+  part; a 403 from another origin is the hub's aged-signature rule, a
+  re-resolve. No token sends no header, and the
   registry's 401 says so. The hub's linked-size and etag checks and its
   `GatedRepo` word are the hub's alone.
 - **sha256 on the platform side** (`SystemInfo.sha256`, CryptoKit); one
@@ -836,7 +848,74 @@ models folder with the `.downloadable` set.
   a refusal.
 - **The failure words**: `disk_full`, `checksum`, `network`, `gated`,
   `manifest_mismatch`, `missing_folder`, `registry_not_configured`,
-  `unauthorized`, `http_<code>`.
+  `unauthorized`, `registry_not_found`, `registry_not_a_model`, `http_<code>`.
+  Each is a sentence in `SetupDownloadBody.describeDownloadError`; the two
+  newest read "The model registry does not have this model. Check its address
+  under Settings, Models." and "The model registry answered with a web page,
+  not a model. Check its address under Settings, Models."
+
+### Ensured outside the wizard
+
+`ModelEnsurer` (`app/lib/services/models/model_ensurer.dart`, provider
+`modelEnsurerProvider`) downloads whatever the current placements need and the
+disk lacks, after setup (decision D6). The wizard downloads once; everything
+later is the ensurer's: a registry file the wizard could not fetch, a launch
+under `BOND_DEV_SKIP_SETUP` that never saw the wizard, a placement moved to
+this Mac, a manifest bump.
+
+- **When it runs.** `SetupGate` kicks `ensure()` (unawaited) whenever it lets
+  the APP through: a launch, the return after Finish or Back to the inbox,
+  and `BOND_DEV_SKIP_SETUP`. Settings kicks it on the decision model's
+  **Check**, on **Download** (the decision row's and the generative row's),
+  after a registry **Save** or **Remove token**, and after every placement or
+  managed-model write (beside the `ensurePreset()` those already fire).
+- **The ensure set** (`modelEnsureSetProvider`) is `managedManifestProvider`'s
+  answer, which is `forRoles` on the hardware tier with the placements'
+  generative choice, PLUS the manifest's decide entry whenever it is not
+  already there, which is exactly when the decision role is on Your server
+  (D10): a ModernBERT server still needs this Mac's heads file and the entry
+  is one download, so there is one rule and no heads-only path (a Kev server
+  ignores the files). Then `.downloadable`. An entry is missing when its
+  ledger rows are not current at this build's digests (`isCurrent`) or any of
+  its files is gone from the folder (`filesPresent`).
+- **One ownership rule.** The ONE `ModelDownloader` refuses a second run, so:
+  while the wizard shows (`setupShowingProvider`, written by the gate) the
+  ensurer starts nothing, at once; while somebody ELSE's run is in flight
+  (the wizard's, still going after Finish or Back to the inbox) it says so
+  (`EnsureState.waiting`, phase downloading with no fraction), awaits
+  `ModelDownloader.idle` and then does its scan, so a kick is never dropped;
+  and `standDown()`, which the gate calls as it shows the wizard, cancels a
+  run the ensurer OWNS, keeping its parts, so the wizard's run (whose
+  `startDownload` likewise waits for `idle`, reading as in progress) resumes
+  from the byte. It is single-flight: a call during a pass returns that
+  pass's future.
+- **Download again.** `ensure(reverify: {id})` treats the entry as missing
+  whatever the ledger says, and the downloader's `run(files, rehash)` HASHES
+  those entries' files on disk instead of trusting a `done` row: a good file
+  is kept with no byte fetched, a wrong or damaged one replaced.
+- **The token is ready first.** Before a run it awaits the prefs notifier's
+  `ready`, so a STORED registry token is in the cache the downloader's lookup
+  reads; the wizard's own run does the same (`SetupController.prefsReady`).
+- **After every pass**, the one that found nothing missing included, it calls
+  `afterRun(landedIds)`. The provider asks for `restart()` when a landed id
+  is one the router serves (`managedManifestProvider`: the preset hash covers
+  paths and arguments, not digests, so a re-landed file of the same name
+  needs it) and for `ensurePreset()` otherwise, which restarts only when the
+  preset hash moved. That second arm is what puts a decision model the
+  wizard's run landed AFTER Finish into the router (the scan finds it
+  present, and the preset now has it), and it leaves the router alone when
+  only the decide entry landed for a decision on Your server. Fire and
+  forget.
+- **What the user sees.** `modelEnsureStateProvider` exposes its
+  `EnsureState` (phase `idle | downloading | failed | done`, `waiting`, the
+  entry being fetched (the smallest first), a monotonic fraction across the
+  run, each entry's own fraction, the ids landed, the first error and each
+  failed entry's own). `managedModelsStatusProvider` re-reads when the phase
+  moves or an entry lands. Each Models row reads its own `Downloading NN%`
+  (plain `Downloading` while waiting), then `On disk · …`, or the failure's
+  sentence with **Download** beside it unless the fix is the registry block; the rail keeps saying `decision_not_installed`'s sentence until
+  triage next drains. A failure is retried by the next `ensure()`: a failed
+  ledger row is simply not current. It never logs or stores a token.
 
 The decision model is the `bond-decide-mbl-v3swap` registry bundle: its GGUF
 and heads file (schema 2) are sha256-pinned in the manifest and downloaded
@@ -856,9 +935,11 @@ strings are in `docs/settings.md` (**First run**). Finish writes what the
 Where step chose through the role writers above, then records `'done'`, and
 only a finish that saved asks for the server, fire-and-forget: `restart()`
 when the folder moved or weights landed during the run, `ensurePreset()`
-otherwise. `BOND_DEV_SKIP_SETUP=1` skips the wizard. "Set up again" (Settings
-→ Models) clears `setup_state` except the migration record and the download
-ledger.
+otherwise. `BOND_DEV_SKIP_SETUP=1` skips the wizard, and the model ensurer
+still downloads the models in the background. Only the GATING entries decide
+whether a stored `done` passes (`ModelManifest.gating`, D7). "Set up again"
+(Settings → Models) clears `setup_state` except the migration record and the
+download ledger.
 
 ## Failure policy: park, never fall back
 
@@ -890,9 +971,9 @@ ledger.
   (the same refusal for a target with an empty URL: the generative role on
   Your server with no address) is `no_address`; the decision client's own
   `DecisionNotInstalledException` is `decision_not_installed`, because its fix
-  is a command rather than a download; `DecisionOlderModelException` (the
+  is the decision model's own download rather than the generative one; `DecisionOlderModelException` (the
   heads schema-1 refusal) is `decision_older_model`, ahead of its parent,
-  because its fix is an install rather than an address;
+  because its fix is a download rather than an address;
   `DecisionMisconfiguredException` is
   `decision_misconfigured`, because waiting fixes neither of its causes (the
   address or the heads file), so its sentence claims no retry;
@@ -923,11 +1004,11 @@ ledger.
   | `unauthorized` | this Mac | `Model server refused the access key · N waiting` |
   | `embed_unavailable` | either | `Embedding server unreachable · N waiting · retrying each minute` |
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
-  | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
+  | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · open Settings, Models` |
   | `no_address` | Your server | `The generative model has no server address · N waiting · add one under Settings, Models` |
-  | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
+  | `decision_not_installed` | either | `The decision model is not downloaded yet · N waiting · open Settings, Models` |
   | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
-  | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
+  | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or press Download again under Settings, Models` |
   | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |
 

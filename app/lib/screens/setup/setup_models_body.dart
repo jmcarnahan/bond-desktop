@@ -66,14 +66,16 @@ class SetupModelsBody extends StatelessWidget {
         _ => '$count',
       };
 
-  /// The opening sentence, which has to agree with itself about number: no
-  /// tier ships one model today, and a sentence reading "one models" would be
-  /// the first thing a person saw.
+  /// The opening sentence, which has to agree with itself about number: a
+  /// sentence reading "one models" would be the first thing a person saw. It
+  /// names no source, because the set mixes two: the embedding and writing
+  /// models come from Hugging Face, the decision model from the model
+  /// registry.
   static String downloadsSentence(int count) => count == 1
-      ? 'Bond downloads one model from Hugging Face. It runs on this Mac and '
-          'never sends your mail anywhere.'
-      : 'Bond downloads ${countWord(count)} models from Hugging Face. They '
-          'run on this Mac and never send your mail anywhere.';
+      ? 'Bond downloads one model. It runs on this Mac and never sends your '
+          'mail anywhere.'
+      : 'Bond downloads ${countWord(count)} models. They run on this Mac and '
+          'never send your mail anywhere.';
 
   /// What each role is FOR, in the user's terms. Held here rather than in the
   /// manifest because it is copy about this app's pipeline, not a fact about
@@ -88,10 +90,12 @@ class SetupModelsBody extends StatelessWidget {
 
   static const Key decisionRowKey = ValueKey('setup-models-decision');
 
-  /// What the decision model's row says in place of a size.
+  /// What a hand-installed (`source: local`) decision model's row says in
+  /// place of a size. The registry's decision model is a download row and
+  /// never says either.
   static const String installedText = 'Installed';
   static const String notInstalledText =
-      'Not installed · run make decide-install';
+      'Not installed. Copy the model files into the models folder.';
 
   /// What a checkpoint's second file adds, under its size. Named here so a
   /// test can pin the sentence rather than rebuild it.
@@ -130,9 +134,14 @@ class SetupModelsBody extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: BondSpacing.s12),
-              Text(
-                decisionInstalled ? installedText : notInstalledText,
-                style: BondType.small,
+              // Flexible: the not-installed state is a sentence, and a
+              // column that could not wrap would run off the pane.
+              Flexible(
+                child: Text(
+                  decisionInstalled ? installedText : notInstalledText,
+                  style: BondType.small,
+                  textAlign: TextAlign.right,
+                ),
               ),
             ],
           ),

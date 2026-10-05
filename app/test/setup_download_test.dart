@@ -2,6 +2,7 @@ import 'package:bond_inbox/screens/setup/setup_controls.dart';
 import 'package:bond_inbox/screens/setup/setup_download_body.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
+import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -46,6 +47,8 @@ void main() {
     bool running = false,
     bool paused = false,
     bool complete = false,
+    bool? allDownloaded,
+    List<ModelFile>? files,
     VoidCallback? onStart,
     VoidCallback? onPause,
     VoidCallback? onResume,
@@ -58,11 +61,12 @@ void main() {
       home: Scaffold(
         body: SingleChildScrollView(
           child: SetupDownloadBody(
-            files: manifest.forTier(tier).bySize,
+            files: files ?? manifest.forTier(tier).bySize,
             progress: progress,
             running: running,
             paused: paused,
             complete: complete,
+            allDownloaded: allDownloaded,
             onStart: onStart ?? () {},
             onPause: onPause ?? () {},
             onResume: onResume ?? () {},
@@ -155,6 +159,17 @@ void main() {
         SetupDownloadBody.describeDownloadError(DownloadError.unauthorized),
         'The model registry refused the access token. Check it under '
         'Settings, Models.',
+      );
+      expect(
+        SetupDownloadBody.describeDownloadError(DownloadError.registryNotFound),
+        'The model registry does not have this model. Check its address under '
+        'Settings, Models.',
+      );
+      expect(
+        SetupDownloadBody.describeDownloadError(
+            DownloadError.registryNotAModel),
+        'The model registry answered with a web page, not a model. Check its '
+        'address under Settings, Models.',
       );
       expect(
         SetupDownloadBody.describeDownloadError(DownloadError.http(503)),
@@ -324,6 +339,95 @@ void main() {
     expect(canContinue(tester), isTrue);
     // Nothing left to start, so nothing offering to.
     expect(find.byKey(SetupDownloadBody.startKey), findsNothing);
+  });
+
+  testWidgets('the caption is true of every set: smallest first, one at a '
+      'time', (tester) async {
+    await open(tester);
+    expect(find.text(SetupDownloadBody.orderText), findsOneWidget);
+    expect(find.text('The models arrive one at a time, smallest first.'),
+        findsOneWidget);
+    expect(find.textContaining('two models the inbox needs'), findsNothing);
+  });
+
+  testWidgets('a failed registry row says why and that Bond keeps trying, and '
+      'does not hold Continue', (tester) async {
+    final withDecide = testManifest(withDecide: true);
+    await open(
+      tester,
+      files: withDecide.bySize,
+      complete: true,
+      allDownloaded: false,
+      progress: {
+        for (final model in withDecide.models)
+          model.id: model.isRegistry
+              ? entry(model.id,
+                  status: DownloadStatus.failed,
+                  error: DownloadError.unauthorized)
+              : entry(model.id, status: DownloadStatus.done),
+      },
+    );
+
+    expect(
+      find.text(
+          SetupDownloadBody.describeDownloadError(DownloadError.unauthorized)),
+      findsOneWidget,
+    );
+    expect(find.text(SetupDownloadBody.registryLaterText), findsOneWidget);
+    expect(
+        find.text('Bond tries again after setup, and under Settings, Models. '
+            'You can continue.'),
+        findsOneWidget);
+    expect(canContinue(tester), isTrue);
+    // Not every model is here, so the step does not say so, and it offers
+    // the retry.
+    expect(find.text('All models are on this Mac.'), findsNothing);
+    expect(find.text('Try again'), findsOneWidget);
+  });
+
+  testWidgets('waiting for another owner\'s run reads as in progress, with '
+      'no button to press', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(760, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: SetupDownloadBody(
+            files: manifest.bySize,
+            progress: const {},
+            running: true,
+            paused: false,
+            waiting: true,
+            complete: false,
+            onStart: () {},
+            onPause: () {},
+            onResume: () {},
+            onCancel: () {},
+            onContinue: () {},
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+
+    expect(find.text(SetupDownloadBody.waitingText), findsOneWidget);
+    for (final key in [
+      SetupDownloadBody.startKey,
+      SetupDownloadBody.pauseKey,
+      SetupDownloadBody.resumeKey,
+      SetupDownloadBody.cancelKey,
+    ]) {
+      expect(find.byKey(key), findsNothing);
+    }
+  });
+
+  testWidgets('a failed hub row gets no registry line', (tester) async {
+    await open(tester, progress: {
+      routerEmbedId: entry(routerEmbedId,
+          status: DownloadStatus.failed, error: DownloadError.network),
+    });
+    expect(find.text(SetupDownloadBody.registryLaterText), findsNothing);
+    expect(canContinue(tester), isFalse);
   });
 
   testWidgets('Continue fires the host callback once complete',

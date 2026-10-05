@@ -130,7 +130,11 @@ class _CallFacts {
   /// anyone to `make decide`: that command starts a server on this Mac.
   final bool yourServer;
 
-  _CallFacts({this.yourServer = false});
+  /// The target is this app's own router, which nobody starts by hand: its
+  /// sentences point at Settings, Models instead of a command.
+  final bool managed;
+
+  _CallFacts({this.yourServer = false, this.managed = false});
 }
 
 /// The first sentence of every "the server's vectors are not the decision
@@ -246,6 +250,11 @@ class DecisionClient {
   /// costs no extra request, and so is every target when this is null.
   final bool Function(LlmTarget target)? _isYourServer;
 
+  /// Whether a target on this Mac is the app's own router rather than a
+  /// hand-started server, which decides what an unreachable sentence tells
+  /// the reader to do. Null answers no: the hand-server words.
+  final bool Function()? _isManaged;
+
   /// Per HTTP request, not per decision. A 395M encoder answers in tens of
   /// milliseconds; this ceiling is for a wedged server.
   final Duration timeout;
@@ -263,6 +272,7 @@ class DecisionClient {
     this.timeout = const Duration(seconds: 15),
     this._toLocal,
     this._isYourServer,
+    this._isManaged,
     this._servedFile,
   }) : _http = client ?? http.Client();
 
@@ -400,7 +410,8 @@ class DecisionClient {
     if (destination.unavailable case final why?) {
       throw DecisionNotInstalledException(why);
     }
-    final facts = _CallFacts(yourServer: _yours(destination));
+    final facts =
+        _CallFacts(yourServer: _yours(destination), managed: _managed());
     try {
       final backend = await _backendFor(destination, facts);
       if (backend is _EncoderHeadsBackend) _heads();
@@ -429,7 +440,8 @@ class DecisionClient {
     if (destination.unavailable case final why?) {
       throw DecisionNotInstalledException(why);
     }
-    final facts = _CallFacts(yourServer: _yours(destination));
+    final facts =
+        _CallFacts(yourServer: _yours(destination), managed: _managed());
     if (facts.yourServer) {
       final kind = await _resolveKind(destination, facts);
       if (kind.kind == DecisionServerKind.systemOne) {
@@ -628,6 +640,16 @@ class DecisionClient {
   /// predicate answers no.
   bool _yours(LlmTarget destination) =>
       _isYourServer?.call(destination) ?? false;
+
+  /// Whether this Mac's target is the app's own router; a predicate that
+  /// throws answers no.
+  bool _managed() {
+    try {
+      return _isManaged?.call() ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// The backend that answers for [destination]: encoder-heads for a managed
   /// or hand-started target without a request, else whatever [_resolveKind]
@@ -1185,7 +1207,7 @@ class DecisionClient {
     } on TimeoutException {
       throw DecisionUnavailableException(
         'The decision model at $url did not answer within '
-        '${timeout.inSeconds} seconds${_advice(facts, ' — ')}',
+        '${timeout.inSeconds} seconds.${_advice(facts)}',
       );
     } on FormatException {
       // Raised while the request is built: a header dart:io refuses, which
@@ -1279,7 +1301,7 @@ class DecisionClient {
     if (status == 429 || status >= 500) {
       throw DecisionUnavailableException(
         'The decision model at $url is not ready (HTTP '
-        '$status)${_advice(facts, ' — ')}. $snippet',
+        '$status).${_advice(facts)} $snippet',
       );
     }
     throw LlmFormatException(
@@ -1295,13 +1317,17 @@ class DecisionClient {
       '${url.scheme}://${url.host}${url.hasPort ? ':${url.port}' : ''}';
 
   String _unreachable(Uri url, _CallFacts facts) =>
-      'The decision model at $url is not answering${_advice(facts, ' — ')}';
+      'The decision model at $url is not answering.${_advice(facts)}';
 
-  /// `run: make decide` after [separator], for a target this Mac serves
-  /// (the managed router or a hand-started server); nothing for Your
-  /// server, which that command does not start.
-  static String _advice(_CallFacts facts, String separator) =>
-      facts.yourServer ? '' : '${separator}run: make decide';
+  /// What fixes a server on this Mac, as a sentence after a space: Settings
+  /// for the app's own router, which nobody starts by hand; `make decide`
+  /// for a hand-started server (a `BOND_DEV_HAND_SERVERS` build); nothing
+  /// for Your server, which neither starts.
+  static String _advice(_CallFacts facts) => facts.yourServer
+      ? ''
+      : facts.managed
+          ? " Bond's model server is starting or stopped. See Settings, Models."
+          : ' Run: make decide.';
 
   /// The start of a server's error body, for the sentence. With the key
   /// blanked out, in case a proxy ever echoes a header back.
@@ -1390,7 +1416,8 @@ class DecisionClient {
     Future<T> Function(_CallFacts facts) body, {
     bool report = true,
   }) async {
-    final facts = _CallFacts(yourServer: _yours(destination));
+    final facts =
+        _CallFacts(yourServer: _yours(destination), managed: _managed());
     void tell(String outcome, String? error) {
       if (report) _report(destination, sw, facts, label, outcome, error);
     }

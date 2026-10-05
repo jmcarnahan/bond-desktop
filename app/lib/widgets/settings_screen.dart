@@ -22,11 +22,14 @@ import '../services/decision/needs_you_predicate.dart'
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../services/models/managed_model_status.dart' show ManagedModelStatus;
+import '../services/models/model_ensurer.dart' show EnsureState;
+import '../services/models/registry_probe.dart' show RegistryCheck;
 import '../services/reminders/tasks_availability.dart';
 import '../services/server/server_state.dart';
 import '../theme/tokens.dart';
 import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
+import 'model_registry_form.dart' show RegistrySave;
 import 'model_servers_form.dart' show ModelServersForm, ServerFormRole;
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
@@ -267,10 +270,25 @@ class SettingsScreen extends StatefulWidget {
   /// This Mac's role models, or null while they are being read.
   final List<ManagedModelStatus>? modelStatuses;
 
-  /// Where `make decide-install` must put the decision model when the models
-  /// folder is not the default one; null while it is. See
-  /// [SettingsModelsPage.decideInstallDir].
-  final String? decideInstallDir;
+  /// The model registry as the host resolved it: the effective address and
+  /// two presence flags. Never a token. See [SettingsModelsPage.registryUrl].
+  final String registryUrl;
+  final bool registryTokenStored;
+  final bool registryTokenFromBuild;
+
+  /// The registry's write, token removal and Check. Null takes each off.
+  final RegistrySave? onSaveRegistry;
+  final Future<void> Function()? onRemoveRegistryToken;
+  final Future<RegistryCheck> Function()? onCheckRegistry;
+
+  /// What the model ensurer is doing, and the **Download** press that asks
+  /// it to fetch what is missing. See [SettingsModelsPage.ensureState].
+  final EnsureState? ensureState;
+  final Future<void> Function()? onDownloadModels;
+
+  /// The decision row's **Download again**. See
+  /// [SettingsModelsPage.onRedownloadDecision].
+  final Future<void> Function()? onRedownloadDecision;
 
   /// The decision role's write. **Null hides the whole Models section**, the
   /// same discipline every other optional section follows: a host that
@@ -593,7 +611,15 @@ class SettingsScreen extends StatefulWidget {
     this.generativeModel = '',
     this.generativeKeyStored = false,
     this.modelStatuses,
-    this.decideInstallDir,
+    this.registryUrl = '',
+    this.registryTokenStored = false,
+    this.registryTokenFromBuild = false,
+    this.onSaveRegistry,
+    this.onRemoveRegistryToken,
+    this.onCheckRegistry,
+    this.ensureState,
+    this.onDownloadModels,
+    this.onRedownloadDecision,
     this.onUseDecision,
     this.onUseGenerative,
     this.onCheckDecision,
@@ -1301,7 +1327,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     generativeKeyStored: widget.generativeKeyStored,
     generativeKeyFromBuild: widget.generativeKeyFromBuild,
     statuses: widget.modelStatuses,
-    decideInstallDir: widget.decideInstallDir,
+    registryUrl: widget.registryUrl,
+    registryTokenStored: widget.registryTokenStored,
+    registryTokenFromBuild: widget.registryTokenFromBuild,
+    onSaveRegistry: widget.onSaveRegistry,
+    onRemoveRegistryToken: widget.onRemoveRegistryToken,
+    onCheckRegistry: widget.onCheckRegistry,
+    ensureState: widget.ensureState,
+    onDownloadModels: widget.onDownloadModels,
+    onRedownloadDecision: widget.onRedownloadDecision,
     probe: widget.probeServer,
     storedBearer: widget.storedBearer,
     onUseDecision: widget.onUseDecision,

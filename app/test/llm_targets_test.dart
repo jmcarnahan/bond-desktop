@@ -785,7 +785,7 @@ void main() {
       expect(triage.model, routerBulkId);
       expect(
         triage.unavailable,
-        'The Qwen3 4B is not downloaded on this Mac. Set up again to '
+        'The Qwen3 4B is not downloaded on this Mac. Open Settings, Models to '
         'download it.',
       );
       expect(prefs.targetForStage('draft_reply').unavailable, isNotNull);
@@ -796,7 +796,7 @@ void main() {
       expect(prefs.targetForStage('triage').unavailable, isNull);
       expect(
         prefs.targetForStage('decision').unavailable,
-        'The decision model is not installed. Run: make decide-install',
+        'The decision model is not downloaded yet. Open Settings, Models.',
       );
     });
 

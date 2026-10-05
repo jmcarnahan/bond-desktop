@@ -323,14 +323,14 @@ String railProgressLine({
     case 'decision_unavailable':
       return 'Decision model unreachable · $waiting waiting · retrying each '
           'minute';
-    // The decision model's own install is missing (the router is not serving
-    // it, or its heads file is not there). Its fix is a command, not the
-    // generative download below, so it says which.
+    // The decision model's own files are missing (the router is not serving
+    // it, or its heads file is not there). The model ensurer downloads it,
+    // and Settings, Models says how that is going and offers Download.
     case 'decision_not_installed':
-      return 'The decision model is not installed · $waiting waiting · run '
-          'make decide-install, then Check in Settings';
+      return 'The decision model is not downloaded yet · $waiting waiting · '
+          'open Settings, Models';
     // The installed decision model is the older one, whose heads file this
-    // build no longer reads. Its fix is an install, not an address, and the
+    // build no longer reads. Its fix is a download, not an address, and the
     // sentence says so in plain words, with no command: whoever reads the
     // rail may not be a developer. No retry cadence either.
     case 'decision_older_model':
@@ -344,7 +344,7 @@ String railProgressLine({
     case 'decision_misconfigured':
       return 'The decision server is not the decision model, or its heads '
           'file does not match · $waiting waiting · check its address in '
-          'Settings, or run make decide-install';
+          'Settings, or press Download again under Settings, Models';
     // Named for the decision server whichever way the generative model is
     // placed: that placement says nothing about where this key went.
     case 'decision_unauthorized':
@@ -355,7 +355,7 @@ String railProgressLine({
     // no retry cadence is claimed and the sentence says what to do.
     case 'not_installed':
       return 'A model this Mac runs is not downloaded · $waiting waiting · '
-          'set up again in Settings';
+          'open Settings, Models';
     // The generative model is placed on Your server and nothing names one.
     // An address fixes it and waiting does not, so no retry cadence.
     case 'no_address':

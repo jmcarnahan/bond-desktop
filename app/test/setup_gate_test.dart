@@ -12,9 +12,11 @@ import 'package:bond_inbox/providers/prefs_provider.dart'
     show AppPrefsNotifier, initialAppPrefsProvider, modelPlacementKey;
 import 'package:bond_inbox/providers/setup_provider.dart';
 import 'package:bond_inbox/screens/setup/setup_gate.dart';
+import 'package:bond_inbox/screens/setup/setup_welcome_body.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_downloader.dart';
+import 'package:bond_inbox/services/models/model_ensurer.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
@@ -23,12 +25,14 @@ import 'package:bond_inbox/services/system/system_info.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/io_client.dart' show IOClient;
 
 import 'fixtures/fake_auth_session.dart';
 import 'fixtures/fake_desktop_notifier.dart';
 import 'fixtures/fake_hub_server.dart';
 import 'fixtures/fake_process_runner.dart';
 import 'fixtures/fake_system_info.dart';
+import 'fixtures/recording_ensurer.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -102,6 +106,10 @@ void main() {
     int memoryBytes = 0,
     SystemInfo? system,
     ModelManifest? manifest,
+    ModelEnsurer? ensurer,
+    bool realEnsurer = false,
+    ModelDownloader? downloader,
+    ModelServerSupervisor? server,
   }) async {
     // Read before the first frame, as `main()` does: the gate answers once,
     // and a prefs notifier still on its defaults would answer for the
@@ -116,7 +124,7 @@ void main() {
       // A downloader pointed at the loopback hub with nothing published on
       // it: the model-bump case opens the wizard ON the download step, and a
       // run against the real Hugging Face is not a thing a test may start.
-      modelDownloaderProvider.overrideWithValue(ModelDownloader(
+      modelDownloaderProvider.overrideWithValue(downloader ?? ModelDownloader(
         manifest: testManifest(),
         modelsFolder: () => support.path,
         readLedger: (overStore ?? store).downloadLedger,
@@ -137,11 +145,15 @@ void main() {
                 osVersion: '15.6',
               )),
       ),
-      modelServerSupervisorProvider.overrideWithValue(supervisor),
+      modelServerSupervisorProvider.overrideWithValue(server ?? supervisor),
       authSessionProvider.overrideWithValue(FakeAuthSession()),
       desktopNotifierProvider.overrideWithValue(notifier),
       desktopNotificationServiceProvider.overrideWithValue(notifications),
       if (overStore != null) setupStoreProvider.overrideWithValue(overStore),
+      // A recording fake unless a case asks for the real one: the real one
+      // would start a download over real sockets inside a fake-async body.
+      if (!realEnsurer)
+        modelEnsurerProvider.overrideWithValue(ensurer ?? RecordingEnsurer()),
     ]);
     addTearDown(container.dispose);
   }
@@ -558,4 +570,224 @@ void main() {
 
     expect(find.text('the app'), findsOneWidget);
   });
+
+  group('the model ensurer and the wizard flag', () {
+    testWidgets('while the wizard shows, the flag says so and nothing is '
+        'ensured', (tester) async {
+      final ensurer = RecordingEnsurer();
+      await makeContainer(ensurer: ensurer);
+
+      await mount(tester);
+
+      expect(find.text('Welcome to Bond'), findsOneWidget);
+      expect(container.read(setupShowingProvider), isTrue);
+      expect(ensurer.calls, 0);
+      // And the ensurer is told to hand over any run of its own.
+      expect(ensurer.standDowns, 1);
+    });
+
+    testWidgets('once the app shows, the flag clears and the ensurer is '
+        'kicked once', (tester) async {
+      final ensurer = RecordingEnsurer();
+      await store.set(SetupStore.setupKey, SetupStep.done.name);
+      await seedLedger();
+      await makeContainer(ensurer: ensurer);
+      ensurer.flag = () => container.read(setupShowingProvider);
+
+      await mount(tester);
+
+      expect(find.text('the app'), findsOneWidget);
+      expect(container.read(setupShowingProvider), isFalse);
+      expect(ensurer.calls, 1);
+      // Kicked AFTER the flag came down, so the real one would not stand
+      // aside.
+      expect(ensurer.blockedAtCall, [false]);
+    });
+
+    testWidgets('"Set up again" raises the flag and kicks nothing; the way '
+        'back to the app kicks again', (tester) async {
+      final ensurer = RecordingEnsurer();
+      await store.set(SetupStore.setupKey, SetupStep.done.name);
+      await seedLedger();
+      await makeContainer(ensurer: ensurer);
+      await mount(tester);
+      expect(ensurer.calls, 1);
+
+      await restartSetupWith(
+        store: store,
+        restart: container.read(setupRestartProvider.notifier),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Welcome to Bond'), findsOneWidget);
+      expect(container.read(setupShowingProvider), isTrue);
+      expect(ensurer.calls, 1);
+      expect(ensurer.standDowns, greaterThanOrEqualTo(1),
+          reason: 'Set up again hands the downloader to the wizard at once');
+
+      // The welcome step's way back, which reaches the gate exactly as
+      // Finish does.
+      await tester.tap(find.byKey(SetupWelcomeBody.returnToInboxKey));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('the app'), findsOneWidget);
+      expect(container.read(setupShowingProvider), isFalse);
+      expect(ensurer.calls, 2);
+    });
+
+    testWidgets('the real ensurer stands aside while the flag is up',
+        (tester) async {
+      await makeContainer(realEnsurer: true);
+      await mount(tester);
+      expect(container.read(setupShowingProvider), isTrue);
+
+      final state = await container.read(modelEnsurerProvider).ensure();
+
+      expect(state.phase, EnsurePhase.idle);
+      expect(hub.requests, isEmpty);
+    });
+  });
+
+  testWidgets('a registry file the wizard\'s run lands AFTER Finish still '
+      'reaches the router: the launch kick waits for that run, then asks for '
+      'the preset', (tester) async {
+    // The default placements: decision on this Mac, generative on Your
+    // server. The wizard's set is embed and decide, and Finish can happen
+    // while decide is still downloading (decision D7).
+    await MessageStore(db).setPref(modelPlacementKey, ModelPlacement.box.name);
+    final paths = AppPaths(support);
+    final folder = paths.models.path;
+    late ModelFile decide;
+    late ModelManifest manifest;
+    late ModelDownloader downloader;
+    final server = _CountingSupervisor(support);
+    await tester.runAsync(() async {
+      final weights = fakeWeights(512 * 1024, seed: 21);
+      final heads = fakeWeights(1536, seed: 22);
+      hub.registryContents['bond-decide-mbl-v3swap/model-f16.gguf'] = weights;
+      hub.registryContents['bond-decide-mbl-v3swap/heads.json'] = heads;
+      decide = testDecideFile(
+        sizeBytes: weights.length,
+        sha256: sha256Hex(weights),
+        headsSizeBytes: heads.length,
+        headsSha256: sha256Hex(heads),
+      );
+      manifest = testManifest(decide: decide);
+      // The embedding model is here and current: the gate lets the app
+      // through on it alone.
+      final embed = manifest.byRole(ModelRole.embed);
+      final file = File('$folder/${embed.relativePath}');
+      await file.parent.create(recursive: true);
+      await file.writeAsString('gguf');
+      await store.recordDownload(DownloadLedger.empty.record(FileDownloadState(
+        id: embed.id,
+        status: DownloadStatus.done,
+        receivedBytes: embed.sizeBytes,
+        totalBytes: embed.sizeBytes,
+        sha256: embed.sha256,
+      )));
+      await store.set(SetupStore.setupKey, SetupStep.done.name);
+      // The widget binding answers every HttpClient with a 400; this case
+      // needs the loopback hub, so its client is built without that override
+      // (the hub is in-process, so nothing leaves this machine).
+      final binding = HttpOverrides.current;
+      HttpOverrides.global = null;
+      final client = IOClient(HttpClient());
+      HttpOverrides.global = binding;
+      addTearDown(client.close);
+      downloader = ModelDownloader(
+        httpClient: client,
+        manifest: manifest,
+        modelsFolder: () => folder,
+        readLedger: store.downloadLedger,
+        writeLedger: store.recordDownload,
+        sha256: (_) async => null,
+        resolveUri: hub.resolveUriFor,
+        registryBase: () => hub.registryBase,
+        registryToken: () => 'test-token-123',
+        sleep: (_) async {},
+        maxAttempts: 1,
+        progressInterval: const Duration(milliseconds: 1),
+        ledgerInterval: Duration.zero,
+      );
+    });
+    addTearDown(downloader.dispose);
+    await makeContainer(
+      manifest: manifest,
+      realEnsurer: true,
+      downloader: downloader,
+      server: server,
+      memoryBytes: 64 * 1024 * 1024 * 1024,
+    );
+
+    // The wizard's run, still holding the registry leg when Finish lands.
+    hub.chunkDelay = const Duration(milliseconds: 20);
+    late Future<List<DownloadProgress>> wizardRun;
+    await tester.runAsync(() async {
+      wizardRun = downloader.run([decide]).toList();
+    });
+
+    await mount(tester);
+    expect(find.text('the app'), findsOneWidget);
+    final ensurer = container.read(modelEnsurerProvider);
+    // The kick did not drop: it waits, and says a download is running.
+    for (var i = 0; i < 50 && !ensurer.state.value.waiting; i++) {
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)));
+      await tester.pump();
+    }
+    expect(ensurer.state.value.phase, EnsurePhase.downloading);
+    expect(ensurer.state.value.waiting, isTrue);
+    expect(server.presets, 0);
+
+    hub.chunkDelay = null;
+    final ran = (await tester.runAsync(() => wizardRun))!;
+    expect(ran.last.status, DownloadStatus.done);
+    for (var i = 0;
+        i < 200 && ensurer.state.value.phase != EnsurePhase.done;
+        i++) {
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)));
+      await tester.pump();
+    }
+
+    expect(ensurer.state.value.phase, EnsurePhase.done);
+    expect(ensurer.state.value.waiting, isFalse);
+    // Nothing of its own landed, so the preset is asked for, which restarts
+    // the router onto the newly present decide file.
+    expect(server.presets, greaterThanOrEqualTo(1));
+    final ledger = (await tester.runAsync(store.downloadLedger))!;
+    expect(ledger.isCurrent(decide), isTrue);
+    // The status rows read the disk again when the phase moved.
+    final rows = (await tester.runAsync(
+        () => container.read(managedModelsStatusProvider.future)))!;
+    expect(rows.firstWhere((r) => r.roleId == 'decision').onDisk, isTrue);
+  });
+}
+
+/// A supervisor that counts what the ensurer asks of it and starts nothing.
+class _CountingSupervisor extends ModelServerSupervisor {
+  _CountingSupervisor(Directory support)
+      : super(
+          runner: FakeProcessRunner(),
+          supportDir: support,
+          binaryPath: () => '/usr/bin/true',
+          buildPreset: () => testManifest().toPreset(support.path),
+          routerPort: () => 8080,
+          onPortMoved: (_) async {},
+          managed: () => false,
+        );
+
+  int presets = 0;
+  int restarts = 0;
+
+  @override
+  Future<void> ensurePreset() async => presets++;
+
+  @override
+  Future<void> restart() async => restarts++;
 }

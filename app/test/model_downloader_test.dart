@@ -240,6 +240,43 @@ void main() {
     if (root.existsSync()) await root.delete(recursive: true);
   });
 
+  test('idle is complete with no run, and completes only when a run ends',
+      () async {
+    manifest = publish(embed: 512 * 1024);
+    final downloader = build();
+    var idle = false;
+    await downloader.idle.then((_) => idle = true);
+    expect(idle, isTrue, reason: 'no run in flight');
+
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final events = downloader.run().toList();
+    var ended = false;
+    unawaited(downloader.idle.then((_) => ended = true));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(downloader.running, isTrue);
+    expect(ended, isFalse);
+
+    hub.chunkDelay = null;
+    await downloader.idle;
+    expect(downloader.running, isFalse);
+    expect(ended, isTrue);
+    expect((await events).last.status, DownloadStatus.done);
+  });
+
+  test('a cancelled run completes idle too', () async {
+    manifest = publish(embed: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = build();
+    final events = downloader.run().toList();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    await downloader.cancel();
+    await downloader.idle;
+
+    expect(downloader.running, isFalse);
+    await events;
+  });
+
   test('two fresh files land, smallest first, with no Range anywhere',
       () async {
     final embed = manifest.byId(routerEmbedId);
@@ -1470,16 +1507,74 @@ void main() {
       }
     });
 
-    test('a registry 404 fails as http_404 after one request', () async {
+    test('a registry 404 fails as registry_not_found after one request',
+        () async {
       final decide = publishDecide();
       hub.registryContents.remove('$bundle/model-f16.gguf');
 
       final events = await buildRegistry().run([decide]).toList();
 
       expect(events.last.status, DownloadStatus.failed);
-      expect(events.last.error, DownloadError.http(HttpStatus.notFound));
+      expect(events.last.error, DownloadError.registryNotFound);
+      expect(ledger[decide.id]!.error, DownloadError.registryNotFound);
       expect(hub.registryCount, 1);
       expect(sleeps, isEmpty);
+    });
+
+    test('a redirect from the registry to a sign-in page fails at once as '
+        'registry_not_a_model, writing no part', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await hub.startStorage();
+      hub.registryRedirect = true;
+      hub.storageWebPage = true;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.registryNotAModel);
+      expect(hub.storageCount, 1);
+      expect(sleeps, isEmpty);
+      expect(File(partOf(decide)).existsSync(), isFalse);
+    });
+
+    test('a registry entry asked to rehash keeps a good file without a '
+        'request, and replaces a wrong one', () async {
+      final decide = publishDecide();
+      final downloader = buildRegistry();
+      await downloader.run([decide]).toList();
+      final asked = hub.registryCount;
+
+      final kept =
+          await downloader.run([decide], {decide.id}).toList();
+      expect(kept.last.status, DownloadStatus.done);
+      expect(hub.registryCount, asked);
+
+      await File(headsDestOf(decide)).writeAsBytes(List<int>.filled(16, 1));
+      final skipped = await downloader.run([decide]).toList();
+      expect(skipped.last.status, DownloadStatus.done);
+      expect(hub.registryCount, asked, reason: 'the ledger fast path');
+
+      final replaced =
+          await downloader.run([decide], {decide.id}).toList();
+      expect(replaced.last.status, DownloadStatus.done);
+      expect(File(headsDestOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/heads.json']);
+      expect(hub.registryCount, greaterThan(asked));
+    });
+
+    test('a registry answering with a web page fails at once as '
+        'registry_not_a_model, spending no retries', () async {
+      final decide = publishDecide();
+      hub.registryWebPage = true;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.registryNotAModel);
+      expect(hub.registryCount, 1);
+      expect(sleeps, isEmpty);
+      expect(File('${destOf(decide)}.part').existsSync(), isFalse);
     });
 
     test('weights done and here, heads missing: only the heads are asked for, '

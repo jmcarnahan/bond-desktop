@@ -262,6 +262,11 @@ class ModelDownloader {
   DownloadLedger _ledger = DownloadLedger.empty;
   StreamController<DownloadProgress>? _controller;
   bool _running = false;
+  Completer<void>? _idle;
+
+  /// Ids whose finished files this run must HASH again rather than trust a
+  /// `done` ledger row for. See [run]'s `rehash`.
+  Set<String> _rehash = const {};
   bool _pauseRequested = false;
   bool _cancelRequested = false;
   bool _disposed = false;
@@ -271,6 +276,12 @@ class ModelDownloader {
 
   bool get running => _running;
 
+  /// Completes when no run is in flight: at once when idle, otherwise once
+  /// the run in flight has ended (finished, failed or been cancelled). The
+  /// one downloader is shared by the wizard and the model ensurer, and this
+  /// is how either one waits its turn rather than being refused.
+  Future<void> get idle => _idle?.future ?? Future<void>.value();
+
   /// The latest in-memory ledger — current from the moment [run] has read it.
   DownloadLedger get ledger => _ledger;
 
@@ -279,7 +290,15 @@ class ModelDownloader {
   /// The stream carries one [DownloadProgress] per state change plus throttled
   /// progress while bytes move, and completes when every file has finished,
   /// failed, or been cancelled. It never carries an error.
-  Stream<DownloadProgress> run([Iterable<ModelFile>? files]) {
+  ///
+  /// [rehash] names entries whose files already on disk are HASHED again
+  /// even when the ledger says they are done: a good file is kept without a
+  /// byte fetched, a wrong or damaged one is replaced. What Settings'
+  /// **Download again** asks for.
+  Stream<DownloadProgress> run([
+    Iterable<ModelFile>? files,
+    Set<String> rehash = const {},
+  ]) {
     if (_running) {
       throw StateError('ModelDownloader.run: a run is already in progress');
     }
@@ -287,6 +306,8 @@ class ModelDownloader {
       throw StateError('ModelDownloader.run: this downloader was disposed');
     }
     _running = true;
+    _idle = Completer<void>();
+    _rehash = rehash;
     _pauseRequested = false;
     _cancelRequested = false;
     final controller = StreamController<DownloadProgress>();
@@ -437,6 +458,10 @@ class ModelDownloader {
         }
       }
       _running = false;
+      _rehash = const {};
+      final idle = _idle;
+      _idle = null;
+      if (idle != null && !idle.isCompleted) idle.complete();
       _bytes = null;
       _resumeGate = null;
       // NOT awaited: a single-subscription controller's `close()` waits for a
@@ -642,7 +667,8 @@ class ModelDownloader {
     if (_exists(dest)) {
       if (existing != null &&
           existing.status == DownloadStatus.done &&
-          existing.sha256 == leg.sha256) {
+          existing.sha256 == leg.sha256 &&
+          !_rehash.contains(leg.parent.id)) {
         // Skipped, but SAID. On a top-up run — the weights already here, the
         // head still to fetch — a silent skip would leave the entry's bar
         // reading zero until the head's first bytes landed, which on a
@@ -807,6 +833,12 @@ class ModelDownloader {
         // The hub's linked-object headers. A registry sends none of its own,
         // and is not trusted to mean the hub's thing by them.
         if (!leg.registry) _checkLinked(leg, response.headers);
+        // A registry address that answers with a web page is a login page
+        // or a proxy's, never the model: said at once rather than after a
+        // download of HTML and a checksum that could never match.
+        if (leg.registry && _isWebPage(response.headers)) {
+          throw _FileFailure(DownloadError.registryNotAModel);
+        }
       } on _FileFailure {
         await _drain(response);
         rethrow;
@@ -818,6 +850,10 @@ class ModelDownloader {
         (code == HttpStatus.unauthorized || code == HttpStatus.forbidden)) {
       // No token, or one the registry refused. Asking again changes nothing.
       throw _FileFailure(DownloadError.unauthorized);
+    }
+    if (leg.registry && code == HttpStatus.notFound) {
+      // The registry has no such file: an address on the wrong repository.
+      throw _FileFailure(DownloadError.registryNotFound);
     }
     if (!leg.registry &&
         code == HttpStatus.unauthorized &&
@@ -836,6 +872,13 @@ class ModelDownloader {
 
   static bool _isRedirect(int code) =>
       code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+
+  /// Whether an answer is a web page rather than a file.
+  static bool _isWebPage(Map<String, String> headers) =>
+      (headers[HttpHeaders.contentTypeHeader] ?? '')
+          .trim()
+          .toLowerCase()
+          .startsWith('text/html');
 
   /// Step 6. The CDN copy — or the object storage a registry redirected to.
   ///
@@ -866,7 +909,7 @@ class ModelDownloader {
         target = target.resolve(location);
         continue;
       }
-      return _fetched(leg, target, response);
+      return _fetched(leg, target, response, offset);
     }
   }
 
@@ -875,8 +918,19 @@ class ModelDownloader {
     _Leg leg,
     Uri target,
     http.StreamedResponse response,
+    int offset,
   ) async {
     final code = response.statusCode;
+    // A registry leg's redirected FIRST fetch that lands on a web page: an
+    // SSO redirect to a sign-in host, said at once rather than written into
+    // the part and spent on a checksum.
+    if (leg.registry &&
+        offset == 0 &&
+        (code == HttpStatus.ok || code == HttpStatus.partialContent) &&
+        _isWebPage(response.headers)) {
+      await _drain(response);
+      throw _FileFailure(DownloadError.registryNotAModel);
+    }
     if (code == HttpStatus.ok ||
         code == HttpStatus.partialContent ||
         code == HttpStatus.requestedRangeNotSatisfiable) {
@@ -888,6 +942,11 @@ class ModelDownloader {
         (code == HttpStatus.unauthorized || code == HttpStatus.forbidden)) {
       // The registry itself refusing the token, not a signature that aged.
       throw _FileFailure(DownloadError.unauthorized);
+    }
+    if (leg.registry &&
+        leg.ownOrigin(target) &&
+        code == HttpStatus.notFound) {
+      throw _FileFailure(DownloadError.registryNotFound);
     }
     if (code == HttpStatus.forbidden) {
       // The signed URL aged out mid-download. Not a refusal — go round again

@@ -4,8 +4,8 @@
 /// `DecisionClient` asks for its heads SYNCHRONOUSLY at the top of every
 /// call, so this answers synchronously too: a `stat` per call (cheap), and a
 /// parse only on the first call and whenever the file's path or modification
-/// time moved — which is what `make decide-install` over an older export
-/// looks like. The heads are needed even when a remote server embeds (the
+/// time moved — which is what a fresh download over an older file looks
+/// like. The heads are needed even when a remote server embeds (the
 /// plan's D12): the heads always run here.
 library;
 
@@ -28,17 +28,18 @@ class DecisionHeadsFile {
   DecisionHeadsFile(this._path);
 
   /// What a missing file says. It reaches the rail through the
-  /// `decision_not_installed` park, so the fix is in the sentence.
+  /// `decision_not_installed` park, so the fix is in the sentence: the model
+  /// ensurer downloads it, and Settings, Models says how that is going.
   static const String notInstalledText =
-      'The decision model is not installed. Run: make decide-install';
+      'The decision model is not downloaded yet. Open Settings, Models.';
 
   /// What a file this build cannot use says, before the parser's own
   /// reason. It parks under `decision_misconfigured`. The older model's file
   /// throws [DecisionOlderModelException] with `DecisionHeads.olderModelText`
   /// alone instead, and parks under its own `decision_older_model`.
   static const String mismatchText =
-      "The decision model's heads file does not match this build. Run: make "
-      'decide-install';
+      "The decision model's heads file does not match this build. Open "
+      'Settings, Models and press Download again.';
 
   DecisionHeads? _heads;
   String? _loadedPath;

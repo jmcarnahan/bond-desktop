@@ -236,6 +236,8 @@ void main() {
       for (final word in [
         DownloadError.registryNotConfigured,
         DownloadError.unauthorized,
+        DownloadError.registryNotFound,
+        DownloadError.registryNotAModel,
       ]) {
         final ledger = DownloadLedger.empty.record(state('bond-decide.heads',
             status: DownloadStatus.failed, error: word));
@@ -245,6 +247,8 @@ void main() {
       }
       expect(DownloadError.registryNotConfigured, 'registry_not_configured');
       expect(DownloadError.unauthorized, 'unauthorized');
+      expect(DownloadError.registryNotFound, 'registry_not_found');
+      expect(DownloadError.registryNotAModel, 'registry_not_a_model');
     });
 
     test('parse tolerates null, empty and rubbish', () {

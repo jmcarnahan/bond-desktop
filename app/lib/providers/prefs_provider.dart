@@ -759,13 +759,13 @@ class AppPrefs {
     if (served.contains(spec.model)) return null;
     return switch (spec.model) {
       routerDecideId =>
-        'The decision model is not installed. Run: make decide-install',
-      routerProseId => 'The Qwen3.8 27B is not downloaded on this Mac. Set '
-          'up again to download it.',
-      routerBulkId => 'The Qwen3 4B is not downloaded on this Mac. Set up '
-          'again to download it.',
-      final other => 'The model $other is not on this Mac. Set up again to '
-          'download it.',
+        'The decision model is not downloaded yet. Open Settings, Models.',
+      routerProseId => 'The Qwen3.8 27B is not downloaded on this Mac. Open '
+          'Settings, Models to download it.',
+      routerBulkId => 'The Qwen3 4B is not downloaded on this Mac. Open '
+          'Settings, Models to download it.',
+      final other => 'The model $other is not on this Mac. Open Settings, '
+          'Models to download it.',
     };
   }
 

@@ -467,7 +467,7 @@ void main() {
       await expectLater(
         client(yourServer: false, heads: syntheticHeads).decide(_input('a')),
         throwsA(isA<DecisionUnavailableException>().having(
-            (e) => e.message, 'message', contains('run: make decide'))),
+            (e) => e.message, 'message', contains('Run: make decide.'))),
       );
     });
 
