@@ -159,6 +159,7 @@ class ActivityLogPanel extends StatefulWidget {
     'embed_unavailable': 'embedding server unreachable',
     'decision_unavailable': 'decision model unreachable',
     'not_installed': 'model not downloaded',
+    'no_address': 'no server address',
     'decision_not_installed': 'decision model not installed',
     'decision_older_model': 'decision model is an older version',
     'decision_misconfigured': 'decision server misconfigured',

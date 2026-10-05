@@ -58,6 +58,11 @@ class SetupWhereBody extends StatelessWidget {
   final String decisionModel;
   final bool decisionKeyStored;
 
+  /// Whether, with nothing in the keychain, each form's key is the one this
+  /// build carries ([ModelServersForm.keyFromBuild]). Flags, never keys.
+  final bool generativeKeyFromBuild;
+  final bool decisionKeyFromBuild;
+
   /// Whether the decision model already runs on the owner's server, which is
   /// what its form's Connect writes. The step's way forward waits for it
   /// while Your server is chosen for that role.
@@ -95,6 +100,8 @@ class SetupWhereBody extends StatelessWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.generativeKeyFromBuild = false,
+    this.decisionKeyFromBuild = false,
     this.decisionConnected = false,
     this.probe,
     this.storedBearer,
@@ -127,7 +134,15 @@ class SetupWhereBody extends StatelessWidget {
 
   /// The word recommended rides a middle dot rather than a parenthesis:
   /// user-facing strings carry neither parentheticals nor em-dashes.
+  ///
+  /// [managedTitle] and [customTitle] are the DECISION cards' words: that
+  /// model reads every message and a local forward pass beats any hop. The
+  /// generative cards recommend the other way round since the default-setup
+  /// round (decision D9): [generativeManagedTitle] and
+  /// [generativeCustomTitle].
   static const String managedTitle = 'This Mac · recommended';
+  static const String generativeManagedTitle = 'This Mac';
+  static const String generativeCustomTitle = 'Your server · recommended';
   static const String managedBlurb =
       'Bond downloads the model and runs it on this Mac. Nothing leaves the '
       'machine.';
@@ -183,6 +198,7 @@ class SetupWhereBody extends StatelessWidget {
             url: decisionUrl,
             model: decisionModel,
             keyStored: decisionKeyStored,
+            keyFromBuild: decisionKeyFromBuild,
             probe: probe,
             storedBearer: storedBearer,
             onConnect: onConnectDecision,
@@ -203,7 +219,7 @@ class SetupWhereBody extends StatelessWidget {
         _heading(generativeTitle, generativeCaption),
         _card(
           cardKey: managedCardKey,
-          title: managedTitle,
+          title: generativeManagedTitle,
           blurb: managedBlurb,
           selected: placement == ModelPlacement.local,
           onTap: () => onChoose(ModelPlacement.local),
@@ -211,7 +227,7 @@ class SetupWhereBody extends StatelessWidget {
         const SizedBox(height: BondSpacing.s12),
         _card(
           cardKey: customCardKey,
-          title: customTitle,
+          title: generativeCustomTitle,
           blurb: customBlurb,
           selected: generativeOnServer,
           onTap: () => onChoose(ModelPlacement.box),
@@ -225,6 +241,7 @@ class SetupWhereBody extends StatelessWidget {
             url: generativeUrl,
             model: generativeModel,
             keyStored: generativeKeyStored,
+            keyFromBuild: generativeKeyFromBuild,
             probe: probe,
             storedBearer: storedBearer,
             onConnect: onConnect,

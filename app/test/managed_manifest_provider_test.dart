@@ -73,14 +73,18 @@ void main() {
       ];
 
   test('everything managed on a full Mac: embed, decide and the 27B', () async {
-    expect(await served(containerFor(const AppPrefs())),
+    // This Mac said out loud: the generative placement defaults to Your
+    // server since the default-setup round.
+    expect(
+        await served(containerFor(
+            const AppPrefs(modelPlacement: ModelPlacement.local))),
         [routerEmbedId, routerDecideId, routerProseId]);
   });
 
   test('a small Mac serves the 4B', () async {
     expect(
       await served(containerFor(
-        const AppPrefs(),
+        const AppPrefs(modelPlacement: ModelPlacement.local),
         memoryBytes: 16 * 1024 * 1024 * 1024,
       )),
       [routerEmbedId, routerDecideId, routerBulkId],
@@ -97,6 +101,7 @@ void main() {
     );
     expect(
       await served(containerFor(const AppPrefs(
+        modelPlacement: ModelPlacement.local,
         decisionPlacement: ModelPlacement.box,
         decisionUrl: 'https://box.example.com/decide/v1/embeddings',
       ))),
@@ -104,20 +109,24 @@ void main() {
     );
   });
 
-  test('a placement with no address to dial keeps its model here', () async {
+  test('with no address to dial the decision model stays here and the '
+      'generative model does not', () async {
+    // The decision role falls back to this Mac, its default. The generative
+    // role parks with a sentence since the default-setup round (decision D9):
+    // no 27B or 4B is demanded behind the owner's back.
     expect(
       await served(containerFor(const AppPrefs(
         modelPlacement: ModelPlacement.box,
         decisionPlacement: ModelPlacement.box,
       ))),
-      [routerEmbedId, routerDecideId, routerProseId],
+      [routerEmbedId, routerDecideId],
     );
   });
 
   test('the supervisor\'s preset teaches the prefs the tier, and leaves out '
       'every model whose files are not on disk', () async {
     final container = containerFor(
-      const AppPrefs(),
+      const AppPrefs(modelPlacement: ModelPlacement.local),
       memoryBytes: 16 * 1024 * 1024 * 1024,
     );
     final supervisor = container.read(modelServerSupervisorProvider);

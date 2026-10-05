@@ -189,6 +189,8 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
           decisionUrl: prefs.effectiveDecisionUrl,
           decisionModel: prefs.effectiveDecisionModel,
           decisionKeyStored: prefs.decisionKeyStored,
+          generativeKeyFromBuild: prefs.generativeKeyFromBuild,
+          decisionKeyFromBuild: prefs.decisionKeyFromBuild,
           decisionConnected: prefs.decisionPlacement == ModelPlacement.box,
           probe: _controller.probe,
           storedBearer: _controller.storedBearer,

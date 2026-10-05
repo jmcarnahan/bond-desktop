@@ -50,6 +50,12 @@ enforce the ones that are commands.
 - Never run `flutter test` or `flutter analyze` while a live `make` bench is
   running: any load moves the timings the bench exists to measure, and the
   run is spent.
+- `make app-run` and `make app-build` carry the box key and the registry
+  token from `local.mk` in the `flutter` command line (and its
+  `frontend_server` child's) for as long as they run, so never list a running
+  flutter process WITH its arguments either. The two recipes drop both from
+  the environment (`APP_NO_SECRET_ENV`), so the app and its llama-server do
+  not inherit them.
 - The Makefile resolves `BENCH_BEARER` into the `flutter test` command line,
   so never list a running bench's process WITH its arguments — `pgrep -f …
   >/dev/null` answers "is it running" without printing the key.
@@ -68,9 +74,12 @@ enforce the ones that are commands.
   inside.
 - Model work runs only while the session's processing switch is on
   (`processingProvider`), which is SEEDED from the remembered `processing_on`
-  preference and defaults ON. `AiWorker` and `TriageQueue` each take an
-  `enabled` closure and read it on every launch decision, so a test that builds
-  either one WITHOUT that argument is unaffected. Turning it off also calls
+  preference and defaults OFF since the default-setup round (only `'true'`
+  reads as on). `AiWorker` and `TriageQueue` each take an `enabled` closure
+  and read it on every launch decision, so a test that builds either one
+  WITHOUT that argument is unaffected; an inbox-level test that needs a drain
+  to run seeds `processing_on = 'true'` in its store before
+  `AppPrefsNotifier.read` (or overrides `processingProvider`). Turning it off also calls
   `stop()` on all four drains; `_setProcessing` on the inbox writes the
   preference LAST, after the drains are told, so a throwing write cannot leave
   lanes running under a switch that reads off. An inbox-level test that drives
@@ -394,10 +403,15 @@ enforce the ones that are commands.
   `/v1/embeddings` with `bond-decide`), else the `BOND_DEV_HAND_SERVERS`
   defines (`LLAMA_URL`, `DECIDE_URL`). A stored URL of `''` means follow the
   build (`$BOND_BOX_URL/prose/v1/chat/completions`,
-  `$BOND_BOX_URL/decide/v1/embeddings`); the generative remote is four wide
-  only while it follows the build, one for a stored address. A test asserting
-  where a stage resolves says which placement it means, since
-  `boxUrlDefault` is empty under `flutter test`. The writers are
+  `$BOND_BOX_URL/decide/v1/embeddings`, where `$BOND_BOX_URL` is `local.mk`'s,
+  passed by `APP_LLM_DEFINES`, with a `$(MS_ENV)` grep as the fallback); the
+  generative remote is four wide only while it follows the build, one for a
+  stored address. The generative placement defaults to `box` WHATEVER the
+  build, and Your server with no address is the `box-prose` spec with an
+  empty URL, unavailable with `generativeNoAddressText` (park `no_address`),
+  never this Mac. A test asserting where a stage resolves says which
+  placement it means (`modelPlacement: ModelPlacement.local` for this Mac),
+  since `boxUrlDefault` is empty under `flutter test`. The writers are
   `useGenerative({placement, managedModel, url, model, key, clearKey,
   hardwareTier})`, `useDecision({placement, url, model, key, clearKey})`,
   `useCloudDrafts` / `clearCloudDrafts` and `clearRoleKey(id)`: each validates
@@ -412,6 +426,24 @@ enforce the ones that are commands.
   store is there, and no `box-prose` token is attached while one is owed).
   `box_small_*`, `llm_targets`, `stage_targets`, `fast_llm_*` and
   `prose_llm_*` are inert.
+- Every compiled default (`boxUrlDefault`, `boxKeyDefault`,
+  `registryUrlDefault`, `registryTokenDefault`) is `''` under `flutter test`.
+  Nothing past `AppPrefsNotifier`'s constructor reads them: a test hands the
+  build's values to `AppPrefsNotifier(store, compiledBoxUrl:, compiledBoxKey:,
+  compiledRegistryUrl:, compiledRegistryToken:)`, which stamps the two
+  addresses and two PRESENCE flags (`boxKeyCompiled`,
+  `registryTokenCompiled`) on `AppPrefs` and keeps the two secrets to itself.
+- The build's key is used ONLY on the build's origin: `bearerFor(id)` is the
+  keychain's entry, else the compiled box key (`box-prose`, `box-decide`) or
+  registry token (`model-registry`) while the role's effective address has
+  the compiled address's origin (`sameOrigin`: scheme, host, port), never a
+  typed address on another host. `generativeKeyFromBuild` /
+  `decisionKeyFromBuild` / `registryTokenFromBuild` say so; `hasBearer` is
+  stored OR from the build; `boxBigKeyStored` and friends still mean "in the
+  keychain" (they drive `Stored. Type to replace` and Remove key, and Remove
+  key falls back to the build's). The form's `keyFromBuild` hints `Using the
+  key from this build. Type to replace`. The Makefile passes the secrets as
+  `"$$BOND_BOX_KEY"` shell references so `make -n app-run` never prints one.
 - What the managed router serves is `managedManifestProvider`
   (`ModelManifest.forRoles`): embed, plus `bond-decide` while the decision
   role is on this Mac, plus the chosen generative model while that role is

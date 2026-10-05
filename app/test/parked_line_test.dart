@@ -618,9 +618,9 @@ void main() {
       tokens.values['granted_scopes'] = _readGrant;
       final auth = GraphAuth(httpClient: client, store: tokens);
       await store.setPref(backendModeKey, backendModeSdk);
-      if (placement == ModelPlacement.box) {
-        await store.setPref(modelPlacementKey, ModelPlacement.box.name);
-      }
+      // Written either way: the generative placement defaults to Your server
+      // since the default-setup round, so this Mac has to be said.
+      await store.setPref(modelPlacementKey, placement.name);
       final prefs = await AppPrefsNotifier.read(store);
 
       await tester.pumpWidget(ProviderScope(

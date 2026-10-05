@@ -174,6 +174,9 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
+    // Processing ON, which this file relied on while it was the default: the
+    // triage pass is what decides the threads the room counts as needing you.
+    await store.setPref(processingOnKey, 'true');
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),

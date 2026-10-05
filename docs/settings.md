@@ -522,9 +522,14 @@ Mac.`), the name-and-size line and a status keyed `settings-embed-status`.
 `<role>` is `decision` or `generative`; the Cloud drafts form uses the prefix
 `cloud-drafts` (`cloud-drafts-url`, `cloud-drafts-key`, `cloud-drafts-model`,
 `cloud-drafts-connect`, `cloud-drafts-error`). The status under Your server is
-`Access key needed. Paste it and press Connect.` while no key is stored for an
-address that is not on this machine (a loopback address needs none), and
-`Connected · <model> at <host>` otherwise.
+`Access key needed. Paste it and press Connect.` while no key is at hand for an
+address that is not on this machine (a loopback address needs none; a key is
+at hand when one is in the keychain, or when the build carries one and the
+address has the build's origin), and `Connected · <model> at <host>`
+otherwise. The generative role on Your server with NO address at all (nothing
+stored, and a build compiled without `BOND_BOX_URL`) says `The generative
+model has no server address. Add one under Settings, Models.`, the same
+sentence its parked work carries (park word `no_address`).
 
 **The decision server's kind** is a caption under the decision form, keyed
 `settings-decision-kind`, once the host knows it (`DecisionClient.kindOf`,
@@ -588,7 +593,14 @@ keychain answers the write with a `PlatformException`).
 **The key.** The field opens EMPTY, always. When one is in the keychain it
 carries the hint `Stored. Type to replace` and Connect goes through with the
 field blank, the probe borrowing the stored token by id (`storedBearer`), never
-by value. **A key belongs to the host it was typed for.** When the typed
+by value. When the keychain holds none but the build was compiled with
+`local.mk`'s `BOND_BOX_KEY` and the address has the build's origin
+(`keyFromBuild`), the hint is `Using the key from this build. Type to replace`,
+**Remove key** is not shown (there is nothing in the keychain to remove), and
+Connect borrows the build's key the same way, by id; on another origin the
+hint goes, nothing is sent and there is nothing to forget, because the build's
+key only ever applies to the build's own origin. A typed key stored in the
+keychain beats the build's, and **Remove key** returns to it. **A key belongs to the host it was typed for.** When the typed
 address names a DIFFERENT origin from the stored one (scheme, host or port;
 `https://h` and `https://h:443` are one origin), the hint becomes `The
 stored key is for another server. Type this server's key.`, the probe goes
@@ -768,12 +780,15 @@ about the model rather than about the app.
 
 **AI processing** is the same switch as the one at the top of the sidebar,
 drawn here as a `Switch` keyed `settings-processing-toggle` beside its name and
-the word `On` or `Off`. It is REMEMBERED and it starts on: a fresh install goes
-to work the moment the wizard finishes, and a machine somebody stood down comes
-back down. The preference is `processing_on`, and it was session state, off at
-every launch, until Round H; what made it session state was the risk of
-spending the first minutes on the wrong server, and the placement rule closes
-that, because the default server is now the measured one. Turning it off still
+the word `On` or `Off`. It is REMEMBERED and it starts OFF: a fresh install
+opens with the models idle, so the servers, the downloads and the keys can be
+checked under **Models** before anything is spent, and the owner turns it on
+once they are; a machine somebody turned on comes back on, and one stood down
+comes back down. The preference is `processing_on`, and only the string
+`true` reads as on (decision D8 of the default-setup round, 2026-10, with no
+migration: an install that never touched the switch starts off once). It was
+session state, off at every launch, until Round H, and a remembered switch
+that started on from then until the default-setup round. Turning it off still
 stands every drain down for the rest of the session. Flipping it here moves the
 sidebar behind the pane, so the host hears about it the instant it moves rather
 than on the way out. Mail and Teams keep syncing while it is off; only the
@@ -1243,13 +1258,13 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 |---|---|---|---|
 | 1 | Welcome to Bond | `Get started` | What Bond is; the container-migration line when there was one |
 | 2 | Your Mac | `Continue` | Chip, memory, macOS, and which models this Mac takes. Intel or Rosetta renders **no** button at all. At 40 GiB and up, one line: `This Mac can run every model: the decision model, the embedding model and the 27B generative model.`; below it, an alert naming the memory, saying this Mac runs the decision model, the embedding model and the 4B as its generative model, that the 27B is not downloaded here, and that a server of the user's own under Settings, Models is how to write with it. Under 16 GiB the same alert gains one sentence about slower triage. All of it is a warning that still continues |
-| 3 | Where the models run | the generative form's `Continue`, or the step's `Continue` under This Mac | The same two questions the Models page asks, answered by the same form. `SetupWhereBody` is two roles of two cards each: **Decision model** with **This Mac · recommended** (`setup-where-decision-managed`) and **Your server** (`setup-where-decision-custom`), then **Generative model** with **This Mac · recommended** (`setup-where-managed`) and **Your server** (`setup-where-custom`), and a note that the embedding model always runs on this Mac. The DEFAULTS are the stored answers: the decision model on this Mac, the generative model on Your server when the build carries `BOND_BOX_URL` (its form prefilled with `…/prose/v1/chat/completions`) and on this Mac otherwise. Generative This Mac shows `SettingsSegments<String>` keyed `setup-where-generative-model` with **Qwen3.8 27B** | **Qwen3 4B** (the 27B disabled on the inbox tier with `This Mac has too little memory for the 27B.`); the pick is `SetupState.generativeManaged` and decides what the download step fetches. Decision Your server renders the decision form with **Connect**: it writes `useDecision(box, …)` at once (`SetupController.connectDecision`) and stays, then says `Connected · <model> at <host>` (`setup-where-decision-connected`); until then the way forward is disabled and says `Connect the decision server first, or choose This Mac for it.` Generative Your server renders the generative form with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward: it probes with the typed key (or the stored one by id, same host only), takes the listed name, refuses a vendor with `Cloud services are connected under Settings after setup.` (the decision form refuses one with its own role sentence), and calls `continueFromWhere(generative:)`, which checks the decision role, writes `useGenerative(box, url, model, key, clearKey, hardwareTier)`, writes `useDecision(local)` when the decision model stays here, and moves to Models. Under This Mac the step's own Continue calls `continueFromWhere()`, which writes `useGenerative(local, managedModel:, hardwareTier:)` with this Mac's HARDWARE tier. Both KEEP the stored addresses and keys: changing where the work runs is not forgetting how to reach the servers |
+| 3 | Where the models run | the generative form's `Continue`, or the step's `Continue` under This Mac | The same two questions the Models page asks, answered by the same form. `SetupWhereBody` is two roles of two cards each: **Decision model** with **This Mac · recommended** (`setup-where-decision-managed`) and **Your server** (`setup-where-decision-custom`), then **Generative model** with **This Mac** (`setup-where-managed`) and **Your server · recommended** (`setup-where-custom`), and a note that the embedding model always runs on this Mac. The DEFAULTS are the stored answers: the decision model on this Mac, the generative model on Your server whatever the build (`defaultModelPlacement`, decision D9 of the default-setup round), its form prefilled with `…/prose/v1/chat/completions` when the build carries `BOND_BOX_URL` and empty otherwise, with the hint `Using the key from this build. Type to replace` when the build carries `BOND_BOX_KEY` too. Generative This Mac shows `SettingsSegments<String>` keyed `setup-where-generative-model` with **Qwen3.8 27B** | **Qwen3 4B** (the 27B disabled on the inbox tier with `This Mac has too little memory for the 27B.`); the pick is `SetupState.generativeManaged` and decides what the download step fetches. Decision Your server renders the decision form with **Connect**: it writes `useDecision(box, …)` at once (`SetupController.connectDecision`) and stays, then says `Connected · <model> at <host>` (`setup-where-decision-connected`); until then the way forward is disabled and says `Connect the decision server first, or choose This Mac for it.` Generative Your server renders the generative form with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward: it probes with the typed key (or the stored one by id, same host only), takes the listed name, refuses a vendor with `Cloud services are connected under Settings after setup.` (the decision form refuses one with its own role sentence), and calls `continueFromWhere(generative:)`, which checks the decision role, writes `useGenerative(box, url, model, key, clearKey, hardwareTier)`, writes `useDecision(local)` when the decision model stays here, and moves to Models. Under This Mac the step's own Continue calls `continueFromWhere()`, which writes `useGenerative(local, managedModel:, hardwareTier:)` with this Mac's HARDWARE tier. Both KEEP the stored addresses and keys: changing where the work runs is not forgetting how to reach the servers |
 | 4 | Models | `Continue` | The RESOLVED manifest's downloadable rows — name, role sentence (`Finds related messages`; both chat models `Writes summaries, drafts and storylines`), size, licence button, and any `notice` verbatim — and the total. With the decision model on this Mac it heads the list (`setup-models-decision`, `Sorts and flags every message`) with `Installed` or `Not installed · run make decide-install` in place of a size: it is installed by hand, never downloaded, and counts toward neither the sentence nor the total. Two rows on a full Mac that chose the 27B (the 27B's row says `+ MTP head, 1.6 GB` under its size), two rows on an inbox one (embed + 4B), one row when the generative model runs on your server, and the first sentence says which |
 | 5 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
 | 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first — the writing model's MTP head rides on its model's bar rather than taking one of its own, so the bar counts both files and finishes once. Enabled only when EVERY file is done — see below |
 | 7 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 8 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
-| 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only and `setup = 'done'`, and only then the server. Nothing writes `managedServer`: it is a build define since Round H. It does not touch processing either: that is a remembered preference and it starts on |
+| 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only and `setup = 'done'`, and only then the server. Nothing writes `managedServer`: it is a build define since Round H. It does not touch processing either: that is a remembered preference and it starts off, so a finished wizard leaves the models idle until **AI processing** is turned on |
 
 **`'done'` is written by Finish and by `returnToInbox`, and by nothing else.**
 The second writer never INVENTS the word: it only puts back a value

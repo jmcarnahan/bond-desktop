@@ -205,6 +205,10 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
+    // This Mac, said out loud: every case here starts from the generative
+    // model on this Mac, which was the default until the default-setup round
+    // moved it to Your server.
+    await store.setPref(modelPlacementKey, ModelPlacement.local.name);
     final prefs = await AppPrefsNotifier.read(store);
     await tester.pumpWidget(ProviderScope(
       overrides: [
@@ -257,6 +261,10 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
+    // This Mac, said out loud: every case here starts from the generative
+    // model on this Mac, which was the default until the default-setup round
+    // moved it to Your server.
+    await store.setPref(modelPlacementKey, ModelPlacement.local.name);
     final prefs = await AppPrefsNotifier.read(store);
     await tester.pumpWidget(ProviderScope(
       overrides: [

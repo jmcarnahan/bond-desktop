@@ -411,9 +411,10 @@ class SetupController extends StateNotifier<SetupState> {
     // below compares the ledger against [resolvedManifest], and on an install
     // whose generative model runs on the owner's server that is the
     // embedding model alone. They are also the step's DEFAULTS: the
-    // generative model on Your server when the build compiled an address
-    // (`defaultModelPlacement`), on this Mac otherwise; the decision model
-    // on this Mac. Seeding writes nothing: the Where step's own press does.
+    // generative model on Your server (`defaultModelPlacement`, whatever the
+    // build; the form opens on the build's address when it compiled one);
+    // the decision model on this Mac. Seeding writes nothing: the Where
+    // step's own press does.
     if (!mounted) return;
     state = state.copyWith(
       placement: prefs.modelPlacement,

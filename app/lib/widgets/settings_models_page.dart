@@ -11,6 +11,7 @@ import '../services/llm/model_slots.dart'
         ModelPlacement,
         boxDecideId,
         boxProseId,
+        generativeNoAddressText,
         handServersBuild,
         hostPort,
         isLoopbackHost,
@@ -75,15 +76,21 @@ class SettingsModelsPage extends StatefulWidget {
   final String decisionModel;
   final bool decisionKeyStored;
 
+  /// Whether, with nothing in the keychain, the decision remote's key is the
+  /// one this build carries (its address on the build's origin). A flag,
+  /// never a key.
+  final bool decisionKeyFromBuild;
+
   /// What the decision remote turned out to be, once a Connect or a call has
   /// asked it; null before then, and the page says what it said before
   /// there were two kinds.
   final DecisionServerKind? decisionKind;
 
-  /// The same three for the generative remote.
+  /// The same four for the generative remote.
   final String generativeUrl;
   final String generativeModel;
   final bool generativeKeyStored;
+  final bool generativeKeyFromBuild;
 
   /// This Mac's role models (`decision`, `generative`, `embed`), or null
   /// while they are still being read.
@@ -139,10 +146,12 @@ class SettingsModelsPage extends StatefulWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKeyFromBuild = false,
     this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
     this.generativeKeyStored = false,
+    this.generativeKeyFromBuild = false,
     this.statuses,
     this.probe,
     this.storedBearer,
@@ -418,6 +427,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       'embed_unavailable' => SettingsModelsPage.embedUnavailableText,
       'decision_unavailable' => SettingsModelsPage.decisionUnavailableText,
       'not_installed' => SettingsModelsPage.notInstalledText,
+      'no_address' => generativeNoAddressText,
       'decision_not_installed' =>
         SettingsModelsPage.decisionNotInstalledIn(widget.decideInstallDir),
       'decision_older_model' => SettingsModelsPage.decisionOlderModelText,
@@ -538,6 +548,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           url: widget.decisionUrl,
           model: widget.decisionModel,
           keyStored: widget.decisionKeyStored,
+          keyFromBuild: widget.decisionKeyFromBuild,
           probe: widget.probe,
           storedBearer: widget.storedBearer,
           onConnect: ({required url, required model, key, required clearKey}) =>
@@ -645,7 +656,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
       return _remoteStatus(
         widget.decisionUrl,
         widget.decisionModel,
-        widget.decisionKeyStored,
+        widget.decisionKeyStored || widget.decisionKeyFromBuild,
       );
     }
     if (_checking) return SettingsModelsPage.checkingText;
@@ -660,10 +671,11 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         : SettingsModelsPage.installedNotLoadedText;
   }
 
-  /// Your server's line: a key is needed unless the server is on this
+  /// Your server's line: a key is needed unless one is at hand (the
+  /// keychain's, or this build's on its own origin) or the server is on this
   /// machine, which needs none.
-  String _remoteStatus(String url, String model, bool keyStored) {
-    if (!keyStored && !isLoopbackHost(url)) {
+  String _remoteStatus(String url, String model, bool hasKey) {
+    if (!hasKey && !isLoopbackHost(url)) {
       return SettingsModelsPage.keyNeededText;
     }
     return SettingsModelsPage.connectedText(model, url);
@@ -719,6 +731,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
           url: widget.generativeUrl,
           model: widget.generativeModel,
           keyStored: widget.generativeKeyStored,
+          keyFromBuild: widget.generativeKeyFromBuild,
           probe: widget.probe,
           storedBearer: widget.storedBearer,
           onConnect: ({required url, required model, key, required clearKey}) =>
@@ -781,14 +794,19 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     // Under This Mac the server line above is already saying what the
     // router is doing, so only Your server speaks for these two parks.
     if (box) {
-      if (_parked(const {'model_unavailable', 'unauthorized'})
+      if (_parked(const {'model_unavailable', 'unauthorized', 'no_address'})
           case final parked?) {
         return parked;
+      }
+      // Your server with no address anywhere: the role is unavailable and
+      // says what fixes it, whether or not anything is waiting yet.
+      if (widget.generativeUrl.isEmpty && !_generativeEditing) {
+        return generativeNoAddressText;
       }
       return _remoteStatus(
         widget.generativeUrl,
         widget.generativeModel,
-        widget.generativeKeyStored,
+        widget.generativeKeyStored || widget.generativeKeyFromBuild,
       );
     }
     if (_generativeEditing) return SettingsModelsPage.untilConnectText;

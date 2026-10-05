@@ -283,8 +283,9 @@ typedef _Selection = ({
 /// under either placement, `decision_unavailable`, `decision_not_installed`,
 /// `decision_older_model`, `decision_misconfigured` and
 /// `decision_unauthorized` name the decision
-/// model rather than a machine, and `not_installed` is a generative model this Mac has not
-/// downloaded, which no server restart fixes.
+/// model rather than a machine, `not_installed` is a generative model this Mac has not
+/// downloaded, which no server restart fixes, and `no_address` is a
+/// generative model on Your server with no address to dial.
 ///
 /// "Retrying each minute" is the inbox's own poll and the supervisor's
 /// `onReady`, and it is the only cadence this sentence may claim: nothing
@@ -355,6 +356,11 @@ String railProgressLine({
     case 'not_installed':
       return 'A model this Mac runs is not downloaded · $waiting waiting · '
           'set up again in Settings';
+    // The generative model is placed on Your server and nothing names one.
+    // An address fixes it and waiting does not, so no retry cadence.
+    case 'no_address':
+      return 'The generative model has no server address · $waiting waiting · '
+          'add one under Settings, Models';
     // Named for the machine that refused, like the arm above it: a local
     // server behind a reverse proxy can answer 401 too, and telling that
     // person to go and look at a server they named would send them to the

@@ -16,12 +16,14 @@ import 'fixtures/test_db.dart';
 /// `llm_targets_test.dart` owns the notifier's writers. What this file holds
 /// is the rule itself — which target a stage resolves to on each placement —
 /// and two things it touches on the way past: what the older one-shot
-/// migrations still do to a Round G install, and the processing switch that
-/// only starts on because the default server is the measured one.
+/// migrations still do to a Round G install, and the processing switch, which
+/// starts off since the default-setup round.
 ///
 /// `boxUrlDefault` is empty under `flutter test`, so every case that wants the
 /// box says so, by constructing an [AppPrefs] with an address or by writing
-/// one to its store.
+/// one to its store. And since the generative placement defaults to Your
+/// server whatever the build, every case that means THIS MAC says
+/// `modelPlacement: ModelPlacement.local`.
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -110,18 +112,33 @@ void main() {
       }
     });
 
-    test('your server with no address to dial is this Mac', () {
-      // No compiled address and none stored: the placement cannot be honoured,
-      // and a target nothing can reach would park every lane.
-      const prefs = AppPrefs(modelPlacement: ModelPlacement.box);
-      expect(prefs.effectiveGenerativeUrl, isEmpty);
-      for (final id in generativeStages) {
-        expect(prefs.specForStage(id)!.id, localGenerativeId, reason: id);
+    test('your server with no address to dial is unavailable, never this Mac',
+        () {
+      // No compiled address and none stored: the placement cannot be
+      // honoured, and coming home to this Mac would demand a 19 GB download
+      // nobody chose (decision D9). The role parks with a sentence instead,
+      // in a hand-servers build too.
+      for (final prefs in const [
+        AppPrefs(modelPlacement: ModelPlacement.box),
+        AppPrefs(),
+        AppPrefs(modelPlacement: ModelPlacement.box, managedServer: false),
+      ]) {
+        expect(prefs.effectiveGenerativeUrl, isEmpty);
+        for (final id in generativeStages) {
+          final spec = prefs.specForStage(id)!;
+          expect(spec.id, boxProseId, reason: id);
+          expect(spec.url, isEmpty, reason: id);
+          expect(prefs.unavailableFor(spec), generativeNoAddressText,
+              reason: id);
+        }
       }
     });
 
     test('hand-started servers: the compiled prose server', () {
-      const prefs = AppPrefs(managedServer: false);
+      const prefs = AppPrefs(
+        managedServer: false,
+        modelPlacement: ModelPlacement.local,
+      );
       for (final id in generativeStages) {
         final spec = prefs.specForStage(id)!;
         expect(spec.id, localGenerativeId, reason: id);
@@ -155,8 +172,10 @@ void main() {
     });
 
     test('the width is the drafts-in-flight setting here', () {
-      expect(const AppPrefs(proseParallel: 2).specForStage('draft_reply')!
-          .parallel, 2);
+      expect(const AppPrefs(
+        proseParallel: 2,
+        modelPlacement: ModelPlacement.local,
+      ).specForStage('draft_reply')!.parallel, 2);
       expect(onBox.specForStage('draft_reply')!.parallel, 1);
     });
 
@@ -167,14 +186,21 @@ void main() {
       // owner's own server either way. (An address that FOLLOWS the build
       // takes the same branch with the same eight; `flutter test` cannot
       // construct one, because `boxUrlDefault` is empty here.)
-      expect(const AppPrefs(proseParallel: 1)
+      const here = ModelPlacement.local;
+      expect(const AppPrefs(proseParallel: 1, modelPlacement: here)
           .specForStage('message_text')!.textParallel, 3);
-      expect(const AppPrefs(proseParallel: 6)
+      expect(const AppPrefs(proseParallel: 6, modelPlacement: here)
           .specForStage('message_text')!.textParallel, 6);
-      expect(const AppPrefs(proseParallel: 6, managedServer: false)
-          .specForStage('message_text')!.textParallel, 6);
-      expect(const AppPrefs(proseParallel: 2, managedServer: false)
-          .specForStage('message_text')!.textParallel, 3);
+      expect(const AppPrefs(
+        proseParallel: 6,
+        managedServer: false,
+        modelPlacement: here,
+      ).specForStage('message_text')!.textParallel, 6);
+      expect(const AppPrefs(
+        proseParallel: 2,
+        managedServer: false,
+        modelPlacement: here,
+      ).specForStage('message_text')!.textParallel, 3);
       expect(onBox.specForStage('message_text')!.textParallel, 8);
       expect(onBox.specForStage('attachment_digest')!.textParallel, 8);
       // The drafts' width is not this one: a typed address still drafts one
@@ -199,6 +225,7 @@ void main() {
       const prefs = AppPrefs(
         decisionPlacement: ModelPlacement.box,
         decisionUrl: '$url/decide/v1/embeddings',
+        modelPlacement: ModelPlacement.local,
       );
       final spec = prefs.specForStage('decision')!;
       expect(spec.id, boxDecideId);
@@ -240,7 +267,11 @@ void main() {
     });
 
     test('a third-party target without consent: drafts stay generative', () {
-      const prefs = AppPrefs(cloudDraftsUrl: vendor, cloudDraftsModel: 'gpt');
+      const prefs = AppPrefs(
+        cloudDraftsUrl: vendor,
+        cloudDraftsModel: 'gpt',
+        modelPlacement: ModelPlacement.local,
+      );
       expect(prefs.cloudDraftsSpec!.isThirdParty, isTrue);
       for (final id in draftStageIds) {
         expect(prefs.specForStage(id)!.id, localGenerativeId, reason: id);
@@ -252,6 +283,7 @@ void main() {
         cloudDraftsUrl: vendor,
         cloudDraftsModel: 'gpt',
         cloudDraftsConsent: true,
+        modelPlacement: ModelPlacement.local,
       );
       for (final id in draftStageIds) {
         final spec = prefs.specForStage(id)!;
@@ -276,6 +308,7 @@ void main() {
       const prefs = AppPrefs(
         cloudDraftsUrl: 'https://bedrock-runtime.us-east-2.amazonaws.com',
         cloudDraftsModel: 'us.example.big-model',
+        modelPlacement: ModelPlacement.local,
       );
       expect(prefs.cloudDraftsSpec!.wire, LlmWire.bedrockConverse);
       expect(prefs.specForStage('draft_reply')!.id, localGenerativeId);
@@ -287,6 +320,7 @@ void main() {
       const prefs = AppPrefs(
         cloudDraftsUrl: 'https://drafts.example.com/v1/chat/completions',
         cloudDraftsModel: 'mine',
+        modelPlacement: ModelPlacement.local,
       );
       expect(prefs.specById(localGenerativeId), prefs.generativeSpec);
       expect(prefs.specById(localDecisionId), prefs.decisionSpec);
@@ -454,7 +488,10 @@ void main() {
       expect(await store.getPref(boxUrlKey), isNull);
       expect(await store.getPref(llmTargetsKey), isNull);
       expect(prefs.boxBigUrl, isEmpty);
-      expect(prefs.modelPlacement, ModelPlacement.local);
+      // Nothing stored: the build's default, Your server since the
+      // default-setup round, read and never written.
+      expect(prefs.modelPlacement, ModelPlacement.box);
+      expect(await store.getPref(modelPlacementKey), isNull);
     });
 
     test('a row with no recoverable origin leaves the address empty',
@@ -505,17 +542,19 @@ void main() {
   });
 
   group('the processing preference', () {
-    test('starts on, and only the one spelling reads as off', () async {
-      expect(const AppPrefs().processingOn, isTrue);
-      expect((await AppPrefsNotifier.read(store)).processingOn, isTrue);
+    test('starts off, and only the one spelling reads as on', () async {
+      // The default-setup round's D8: a new environment opens with the
+      // models idle, so they can be checked before anything is spent.
+      expect(const AppPrefs().processingOn, isFalse);
+      expect((await AppPrefsNotifier.read(store)).processingOn, isFalse);
 
-      for (final raw in ['true', 'yes', '', 'nonsense']) {
+      for (final raw in ['yes', '', 'nonsense', 'false', 'TRUE']) {
         await store.setPref(processingOnKey, raw);
-        expect((await AppPrefsNotifier.read(store)).processingOn, isTrue,
+        expect((await AppPrefsNotifier.read(store)).processingOn, isFalse,
             reason: raw);
       }
-      await store.setPref(processingOnKey, 'false');
-      expect((await AppPrefsNotifier.read(store)).processingOn, isFalse);
+      await store.setPref(processingOnKey, 'true');
+      expect((await AppPrefsNotifier.read(store)).processingOn, isTrue);
     });
 
     test('the setter round-trips, and it survives a wipe', () async {

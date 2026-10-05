@@ -80,7 +80,10 @@ void main() {
       downloader: downloader,
       supervisor: supervisor,
       paths: AppPaths(root),
-      readPrefs: () => AppPrefs(modelsFolder: folder()),
+      readPrefs: () => AppPrefs(
+        modelsFolder: folder(),
+        modelPlacement: ModelPlacement.local,
+      ),
       setModelsFolder: (_) async {},
       useGenerative: ({
         required placement,

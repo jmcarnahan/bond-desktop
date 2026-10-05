@@ -156,6 +156,18 @@ class ModelNotInstalledException extends LlmUnavailableException {
   const ModelNotInstalledException(super.message);
 }
 
+/// The generative role is placed on Your server and no address names one:
+/// the target carried `LlmTarget.unavailable` with an empty `baseUrl`, and the
+/// request was refused before it was sent.
+///
+/// Its own subclass, and its own park word `no_address`, for
+/// [ModelNotInstalledException]'s reason: the fix is an address under
+/// Settings, Models, not a download, and "not downloaded" would send a person
+/// looking for a model this Mac was never meant to run.
+class ModelNoAddressException extends LlmUnavailableException {
+  const ModelNoAddressException(super.message);
+}
+
 /// The DECISION model is not installed on this Mac: the router is not
 /// serving it, or its heads file is missing. A [DecisionUnavailableException]
 /// so every decision arm keeps treating it as its own park; its own reason,
@@ -224,6 +236,7 @@ String parkReasonFor(Object e) => switch (e) {
       LlmUnauthorizedException() => 'unauthorized',
       DecisionNotInstalledException() => 'decision_not_installed',
       ModelNotInstalledException() => 'not_installed',
+      ModelNoAddressException() => 'no_address',
       // Waiting fixes nothing here — the address or the heads file does —
       // so it is not worded as a server that is still coming up.
       DecisionOlderModelException() => 'decision_older_model',
@@ -830,7 +843,9 @@ class LlmClient {
     // model it is not serving would be fatal.
     Future<_Reply> send() async {
       if (target.unavailable case final why?) {
-        throw ModelNotInstalledException(why);
+        throw target.baseUrl.isEmpty
+            ? ModelNoAddressException(why)
+            : ModelNotInstalledException(why);
       }
       return streamed
           ? _postStreamed(body, request: request, target: target, onText: onText)

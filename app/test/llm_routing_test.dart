@@ -91,9 +91,14 @@ void main() {
   late BondDatabase db;
   late MessageStore store;
 
-  setUp(() {
+  setUp(() async {
     db = testDb();
     store = MessageStore(db);
+    // The world this file was written in, said out loud since the
+    // default-setup round moved both defaults: the generative model on this
+    // Mac (the router's target) and processing ON.
+    await store.setPref(modelPlacementKey, ModelPlacement.local.name);
+    await store.setPref(processingOnKey, 'true');
   });
 
   tearDown(() => db.close());

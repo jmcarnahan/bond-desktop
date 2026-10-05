@@ -267,7 +267,13 @@ void main() {
     decisionUses = [];
     boxRefuses = false;
     manifest = publish();
-    prefs = AppPrefs(modelsFolder: folder());
+    // This Mac, said out loud: the generative placement defaults to Your
+    // server since the default-setup round, and most of this file is about
+    // what this Mac downloads. The defaults test below reads the bare one.
+    prefs = AppPrefs(
+      modelsFolder: folder(),
+      modelPlacement: ModelPlacement.local,
+    );
     supervisor = ModelServerSupervisor(
       runner: runner,
       supportDir: root,
@@ -938,20 +944,23 @@ void main() {
       expect(controller.state.step, SetupStep.models);
     });
 
-    test('the defaults are the stored answers: decision here, generative as '
-        'the build decided', () async {
+    test('the defaults are the stored answers: decision here, generative on '
+        'Your server', () async {
+      // Nothing stored: the decision model on this Mac, the generative model
+      // on Your server whatever the build (decision D9).
+      prefs = AppPrefs(modelsFolder: folder());
       final controller = build();
       await controller.init();
       expect(controller.state.decisionPlacement, ModelPlacement.local);
-      expect(controller.placement, ModelPlacement.local);
+      expect(controller.placement, ModelPlacement.box);
 
       prefs = prefs.copyWith(
-        modelPlacement: ModelPlacement.box,
+        modelPlacement: ModelPlacement.local,
         decisionPlacement: ModelPlacement.box,
       );
       final again = build();
       await again.init();
-      expect(again.placement, ModelPlacement.box);
+      expect(again.placement, ModelPlacement.local);
       expect(again.state.decisionPlacement, ModelPlacement.box);
     });
 

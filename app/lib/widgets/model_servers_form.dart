@@ -82,7 +82,11 @@ typedef ServerConnect = Future<void> Function({
 /// names a different host from the stored one and the key field is blank, the
 /// stored token is NOT sent with the probe and the press asks the host to
 /// forget it ([ServerConnect]'s `clearKey`), so a token for one machine never
-/// rides a request to another.
+/// rides a request to another. The BUILD's key ([keyFromBuild]) follows the
+/// same rule: on an unchanged host the press borrows it through
+/// [storedBearer] exactly as it borrows a stored key, and on a changed host
+/// nothing is sent and nothing needs forgetting, because the build's key
+/// only ever applies to the build's own origin.
 class ModelServersForm extends StatefulWidget {
   final ServerFormRole role;
 
@@ -95,6 +99,14 @@ class ModelServersForm extends StatefulWidget {
   /// never the token: it offers **Remove key** and hints that typing
   /// replaces something.
   final bool keyStored;
+
+  /// Whether, with nothing in the keychain, this target's key is the one this
+  /// build was compiled with (`local.mk`'s `BOND_BOX_KEY`, on the build's own
+  /// origin). A presence flag, never the key: the field hints
+  /// [buildKeyHint], **Remove key** stays off (there is nothing in the
+  /// keychain to remove), and a press on an unchanged host proceeds with
+  /// [storedBearer]'s answer as it does for a stored key.
+  final bool keyFromBuild;
 
   /// Asks a server what it serves. **Null takes Connect off**: a form that
   /// cannot discover a name has nothing to write.
@@ -134,6 +146,7 @@ class ModelServersForm extends StatefulWidget {
     this.url = '',
     this.model = '',
     this.keyStored = false,
+    this.keyFromBuild = false,
     this.probe,
     this.storedBearer,
     required this.onConnect,
@@ -182,6 +195,11 @@ class ModelServersForm extends StatefulWidget {
   /// What the key field says when there is one in the keychain. The field
   /// opens EMPTY: nothing on this screen ever reads a stored key back.
   static const String storedHint = 'Stored. Type to replace';
+
+  /// What the key field says when nothing is in the keychain and this
+  /// build's own key applies to the address. The field opens EMPTY here too.
+  static const String buildKeyHint =
+      'Using the key from this build. Type to replace';
 
   /// What it says once the address names another host: the stored key is
   /// for the old one, and this press will forget it unless a new one is
@@ -310,11 +328,15 @@ class _ModelServersFormState extends State<ModelServersForm> {
     final url = _url.text.trim();
     final onRemove = widget.onRemoveKey;
     final converse = _isConverse(url);
-    final hint = !widget.keyStored
-        ? null
-        : (_hostChanged
+    // The build's key belongs to the build's origin: on another host there is
+    // no key to speak of, so the field says nothing.
+    final hint = widget.keyStored
+        ? (_hostChanged
             ? ModelServersForm.otherHostHint
-            : ModelServersForm.storedHint);
+            : ModelServersForm.storedHint)
+        : (widget.keyFromBuild && !_hostChanged
+            ? ModelServersForm.buildKeyHint
+            : null);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -481,6 +503,8 @@ class _ModelServersFormState extends State<ModelServersForm> {
     }
     final key = typed.isEmpty ? null : typed;
     final hostChanged = _hostChanged;
+    // `storedBearer` answers the keychain's key, else the build's on its own
+    // origin; either way it rides only to the host the form opened on.
     final bearer = key ??
         (hostChanged ? null : widget.storedBearer?.call(_role.targetId));
     final clearKey = key == null && hostChanged && widget.keyStored;

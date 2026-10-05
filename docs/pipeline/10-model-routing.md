@@ -154,16 +154,26 @@ Each role has its own placement (`ModelPlacement { box, local }`; `box` is
 
 | Role | Placement key | Default |
 |------|---------------|---------|
-| Generative | `model_placement` (Round H's key, reused) | `box` in a build compiled with `BOND_BOX_URL`, `local` otherwise (`defaultModelPlacement`) |
+| Generative | `model_placement` (Round H's key, reused) | `box` whatever the build (`defaultModelPlacement`, the default-setup round's D9, 2026-10); with no address anywhere the role is unavailable and parks, it never falls back to this Mac |
 | Decision | `decision_placement` | `local` whatever the build: it reads every message, and a local pass beats any network hop |
 
 Each role's spec resolves in the same order, per call:
 
 1. **Your server**, when the placement is `box` AND an address resolves AND it
    is the owner's own (not third party, not the Converse wire).
-2. **The managed router**, when the app runs its own server
+2. **Generative only: Your server with no address.** Placement `box` and no
+   address stored or compiled is still the `box-prose` spec, with an empty
+   URL, and `AppPrefs.unavailableFor` gives it `generativeNoAddressText`
+   (`The generative model has no server address. Add one under Settings,
+   Models.`). `LlmClient` refuses it before any request with
+   `ModelNoAddressException` and the drains park as `no_address`, spending no
+   attempt; the managed router serves no generative model for it, so no 27B
+   or 4B is demanded behind the owner's back. A `BOND_DEV_HAND_SERVERS` build
+   is the same: its hand server is reached only under `local`. (The decision
+   role keeps the older fall-through below: it defaults to this Mac.)
+3. **The managed router**, when the app runs its own server
    (`managedServer`, true unless the build says `BOND_DEV_HAND_SERVERS`).
-3. **The hand-started server** of a `BOND_DEV_HAND_SERVERS` build.
+4. **The hand-started server** of a `BOND_DEV_HAND_SERVERS` build.
 
 | | Generative (`generativeSpec`) | Decision (`decisionSpec`) |
 |---|---|---|
@@ -175,6 +185,11 @@ Each role's spec resolves in the same order, per call:
 | Managed: model | `managedGenerativeIdFor(tier, generative_managed_model)`: `bond-prose` (27B) or `bond-bulk` (4B) | `bond-decide` |
 | Hand servers | `LLAMA_URL` / `LLAMA_MODEL` (`:8080`, `qwen3.8`) | `DECIDE_URL` / `DECIDE_MODEL` (`:8083`, `bond-decide`, `make decide`) |
 
+- **Where `$BOND_BOX_URL` comes from.** `local.mk`'s `BOND_BOX_URL`, passed
+  by the Makefile's `APP_LLM_DEFINES` as `--dart-define=BOND_BOX_URL`
+  (`boxUrlDefault`); a `BOND_BOX_URL` line in `$(MS_ENV)` is read by
+  `APP_SECRET_DEFINE` only as a FALLBACK while the make variable is empty, so
+  the define is never passed twice. `local.mk.example` is the template.
 - **Empty means "follow the build".** `box_big_url`, `box_big_model`,
   `decision_url` and `decision_model` are stored EMPTY whenever the value
   equals what the build derives; the writers compare against
@@ -252,7 +267,8 @@ remote keep the shipped `needsYou`. The Models page and the wizard then call
 the preset's hash changed.
 
 **What travels.** On Your server, message text, attachment text and drafts go
-to the owner's own machine over TLS with an api-key from this Mac's keychain;
+to the owner's own machine over TLS with an api-key from this Mac's keychain,
+or the build's own key on the build's own origin (below);
 the decision model's input there is the rendered message state. The heads run
 here either way, and so does the embedding model. That is why Your server is
 not a third-party target and asks for no consent.
@@ -266,13 +282,38 @@ not a third-party target and asks for no consent.
 | `generative_managed_model` | `''`, `bond-prose` or `bond-bulk` |
 | `decision_placement`, `decision_url`, `decision_model` | decision placement, remote `/v1/embeddings` URL, discovered model |
 | `cloud_drafts_url`, `cloud_drafts_model`, `cloud_drafts_consent` | the cloud-drafts target and its consent |
+| `registry_url` | the model registry's base address, `''` to follow the build's `BOND_REGISTRY_URL` (`effectiveRegistryUrl`) |
 | `prose_parallel`, `router_port`, `models_folder` | managed width, port, folder |
 | `box_small_url`, `box_small_model`, `llm_targets`, `stage_targets`, `box_url`, `fast_llm_*`, `prose_llm_*` | INERT; read only by the frozen one-shots below |
 
-The bearers live in the keychain as `llm_target_bearer:<id>` for the three
-keyed ids: `box-prose` (generative remote), `box-decide` (decision remote) and
-`cloud-drafts`. The Round H small-server id `box-bulk` is read only by the
+The bearers live in the keychain as `llm_target_bearer:<id>` for the four
+keyed ids: `box-prose` (generative remote), `box-decide` (decision remote),
+`cloud-drafts` and `model-registry` (`registryId`, the registry's read
+token). The Round H small-server id `box-bulk` is read only by the
 role-split migration.
+
+**Key layering: the keychain, else the build's key on the build's origin.**
+Since the default-setup round a build made from the repo (`make app-run`,
+`make app-build`) carries `local.mk`'s `BOND_BOX_KEY` and
+`BOND_REGISTRY_TOKEN` (`boxKeyDefault`, `registryTokenDefault`); the Makefile
+`export`s them and the recipe passes them as `"$BOND_BOX_KEY"`, so `make -n`
+prints the reference and never the value. A distributed build carries none.
+`AppPrefsNotifier.bearerFor(id)` answers the keychain's entry when there is
+one; otherwise the compiled key for `box-prose` / `box-decide`, or the
+compiled token for `model-registry`, but ONLY while the role's effective
+address has the same ORIGIN (scheme, host, port: `sameOrigin`) as the build's
+compiled address, which includes an address that follows the build. A typed
+address on another host never receives it. `AppPrefs` carries presence flags
+only (`boxKeyCompiled`, `registryTokenCompiled`, and the derived
+`generativeKeyFromBuild`, `decisionKeyFromBuild`, `registryTokenFromBuild`);
+the secrets stay in the notifier (`compiledBoxKey:` / `compiledRegistryToken:`
+constructor parameters, the seam a test drives because every define is `''`
+under `flutter test`). A spec's `hasBearer` is "stored or from the build", and
+**Remove key** (`clearRoleKey`, `clearRegistryToken`) deletes the keychain
+entry so the build's key applies again. The registry address and token are
+written by `useRegistry({url, token, clearToken})`, `useDecision`'s shape
+(validate first, keychain before the address, `''` stored for the build's own
+address).
 
 ## Runtime overrides
 
@@ -296,7 +337,9 @@ flight.
   `_loadBearers` (the resolver is synchronous and the keychain is not). The
   specs carry only a presence flag (`boxBigKeyStored`, `decisionKeyStored`,
   `cloudDraftsKeyStored`), false until the prefetch answers, so a first drain
-  that beats it sends no half-claimed key. The token reaches the wire as the
+  that beats it sends no half-claimed key (the build's own key on the build's
+  origin may ride it: that is a key for that host either way, and a keychain
+  entry replaces it the moment it arrives). The token reaches the wire as the
   `Authorization` header and nowhere else: never `app_prefs`, never an
   `LlmCallRecord`, never an exception message, never `LlmTarget.toString()`.
   A keychain that refuses costs the header on the next request (a 401 park the
@@ -789,7 +832,9 @@ ledger.
   to a server that is answering fine. `parkReasonFor` maps the closed set to
   one word each, subclasses first. `ModelNotInstalledException` (thrown by
   `LlmClient` for a managed generative target carrying
-  `LlmTarget.unavailable`) is `not_installed`; the decision client's own
+  `LlmTarget.unavailable`) is `not_installed`; `ModelNoAddressException`
+  (the same refusal for a target with an empty URL: the generative role on
+  Your server with no address) is `no_address`; the decision client's own
   `DecisionNotInstalledException` is `decision_not_installed`, because its fix
   is a command rather than a download; `DecisionOlderModelException` (the
   heads schema-1 refusal) is `decision_older_model`, ahead of its parent,
@@ -825,6 +870,7 @@ ledger.
   | `embed_unavailable` | either | `Embedding server unreachable · N waiting · retrying each minute` |
   | `decision_unavailable` | either | `Decision model unreachable · N waiting · retrying each minute` |
   | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · set up again in Settings` |
+  | `no_address` | Your server | `The generative model has no server address · N waiting · add one under Settings, Models` |
   | `decision_not_installed` | either | `The decision model is not installed · N waiting · run make decide-install, then Check in Settings` |
   | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
   | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or run make decide-install` |
@@ -887,7 +933,9 @@ arriving mid-backlog was extracted 7.2 s after it landed on the box, against
 not, and the number has not been re-taken on one generative model.
 
 **…and one switch.** Model work runs only while **AI processing** is on
-(`processingProvider`, remembered in `processing_on`, default on). It reaches
+(`processingProvider`, remembered in `processing_on`, default OFF since the
+default-setup round, so a new environment's servers and downloads are checked
+under Settings before anything is spent; only `true` reads as on). It reaches
 each drain as one `enabled` closure read on every launch decision; an off
 `pump()` returns at once but still EMITS the waiting count for the rail's
 `Processing is off · N waiting`. Off stops the queue and the three lanes; on

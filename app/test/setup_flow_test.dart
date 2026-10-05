@@ -215,20 +215,22 @@ void main() {
 
     await tapContinue(tester);
 
-    // 3 — Where the models run. Two roles, each with two cards; a build
-    // with no compiled address opens on This Mac for both, so the way
-    // forward is live.
+    // 3 — Where the models run. Two roles, each with two cards; the
+    // decision model opens on This Mac and the generative model on Your
+    // server, whose form's own press is the way forward. This walk picks
+    // This Mac, and the step's Continue comes up live.
     expect(find.text('Where the models run'), findsOneWidget);
     expect(find.text('Step 3 of 9'), findsOneWidget);
     expect(find.byKey(SetupWhereBody.managedCardKey), findsOneWidget);
     expect(find.byKey(SetupWhereBody.customCardKey), findsOneWidget);
     expect(find.byKey(SetupWhereBody.decisionManagedCardKey), findsOneWidget);
     expect(find.byKey(SetupWhereBody.decisionCustomCardKey), findsOneWidget);
-    expect(continueEnabled(tester), isTrue);
+    expect(find.byKey(SetupFlow.continueKey), findsNothing);
     expect(await store.get(SetupStore.setupKey), 'where');
 
     await tester.tap(find.byKey(SetupWhereBody.managedCardKey));
     await settle(tester);
+    expect(continueEnabled(tester), isTrue);
     await tapContinue(tester);
 
     // 4 — Models. This Mac: the embedding model and the one generative model.
@@ -416,10 +418,12 @@ void main() {
     /// and the key it writes. `appPrefsProvider` builds a `SecureTokenStore`,
     /// which throws under `flutter test`.
     ///
-    /// [initial] is how a case says which install this is. `boxUrlDefault` is
-    /// empty under `flutter test`, so `defaultModelPlacement` reads local
-    /// across the suite and a case that wants the compiled-address build says
-    /// so with `AppPrefs(modelPlacement: box, boxBigUrl: …)`.
+    /// [initial] is how a case says which install this is. The generative
+    /// model opens on Your server whatever the build (`defaultModelPlacement`),
+    /// with an empty address because `boxUrlDefault` is empty under `flutter
+    /// test`; a case about This Mac taps its card first, as a person would,
+    /// and a case that wants the compiled-address build says so with
+    /// `AppPrefs(modelPlacement: box, boxBigUrl: …)`.
     late MemoryTokenStore tokens;
     late AppPrefsNotifier prefs;
 
@@ -508,8 +512,8 @@ void main() {
           hardwareTier: MachineTier.full,
         );
 
-    testWidgets('both roles say what they mean, and each opens on This Mac',
-        (tester) async {
+    testWidgets('both roles say what they mean: the decision model opens on '
+        'This Mac, the generative model on Your server', (tester) async {
       makeWithPrefs(probe: servers);
       await reachWhere(tester);
 
@@ -519,10 +523,28 @@ void main() {
       expect(find.text(SetupWhereBody.customBlurb), findsOneWidget);
       expect(find.text(SetupWhereBody.decisionManagedBlurb), findsOneWidget);
       expect(find.text(SetupWhereBody.decisionCustomBlurb), findsOneWidget);
-      // No form until Your server is picked.
-      expect(find.byKey(ModelServersForm.urlKey(gen)), findsNothing);
+      // Each role recommends its own default: the decision model this Mac,
+      // the generative model Your server.
+      expect(find.text(SetupWhereBody.managedTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.customTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.generativeCustomTitle), findsOneWidget);
+      expect(find.text(SetupWhereBody.generativeManagedTitle), findsOneWidget);
+      // The generative form is open on an empty address, and its press is the
+      // way forward; the decision form waits for its card.
+      expect(find.byKey(ModelServersForm.urlKey(gen)), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byKey(ModelServersForm.urlKey(gen)))
+            .controller!
+            .text,
+        isEmpty,
+      );
       expect(find.byKey(ModelServersForm.urlKey(dec)), findsNothing);
-      // The managed choice is up, on the 27B for a full Mac.
+      expect(find.byKey(SetupWhereBody.generativeModelKey), findsNothing);
+      expect(find.byKey(SetupFlow.continueKey), findsNothing);
+
+      // This Mac: the managed choice comes up, on the 27B for a full Mac.
+      await tapKey(tester, SetupWhereBody.managedCardKey);
+      expect(find.byKey(ModelServersForm.urlKey(gen)), findsNothing);
       expect(find.byKey(SetupWhereBody.generativeModelKey), findsOneWidget);
       expect(continueEnabled(tester), isTrue);
     });
@@ -585,6 +607,7 @@ void main() {
         'step lists this Mac\'s models', (tester) async {
       makeWithPrefs(probe: servers);
       await reachWhere(tester);
+      await tapKey(tester, SetupWhereBody.managedCardKey);
 
       await tapContinue(tester);
 
@@ -602,6 +625,7 @@ void main() {
         (tester) async {
       makeWithPrefs(probe: servers);
       await reachWhere(tester);
+      await tapKey(tester, SetupWhereBody.managedCardKey);
 
       await tester.tap(find.descendant(
         of: find.byKey(SetupWhereBody.generativeModelKey),
@@ -647,6 +671,9 @@ void main() {
         (tester) async {
       makeWithPrefs(probe: servers);
       await reachWhere(tester);
+      // The generative model on This Mac, so the step's own Continue is the
+      // way forward this case reads.
+      await tapKey(tester, SetupWhereBody.managedCardKey);
 
       await tapKey(tester, SetupWhereBody.decisionCustomCardKey);
       // Not connected yet: the step's Continue waits for it.
@@ -711,7 +738,10 @@ void main() {
       expect(find.text(ModelServersForm.addressRefusalText), findsOneWidget);
       expect(find.text('Where the models run'), findsOneWidget,
           reason: 'a refused address does not advance the wizard');
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      // Nothing was written: the placement is still the unstored default,
+      // which a wrong write of Your server would equal.
+      expect(prefs.state.modelPlacement, defaultModelPlacement);
+      expect(await MessageStore(db).getPref(modelPlacementKey), isNull);
       expect(prefs.state.boxBigUrl, isEmpty);
       expect(tokens.values, isEmpty);
       expect(asked, isEmpty,
@@ -738,8 +768,12 @@ void main() {
       await tapKey(tester, ModelServersForm.connectKey(gen));
 
       expect(find.text('Not reachable'), findsOneWidget);
+      expect(prefs.state.boxBigUrl, isEmpty);
       expect(find.text('Where the models run'), findsOneWidget);
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      // Nothing was written: the placement is still the unstored default,
+      // which a wrong write of Your server would equal.
+      expect(prefs.state.modelPlacement, defaultModelPlacement);
+      expect(await MessageStore(db).getPref(modelPlacementKey), isNull);
       expect(tokens.values, isEmpty);
     });
 
@@ -756,8 +790,12 @@ void main() {
       await tapKey(tester, ModelServersForm.connectKey(gen));
 
       expect(find.text(ModelServersForm.thirdPartyRefusalText), findsOneWidget);
+      expect(prefs.state.boxBigUrl, isEmpty);
       expect(find.text('Where the models run'), findsOneWidget);
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      // Nothing was written: the placement is still the unstored default,
+      // which a wrong write of Your server would equal.
+      expect(prefs.state.modelPlacement, defaultModelPlacement);
+      expect(await MessageStore(db).getPref(modelPlacementKey), isNull);
       expect(tokens.values, isEmpty);
       expect(asked, isEmpty);
       expect(prefs.state.cloudDraftsConsent, isFalse);
@@ -821,7 +859,10 @@ void main() {
       await tapKey(tester, SetupWhereBody.customCardKey);
 
       expect(await store.get(SetupStore.setupKey), 'where');
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      // Nothing was written: the placement is still the unstored default,
+      // which a wrong write of Your server would equal.
+      expect(prefs.state.modelPlacement, defaultModelPlacement);
+      expect(await MessageStore(db).getPref(modelPlacementKey), isNull);
       expect(prefs.state.boxBigUrl, isEmpty);
     });
   });

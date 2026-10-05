@@ -150,14 +150,14 @@ final sessionStartProvider = Provider<DateTime?>((ref) => null);
 
 /// Whether this session is allowed to run model work at all.
 ///
-/// A REMEMBERED preference that starts on, seeded here from
-/// [AppPrefs.processingOn]. It was session state until Round H, off at every
-/// launch so the owner could point the stages at the right servers before
-/// anything was spent on the wrong one. The placement rule answers that now:
-/// the default server IS the measured one, and a missing key or a dead address
-/// parks with a sentence instead of spending attempts. Turning it off still
-/// stands the models down for the rest of the session, and it is remembered,
-/// so a machine left off comes back off.
+/// A REMEMBERED preference that starts OFF, seeded here from
+/// [AppPrefs.processingOn]. It was session state until Round H and a
+/// remembered switch that started on until the default-setup round
+/// (2026-10, decision D8), which flipped it: a new environment opens with the
+/// models idle so the servers, the downloads and the keys can be checked
+/// under Settings, Models before anything is spent, and the owner turns it on
+/// once they are. Either way it is remembered, so a machine left off comes
+/// back off and a machine left on comes back on.
 ///
 /// `read` and never `watch`. A watch would rebuild this notifier on every
 /// unrelated preference write and reset the switch mid-drain, which is
@@ -369,7 +369,10 @@ final machineTierProvider = FutureProvider<MachineTier>((ref) async {
 /// the embedding model always, the decision model when it runs here, and the
 /// managed generative model (the 27B or the 4B, by `managedGenerativeIdFor`)
 /// when that runs here. The hardware tier's view, so a Mac under the full
-/// tier's floor is never asked for the 27B.
+/// tier's floor is never asked for the 27B. A generative role on Your server
+/// is never served here, with an address or without one: without one its
+/// spec is still `boxProseId`, unavailable and parked, so no 27B or 4B is
+/// demanded behind the owner's back.
 ///
 /// [machineTierProvider] still answers what this MAC could hold and stays the
 /// question for the Settings fact line and the wizard. This one answers what

@@ -3,10 +3,13 @@ import 'dart:io';
 
 import 'package:bond_inbox/data/app_paths.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
+import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/models/setup_step.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/notification_provider.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart'
+    show AppPrefsNotifier, initialAppPrefsProvider, modelPlacementKey;
 import 'package:bond_inbox/providers/setup_provider.dart';
 import 'package:bond_inbox/screens/setup/setup_gate.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
@@ -100,8 +103,14 @@ void main() {
     SystemInfo? system,
     ModelManifest? manifest,
   }) async {
+    // Read before the first frame, as `main()` does: the gate answers once,
+    // and a prefs notifier still on its defaults would answer for the
+    // generative model on Your server, the default, instead of the stored
+    // This Mac.
+    final prefs = await AppPrefsNotifier.read(MessageStore(db));
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
+      initialAppPrefsProvider.overrideWithValue(prefs),
       appPathsProvider.overrideWithValue(AppPaths(support)),
       modelManifestProvider.overrideWithValue(manifest ?? testManifest()),
       // A downloader pointed at the loopback hub with nothing published on
@@ -142,6 +151,11 @@ void main() {
     support = await Directory.systemTemp.createTemp('bond-gate');
     db = testDb();
     store = SetupStore(db);
+    // This Mac, said out loud: the gate's cases are about the files this Mac
+    // downloads, and the generative placement defaults to Your server since
+    // the default-setup round.
+    await MessageStore(db)
+        .setPref(modelPlacementKey, ModelPlacement.local.name);
     runner = FakeProcessRunner();
     notifier = FakeDesktopNotifier();
     settles = StreamController<MessageSettled>.broadcast();

@@ -253,6 +253,11 @@ class SettingsScreen extends StatefulWidget {
   final String decisionModel;
   final bool decisionKeyStored;
 
+  /// Whether, with nothing in the keychain, each remote's key is the one this
+  /// build carries, on the build's own origin. Flags, never keys.
+  final bool decisionKeyFromBuild;
+  final bool generativeKeyFromBuild;
+
   /// What the decision remote turned out to be, or null while unknown.
   final DecisionServerKind? decisionKind;
   final String generativeUrl;
@@ -581,6 +586,8 @@ class SettingsScreen extends StatefulWidget {
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
+    this.decisionKeyFromBuild = false,
+    this.generativeKeyFromBuild = false,
     this.decisionKind,
     this.generativeUrl = '',
     this.generativeModel = '',
@@ -1287,10 +1294,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     decisionUrl: widget.decisionUrl,
     decisionModel: widget.decisionModel,
     decisionKeyStored: widget.decisionKeyStored,
+    decisionKeyFromBuild: widget.decisionKeyFromBuild,
     decisionKind: widget.decisionKind,
     generativeUrl: widget.generativeUrl,
     generativeModel: widget.generativeModel,
     generativeKeyStored: widget.generativeKeyStored,
+    generativeKeyFromBuild: widget.generativeKeyFromBuild,
     statuses: widget.modelStatuses,
     decideInstallDir: widget.decideInstallDir,
     probe: widget.probeServer,

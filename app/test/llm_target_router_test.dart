@@ -14,9 +14,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// The build that hands the servers over — `BOND_DEV_HAND_SERVERS` — said
 /// here as the field it sets, because the define is compiled and a test cannot
-/// pass one. [_managed] is what every shipped build reads.
-const AppPrefs _handStarted = AppPrefs(managedServer: false);
-const AppPrefs _managed = AppPrefs();
+/// pass one. [_managed] is what every shipped build reads. Both say THIS MAC
+/// out loud: the generative placement defaults to Your server since the
+/// default-setup round, and this file is the this-Mac half of the rule.
+const ModelPlacement _here = ModelPlacement.local;
+const AppPrefs _handStarted =
+    AppPrefs(managedServer: false, modelPlacement: _here);
+const AppPrefs _managed = AppPrefs(modelPlacement: _here);
 
 void main() {
   test('hand-started, each role dials its make-target server', () {
@@ -52,10 +56,13 @@ void main() {
   });
 
   test('the managed generative model follows the tier and the choice', () {
-    expect(const AppPrefs(machineTier: MachineTier.inbox).generativeSpec.model,
+    expect(
+        const AppPrefs(machineTier: MachineTier.inbox, modelPlacement: _here)
+            .generativeSpec
+            .model,
         routerBulkId);
     expect(
-      const AppPrefs(generativeManagedModel: routerBulkId)
+      const AppPrefs(generativeManagedModel: routerBulkId, modelPlacement: _here)
           .generativeSpec
           .model,
       routerBulkId,
@@ -65,15 +72,21 @@ void main() {
       const AppPrefs(
         machineTier: MachineTier.inbox,
         generativeManagedModel: routerProseId,
+        modelPlacement: _here,
       ).generativeSpec.model,
       routerBulkId,
     );
   });
 
   test('the generative width is the drafts-in-flight setting here', () {
-    expect(const AppPrefs(proseParallel: 4).generativeSpec.parallel, 4);
     expect(
-      const AppPrefs(proseParallel: 2, managedServer: false)
+        const AppPrefs(proseParallel: 4, modelPlacement: _here)
+            .generativeSpec
+            .parallel,
+        4);
+    expect(
+      const AppPrefs(
+              proseParallel: 2, managedServer: false, modelPlacement: _here)
           .generativeSpec
           .parallel,
       2,
@@ -81,7 +94,7 @@ void main() {
   });
 
   test('moving the port moves all three roles together', () {
-    const prefs = AppPrefs(routerPort: 9310);
+    const prefs = AppPrefs(routerPort: 9310, modelPlacement: _here);
     expect(prefs.routerBase, 'http://127.0.0.1:9310');
     expect(prefs.generativeSpec.url,
         'http://127.0.0.1:9310/v1/chat/completions');

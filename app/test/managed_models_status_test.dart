@@ -225,16 +225,17 @@ void main() {
     expect(rows.last.routerId, routerEmbedId);
   });
 
-  test('your server with no address to dial is still this Mac', () async {
-    // The placement cannot be honoured, so the rule answers the router, and
-    // the row says the router is asked to hold the model.
+  test('your server with no address to dial is NOT this Mac', () async {
+    // The placement cannot be honoured, and since the default-setup round
+    // (decision D9) the role parks with a sentence rather than coming home:
+    // the row stays, and the router is not asked to hold the model.
     final rows = await containerFor(
       testManifest(),
       prefs: const AppPrefs(modelPlacement: ModelPlacement.box),
     ).read(managedModelsStatusProvider.future);
 
     expect(rows.first.roleId, 'generative');
-    expect(rows.first.inUse, isTrue);
+    expect(rows.first.inUse, isFalse);
   });
 
   test('Set up again re-reads it', () async {

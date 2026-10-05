@@ -161,7 +161,8 @@ void main() {
       // and a refusal leaves the install exactly as it was.
       expect(await store.getPref(boxBigUrlKey), isNull);
       expect(prefs.state.boxBigKeyStored, isFalse);
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.modelPlacement, defaultModelPlacement);
+      expect(await store.getPref(modelPlacementKey), isNull);
     });
 
     test('this Mac: the managed model, the tier and the draft policy',
@@ -251,7 +252,8 @@ void main() {
       expect(tokens.values['$llmTargetBearerKeyPrefix$boxDecideId'],
           decideKey);
       // The generative placement is not the decision writer's to move.
-      expect(prefs.state.modelPlacement, ModelPlacement.local);
+      expect(prefs.state.modelPlacement, defaultModelPlacement);
+      expect(await store.getPref(modelPlacementKey), isNull);
     });
 
     test('refuses a third party, with its own sentence', () async {
@@ -344,10 +346,13 @@ void main() {
 
       await prefs.setCloudDraftsConsent(false);
 
-      // The target is still set; the resolver is what refuses it.
+      // The target is still set; the resolver is what refuses it, and the
+      // drafts go to the generative model like every other stage.
       expect(prefs.state.cloudDraftsSpec, isNotNull);
-      expect(prefs.specForDraft('draft_reply'), localGenerativeId);
-      expect(prefs.specForDraft('draft_improve'), localGenerativeId);
+      final home = prefs.state.generativeSpec.id;
+      expect(home, isNot(cloudDraftsId));
+      expect(prefs.specForDraft('draft_reply'), home);
+      expect(prefs.specForDraft('draft_improve'), home);
     });
 
     test('clearing forgets the address, the model and the key', () async {
@@ -363,7 +368,8 @@ void main() {
       expect(prefs.state.cloudDraftsKeyStored, isFalse);
       expect(await store.getPref(cloudDraftsUrlKey), '');
       expect(tokens.values, isEmpty);
-      expect(prefs.specForDraft('draft_reply'), localGenerativeId);
+      expect(prefs.specForDraft('draft_reply'), prefs.state.generativeSpec.id);
+      expect(prefs.specForDraft('draft_reply'), isNot(cloudDraftsId));
     });
 
     test('the consent round-trips', () async {
@@ -444,7 +450,7 @@ void main() {
       expect(prefs.targetForStage('decision').bearer, isNull);
     });
 
-    test('is prefetched before ready completes, for exactly three ids',
+    test('is prefetched before ready completes, for exactly four ids',
         () async {
       final tokens = MemoryTokenStore({
         '$llmTargetBearerKeyPrefix$boxProseId': key,
@@ -459,10 +465,12 @@ void main() {
         '$llmTargetBearerKeyPrefix$boxProseId',
         '$llmTargetBearerKeyPrefix$boxDecideId',
         '$llmTargetBearerKeyPrefix$cloudDraftsId',
+        '$llmTargetBearerKeyPrefix$registryId',
       });
       expect(prefs.state.boxBigKeyStored, isTrue);
       expect(prefs.state.decisionKeyStored, isFalse);
       expect(prefs.state.cloudDraftsKeyStored, isTrue);
+      expect(prefs.state.registryTokenStored, isFalse);
       expect(prefs.targetForStage('triage').bearer, key);
     });
 

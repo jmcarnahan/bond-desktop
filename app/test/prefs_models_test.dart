@@ -53,8 +53,14 @@ void main() {
     }
 
     final prefs = ref.read(appPrefsProvider);
-    expect(prefs.generativeSpec.id, localGenerativeId);
-    expect(prefs.generativeSpec.model, routerProseId);
+    // The generative model defaults to Your server, and with no address
+    // compiled (`flutter test`) or stored it is that role, unavailable with
+    // its sentence, never this Mac's router.
+    expect(prefs.modelPlacement, ModelPlacement.box);
+    expect(await store.getPref(modelPlacementKey), isNull);
+    expect(prefs.generativeSpec.id, boxProseId);
+    expect(prefs.generativeSpec.url, isEmpty);
+    expect(prefs.unavailableFor(prefs.generativeSpec), generativeNoAddressText);
     expect(prefs.decisionSpec.id, localDecisionId);
     expect(prefs.decisionPlacement, ModelPlacement.local);
     expect(prefs.cloudDraftsSpec, isNull);

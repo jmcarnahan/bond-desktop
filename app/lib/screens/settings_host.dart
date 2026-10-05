@@ -394,6 +394,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       decisionUrl: prefs.effectiveDecisionUrl,
       decisionModel: prefs.effectiveDecisionModel,
       decisionKeyStored: prefs.decisionKeyStored,
+      decisionKeyFromBuild: prefs.decisionKeyFromBuild,
       // The client's cache, filled by a Connect, a decision, or the one
       // listing GET this screen asks when it opens on an address this run
       // has not seen; read again on every rebuild, which a Connect's prefs
@@ -402,6 +403,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       generativeUrl: prefs.effectiveGenerativeUrl,
       generativeModel: prefs.effectiveGenerativeModel,
       generativeKeyStored: prefs.boxBigKeyStored,
+      generativeKeyFromBuild: prefs.generativeKeyFromBuild,
       // The app's own server. Watched, so a load that finishes behind an open
       // Settings pane moves the bar and the three roles' lines without the
       // reader touching anything.

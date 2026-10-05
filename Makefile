@@ -180,7 +180,7 @@ RESET  := \033[0m
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         decide decide-stop decide-install _wait-decide \
         app-install app-run app-test app-gen app-migrations app-analyze \
-        app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
+        app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
         ab drain bench-pipeline bench-compare \
         golden-check golden-baseline golden-score golden golden-prose \
@@ -214,6 +214,7 @@ help:
 	@printf "  make verify       → SHA256 the downloaded weights against the HF cache\n"
 	@printf "  make clean-model  → delete the cached weights for a re-download\n"
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
+	@printf "  make app-doctor   → check this environment's local.mk and .env before the first app-run\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
 	@printf "  make foreground W=<worktree>   → check a round's branch out HERE for the manual pass (the worktree detaches)\n"
 	@printf "  make background W=<worktree>   → the reverse: this checkout back on main, the worktree back on its branch\n"
@@ -790,6 +791,43 @@ clean:
 # for the same public-repo reason as the ids.
 MS_ENV ?= $(CURDIR)/.env
 
+# ── this environment: the model registry and Your server ───────────────
+# The four values a new environment is configured with, all written in
+# local.mk (local.mk.example is the template; plain `=`, comments on their
+# own line). Each one is a compiled DEFAULT: `make app-run` and `make
+# app-build` pass it to the app as a --dart-define, and a value saved under
+# Settings, Models in the app beats it. `make app-doctor` checks them.
+#
+# The model registry's base address, an Artifactory repository URL; the app
+# downloads the decision model's files from <it>/bundles/<bundle>/<file>.
+BOND_REGISTRY_URL   ?=
+# The registry's READ token. A SECRET: exported below and handed to the app
+# and to curl as the shell's "$$BOND_REGISTRY_TOKEN", so `make -n` prints the
+# reference and never the value.
+BOND_REGISTRY_TOKEN ?=
+# Your server's origin, where the generative model runs (`/prose`) and a
+# decision server may (`/decide`). Empty falls back to a BOND_BOX_URL line in
+# $(MS_ENV), which is where it was read from before the default-setup round.
+BOND_BOX_URL        ?=
+# Your server's access key. A SECRET on BOND_REGISTRY_TOKEN's terms; the app
+# sends it only to BOND_BOX_URL's own origin, and a key saved in the app's
+# keychain beats it. A distributed build (dist/) carries none.
+BOND_BOX_KEY        ?=
+# The registry bundle the decision model is downloaded from, and the one
+# `make app-doctor` asks the registry for.
+DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
+# The secrets travel as ENVIRONMENT, never as make text: every recipe that
+# needs one names it as a shell reference.
+export BOND_REGISTRY_TOKEN BOND_BOX_KEY
+
+# A Homebrew llama-server (`brew install llama.cpp`) is found on PATH, so a
+# new environment needs no BOND_LLAMA_SERVER line in local.mk; a plain `=`
+# there still wins. Empty when there is none, and the app then reports it.
+# `:=` under an origin check, so the lookup runs once and not on every use.
+ifeq ($(origin BOND_LLAMA_SERVER),undefined)
+BOND_LLAMA_SERVER := $(shell command -v llama-server 2>/dev/null)
+endif
+
 # ── the bakeoff: where a bench points ──────────────────────────────────
 # Every one of these is `?=`, so a durable override in local.mk (included at
 # the top) wins and a one-off on the command line wins over that.
@@ -971,11 +1009,11 @@ SWEEP_EMBED_PREFIX ?=
 # BENCH_BEARER and BENCH_BOX_KEY are the exceptions, and deliberately: `:=`
 # expands `$$` to a literal `$` once, here, so what is STORED is the text
 # `$(grep …)` and every recipe that uses BENCH_DEFINES has its own shell run
-# that grep at recipe time. A key therefore never sits in a make variable,
-# never appears in `make -n` output, and never reaches the environment of
-# anything but the one flutter test that needs it. BENCH_BOX_KEY is the shared
-# GPU box's access key, which a bench needs because it runs outside the app and
-# has no keychain to read it from; BOND_BOX_KEY lives in `.env` alone.
+# that grep at recipe time. A key therefore never appears in `make -n` output.
+# BENCH_BOX_KEY is the shared GPU box's access key, which a bench needs
+# because it runs outside the app and has no keychain to read it from: the
+# exported BOND_BOX_KEY from local.mk when it is set, else a BOND_BOX_KEY line
+# in $(BEDROCK_ENV), where it lived before the default-setup round.
 BENCH_DEFINES := \
   --dart-define=BENCH_URL='$(BENCH_URL)' \
   --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
@@ -1009,7 +1047,7 @@ BENCH_DEFINES := \
   --dart-define=BENCH_WIRE='$(BENCH_WIRE)' \
   --dart-define=PROSE_WIRE='$(PROSE_WIRE)' \
   --dart-define=BENCH_BEARER="$$(grep -m1 '^BEDROCK_API_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)" \
-  --dart-define=BENCH_BOX_KEY="$$(grep -m1 '^BOND_BOX_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)"
+  --dart-define=BENCH_BOX_KEY="$${BOND_BOX_KEY:-$$(grep -m1 '^BOND_BOX_KEY=' $(BEDROCK_ENV) 2>/dev/null | cut -d= -f2-)}"
 
 # ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
 # oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
@@ -1109,11 +1147,13 @@ omlx-stop:
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
-# behavior). BOND_BOX_URL rides along: it makes the GPU server the build's
-# default place for the GENERATIVE model (`/prose`) and prefills both role
+# behavior). A BOND_BOX_URL line in $(MS_ENV) rides along as a FALLBACK, read
+# only while the make variable BOND_BOX_URL is empty, so the define is never
+# passed twice: the box's address and access key belong in local.mk now
+# (APP_LLM_DEFINES below passes them), and this grep keeps a setup that still
+# keeps the address in $(MS_ENV) working. The address prefills both role
 # addresses in the wizard and in Settings (`/prose` and `/decide`); the
-# decision model still defaults to this Mac. The box's access key is NOT here. It is typed in the app and kept
-# in the keychain.
+# access key is never read from $(MS_ENV) by the app's build.
 define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
@@ -1122,8 +1162,8 @@ $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-)
    if [ -n "$$CID" ]; then printf -- '--dart-define=MS_CLIENT_ID=%s ' "$$CID"; fi; \
    if [ -n "$$TID" ]; then printf -- '--dart-define=MS_TENANT_ID=%s ' "$$TID"; fi; \
    if [ -n "$$MCPURL" ]; then printf -- '--dart-define=BOND_MCP_SERVER_URL=%s ' "$$MCPURL"; fi; \
-   BOXURL=$$(grep -m1 '^BOND_BOX_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
-   if [ -n "$$BOXURL" ]; then printf -- '--dart-define=BOND_BOX_URL=%s ' "$$BOXURL"; fi; \
+   $(if $(strip $(BOND_BOX_URL)),,BOXURL=$$(grep -m1 '^BOND_BOX_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   if [ -n "$$BOXURL" ]; then printf -- '--dart-define=BOND_BOX_URL=%s ' "$$BOXURL"; fi;) \
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 
@@ -1162,6 +1202,33 @@ endif
 ifneq ($(strip $(BOND_LLAMA_SERVER)),)
 APP_LLM_DEFINES += --dart-define=BOND_LLAMA_SERVER='$(BOND_LLAMA_SERVER)'
 endif
+# This environment's model registry and Your server (local.mk, see the block
+# beside MS_ENV): the two addresses as plain values, one block each for the
+# reason above.
+ifneq ($(strip $(BOND_REGISTRY_URL)),)
+APP_LLM_DEFINES += --dart-define=BOND_REGISTRY_URL='$(BOND_REGISTRY_URL)'
+endif
+ifneq ($(strip $(BOND_BOX_URL)),)
+APP_LLM_DEFINES += --dart-define=BOND_BOX_URL='$(BOND_BOX_URL)'
+endif
+# The two secrets as SHELL references: `+=` onto a `:=` variable expands `$$`
+# to one `$` here, so the recipe line holds the text "$BOND_BOX_KEY" and the
+# recipe's shell reads the exported value. `make -n app-run` therefore prints
+# the reference and never the key. Compiled into a from-repo build only; the
+# app sends each to its own address's origin alone.
+# The shell expands those two references BEFORE it runs the command, so the
+# build still gets its defines, and this prefix then takes both secrets out of
+# the environment flutter, the app and the llama-server the app starts would
+# otherwise inherit from the `export` beside MS_ENV. They are still in the
+# flutter process's ARGUMENTS for as long as `make app-run` lives (see
+# app/CLAUDE.md: never list that process with its arguments).
+APP_NO_SECRET_ENV := env -u BOND_BOX_KEY -u BOND_REGISTRY_TOKEN
+ifneq ($(strip $(BOND_REGISTRY_TOKEN)),)
+APP_LLM_DEFINES += --dart-define=BOND_REGISTRY_TOKEN="$$BOND_REGISTRY_TOKEN"
+endif
+ifneq ($(strip $(BOND_BOX_KEY)),)
+APP_LLM_DEFINES += --dart-define=BOND_BOX_KEY="$$BOND_BOX_KEY"
+endif
 # Read by the first-run setup gate (Phase 4) to skip the wizard on a machine
 # that is already set up. Defined here NOW, while the gate is still being
 # built, so the `local.mk` line a developer writes today keeps working when it
@@ -1191,7 +1258,7 @@ app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
 
 app-run:
-	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 
 # A round is built in a worktree under .claude/worktrees/<name> and tested by
 # hand from THIS checkout, where local.mk, .env, the signing config and the
@@ -1641,6 +1708,57 @@ golden-judge-tally: golden-check
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
 
+# Is this environment configured? One line each, ✓ or ✗: flutter and its
+# version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
+# registry answering for $(DECIDE_BUNDLE) with the token, and Your server
+# answering /prose/v1/models with the key. It prints HTTP status codes only,
+# never a secret: the two tokens reach curl as "$$BOND_…" shell references
+# through the `export` beside MS_ENV, so `make -n app-doctor` shows the
+# reference. Exits non-zero when any line is ✗. Read-only: nothing is
+# downloaded, started or written.
+app-doctor:
+	@fail=0; \
+	 if v=$$($(FLUTTER) --version 2>/dev/null | head -1) && [ -n "$$v" ]; then \
+	   printf "  $(GREEN)✓$(RESET) %s\n" "$$v"; \
+	 else \
+	   printf "  $(RED)✗$(RESET) flutter not found — install it, or set FLUTTER in local.mk\n"; fail=1; \
+	 fi; \
+	 if [ -n "$(BOND_LLAMA_SERVER)" ] && [ -x "$(BOND_LLAMA_SERVER)" ]; then \
+	   printf "  $(GREEN)✓$(RESET) llama-server at %s\n" "$(BOND_LLAMA_SERVER)"; \
+	 else \
+	   printf "  $(RED)✗$(RESET) llama-server not found — brew install llama.cpp, or set BOND_LLAMA_SERVER in local.mk\n"; fail=1; \
+	 fi; \
+	 if grep -q '^BOND_MCP_SERVER_URL=.' "$(MS_ENV)" 2>/dev/null; then \
+	   printf "  $(GREEN)✓$(RESET) BOND_MCP_SERVER_URL is set in %s\n" "$(MS_ENV)"; \
+	 else \
+	   printf "  $(RED)✗$(RESET) BOND_MCP_SERVER_URL is not set in %s\n" "$(MS_ENV)"; fail=1; \
+	 fi; \
+	 if [ -z "$(strip $(BOND_REGISTRY_URL))" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_URL is not set in local.mk\n"; fail=1; \
+	 elif [ -z "$$BOND_REGISTRY_TOKEN" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_TOKEN is not set in local.mk\n"; fail=1; \
+	 else \
+	   code=$$(curl -s -o /dev/null -w '%{http_code}' -m 8 -H "Authorization: Bearer $$BOND_REGISTRY_TOKEN" "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/bundle.json"); \
+	   case "$$code" in \
+	     200) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
+	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
+	     *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for $(DECIDE_BUNDLE)\n" "$$code"; fail=1;; \
+	   esac; \
+	 fi; \
+	 if [ -z "$(strip $(BOND_BOX_URL))" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_BOX_URL is not set in local.mk\n"; fail=1; \
+	 elif [ -z "$$BOND_BOX_KEY" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_BOX_KEY is not set in local.mk\n"; fail=1; \
+	 else \
+	   code=$$(curl -s -o /dev/null -w '%{http_code}' -m 8 -H "Authorization: Bearer $$BOND_BOX_KEY" "$(BOND_BOX_URL:%/=%)/prose/v1/models"); \
+	   case "$$code" in \
+	     200) printf "  $(GREEN)✓$(RESET) your server answers at %s\n" "$(BOND_BOX_URL)";; \
+	     401|403) printf "  $(RED)✗$(RESET) your server refused the key — HTTP %s\n" "$$code"; fail=1;; \
+	     *) printf "  $(RED)✗$(RESET) your server answered HTTP %s at %s\n" "$$code" "$(BOND_BOX_URL)"; fail=1;; \
+	   esac; \
+	 fi; \
+	 exit $$fail
+
 # ── vendored sqlite-vec sources ────────────────────────────────────────
 # The four C/H files under $(VEC_SRC) are COMMITTED, not fetched at build
 # time. `flutter test` and `flutter build` compile them through the
@@ -1712,7 +1830,7 @@ vec-vendor:
 	 printf "  $(YELLOW)!$(RESET) these are committed — include them in the diff\n"
 
 app-build:
-	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 	@printf "  $(GREEN)✓$(RESET) \"$(APP_DIR)/build/macos/Build/Products/Release/Bond Desktop.app\"\n"
 
 # ── distribution ───────────────────────────────────────────────────────

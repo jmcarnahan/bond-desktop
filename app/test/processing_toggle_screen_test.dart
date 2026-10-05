@@ -32,10 +32,12 @@ import 'fixtures/test_db.dart';
 /// composer's draft button goes inert while it is off, and that every throw of
 /// it is recorded.
 ///
-/// Since Round H the switch is a remembered preference that starts ON, so
-/// [pumpScreen] seeds it OFF by default: every test below but the first is
-/// about what a THROW of the switch does, and starting from off is what makes
-/// the throw the subject.
+/// The switch is a remembered preference that starts OFF since the
+/// default-setup round, and [pumpScreen] seeds it OFF by default: every test
+/// below but the first two is about what a THROW of the switch does, and
+/// starting from off is what makes the throw the subject. `processingOn:
+/// null` leaves the row absent, a fresh install; `true` writes the one
+/// spelling that reads as on.
 
 class _Tokens implements TokenStore {
   final Map<String, String> values = {};
@@ -161,7 +163,7 @@ void main() {
     WidgetTester tester, {
     List<Override> extra = const [],
     RailSection section = RailSection.people,
-    bool processingOn = false,
+    bool? processingOn = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -175,9 +177,11 @@ void main() {
     // question by asking a server that is not there.
     await store.setPref(backendModeKey, backendModeSdk);
     // The remembered switch, written before the read that seeds the provider.
-    // A fresh install leaves this key absent and comes up ON, which is what
-    // the first test below pumps.
-    if (!processingOn) await store.setPref(processingOnKey, 'false');
+    // A fresh install leaves this key absent (null here) and comes up OFF,
+    // which is what the first test below pumps.
+    if (processingOn != null) {
+      await store.setPref(processingOnKey, processingOn.toString());
+    }
     final prefs = await AppPrefsNotifier.read(store);
 
     await tester.pumpWidget(ProviderScope(
@@ -257,16 +261,23 @@ void main() {
         ),
       );
 
-  testWidgets('the switch starts on for a fresh install and off when the '
-      'preference says off', (tester) async {
-    // A fresh install has no `processing_on` row at all, and comes up working:
-    // the placement rule means the default server is the measured one, so the
-    // reason the switch used to start off — minutes spent on the wrong server
-    // before anyone had pointed it at the right one — is gone.
+  testWidgets('the switch starts off for a fresh install', (tester) async {
+    // A fresh install has no `processing_on` row at all, and comes up with
+    // the models idle: the default-setup round's D8, so the servers and the
+    // downloads can be checked under Settings before anything is spent.
+    await seedThread();
+    await pumpScreen(tester, processingOn: null);
+
+    expect(toggle(), findsOneWidget);
+    expect(tester.widget<Switch>(toggle()).value, isFalse);
+    expect(find.text('Off'), findsOneWidget);
+  });
+
+  testWidgets('and comes back on the launch after somebody turned it on',
+      (tester) async {
     await seedThread();
     await pumpScreen(tester, processingOn: true);
 
-    expect(toggle(), findsOneWidget);
     expect(tester.widget<Switch>(toggle()).value, isTrue);
     expect(find.text('On'), findsOneWidget);
   });
