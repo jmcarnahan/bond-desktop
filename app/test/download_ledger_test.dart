@@ -98,6 +98,20 @@ void main() {
       await store.clearExcept(const {});
       expect(store.knownLedger, isNull);
     });
+
+    test('knownLedger never goes empty across a recordDownload, so a decision '
+        'call landing mid-write still sees the model', () async {
+      final first = DownloadLedger.empty.record(state('bond-embed'));
+      await store.recordDownload(first);
+      final second = first.record(state('bond-decide'));
+
+      final write = store.recordDownload(second);
+      expect(store.knownLedger, second,
+          reason: 'the copy leads the row rather than clearing across it');
+      await write;
+      expect(store.knownLedger, second);
+      expect(await store.downloadLedger(), second);
+    });
   });
 
   group('DownloadLedger', () {

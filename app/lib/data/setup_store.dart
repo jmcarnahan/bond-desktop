@@ -115,6 +115,10 @@ class SetupStore {
   /// while a download writes to it.
   Future<void> set(String key, String value) async {
     if (key == downloadKey) _knownLedger = null;
+    await _upsert(key, value);
+  }
+
+  Future<void> _upsert(String key, String value) async {
     await db.customUpdate(
       'INSERT INTO setup_state (key, value, updated_at) VALUES (?, ?, ?) '
       'ON CONFLICT(key) DO UPDATE SET value = excluded.value, '
@@ -144,9 +148,14 @@ class SetupStore {
 
   /// Writes the whole ledger over itself. The downloader owns the value and
   /// rewrites it as a unit, so there is nothing here to merge.
+  ///
+  /// The copy is set BEFORE the row is written, never cleared across the
+  /// write: the downloader records the ledger every couple of seconds during
+  /// a transfer, and a decision call landing inside a cleared window would
+  /// read a fully installed model as not installed and park triage.
   Future<void> recordDownload(DownloadLedger ledger) async {
-    await set(downloadKey, jsonEncode(ledger.toJson()));
     _knownLedger = ledger;
+    await _upsert(downloadKey, jsonEncode(ledger.toJson()));
   }
 
   /// The ledger, or an empty one — [DownloadLedger.parse] never throws, so an

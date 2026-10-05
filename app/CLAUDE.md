@@ -470,7 +470,9 @@ enforce the ones that are commands.
   served; a Hugging Face entry is served on its files, a local one on its
   files. A Download again takes the entry's rows out of `done` as it starts
   (`ModelDownloader._unsettle`), and files placed by `make decide-fetch`
-  join after the ensurer's next pass hashes them in. A fixture that puts
+  join once a pass has hashed them in: the next launch or a Download press,
+  with a registry address set or not (`_withoutRegistry` hashes a present
+  file whose row is not `done` before it fails the leg). A fixture that puts
   registry files on disk and expects them served writes
   `currentLedgerFor([...])` (`test/fixtures/current_ledger.dart`) through
   the container's own `setupStoreProvider`. A `source: local` entry (repo

@@ -262,7 +262,6 @@ void main() {
       final first = ensurer.ensure();
       final second = ensurer.ensure();
 
-      expect(identical(first, second), isFalse);
       gate.complete();
       expect((await first).phase, EnsurePhase.done);
       expect((await second).phase, EnsurePhase.done);

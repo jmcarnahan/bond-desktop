@@ -116,10 +116,11 @@ It prints one line per check and exits non-zero when any fails:
 | `✓ your server answers at …` | the address and key work |
 
 A `✗` names what is wrong: a value that is not set, a refused token or key
-(`HTTP 401` or `403`), a registry address that answers with a web page, a
-redirect or `HTTP 404`, or an address that does not answer. It prints status
-codes only, never a token or a key. Fix `local.mk` and run it again until
-every line is a `✓`.
+(`HTTP 401` or `403`), a registry address that answers with a web page or
+`HTTP 404`, or an address that does not answer. A `!` is a warning: a
+registry that answers with a redirect works, but the address it redirects
+to is steadier. It prints status codes only, never a token or a key. Fix
+`local.mk` and run it again until every line is a `✓`.
 
 ## 3. Run the app
 

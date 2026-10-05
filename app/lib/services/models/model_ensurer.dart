@@ -175,10 +175,6 @@ class ModelEnsurer {
       ValueNotifier(const EnsureState());
   /// The loop of passes in flight, or null.
   Future<EnsureState>? _inFlight;
-
-  /// The future handed to the calls made since the pass in flight scanned:
-  /// the loop's own, completing after the further pass they are owed.
-  Future<EnsureState>? _followUp;
   bool _disposed = false;
 
   /// A call is owed a pass that has not scanned yet.
@@ -214,9 +210,10 @@ class ModelEnsurer {
     _pendingReverify.addAll(reverify);
     final loop = _inFlight;
     if (loop != null) {
-      if (_dirty) return _followUp ?? loop;
+      // Every caller shares the loop's future, which completes once the
+      // last owed pass has run.
       _dirty = true;
-      return _followUp = loop.then((state) => state);
+      return loop;
     }
     if (_blocked) {
       _pendingReverify = {};
@@ -240,7 +237,6 @@ class ModelEnsurer {
       debugPrint('model ensure: the loop ended unexpectedly: $e');
     }
     _inFlight = null;
-    _followUp = null;
     _dirty = false;
     _pendingReverify = {};
     return _state.value;
@@ -250,7 +246,6 @@ class ModelEnsurer {
   /// or as it ends early without one.
   Set<String> _take() {
     _dirty = false;
-    _followUp = null;
     final reverify = _pendingReverify;
     _pendingReverify = {};
     return reverify;

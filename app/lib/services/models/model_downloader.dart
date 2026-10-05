@@ -567,7 +567,9 @@ class ModelDownloader {
   /// still count — an address removed after the download does not unmake
   /// it — and the first file that is not fails the entry with
   /// [DownloadError.registryNotConfigured], on its own row, so a landed
-  /// file's `done` row is never overwritten.
+  /// file's `done` row is never overwritten. A file that is here with no
+  /// `done` row (placed by `make decide-fetch`, or a pass that quit after the
+  /// rename) is hashed in place and recorded, so it joins without an address.
   Future<void> _withoutRegistry(ModelFile file, String folder) async {
     var landed = 0;
     for (final spec in _specsFor(file)) {
@@ -577,6 +579,19 @@ class ModelDownloader {
           row.status == DownloadStatus.done &&
           row.sha256 == spec.sha256 &&
           _exists(dest)) {
+        landed += spec.sizeBytes;
+        continue;
+      }
+      if (_exists(dest) && await _digestMatches(dest, spec.sha256)) {
+        _ledger = _ledger.record(FileDownloadState(
+          id: spec.ledgerId,
+          status: DownloadStatus.done,
+          receivedBytes: spec.sizeBytes,
+          totalBytes: spec.sizeBytes,
+          sha256: spec.sha256,
+          updatedAt: MessageStore.isoStamp(DateTime.now()),
+        ));
+        await _persistLedger(force: true);
         landed += spec.sizeBytes;
         continue;
       }

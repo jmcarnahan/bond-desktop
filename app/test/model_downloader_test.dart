@@ -1832,6 +1832,47 @@ void main() {
       expect(headsRow?.error, DownloadError.registryNotConfigured);
       expect(hub.registryCount, 0);
     });
+
+    test('no address with both files placed by hand and no rows hashes them '
+        'in place, records them done and asks the network nothing', () async {
+      final decide = publishDecide();
+      await File(destOf(decide)).create(recursive: true);
+      await File(destOf(decide))
+          .writeAsBytes(hub.registryContents['$bundle/model-f16.gguf']!);
+      await File(headsDestOf(decide))
+          .writeAsBytes(hub.registryContents['$bundle/heads.json']!);
+      ledger = DownloadLedger.empty;
+
+      final events =
+          await build(registryBase: () => '').run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      expect(ledger.isCurrent(decide), isTrue,
+          reason: 'make decide-fetch writes no rows; the pass adopts the '
+              'files it finds whole without a registry address');
+      expect(hub.registryCount, 0);
+    });
+
+    test('no address with a wrong file placed by hand fails the entry and '
+        'records nothing done for it', () async {
+      final decide = publishDecide();
+      await File(destOf(decide)).create(recursive: true);
+      await File(destOf(decide))
+          .writeAsBytes(hub.registryContents['$bundle/model-f16.gguf']!);
+      await File(headsDestOf(decide)).writeAsBytes(List<int>.filled(16, 1));
+      ledger = DownloadLedger.empty;
+
+      final events =
+          await build(registryBase: () => '').run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.registryNotConfigured);
+      expect(ledger[decide.id]?.status, DownloadStatus.done);
+      expect(ledger[DownloadLedger.headsId(decide.id)]?.status,
+          DownloadStatus.failed);
+      expect(ledger.isCurrent(decide), isFalse);
+      expect(hub.registryCount, 0);
+    });
   });
 }
 

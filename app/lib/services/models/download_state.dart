@@ -314,8 +314,9 @@ class DownloadLedger {
   /// together, and existence alone would let a new GGUF run with old heads
   /// (a quit between the two legs, a digest bump on the same file names), and
   /// the decisions written that way are never redone. A file placed by hand
-  /// with no row (`make decide-fetch`) is used once the model ensurer's next
-  /// pass has hashed it in place and recorded it. A `source: local` entry has
+  /// with no row (`make decide-fetch`) is used once a model ensurer pass, at
+  /// the next launch or a Download press, has hashed it in place and recorded
+  /// it, with or without a registry address. A `source: local` entry has
   /// no rows, and a Hugging Face entry is served on its files as it always
   /// was.
   bool servable(ModelFile file, String modelsFolder) {

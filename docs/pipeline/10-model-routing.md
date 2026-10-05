@@ -768,7 +768,8 @@ preset, and so is a REGISTRY entry whose ledger rows are not current
 (`DownloadLedger.servable`: its GGUF and heads must belong together, so a quit
 between the two legs, a digest bump on the same file names or a Download again
 under way or failed is not served; files placed by `make decide-fetch` join
-after the ensurer's next pass hashes them in place), except the embedding model, which every stage needs and whose absence
+once a pass has hashed them in place, at the next launch or a Download press
+under Settings, Models, with or without a registry address), except the embedding model, which every stage needs and whose absence
 should fail the start with the preflight's own sentence. The server refuses to
 start with a file the preset names missing, and one missing model must not
 take the others down with it: a decision model whose download has not landed,

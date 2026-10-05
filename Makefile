@@ -1743,7 +1743,8 @@ app-analyze:
 # registry answering for $(DECIDE_BUNDLE) with the token (its first byte of
 # $(DECIDE_REMOTE_HEADS), a file the app really downloads, the way Settings'
 # Check asks: 200 or 206 is ✓ unless it is a `text/html` page, and a redirect
-# is ✗ because doctor follows none, as Check does not), and Your server
+# is a `!` warning, as Check words it, since the app's downloads follow one
+# though doctor itself does not), and Your server
 # answering /prose/v1/models with the key. It prints HTTP status codes only,
 # never a secret: the two tokens reach the shell as "$$BOND_…" references
 # through the `export` beside MS_ENV, so `make -n app-doctor` shows the
@@ -1780,7 +1781,7 @@ app-doctor:
 	       text/html*) printf "  $(RED)✗$(RESET) the registry answered with a web page, not a model — check BOND_REGISTRY_URL\n"; fail=1;; \
 	       *) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
 	     esac;; \
-	     3[0-9][0-9]) printf "  $(RED)✗$(RESET) the registry answered with a redirect — HTTP %s; use the address it redirects to, or the https address\n" "$$code"; fail=1;; \
+	     3[0-9][0-9]) printf "  $(YELLOW)!$(RESET) the registry answered with a redirect — HTTP %s; the app follows it, but the https address, or the one it redirects to, is steadier\n" "$$code";; \
 	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
 	     404) printf "  $(RED)✗$(RESET) the registry does not have $(DECIDE_BUNDLE) — HTTP 404; check BOND_REGISTRY_URL\n"; fail=1;; \
 	     *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for $(DECIDE_BUNDLE)\n" "$$code"; fail=1;; \
