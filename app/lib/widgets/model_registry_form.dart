@@ -148,6 +148,10 @@ class _ModelRegistryFormState extends State<ModelRegistryForm> {
   /// Which press is the current one; an edit drops an answer in flight.
   int _seq = 0;
 
+  /// The address the last Save that landed wrote, normalised: blank when it
+  /// asked to follow the build.
+  String? _lastSaved;
+
   @override
   void didUpdateWidget(ModelRegistryForm old) {
     super.didUpdateWidget(old);
@@ -174,9 +178,14 @@ class _ModelRegistryFormState extends State<ModelRegistryForm> {
   }
 
   /// The typed address is not the saved one, so Check, which asks the
-  /// saved one, would answer about somewhere else.
-  bool get _unsaved =>
-      normalizeBoxBaseUrl(_url.text) != normalizeBoxBaseUrl(widget.url);
+  /// saved one, would answer about somewhere else. A blank field that was
+  /// SAVED blank is the saved one: it follows the build, and [widget.url] is
+  /// then the build's address.
+  bool get _unsaved {
+    final typed = normalizeBoxBaseUrl(_url.text);
+    if (typed == normalizeBoxBaseUrl(widget.url)) return false;
+    return !(typed.isEmpty && _lastSaved == '');
+  }
 
   bool get _plainHttpElsewhere {
     final uri = Uri.tryParse(_url.text.trim());
@@ -350,6 +359,7 @@ class _ModelRegistryFormState extends State<ModelRegistryForm> {
       // The token has reached the keychain; nothing here holds it now. The
       // fields were held during the Save, so this is what was sent.
       _token.clear();
+      _lastSaved = normalizeBoxBaseUrl(url);
       if (seq == _seq) _result = ModelRegistryForm.savedText;
     });
   }

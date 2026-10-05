@@ -568,7 +568,7 @@ What goes wrong, and what the owner sees:
 |---------|-----------|-------------|------|
 | Connection refused, TLS failure, timeout, 5xx, 429 | `DecisionUnavailableException` | `decision_unavailable` | `Decision model unreachable · N waiting · retrying each minute` |
 | Heads file refused (not JSON, schema, question set); a systemone server lists another `qhash` or renderer, answers `/v1/systemone` with 404/405, or answers outside the contract; the identity probe finds another tokenizer, or `/tokenize` or the encoder's `/v1/embeddings` answers 404 or 405; the served GGUF's name does not contain the heads file's `model` (`DecisionModelMismatchException`: "The decision model file (<file>) does not match its heads file (<model>). Install them together."); the server answers a normalised or wrong-width vector, the wrong vector count or index, no token list, non-JSON, or refuses even the truncated ids; the address is not an embeddings URL | `DecisionMisconfiguredException` (a `DecisionUnavailableException`; its sentence names the cause and carries no key) | `decision_misconfigured` | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or press Download again under Settings, Models` |
-| Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
+| Heads file is the older model's (schema 1) | `DecisionOlderModelException` (a `DecisionMisconfiguredException`) | `decision_older_model` | `The installed decision model is an older version that this app no longer reads · N waiting · open Settings, Models and press Download again to resume sorting new mail` |
 | Heads file missing, or the managed decision model the router does not serve (`LlmTarget.unavailable`), refused before any request | `DecisionNotInstalledException` (a `DecisionUnavailableException`) | `decision_not_installed` | `The decision model is not downloaded yet · N waiting · open Settings, Models` |
 | 401 / 403, or a key no header can carry (refused before sending) | `DecisionUnauthorizedException` (an `LlmUnauthorizedException`) | `decision_unauthorized` | `The decision server refused the access key · N waiting` |
 | Any other 4xx (a systemone 413/422 included) | `LlmFormatException` | none: counted against the item | none |
@@ -818,8 +818,11 @@ models folder with the `.downloadable` set.
   aged-out signature, and the hub is asked again at once. No URL is ever
   stored.
 - **The registry.** The base and the token are LOOKUPS the provider hands in
-  (`registryBase`, `registryToken`), the base read once per run and the token
-  per registry entry; neither is stored by the downloader. With no base the
+  (`registryBase`, `registryToken`), both read per registry entry at the same
+  moment, and the token lookup is handed the base it will be sent to
+  (`registryToken(base)`; the provider answers only while that base has the
+  current registry address's origin), so a Save mid-run can never send one
+  host's token to another; neither is stored by the downloader. With no base the
   entry fails at once as `registry_not_configured`, before any request (files
   already here at the manifest's digests still count as done), and the rest
   of the set downloads. `Authorization: Bearer <token>` goes to the registry's
@@ -875,7 +878,11 @@ this Mac, a manifest bump.
   already there, which is exactly when the decision role is on Your server
   (D10): a ModernBERT server still needs this Mac's heads file and the entry
   is one download, so there is one rule and no heads-only path (a Kev server
-  ignores the files). Then `.downloadable`. An entry is missing when its
+  ignores the files). Under `BOND_DEV_HAND_SERVERS` (no managed server) the
+  embedding entry is left out, because `make embed` serves it from the
+  Homebrew/Hugging Face cache; the decide entry stays, since the app reads the
+  heads file from the models folder and `make decide` reads the same folder.
+  Then `.downloadable`. An entry is missing when its
   ledger rows are not current at this build's digests (`isCurrent`) or any of
   its files is gone from the folder (`filesPresent`).
 - **One ownership rule.** The ONE `ModelDownloader` refuses a second run, so:
@@ -887,12 +894,27 @@ this Mac, a manifest bump.
   and `standDown()`, which the gate calls as it shows the wizard, cancels a
   run the ensurer OWNS, keeping its parts, so the wizard's run (whose
   `startDownload` likewise waits for `idle`, reading as in progress) resumes
-  from the byte. It is single-flight: a call during a pass returns that
-  pass's future.
+  from the byte. A run that is PAUSED (`ModelDownloader.paused`) is never
+  waited for: the wizard cancels its own paused run as it leaves the download
+  step (Continue, Back, Finish, Back to the inbox), the ensurer cancels
+  another owner's paused run instead of awaiting it (it runs only while the
+  wizard is not showing, so nothing could resume it), and the wizard's
+  `startDownload` cancels one it inherits rather than showing it as waiting.
+  The parts are kept every time, so the next run resumes from the byte. It is
+  single-flight, coalescing FORWARD: a call while the pass still waits for
+  another owner's run joins that pass (its `reverify` merged in), and a call
+  once the pass has scanned gets ONE further pass, shared by every call made
+  meanwhile and started as the current one ends, so a placement move, a
+  registry Save or a Download again mid-pass is seen. The further pass is
+  skipped (its callers still complete) when the wizard opened, the ensurer
+  was disposed, or `standDown()` was called meanwhile.
 - **Download again.** `ensure(reverify: {id})` treats the entry as missing
   whatever the ledger says, and the downloader's `run(files, rehash)` HASHES
   those entries' files on disk instead of trusting a `done` row: a good file
-  is kept with no byte fetched, a wrong or damaged one replaced.
+  is kept with no byte fetched, a wrong or damaged one replaced. The wrong
+  file stays on disk until its replacement is renamed over it, its ledger row
+  no longer `done` meanwhile, so a registry that is down never turns a file
+  into none.
 - **The token is ready first.** Before a run it awaits the prefs notifier's
   `ready`, so a STORED registry token is in the cache the downloader's lookup
   reads; the wizard's own run does the same (`SetupController.prefsReady`).
@@ -1007,7 +1029,7 @@ download ledger.
   | `not_installed` | either | `A model this Mac runs is not downloaded · N waiting · open Settings, Models` |
   | `no_address` | Your server | `The generative model has no server address · N waiting · add one under Settings, Models` |
   | `decision_not_installed` | either | `The decision model is not downloaded yet · N waiting · open Settings, Models` |
-  | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · install the current decision model to resume sorting new mail` |
+  | `decision_older_model` | either | `The installed decision model is an older version that this app no longer reads · N waiting · open Settings, Models and press Download again to resume sorting new mail` |
   | `decision_misconfigured` | either | `The decision server is not the decision model, or its heads file does not match · N waiting · check its address in Settings, or press Download again under Settings, Models` |
   | `decision_unauthorized` | either | `The decision server refused the access key · N waiting` |
   | `session` | either | `Triaging N remaining…` |

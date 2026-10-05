@@ -480,13 +480,17 @@ void main() {
 
       final downloader = container.read(modelDownloaderProvider);
       expect(downloader.registryBase!(), registryUrl);
-      expect(downloader.registryToken!(), registryToken);
+      expect(downloader.registryToken!(registryUrl), registryToken);
+      // Asked for a base that is not the address the prefs hold now (a Save
+      // landed between the two reads), the lookup answers nothing.
+      expect(downloader.registryToken!(otherRegistry), isNull);
 
       // Late-bound: a typed address on another host is read on the next ask,
       // and the build's token does not follow it there.
       await prefs.useRegistry(url: otherRegistry);
       expect(downloader.registryBase!(), otherRegistry);
-      expect(downloader.registryToken!(), isNull);
+      expect(downloader.registryToken!(otherRegistry), isNull);
+      expect(downloader.registryToken!(registryUrl), isNull);
     });
   });
 

@@ -335,8 +335,8 @@ String railProgressLine({
     // rail may not be a developer. No retry cadence either.
     case 'decision_older_model':
       return 'The installed decision model is an older version that this '
-          'app no longer reads · $waiting waiting · install the current '
-          'decision model to resume sorting new mail';
+          'app no longer reads · $waiting waiting · open Settings, Models '
+          'and press Download again to resume sorting new mail';
     // A server that answers, but not as the decision model does (another
     // model's tokenizer, normalised vectors, no /tokenize), or a heads file
     // this build refuses. Waiting fixes neither, so no retry cadence is

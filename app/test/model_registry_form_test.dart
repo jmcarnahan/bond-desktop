@@ -275,6 +275,52 @@ void main() {
     expect(checks, 1);
   });
 
+  testWidgets('a BLANK address saved follows the build, and Check is on for '
+      'the build\'s address', (tester) async {
+    const typed = 'https://registry.example.com/artifactory/bond-models';
+    var checks = 0;
+    var hostUrl = typed;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: StatefulBuilder(
+          builder: (context, setState) => SingleChildScrollView(
+            child: ModelRegistryForm(
+              url: hostUrl,
+              onSave: ({required url, token, required clearToken}) async {
+                saves.add((url: url, token: token, clearToken: clearToken));
+                // Blank means follow the build: the host re-resolves to it.
+                setState(() => hostUrl = url.isEmpty ? _registry : url);
+                return null;
+              },
+              onCheck: () async {
+                checks++;
+                return RegistryCheck.reachable;
+              },
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await type(tester, ModelRegistryForm.urlKey, '');
+    expect(find.text(ModelRegistryForm.saveFirstText), findsOneWidget,
+        reason: 'blank is not saved yet; Check would ask the typed host');
+
+    await press(tester, ModelRegistryForm.saveKey);
+    expect(saves.single.url, '');
+    expect(field(tester, ModelRegistryForm.urlKey).controller!.text, isEmpty);
+    expect(find.text(ModelRegistryForm.saveFirstText), findsNothing);
+    expect(
+      tester
+          .widget<OutlinedButton>(find.byKey(ModelRegistryForm.checkKey))
+          .onPressed,
+      isNotNull,
+    );
+    await press(tester, ModelRegistryForm.checkKey);
+    expect(checks, 1);
+  });
+
   testWidgets('both fields are held while a Save is out, and the token is '
       'emptied when it lands', (tester) async {
     final landed = Completer<String?>();

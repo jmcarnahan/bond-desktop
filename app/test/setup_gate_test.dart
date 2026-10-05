@@ -708,7 +708,7 @@ void main() {
         sha256: (_) async => null,
         resolveUri: hub.resolveUriFor,
         registryBase: () => hub.registryBase,
-        registryToken: () => 'test-token-123',
+        registryToken: (_) => 'test-token-123',
         sleep: (_) async {},
         maxAttempts: 1,
         progressInterval: const Duration(milliseconds: 1),

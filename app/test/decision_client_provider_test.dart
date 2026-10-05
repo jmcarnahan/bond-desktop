@@ -138,6 +138,18 @@ void main() {
     expect(noAddress, {routerEmbedId, routerDecideId});
   });
 
+  test('under hand-started servers the ensure set is the decision model '
+      'alone: no embedding download', () async {
+    // `make embed` serves embeddings from the Homebrew/HF cache; the heads
+    // file is still read from the models folder, which `make decide` reads.
+    final ids = await ensureIds(const AppPrefs(
+      managedServer: false,
+      modelPlacement: ModelPlacement.local,
+    ));
+    expect(ids, {routerDecideId});
+    expect(ids, isNot(contains(routerEmbedId)));
+  });
+
   test('the heads file is read from the registry entry\'s folder', () async {
     final path = p.join(support.path, 'models',
         'artifactory_bond-decide-mbl-v3swap', 'decide-heads.json');

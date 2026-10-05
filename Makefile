@@ -833,7 +833,7 @@ BOND_BOX_URL        ?=
 # keychain beats it. A distributed build (dist/) carries none.
 BOND_BOX_KEY        ?=
 # The registry bundle the decision model is downloaded from, and the one
-# `make app-doctor` asks the registry for.
+# `make app-doctor` asks the registry for (its $(DECIDE_REMOTE_HEADS)).
 DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
 # The secrets travel as ENVIRONMENT, never as make text: every recipe that
 # needs one names it as a shell reference.
@@ -1729,7 +1729,9 @@ app-analyze:
 
 # Is this environment configured? One line each, ✓ or ✗: flutter and its
 # version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
-# registry answering for $(DECIDE_BUNDLE) with the token, and Your server
+# registry answering for $(DECIDE_BUNDLE) with the token (its first byte of
+# $(DECIDE_REMOTE_HEADS), a file the app really downloads, the way Settings'
+# Check asks; 200 or 206 is ✓), and Your server
 # answering /prose/v1/models with the key. It prints HTTP status codes only,
 # never a secret: the two tokens reach the shell as "$$BOND_…" references
 # through the `export` beside MS_ENV, so `make -n app-doctor` shows the
@@ -1738,7 +1740,7 @@ app-analyze:
 # downloaded, started or written.
 app-doctor:
 	@fail=0; \
-	 if v=$$($(FLUTTER) --version 2>/dev/null | head -1) && [ -n "$$v" ]; then \
+	 if v=$$($(FLUTTER) --version 2>/dev/null | grep -m1 '^Flutter') && [ -n "$$v" ]; then \
 	   printf "  $(GREEN)✓$(RESET) %s\n" "$$v"; \
 	 else \
 	   printf "  $(RED)✗$(RESET) flutter not found — install it, or set FLUTTER in local.mk\n"; fail=1; \
@@ -1759,9 +1761,9 @@ app-doctor:
 	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_TOKEN is not set in local.mk\n"; fail=1; \
 	 else \
 	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$BOND_REGISTRY_TOKEN" | \
-	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/bundle.json"); \
+	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 -r 0-0 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/$(DECIDE_REMOTE_HEADS)"); \
 	   case "$$code" in \
-	     200) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
+	     200|206) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
 	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
 	     *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for $(DECIDE_BUNDLE)\n" "$$code"; fail=1;; \
 	   esac; \

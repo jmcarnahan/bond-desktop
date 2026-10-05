@@ -297,8 +297,8 @@ void main() {
         expect(
           line,
           'The installed decision model is an older version that this app no '
-          'longer reads · 3 waiting · install the current decision model to '
-          'resume sorting new mail',
+          'longer reads · 3 waiting · open Settings, Models and press '
+          'Download again to resume sorting new mail',
           reason: 'onBox: $onBox',
         );
         expect(line, isNot(contains('make')));

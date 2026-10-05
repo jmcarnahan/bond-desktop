@@ -173,7 +173,7 @@ void main() {
     Uri Function(ModelFile)? resolveUri,
     ResolveSidecarUri? resolveSidecarUri,
     String Function()? registryBase,
-    String? Function()? registryToken,
+    String? Function(String base)? registryToken,
   }) {
     final downloader = ModelDownloader(
       manifest: which ?? manifest,
@@ -328,7 +328,7 @@ void main() {
 
     final events = await build(
       registryBase: () => hub.registryBase,
-      registryToken: () => _fakeToken,
+      registryToken: (_) => _fakeToken,
     ).run([decide, embed]).toList();
 
     expect(events.where((e) => e.id == routerDecideId), isEmpty);
@@ -1205,9 +1205,10 @@ void main() {
       );
     }
 
-    ModelDownloader buildRegistry({String? Function()? token}) => build(
+    ModelDownloader buildRegistry({String? Function(String base)? token}) =>
+        build(
           registryBase: () => hub.registryBase,
-          registryToken: token ?? () => _fakeToken,
+          registryToken: token ?? (_) => _fakeToken,
         );
 
     test('weights and heads land under the app names with the bearer',
@@ -1298,7 +1299,7 @@ void main() {
       // A trailing slash on the base, as a pasted address often has.
       final events = await build(
         registryBase: () => '${hub.registryBase}/',
-        registryToken: () => _fakeToken,
+        registryToken: (_) => _fakeToken,
       ).run([decide]).toList();
 
       expect(events.last.status, DownloadStatus.done);
@@ -1321,7 +1322,7 @@ void main() {
         ledger = DownloadLedger.empty;
         final events = await build(
           registryBase: base,
-          registryToken: () => _fakeToken,
+          registryToken: (_) => _fakeToken,
         ).run([decide, embed]).toList();
 
         final failed = events.lastWhere((e) => e.id == routerDecideId);
@@ -1359,7 +1360,7 @@ void main() {
 
       final events = await build(
         registryBase: () => hub.registryBase,
-        registryToken: () => 'not-the-test-token',
+        registryToken: (_) => 'not-the-test-token',
       ).run([decide]).toList();
 
       expect(events.last.status, DownloadStatus.failed);
@@ -1384,7 +1385,7 @@ void main() {
     test('no token sends no authorization header at all', () async {
       final decide = publishDecide();
 
-      for (final token in <String? Function()>[() => null, () => '']) {
+      for (final token in <String? Function(String)>[(_) => null, (_) => '']) {
         ledger = DownloadLedger.empty;
         hub.registryAuth.clear();
         final folderNow = Directory(folder());
@@ -1486,7 +1487,7 @@ void main() {
       await hub.startStorage();
       hub.registryRedirect = true;
 
-      for (final token in <String? Function()>[() => _fakeToken, () => null]) {
+      for (final token in <String? Function(String)>[(_) => _fakeToken, (_) => null]) {
         ledger = DownloadLedger.empty;
         hub.registryAuth.clear();
         hub.storageAuth.clear();
@@ -1498,7 +1499,7 @@ void main() {
         final events = await buildRegistry(token: token).run([decide]).toList();
 
         expect(events.last.status, DownloadStatus.done,
-            reason: 'token: ${token() != null}');
+            reason: 'token: ${token('') != null}');
         expect(events.where((e) => e.error == DownloadError.unauthorized),
             isEmpty);
         // The weights' resolve, its re-resolve after the 403, then the heads.
@@ -1561,6 +1562,132 @@ void main() {
       expect(File(headsDestOf(decide)).readAsBytesSync(),
           hub.registryContents['$bundle/heads.json']);
       expect(hub.registryCount, greaterThan(asked));
+    });
+
+    test('a rehash whose replacement cannot be fetched leaves the old file '
+        'where it was, trusted by nothing, and a later run replaces it',
+        () async {
+      final decide = publishDecide();
+      final downloader = buildRegistry();
+      await downloader.run([decide]).toList();
+      final wrong = List<int>.filled(16, 1);
+      await File(headsDestOf(decide)).writeAsBytes(wrong);
+
+      // The registry refuses the token: the replacement never arrives.
+      hub.registryBearer = 'another-fake-token';
+      final refused = await downloader.run([decide], {decide.id}).toList();
+
+      expect(refused.last.status, DownloadStatus.failed);
+      expect(File(headsDestOf(decide)).readAsBytesSync(), wrong,
+          reason: 'the old file is not deleted before its replacement exists');
+      expect(ledger.isCurrent(decide), isFalse,
+          reason: 'its row no longer vouches for it');
+      expect(ledger[DownloadLedger.headsId(decide.id)]?.status,
+          isNot(DownloadStatus.done));
+
+      // A plain run, no rehash: the old file is not taken for a finished one.
+      hub.registryBearer = null;
+      final fixed = await downloader.run([decide]).toList();
+
+      expect(fixed.last.status, DownloadStatus.done);
+      expect(File(headsDestOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/heads.json']);
+      expect(sha256Hex(File(headsDestOf(decide)).readAsBytesSync()),
+          decide.heads!.sha256);
+      expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    group('the address and the token come from one snapshot', () {
+      late FakeHubServer other;
+      late ModelFile second;
+
+      setUp(() async {
+        other = await FakeHubServer.start();
+        // A second registry entry, larger, so it is fetched after decide.
+        const secondBundle = 'bond-second-bundle';
+        final weights = fakeWeights(9000, seed: 41);
+        final head = fakeWeights(700, seed: 42);
+        for (final server in [hub, other]) {
+          server.registryContents['$secondBundle/model-f16.gguf'] = weights;
+          server.registryContents['$secondBundle/heads.json'] = head;
+        }
+        second = ModelFile(
+          id: 'bond-second',
+          role: ModelRole.decide,
+          displayName: 'Test Second',
+          repo: 'artifactory/$secondBundle',
+          file: 'bond-second-f16.gguf',
+          revision: '',
+          sizeBytes: weights.length,
+          sha256: sha256Hex(weights),
+          minRamBytes: 0,
+          license: 'Fictional-1.0',
+          licenseUrl: 'https://example.invalid/licence',
+          source: sourceArtifactory,
+          bundle: secondBundle,
+          remoteFile: 'model-f16.gguf',
+          heads: ModelHeads(
+            file: 'second-heads.json',
+            remoteFile: 'heads.json',
+            sha256: sha256Hex(head),
+            sizeBytes: head.length,
+          ),
+        );
+      });
+
+      tearDown(() => other.close());
+
+      /// The address moves to [other]'s origin after the first entry's
+      /// read, the way a Save in Settings mid-run moves it.
+      String Function() movingBase() {
+        var reads = 0;
+        return () => reads++ == 0 ? hub.registryBase : other.registryBase;
+      }
+
+      test('a lookup that answers only for the old origin sends the new base '
+          'no token at all', () async {
+        final decide = publishDecide();
+        final asked = <String>[];
+        final downloader = build(
+          registryBase: movingBase(),
+          registryToken: (base) {
+            asked.add(base);
+            return sameOrigin(base, hub.registryBase) ? _fakeToken : null;
+          },
+        );
+
+        final events = await downloader.run([decide, second]).toList();
+
+        expect(events.where((e) => e.status == DownloadStatus.done),
+            hasLength(2));
+        expect(asked, [hub.registryBase, other.registryBase],
+            reason: 'each entry asks for the base its legs are sent to');
+        expect(hub.registryCount, 2, reason: 'decide, at the old base');
+        expect(hub.registryAuth.every((a) => a == 'Bearer $_fakeToken'),
+            isTrue);
+        expect(other.registryCount, 2, reason: 'the second, at the new base');
+        expect(other.registryAuth, everyElement(isNull));
+      });
+
+      test('a lookup that answers for the new base sends that token there '
+          'and only there', () async {
+        const otherToken = 'other-fake-token-789';
+        final decide = publishDecide();
+        final downloader = build(
+          registryBase: movingBase(),
+          registryToken: (base) =>
+              sameOrigin(base, other.registryBase) ? otherToken : null,
+        );
+
+        final events = await downloader.run([decide, second]).toList();
+
+        expect(events.where((e) => e.status == DownloadStatus.done),
+            hasLength(2));
+        expect(hub.registryAuth, everyElement(isNull));
+        expect(other.registryCount, 2);
+        expect(other.registryAuth.every((a) => a == 'Bearer $otherToken'),
+            isTrue);
+      });
     });
 
     test('a registry answering with a web page fails at once as '

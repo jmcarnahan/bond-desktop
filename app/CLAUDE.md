@@ -622,14 +622,21 @@ enforce the ones that are commands.
 - `ModelEnsurer` (`services/models/model_ensurer.dart`, `modelEnsurerProvider`)
   downloads what the placements need and the disk lacks, outside the wizard:
   the set is `modelEnsureSetProvider` (`managedManifestProvider` plus the
-  decide entry when absent, i.e. under Your server, D10, `.downloadable`).
+  decide entry when absent, i.e. under Your server, D10, `.downloadable`;
+  no embed entry under `BOND_DEV_HAND_SERVERS`, where `make embed` serves it).
   ONE ownership rule for the ONE downloader: nothing starts while
   `setupShowingProvider` is up (the gate writes it from its decision's
   callback, never in a build); another owner's run is WAITED for
   (`EnsureState.waiting`, then `ModelDownloader.idle`, then the scan), never
   dropped; `standDown()` (the gate, as it shows the wizard) cancels the
   ensurer's OWN run keeping its parts; the wizard's `startDownload` waits for
-  `idle` too (`SetupState.downloadWaiting`). It is SINGLE-FLIGHT, AWAITS
+  `idle` too (`SetupState.downloadWaiting`). A PAUSED run
+  (`ModelDownloader.paused`) is never waited for: the wizard cancels its own
+  as it leaves the download step (any `_goTo` off it, Finish, Back to the
+  inbox), and both waiting loops cancel one they find, parts kept. It is
+  SINGLE-FLIGHT coalescing FORWARD (a call before the pass's scan joins it; a
+  call after gets ONE shared further pass, skipped on blocked, dispose or
+  `standDown`), AWAITS
   `prefs.ready` before a run (a stored registry token is a synchronous cache
   lookup), and calls `afterRun(landedIds)` after EVERY pass: the provider
   restarts the router when a landed id is one it serves, else asks
@@ -653,8 +660,10 @@ enforce the ones that are commands.
   that failed shows `registryLaterText` and never holds it, and
   `allDownloaded` decides whether arriving at the step starts a run.
 - Registry downloads (`ModelDownloader` with `registryBase` and
-  `registryToken`, both LOOKUPS: the provider's
-  `AppPrefs.effectiveRegistryUrl` and `bearerFor(registryId)`). A registry
+  `registryToken`, both LOOKUPS read per registry entry: the provider's
+  `AppPrefs.effectiveRegistryUrl` and `registryToken(base)`, which answers
+  `bearerFor(registryId)` only when `base` has the current address's origin,
+  so the address and the token come from one snapshot). A registry
   leg's URL is `ModelFile.registryUri(base)` / `headsRegistryUri(base)`
   (`<base>/bundles/<bundle>/<remoteFile>`, the base through
   `normalizeBoxBaseUrl`); `resolveUri` and `sidecarResolveUri` throw for a

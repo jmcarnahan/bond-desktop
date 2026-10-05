@@ -632,6 +632,9 @@ class SetupController extends StateNotifier<SetupState> {
   /// A relaunch lands on Notifications, whose Continue re-asks — macOS answers
   /// a settled prompt instantly — and leads back to All set.
   Future<void> _goTo(SetupStep target) async {
+    if (state.step == SetupStep.download && target != SetupStep.download) {
+      await _cancelIfPaused();
+    }
     final recorded =
         target == SetupStep.done ? SetupStep.notifications : target;
     try {
@@ -840,6 +843,13 @@ class SetupController extends StateNotifier<SetupState> {
   }
 
   Future<void> _startDownload() async {
+    // A PAUSED run inherited from an earlier visit is never waited for:
+    // nothing would resume it. Cancelled, its parts kept, so the run below
+    // carries on from the byte.
+    if (downloader.paused) {
+      await downloader.cancel();
+      await downloader.idle;
+    }
     // Somebody else's run holds the downloader (the model ensurer's, which
     // the gate cancelled as the wizard opened): wait for it to end, reading
     // as a download in progress meanwhile, then start this step's own.
@@ -926,6 +936,15 @@ class SetupController extends StateNotifier<SetupState> {
   /// downloader rather than the button press.
   Future<void> cancelDownload() => downloader.cancel();
 
+  /// A PAUSED run never outlives the download step: once the wizard has left
+  /// it nothing could resume it, and a run parked for ever holds the one
+  /// downloader from the model ensurer. Cancelled the way Cancel does it, so
+  /// the parts stay and the ensurer resumes them from the byte after Finish.
+  /// A run that is still moving is left alone: it may outlive the screen.
+  Future<void> _cancelIfPaused() async {
+    if (downloader.paused) await cancelDownload();
+  }
+
   Future<void> probeSignIn() async {
     bool signedIn;
     try {
@@ -996,6 +1015,7 @@ class SetupController extends StateNotifier<SetupState> {
     }
     var saved = false;
     try {
+      await _cancelIfPaused();
       // BEFORE the stored word and before the server: the generative
       // placement, the tier and the draft policy are what the first drain
       // resolves through. A write that throws leaves the wizard on this
@@ -1061,9 +1081,12 @@ class SetupController extends StateNotifier<SetupState> {
   ///
   /// A download this run started is left alone: the run outlives the screen
   /// by [dispose]'s reasoning, and cancelling one an hour in would be a
-  /// steeper price than the button implies.
+  /// steeper price than the button implies. A PAUSED one is cancelled
+  /// instead, keeping its parts: nothing could resume it once the wizard is
+  /// gone.
   Future<bool> returnToInbox() async {
     try {
+      await _cancelIfPaused();
       await store.set(SetupStore.setupKey, SetupStep.done.name);
       await store.remove(SetupStore.previousSetupKey);
     } on Object catch (e) {

@@ -239,18 +239,21 @@ class ModelDownloader {
   final Future<int?> Function(String reason)? beginActivity;
   final Future<void> Function(int token)? endActivity;
 
-  /// The model registry's address, read once at the top of a run like the
-  /// folder. Absent, or answering empty, means no registry is configured: a
-  /// registry entry then fails with [DownloadError.registryNotConfigured]
-  /// before any request, and the rest of the set still downloads.
+  /// The model registry's address, read for each registry entry as its legs
+  /// are built, at the same moment as [registryToken]. Absent, or answering
+  /// empty, means no registry is configured: a registry entry then fails with
+  /// [DownloadError.registryNotConfigured] before any request, and the rest
+  /// of the set still downloads.
   final String Function()? registryBase;
 
-  /// The registry's bearer token, LOOKED UP for each registry entry as its
-  /// legs are built and held only on those legs' headers for as long as the
-  /// entry is fetched. Never a field holding the value, never a log line,
-  /// never a ledger row or a progress event. Null or empty sends no header,
-  /// and the registry's own 401 then says so.
-  final String? Function()? registryToken;
+  /// The registry's bearer token for the base it will be SENT to, LOOKED UP
+  /// for each registry entry as its legs are built and held only on those
+  /// legs' headers for as long as the entry is fetched. Handed that entry's
+  /// own base, so the address and the token come from one snapshot and a Save
+  /// mid-run cannot send one host's token to another. Never a field holding
+  /// the value, never a log line, never a ledger row or a progress event.
+  /// Null or empty sends no header, and the registry's own 401 then says so.
+  final String? Function(String base)? registryToken;
 
   final http.Client _client;
   final bool _ownsClient;
@@ -275,6 +278,10 @@ class ModelDownloader {
   DateTime? _lastLedgerWrite;
 
   bool get running => _running;
+
+  /// A run is in flight and [pause] holds it: parked at its next stop until
+  /// [resume] or [cancel]. False when nothing runs.
+  bool get paused => _running && _pauseRequested;
 
   /// Completes when no run is in flight: at once when idle, otherwise once
   /// the run in flight has ended (finished, failed or been cancelled). The
@@ -398,9 +405,6 @@ class ModelDownloader {
       // The whole list before the first byte, so a screen draws every row at
       // once rather than growing one line at a time.
       final folder = modelsFolder();
-      // Read once per run, like the folder: an address changed in Settings
-      // mid-run is picked up by the next one.
-      final base = normalizeBoxBaseUrl(registryBase?.call() ?? '');
       for (final file in ordered) {
         // Summed across the legs, because the row is the ENTRY's: a prose
         // model whose weights are here and whose sidecar is half here draws
@@ -422,6 +426,11 @@ class ModelDownloader {
       for (final file in ordered) {
         if (_cancelRequested) break;
         try {
+          // Read per entry, beside the token its legs are built with, so the
+          // two always describe the same address.
+          final base = file.isRegistry
+              ? normalizeBoxBaseUrl(registryBase?.call() ?? '')
+              : '';
           if (file.isRegistry && base.isEmpty) {
             await _withoutRegistry(file, folder);
             continue;
@@ -514,7 +523,7 @@ class ModelDownloader {
   List<_Leg> _legsFor(ModelFile file, String base) {
     final specs = _specsFor(file);
     final headers =
-        file.isRegistry ? _registryHeaders() : const <String, String>{};
+        file.isRegistry ? _registryHeaders(base) : const <String, String>{};
     final legs = <_Leg>[];
     var prior = 0;
     for (var i = 0; i < specs.length; i++) {
@@ -545,10 +554,10 @@ class ModelDownloader {
     return file.isRegistry ? file.registryUri(base) : _resolveUri(file);
   }
 
-  /// The registry's `authorization` header, from a lookup made NOW, or none
-  /// when the lookup has no token.
-  Map<String, String> _registryHeaders() {
-    final token = registryToken?.call();
+  /// The registry's `authorization` header for [base], from a lookup made
+  /// NOW, or none when the lookup has no token for it.
+  Map<String, String> _registryHeaders(String base) {
+    final token = registryToken?.call(base);
     if (token == null || token.isEmpty) return const {};
     return {'authorization': 'Bearer $token'};
   }
@@ -685,7 +694,12 @@ class ModelDownloader {
         await _finish(leg, DownloadStatus.done, total, total);
         return true;
       }
-      _deleteQuietly(dest);
+      // The wrong file STAYS until its replacement is renamed over it: a
+      // registry that is down must not turn a file on disk into none. Its row
+      // stops being `done` here, so nothing trusts it meanwhile and a retry
+      // hashes it again rather than taking it for a finished download.
+      await _record(leg, DownloadStatus.pending, _lengthOf(part), total,
+          force: true);
     }
 
     var attempts = 0;

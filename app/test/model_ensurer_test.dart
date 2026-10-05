@@ -79,7 +79,7 @@ void main() {
       manifest: manifestFor(files),
       modelsFolder: folder,
       registryBase: () => registryBase,
-      registryToken: () => _fakeToken,
+      registryToken: (_) => _fakeToken,
       readLedger: () async => ledger,
       writeLedger: (updated) async => ledger = updated,
       // Null sends every verify to the Dart digest, as under `flutter test`.
@@ -244,18 +244,205 @@ void main() {
     expect(nudges, [<String>{}], reason: 'a pass, with nothing of its own');
   });
 
-  test('is single-flight: a call during a pass gets that pass', () async {
-    hub.chunkDelay = const Duration(milliseconds: 2);
-    final downloader = downloaderFor([embed]);
-    final ensurer = ensurerFor(downloader, [embed]);
+  group('single-flight, coalescing forward', () {
+    /// Held at `beforeRun`, i.e. AFTER the pass has scanned: the next pass
+    /// that reaches it waits until the test completes it.
+    Completer<void>? hold;
+    Future<void> holding() async {
+      final gate = hold;
+      hold = null;
+      if (gate != null) await gate.future;
+    }
 
-    final first = ensurer.ensure();
-    final second = ensurer.ensure();
+    test('two calls during a pass give exactly two passes', () async {
+      final downloader = downloaderFor([embed]);
+      final ensurer = ensurerFor(downloader, [embed], beforeRun: holding);
+      final gate = hold = Completer<void>();
 
-    expect(identical(first, second), isTrue);
+      final first = ensurer.ensure();
+      final second = ensurer.ensure();
+
+      expect(identical(first, second), isFalse);
+      gate.complete();
+      expect((await first).phase, EnsurePhase.done);
+      expect((await second).phase, EnsurePhase.done);
+      expect(nudges, [
+        {routerEmbedId},
+        <String>{},
+      ], reason: 'the pass, then one further pass that found nothing');
+    });
+
+    test('three calls during one pass still give exactly two', () async {
+      final downloader = downloaderFor([embed]);
+      final ensurer = ensurerFor(downloader, [embed], beforeRun: holding);
+      final gate = hold = Completer<void>();
+
+      final first = ensurer.ensure();
+      final second = ensurer.ensure();
+      final third = ensurer.ensure();
+
+      expect(identical(second, third), isTrue,
+          reason: 'every call during the pass shares the one further pass');
+      gate.complete();
+      await first;
+      await third;
+      expect(nudges, hasLength(2));
+    });
+
+    test('a reverify asked during a pass is done by the further pass',
+        () async {
+      final wanted = [decide];
+      final downloader = downloaderFor([embed, decide]);
+      final ensurer = ensurerFor(downloader, wanted, beforeRun: holding);
+      await ensurer.ensure();
+      expect(ledger.isCurrent(decide), isTrue);
+
+      // A pass for the embedding model, held after its scan.
+      wanted.add(embed);
+      final gate = hold = Completer<void>();
+      final first = ensurer.ensure();
+      await File(headsOf(decide)).writeAsBytes(List<int>.filled(1536, 9));
+      final again = ensurer.ensure(reverify: {routerDecideId});
+      gate.complete();
+      await first;
+      final result = await again;
+
+      expect(result.phase, EnsurePhase.done);
+      expect(File(headsOf(decide)).readAsBytesSync(),
+          hub.registryContents['$_bundle/heads.json'],
+          reason: 'the further pass hashed decide again and replaced it');
+    });
+
+    test('a wanted entry added during a pass is downloaded by the further '
+        'pass with no other press', () async {
+      final wanted = [embed];
+      final downloader = downloaderFor([embed, decide]);
+      final ensurer = ensurerFor(downloader, wanted, beforeRun: holding);
+      final gate = hold = Completer<void>();
+
+      final first = ensurer.ensure();
+      // A placement moved while the pass was already under way.
+      wanted.add(decide);
+      final again = ensurer.ensure();
+      gate.complete();
+      await first;
+      final result = await again;
+
+      expect(result.phase, EnsurePhase.done);
+      expect(File(destOf(decide)).existsSync(), isTrue);
+      expect(ledger.isCurrent(decide), isTrue);
+      expect(nudges, [
+        {routerEmbedId},
+        {routerDecideId},
+      ]);
+    });
+
+    test('standDown between passes skips the further pass, and its future '
+        'still completes', () async {
+      final downloader = downloaderFor([embed]);
+      final ensurer = ensurerFor(downloader, [embed], beforeRun: holding);
+      final gate = hold = Completer<void>();
+
+      final first = ensurer.ensure();
+      final again = ensurer.ensure();
+      await ensurer.standDown();
+      gate.complete();
+      await first;
+      await again.timeout(const Duration(seconds: 10));
+
+      expect(nudges, hasLength(1), reason: 'no further pass ran');
+    });
+
+    test('a call while the pass still waits for another owner joins that '
+        'pass', () async {
+      hub.chunkDelay = const Duration(milliseconds: 5);
+      final downloader = downloaderFor([embed]);
+      final ensurer = ensurerFor(downloader, [embed]);
+      final other = downloader.run([embed]).toList();
+
+      final first = ensurer.ensure();
+      final second = ensurer.ensure();
+
+      expect(identical(first, second), isTrue);
+      hub.chunkDelay = null;
+      await other;
+      await first;
+      expect(nudges, hasLength(1));
+    });
+  });
+
+  test('another owner\'s PAUSED run is cancelled rather than waited for, and '
+      'the pass downloads the file itself', () async {
+    decide = publishDecide(gguf: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = downloaderFor([decide]);
+    final ensurer = ensurerFor(downloader, [decide]);
+    // The wizard's run, paused and then left behind.
+    final other = downloader.run([decide]).toList();
+    final part = '${destOf(decide)}${ModelDownloader.partSuffix}';
+    await waitUntil(
+      () => File(part).existsSync() && File(part).lengthSync() > 0,
+      reason: 'bytes to land',
+    );
+    await downloader.pause();
+    expect(downloader.paused, isTrue);
     hub.chunkDelay = null;
-    expect((await first).phase, EnsurePhase.done);
-    expect(nudges, hasLength(1), reason: 'one pass, one nudge');
+
+    final result =
+        await ensurer.ensure().timeout(const Duration(seconds: 10));
+    await other;
+
+    expect(result.phase, EnsurePhase.done);
+    expect(result.landedIds, {routerDecideId});
+    expect(ledger.isCurrent(decide), isTrue);
+    expect(downloader.running, isFalse);
+  });
+
+  test('a downloader lookup that throws costs no unhandled error: ensure and '
+      'standDown both complete', () async {
+    final ensurer = ModelEnsurer(
+      downloader: () => throw StateError('the container is gone'),
+      wanted: () async => manifestFor([embed]),
+      modelsFolder: folder,
+      readLedger: () async => ledger,
+      beforeRun: () async {},
+      afterRun: (_) async {},
+    );
+    addTearDown(ensurer.dispose);
+
+    final result =
+        await ensurer.ensure().timeout(const Duration(seconds: 10));
+    expect(result.phase, EnsurePhase.idle);
+    await ensurer.standDown().timeout(const Duration(seconds: 10));
+  });
+
+  test('standDown completes when the lookup throws while its own run is in '
+      'flight', () async {
+    decide = publishDecide(gguf: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = downloaderFor([decide]);
+    var broken = false;
+    final ensurer = ModelEnsurer(
+      downloader: () =>
+          broken ? throw StateError('the container is gone') : downloader,
+      wanted: () async => manifestFor([decide]),
+      modelsFolder: folder,
+      readLedger: () async => ledger,
+      beforeRun: () async {},
+      afterRun: (_) async {},
+    );
+    addTearDown(ensurer.dispose);
+    final pass = ensurer.ensure();
+    await waitUntil(() => ensurer.state.value.phase == EnsurePhase.downloading,
+        reason: 'the run to start');
+
+    broken = true;
+    await ensurer.standDown().timeout(const Duration(seconds: 10));
+
+    broken = false;
+    hub.chunkDelay = null;
+    expect((await pass).phase, EnsurePhase.done,
+        reason: 'nothing was cancelled, so the run finished');
   });
 
   test('waits for the preferences before the run asks for anything',

@@ -120,9 +120,15 @@ class EnsureState {
 ///   dropped and a file that run landed still reaches the router through
 ///   [afterRun];
 /// - [standDown] cancels its OWN run when the wizard opens (parts are kept,
-///   so the wizard resumes from the byte).
-/// Single-flight on its own account too: a call during a pass returns that
-/// pass's future.
+///   so the wizard resumes from the byte);
+/// - a run somebody else left PAUSED is cancelled rather than waited for:
+///   nothing could ever resume it (see [_ensure]).
+/// Single-flight on its own account too, coalescing FORWARD: a call while a
+/// pass is still waiting for somebody else's run joins that pass, whose scan
+/// is still to come; a call once the pass has scanned gets ONE further pass,
+/// shared by every call made meanwhile and started when the current one ends,
+/// so a placement moved, a registry saved or a Download again pressed during
+/// a pass is seen.
 ///
 /// Plain Dart, no Riverpod: the provider hands it every collaborator as a
 /// closure read at call time, so a placement or a folder moved between two
@@ -169,6 +175,22 @@ class ModelEnsurer {
   Future<EnsureState>? _inFlight;
   bool _disposed = false;
 
+  /// The pass in flight has begun its scan: a call now needs a pass of its
+  /// own rather than this one.
+  bool _scanned = false;
+
+  /// What the pass in flight re-verifies, merged into by a call that arrives
+  /// before its scan.
+  Set<String> _reverify = {};
+
+  /// The one further pass owed to the calls made after the scan, and what it
+  /// re-verifies.
+  Completer<EnsureState>? _again;
+  Set<String> _againReverify = {};
+
+  /// [standDown] was called: a further pass owed is skipped.
+  bool _skipAgain = false;
+
   /// This ensurer's own run is in flight.
   bool _owns = false;
 
@@ -186,22 +208,64 @@ class ModelEnsurer {
   /// [reverify] names entries to treat as missing even when the ledger says
   /// they are current, whose files the downloader HASHES again: a good file
   /// is kept, a wrong or damaged one replaced (Settings' Download again).
+  ///
+  /// A call during a pass that has not scanned yet joins it; a call after
+  /// the scan completes with the ONE further pass every such call shares.
   Future<EnsureState> ensure({Set<String> reverify = const {}}) {
     final running = _inFlight;
-    if (running != null) return running;
+    if (running != null) {
+      if (!_scanned) {
+        _reverify.addAll(reverify);
+        return running;
+      }
+      _againReverify.addAll(reverify);
+      return (_again ??= Completer<EnsureState>()).future;
+    }
     if (_blocked) return Future.value(_state.value);
-    final run = _ensure(reverify).whenComplete(() => _inFlight = null);
+    _skipAgain = false;
+    return _start(reverify);
+  }
+
+  Future<EnsureState> _start(Set<String> reverify) {
+    _reverify = {...reverify};
+    _scanned = false;
+    final run = _ensure().whenComplete(_passEnded);
     _inFlight = run;
     return run;
   }
 
+  /// Starts the further pass owed, unless the wizard opened, the ensurer was
+  /// disposed or stood down meanwhile: then the calls waiting on it complete
+  /// with the state as it stands.
+  void _passEnded() {
+    _inFlight = null;
+    final again = _again;
+    if (again == null) return;
+    _again = null;
+    final reverify = _againReverify;
+    _againReverify = {};
+    if (_skipAgain || _blocked) {
+      _skipAgain = false;
+      again.complete(_state.value);
+      return;
+    }
+    again.complete(_start(reverify));
+  }
+
   /// Cancels this ensurer's OWN run, keeping its parts, and completes once
   /// that run has ended. Nothing when the run in flight is somebody else's
-  /// or there is none.
+  /// or there is none. A further pass owed is skipped either way.
   Future<void> standDown() async {
+    if (_again != null) _skipAgain = true;
     if (!_owns) return;
+    final ModelDownloader shared;
+    try {
+      shared = _shared;
+    } on Object catch (e) {
+      debugPrint('model ensure: could not stand down: $e');
+      return;
+    }
     _stoodDown = true;
-    final shared = _shared;
     try {
       await shared.cancel();
     } on Object catch (e) {
@@ -210,20 +274,37 @@ class ModelEnsurer {
     await shared.idle;
   }
 
-  Future<EnsureState> _ensure(Set<String> reverify) async {
-    // Somebody else's run: wait for it rather than drop the kick.
-    if (_shared.running) {
-      final before = _state.value;
-      _set(const EnsureState(phase: EnsurePhase.downloading, waiting: true));
-      while (_shared.running) {
-        await _shared.idle;
+  Future<EnsureState> _ensure() async {
+    // Somebody else's run: wait for it rather than drop the kick. Inside the
+    // net, because the lookup builds a provider that can throw, or be read
+    // after its container is gone.
+    try {
+      if (_shared.running) {
+        final before = _state.value;
+        _set(const EnsureState(phase: EnsurePhase.downloading, waiting: true));
+        while (_shared.running) {
+          // A PAUSED run is cancelled, never waited for: this ensurer runs
+          // only while the wizard is not showing, so a paused run then has no
+          // screen that could ever resume it. Its parts are kept, and the
+          // scan below resumes them from the byte.
+          if (_shared.paused && !_owns && !_blocked) {
+            await _shared.cancel();
+          }
+          await _shared.idle;
+        }
+        if (_blocked) {
+          _set(before);
+          return _state.value;
+        }
       }
-      if (_blocked) {
-        _set(before);
-        return _state.value;
-      }
+    } on Object catch (e) {
+      debugPrint('model ensure: could not read the downloader: $e');
+      if (_state.value.waiting) _set(const EnsureState());
+      return _state.value;
     }
 
+    _scanned = true;
+    final reverify = {..._reverify};
     final List<ModelFile> missing;
     try {
       final set = await wanted();
@@ -256,7 +337,14 @@ class ModelEnsurer {
     }
     // Asked again: the wizard may have opened, or another run started,
     // across the awaits above. No await between this and `run`.
-    final shared = _shared;
+    final ModelDownloader shared;
+    try {
+      shared = _shared;
+    } on Object catch (e) {
+      debugPrint('model ensure: could not read the downloader: $e');
+      if (_state.value.waiting) _set(const EnsureState());
+      return _state.value;
+    }
     if (_blocked || shared.running) {
       if (_state.value.waiting) _set(const EnsureState());
       return _state.value;

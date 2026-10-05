@@ -135,9 +135,9 @@ void main() {
   /// Serves the decision model's two files from the fake REGISTRY, puts the
   /// registry entry describing them into [manifest] beside what [publish]
   /// made, and returns it.
-  ModelFile publishDecide() {
+  ModelFile publishDecide({int gguf = 3072}) {
     const bundle = 'bond-decide-mbl-v3swap';
-    final weights = fakeWeights(3072, seed: 31);
+    final weights = fakeWeights(gguf, seed: 31);
     final heads = fakeWeights(1024, seed: 32);
     hub.registryContents['$bundle/model-f16.gguf'] = weights;
     hub.registryContents['$bundle/heads.json'] = heads;
@@ -160,7 +160,7 @@ void main() {
       manifest: manifest,
       modelsFolder: folder,
       registryBase: registryBase,
-      registryToken: () => 'test-token-123',
+      registryToken: (_) => 'test-token-123',
       readLedger: store.downloadLedger,
       writeLedger: store.recordDownload,
       // Null makes every verify fall through to the Dart digest, which is
@@ -755,6 +755,101 @@ void main() {
 
     expect(controller.state.downloadWaiting, isFalse);
     expect(controller.state.allDownloaded, isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
+  });
+
+  // A run PAUSED and then left behind would park for ever on the one
+  // downloader, holding the model ensurer out. Every way off the download
+  // step cancels it, parts kept; a run still moving is left alone.
+  for (final leave in <String, Future<void> Function(SetupController)>{
+    'Continue': (controller) => controller.next(),
+    'Back': (controller) => controller.back(),
+    'Finish': (controller) async => controller.finish(),
+    'Back to the inbox': (controller) async => controller.returnToInbox(),
+  }.entries) {
+    test('a paused run does not outlive the download step: ${leave.key} '
+        'cancels it and the downloader goes idle', () async {
+      final decide = publishDecide(gguf: 512 * 1024);
+      hub.chunkDelay = const Duration(milliseconds: 5);
+      await store.set(SetupStore.setupKey, SetupStep.download.name);
+      final downloader =
+          buildDownloader(registryBase: () => hub.registryBase);
+      final controller = build(downloader: downloader);
+
+      await controller.init();
+      final part = '${destOf(decide)}${ModelDownloader.partSuffix}';
+      await waitUntil(
+        () => File(part).existsSync() && File(part).lengthSync() > 0,
+        reason: 'the registry leg to be under way',
+      );
+      await controller.pauseDownload();
+      expect(downloader.paused, isTrue);
+      hub.chunkDelay = null;
+
+      await leave.value(controller);
+      await downloader.idle.timeout(const Duration(seconds: 10));
+
+      expect(downloader.running, isFalse);
+      expect(File(part).existsSync(), isTrue, reason: 'the part is kept');
+      await waitUntil(
+        () => !controller.state.downloadRunning,
+        reason: 'the state to follow the cancel',
+      );
+      expect(controller.state.downloadPaused, isFalse);
+    });
+  }
+
+  test('a run still moving is left alone when the step is left', () async {
+    final decide = publishDecide(gguf: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    final downloader = buildDownloader(registryBase: () => hub.registryBase);
+    final controller = build(downloader: downloader);
+
+    await controller.init();
+    final part = '${destOf(decide)}${ModelDownloader.partSuffix}';
+    await waitUntil(
+      () => File(part).existsSync() && File(part).lengthSync() > 0,
+      reason: 'the registry leg to be under way',
+    );
+    await controller.next();
+
+    expect(downloader.running, isTrue);
+    hub.chunkDelay = null;
+    await downloader.idle.timeout(const Duration(seconds: 20));
+    expect(File(destOf(decide)).existsSync(), isTrue);
+  });
+
+  test('a paused run inherited from an earlier visit is cancelled, never '
+      'waited for, and the step runs its own to the end', () async {
+    manifest = publish(embed: 512 * 1024);
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    final downloader = buildDownloader();
+    final embed = manifest.byRole(ModelRole.embed);
+    final other = downloader.run([embed]).toList();
+    final part = '${destOf(embed)}${ModelDownloader.partSuffix}';
+    await waitUntil(
+      () => File(part).existsSync() && File(part).lengthSync() > 0,
+      reason: 'bytes to land',
+    );
+    await downloader.pause();
+    hub.chunkDelay = null;
+    final controller = build(downloader: downloader);
+    await controller.init();
+    var waited = false;
+    final remove = controller.addListener((state) {
+      if (state.downloadWaiting) waited = true;
+    });
+    addTearDown(remove);
+
+    await controller.startDownload().timeout(const Duration(seconds: 10));
+    await other;
+    await waitUntil(
+      () => !controller.state.downloadRunning && controller.state.allDownloaded,
+      reason: 'the step\'s own run to finish',
+    );
+
+    expect(waited, isFalse, reason: 'a paused run is never waited for');
     expect(controller.state.downloadsComplete, isTrue);
   });
 

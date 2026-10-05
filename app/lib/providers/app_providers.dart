@@ -654,12 +654,16 @@ final modelDownloaderProvider = Provider<ModelDownloader>((ref) {
     sha256: system.sha256,
     beginActivity: system.beginActivity,
     endActivity: system.endActivity,
-    // Both LOOKUPS, read at the top of a run and per registry entry: the
-    // address as Settings or the build has it now, and the token through the
-    // one door that knows whether the build's may go to that address.
+    // Both LOOKUPS, read per registry entry at the same moment: the address
+    // as Settings or the build has it now, and the token through the one
+    // door that knows whether the build's may go to that address, and only
+    // for the base the entry will really be sent to. A Save between the two
+    // reads sends no token rather than one host's token to another.
     registryBase: () => ref.read(appPrefsProvider).effectiveRegistryUrl,
-    registryToken: () =>
-        ref.read(appPrefsProvider.notifier).bearerFor(registryId),
+    registryToken: (base) =>
+        sameOrigin(base, ref.read(appPrefsProvider).effectiveRegistryUrl)
+            ? ref.read(appPrefsProvider.notifier).bearerFor(registryId)
+            : null,
   );
   ref.onDispose(downloader.dispose);
   return downloader;
@@ -680,14 +684,22 @@ final setupShowingProvider = StateProvider<bool>((ref) => false);
 /// this Mac's heads file, and the entry is one download, so there is one
 /// rule and no heads-only path. A Kev server ignores the files. Then only
 /// what downloads (`downloadable`).
+///
+/// Under `BOND_DEV_HAND_SERVERS` (no managed server) the embedding model is
+/// left out: `make embed` serves it from the Homebrew/Hugging Face cache, and
+/// nothing reads it from the models folder. The decision model stays, since
+/// the app reads its heads file there and `make decide` reads the same folder.
 final modelEnsureSetProvider = FutureProvider<ModelManifest>((ref) async {
   final manifest = ref.watch(modelManifestProvider);
   final served = await ref.watch(managedManifestProvider.future);
   final decide = manifest.byRoleOrNull(ModelRole.decide);
+  // A build constant, so a read is as good as a watch.
+  final managed = ref.read(appPrefsProvider).managedServer;
   return ModelManifest(
     version: served.version,
     models: List.unmodifiable([
-      ...served.models,
+      for (final model in served.models)
+        if (managed || model.role != ModelRole.embed) model,
       if (decide != null && !served.models.any((m) => m.id == decide.id))
         decide,
     ]),
