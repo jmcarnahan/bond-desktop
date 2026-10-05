@@ -720,7 +720,7 @@ class SetupController extends StateNotifier<SetupState> {
   ///
   /// The roles' manifest (`ModelManifest.forRoles`: embeddings, the decision
   /// model when it runs here, the managed generative model when that runs
-  /// here — so choosing User defined drops the chat model from the download)
+  /// here — so choosing Your server drops the chat model from the download)
   /// without the hand-installed entries, which are never downloaded. The
   /// registry's decision model IS here, an ordinary download row.
   ModelManifest get resolvedManifest {

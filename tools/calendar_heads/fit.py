@@ -191,8 +191,9 @@ def read_decide_heads(path):
         with open(path) as handle:
             heads = json.load(handle)
     except FileNotFoundError:
-        fail(f"no decision heads at {path} -- run make decide-install (or "
-             f"point DECIDE_DIR at the installed model)")
+        fail(f"no decision heads at {path} -- run make decide-fetch, or let "
+             f"the app download it (or point DECIDE_DIR at the model's "
+             f"folder)")
     except (OSError, ValueError):
         fail(f"the decision heads at {path} could not be read as JSON")
     if not isinstance(heads, dict):
@@ -334,9 +335,9 @@ def main():
         "--decide-heads",
         default=os.path.expanduser(
             "~/Library/Application Support/com.bondinbox.app/models/"
-            "local_bond-decide/decide-heads.json"),
-        help="the installed decision heads file (make decide-install's "
-             "decide-heads.json); its qhash and model are copied into the "
+            "artifactory_bond-decide-mbl-v3swap/decide-heads.json"),
+        help="the decision heads file the app downloaded (or make "
+             "decide-fetch fetched); its qhash and model are copied into the "
              "head as encoder_qhash and encoder_model")
     parser.add_argument(
         "--out", default="tmp/calendar_heads/command_heads.json",

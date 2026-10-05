@@ -1407,10 +1407,10 @@ cache the downloader's lookup reads.
 **`--dart-define=BOND_DEV_SKIP_SETUP=1`** skips the wizard entirely
 (`SetupGate.skipDefine`). It is for the engineers who run `make model fast
 embed` by hand: their models are in the Homebrew cache rather than this app's
-folder, and a wizard offering to download twenty-three gigabytes they already
-have would be in the way of every `make app-run`. A define rather than a
+folder, and a wizard offering to download models they already have would be
+in the way of every `make app-run`. A define rather than a
 preference because it describes the BUILD, not the person — `local.mk` passes
-it through (see QUICKSTART step 2). The models still arrive: the gate lets
+it through (see QUICKSTART step 3, "Skipping the wizard"). The models still arrive: the gate lets
 the app through and kicks the model ensurer, which downloads in the
 background whatever the placements need and the disk lacks, and Settings,
 Models shows each one's progress.

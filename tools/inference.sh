@@ -29,9 +29,12 @@
 # fine-tuned ModernBERT classifier as a GGUF, served as mean-pooled embeddings
 # by a llama.cpp container (llama-decide); the app applies the heads (the
 # nine message fields and the three storyline questions) itself, so the heads file stays on the Mac and is never uploaded. PATH has
-# no default; the usual value is the file `make decide-install` put in
-# "$HOME/Library/Application Support/com.bondinbox.app/models/local_bond-decide/
-# bond-decide-mbl-v3-f16.gguf". It is copied up from this machine and its
+# no default; the usual value is the v3 swap file the app downloaded from the
+# model registry (or `make decide-fetch` fetched) into
+# "$HOME/Library/Application Support/com.bondinbox.app/models/artifactory_bond-decide-mbl-v3swap/
+# bond-decide-mbl-v3-f16.gguf". Serve that v3 swap file and no other: raw v3
+# carries the same served name, and nothing catches raw-v3 vectors under the
+# app's v3 swap heads. It is copied up from this machine and its
 # sha256 checked on the box before the slot starts. It is served under the
 # file's name less its -<quant>.gguf (bond-decide-mbl-v3-f16.gguf serves as
 # bond-decide-mbl-v3), which the app's heads pairing reads against the heads
@@ -754,9 +757,9 @@ EOF
   has_decide && {
     echo "the app's decision address (Settings, Decision model, Your server):"
     echo "  https://$DOMAIN/decide/v1/embeddings        model: ${DECIDE_SERVED_NAME:-$DECIDE_SERVED}"
-    echo "  (the heads file stays on the Mac: make decide-install there)"; }
+    echo "  (the heads file stays on the Mac: the app downloads it from the model registry)"; }
   cat <<EOF
-the access key is what a tester types in the app. It is not printed here and
+the access key goes in local.mk as BOND_BOX_KEY, or is typed in the app. It is not printed here and
 it belongs in no committed file.
 next:
   $0 test --url https://$DOMAIN/prose --bearer <key> --model $served
@@ -801,7 +804,7 @@ scp_box() {  # scp_box LOCAL IP REMOTE — the same options as ssh_box
 # where the app applies the heads.
 upload_decide() {  # upload_decide IP
   local ip=$1 here there
-  [ -f "$DECIDE_GGUF" ] || die "no decision model at $DECIDE_GGUF (make decide-install puts it in the models folder)"
+  [ -f "$DECIDE_GGUF" ] || die "no decision model at $DECIDE_GGUF (the app downloads it into the models folder, or run make decide-fetch)"
   log "decide: hashing $DECIDE_FILE here"
   here=$(sha256_stdin < "$DECIDE_GGUF")
   [ -n "$here" ] || die "could not hash $DECIDE_GGUF"
@@ -847,7 +850,7 @@ cmd_up() {
   [ -n "$BULK_MODEL" ] && bulk_tag=",{Key=bulk-model,Value=$BULK_MODEL}"
   if [ -n "$DECIDE_FILE" ]; then
     # Checked before anything is launched, so a wrong path costs no instance.
-    [ -f "$DECIDE_GGUF" ] || die "no decision model at $DECIDE_GGUF (make decide-install puts it in the models folder)"
+    [ -f "$DECIDE_GGUF" ] || die "no decision model at $DECIDE_GGUF (the app downloads it into the models folder, or run make decide-fetch)"
     decide_tag=",{Key=decide-model,Value=$DECIDE_SERVED},{Key=decide-file,Value=$DECIDE_FILE}"
   fi
   [ -n "$DOMAIN" ] && domain_tag=",{Key=domain,Value=$DOMAIN}"

@@ -781,7 +781,7 @@ clean:
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
 # By default the app runs its OWN llama-server router (the decision model, the
-# embeddings and, unless the build names a box, the generative model) and
+# embeddings and, when it is set to This Mac, the generative model) and
 # none of the servers above is needed. A BOND_DEV_HAND_SERVERS build instead
 # talks to three hand-started servers: :$(DECIDE_PORT) for the decision model
 # (every kept message's classification), :$(MODEL_PORT) for every generative

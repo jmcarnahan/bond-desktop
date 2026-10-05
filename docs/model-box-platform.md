@@ -64,10 +64,13 @@ Caddy on the box (:80, host networking)
 - **No public address.** The box is in a private subnet with NAT egress for
   the image and the weights. The operator reaches it through SSM Session
   Manager, not SSH.
-- **The app needs no change.** `BOND_BOX_URL=https://<platform-host>/models`
-  in `.env` prefills User defined with `<base>/prose/v1/chat/completions`
-  and `<base>/bulk/v1/chat/completions`; `isBoxOrigin` accepts a base with a
-  path. Both addresses are one host, so one key.
+- **The app needs no change.** `BOND_BOX_URL = https://<platform-host>/models`
+  and `BOND_BOX_KEY` in `local.mk` are compiled into a build made from the
+  repository: the Generative model's **Your server** address defaults to
+  `<base>/prose/v1/chat/completions`, and the key comes with it. An address
+  or key saved under Settings → Models wins over the build's, and
+  **Remove key** returns to it. `isBoxOrigin` accepts a base with a path.
+  The slots are one host, so one key.
 
 ## 2. Running it
 

@@ -1,5 +1,9 @@
 # Installing Bond
 
+> **This is the guide for the installer build, which is not how Bond is
+> shared yet.** To run Bond today, follow [QUICKSTART.md](../QUICKSTART.md):
+> you run the app from the repository with `make app-run`.
+
 For someone who wants to *use* Bond on their Mac. There is no toolchain here,
 nothing to compile, and nothing to type in a terminal. If you are building
 from source instead, read [QUICKSTART.md](../QUICKSTART.md).
@@ -11,14 +15,18 @@ from source instead, read [QUICKSTART.md](../QUICKSTART.md).
   opens and macOS then refuses to open Bond itself. There is nothing to click
   past and no setup screen to reach.
 - **macOS 12 or newer.**
-- **About 35 GB free.** The models are ~22 GB; the rest is room for macOS to
-  load them.
+- **About 5 GB free.** With the generative model on your server, this Mac
+  downloads about 1.4 GB. Running the generative model on this Mac instead
+  adds about 19 GB, so plan on about 35 GB free for that.
 - **A Bond workspace login.** The same one you would use for anything else on
   your team's Bond server. If you do not have one, ask whoever runs it.
+- **Four values from whoever runs your Bond setup.** An installer build
+  carries none of them, so you type them into the app: the model registry
+  address and its access token, and your server's address and its access key.
 
-Memory matters for one of the three models. 32 GB or more runs everything
-comfortably; on 16 GB the inbox works — reading, sorting, search — and the
-model that writes drafts will be slow. Bond tells you which case you are in.
+Memory matters only for the generative model, and only when it runs on this
+Mac. With it on your server, 16 GB is enough. On this Mac, 40 GB or more runs
+the 27B, and a smaller Mac runs the 4B. Bond tells you which case you are in.
 
 ## Getting the app
 
@@ -59,19 +67,19 @@ first, because there is nothing behind it.
    whether the models will run here. Too little memory for the writing model
    is a warning, not a refusal. (An Intel Mac never gets this far — macOS will
    not open the app there in the first place.)
-3. **Where the models run** — two cards. **Managed · recommended** is Bond's
-   own: it downloads the models and runs them on this Mac, and nothing leaves
-   the machine, at the cost of the larger download on the next screens.
-   **User defined** is your own servers, and it opens a short form: **Big
-   model address**, **Small model address** and **Access key**. **Continue**
-   checks both servers, takes the model names they list, and keeps the key in
-   the macOS keychain and nowhere else. If your build came with server
-   addresses, User defined is already chosen with both filled in, so pasting
-   the key is all there is to do. Under User defined only the embedding model
-   is downloaded, because it always runs on this Mac.
+3. **Where the models run** — two questions, each with two cards: **This
+   Mac** and **Your server**. The **Decision model** opens on **This Mac ·
+   recommended**: Bond downloads it from your model registry and runs it
+   here. The **Generative model** opens on **Your server · recommended**, with
+   a short form: **Generative model address** and **Access key**. Type the
+   address and key you were given. **Continue** checks the server, takes the
+   model name it lists, and keeps the key in the macOS keychain and nowhere
+   else. Choosing **This Mac** for the generative model downloads it and runs
+   it here instead, and nothing leaves the machine, at the cost of about
+   19 GB more on the next screens. The embedding model always runs on this
+   Mac.
 4. **Models** — the models this Mac will download, what each one does, how
-   big it is, and the licence it comes under. Three on Managed, one on User
-   defined. Nothing downloads yet.
+   big it is, and the licence it comes under. Nothing downloads yet.
 5. **Storage** — where the weights will go, and whether they fit. **Change
    folder…** puts them somewhere else — an external disk, for instance. If
    there is not enough room, Bond says how much more it needs and will not
@@ -82,8 +90,12 @@ first, because there is nothing behind it.
 6. **Download** — one progress bar per model, smallest first, with a rate and
    an estimate. **You can quit.** Closing Bond mid-download is safe: the next
    launch comes back to this screen and picks up the same file where it
-   stopped. **Continue** waits for every bar, because Bond's model server
-   will not start with a file missing.
+   stopped. **Continue** waits for the models from Hugging Face. The decision
+   model comes from your model registry, and an installer build has no
+   registry address yet, so its bar says `The model registry has no address.
+   Add one under Settings, Models.` and `Bond tries again after setup, and
+   under Settings, Models. You can continue.` It does not hold you here: you
+   add the address after setup.
 7. **Sign in** — your browser opens on the Bond login. Sign in there and come
    back; Bond picks the session up on its own. If your workspace has never
    connected a Microsoft account, there is one more step in the browser and a
@@ -95,10 +107,17 @@ first, because there is nothing behind it.
 9. **All set** — what was set up, said back. **Finish** starts Bond's own
    model server and opens the inbox.
 
-The models take a minute or two to load the first time. The inbox is readable
-while that happens; the reading and sorting fill in behind it. Processing is
-on from the start, and the switch that pauses it is at the top of the sidebar
-and under **Settings → Processing**. Bond remembers where you left it.
+The inbox opens and mail syncs, but nothing is sorted or summarised yet. AI
+processing starts off, so you can finish setting up before any mail goes to a
+model:
+
+1. Open **Settings → Models** from the avatar menu at the top of the inbox.
+2. Under **Model registry**, type the **Registry address** and the **Access
+   token**, press **Save**, then **Check**. It should say `Registry
+   reachable.` Saving starts the decision model's download; the Decision
+   model block shows `Downloading NN%` until it lands.
+3. Switch **AI processing** on, at the top of the sidebar or under
+   **Settings → Processing**. Bond remembers where you left it.
 
 ## Where things live
 
@@ -109,7 +128,7 @@ Everything Bond keeps is under one folder:
 | | |
 |---|---|
 | `bond_inbox.db` | your mail, your storylines, your drafts and every setting |
-| `models/` | the three model files — this is the big one, ~22 GB |
+| `models/` | the model files: about 1.4 GB, or about 21 GB with the generative model on this Mac |
 | `logs/llama-server.log` | what the model server printed, when something goes wrong |
 | `servers/` | the model server's configuration and the file that lets Bond clean up after itself |
 
@@ -121,30 +140,28 @@ instead and everything else is still here.
 ## Changing things later
 
 Everything the setup asked is under **Settings → Models**, from the avatar
-menu at the top of the inbox. The page asks one question, where the models
-run, and answers it with two tabs, **Managed** and **User defined**. The tabs
-act: choosing Managed moves the work here at once, and choosing User defined
-opens the form, which writes nothing until **Connect**. Switching to User
-defined also unloads the two chat models from this Mac, and switching back
-reloads them; the rows say which state each model is in.
+menu at the top of the inbox. The page opens with one line about Bond's own
+model server on this Mac; **Show log** appears there only when the server has
+failed, and hands the log to the Mac's own viewer. Under it are four blocks:
 
-- **Managed** is a status block, because there is nothing to fill in. One line
-  says what Bond's own server is doing, a bar fills while the models load, and
-  three rows, **Big model**, **Small model** and **Embeddings**, name each
-  model with its size and whether it is on disk and loaded. Each row has a
-  **Check**. **Show log** appears only when the server has failed, and hands
-  the log to the Mac's own viewer.
-- **User defined** is the same form the setup used, with **Connect** as its
-  word. A stored key leaves the field empty on purpose and typing replaces it;
-  **Remove key** is the only thing that forgets one. **Connect** asks both
-  servers which model they serve and takes the names they list, so nothing is
-  typed twice. A server that offers several shows a picker, and a second
-  **Connect** takes what is showing, unless one of the names it lists is the
-  one this install already uses, which connects on the first press. The same three rows sit under the form,
-  naming the model each server listed and the server's address, each with its
-  **Check**.
+- **Decision model** and **Generative model** each choose **This Mac** or
+  **Your server**. On This Mac the block names the model with its size and
+  whether it is on disk and loaded, with a **Download** button while it is
+  `Not downloaded yet.` Choosing This Mac for a role downloads its model.
+  On Your server the block is the same form the setup used, with
+  **Connect** as its word: an address and an **Access key**. A stored key
+  leaves the field empty on purpose and typing replaces it; **Remove key**
+  is the only thing that forgets one. **Connect** asks the server which model
+  it serves and takes the name it lists, so nothing is typed twice. A server
+  that offers several shows a picker, and a second **Connect** takes what is
+  showing, unless one of the names it lists is the one this install already
+  uses, which connects on the first press.
+- **Embeddings** always runs on this Mac.
+- **Model registry** is where the decision model is downloaded from: a
+  **Registry address** and an **Access token**, with **Save**, **Remove
+  token** and **Check**.
 - **Set up again** — runs the whole flow from the top, and is how the models
-  folder changes and a download is retried. It keeps what is expensive and
+  folder changes. It keeps what is expensive and
   still true: the models stay on disk and you stay signed in, so those two
   screens are a **Continue** each. It is not a commitment: the first screen
   carries **Back to the inbox**, which puts you back exactly where you were.
@@ -155,7 +172,7 @@ reloads them; the rows say which state each model is in.
 1. Quit Bond.
 2. Drag **Bond Desktop** from Applications to the Trash.
 3. Delete `~/Library/Application Support/com.bondinbox.app/` — this is what
-   frees the 22 GB.
+   frees the space the models took.
 4. Open **Keychain Access**, search for `bond`, and delete the login items
    named after the app. That is the stored sign-in.
 

@@ -1,90 +1,52 @@
 # Bond quickstart
 
-From a bare Apple Silicon Mac to the desktop inbox running against local
-model servers and signed in. Every block below is meant to be pasted as-is;
-the text between blocks tells you what to expect.
+From a bare Apple Silicon Mac to the desktop inbox, signed in and sorting
+mail. You run the app from this checkout: there is no installer step. Every
+block below is meant to be pasted as-is; the text between blocks tells you
+what to expect.
 
-This is the build-from-source path for developers. `README.md` is the
-reference for everything else: the agent REPL, the benchmarks, and every
-Makefile knob.
+`README.md` is the reference for everything else: the agent REPL, the
+benchmarks, and every Makefile knob.
 
 ## 0. What you get, what you need
 
-Bond uses three models, one per role, and sends mail content to no model
-server you have not named:
+Bond uses three models, one per role. A new environment starts like this:
 
-| Role | Hand-started server | Port | Model | Size |
-|---|---|---|---|---|
-| **Decision** (sorts and flags every message: the learned gate, urgency, category, the asks, needs-you, intent, importance, whether a reply is expected; and judges storylines: which storyline a thread belongs to, whether a charter is specific) | `make decide` | 8083 | bond-decide, a fine-tuned ModernBERT-large, F16 GGUF + heads file | ~0.8 GB, installed by `make decide-install`, never downloaded |
-| **Generative** (message summaries, storyline titles, charters and recaps, drafts) | `make model` | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
-| **Embeddings** (clustering, search) | `make embed` | 8081 | Qwen3-Embedding-0.6B Q8_0 | ~0.7 GB |
+| | Default | Where it comes from | Change it |
+|---|---|---|---|
+| **AI processing** | off | | the **AI processing** switch in the sidebar, or Settings, Processing |
+| **Decision model** (sorts and flags every message, judges storylines) | ModernBERT v3 swap, on this Mac, about 0.8 GB | downloaded from your model registry when it is not on disk | Settings, Models |
+| **Generative model** (summaries, storyline titles and recaps, drafts) | Qwen3.8 27B on **Your server** | the server address and access key in `local.mk` | Settings, Models |
+| **Embeddings** (clustering, search) | Qwen3-Embedding-0.6B, on this Mac, about 0.6 GB | downloaded from Hugging Face | always this Mac |
 
-`make setup` also starts `make fast` on :8082 (Qwen3-4B-Instruct Q8_0,
-~4.3 GB). The app does not use it any more: it is the benches' bulk slot.
-
-**The generative model runs on your box by default** when the build names one
-(`BOND_BOX_URL`, step 2): the 27B there, with this Mac holding only the
-decision and embedding models. Without a box, or with **This Mac** chosen, the
-app's own server runs the 27B, or the 4B on a smaller Mac.
-
-**The decision model is not published yet.** `make decide-install` copies it,
-sha256-checked, from the export the training project writes (`DECIDE_SRC`),
-so it works only on a machine that has that export. Without it new mail
-parks at triage (the rail and Settings, Models say the decision model is not
-installed): no summary, no needs-you probability, no storyline filed and no
-suggested draft until it is installed, because the text and needs-you work
-waits behind triage and the storyline lane parks on the same model. Sync,
-reading and search still work. The next round
-ships it as a model bundle from a registry (JFrog Artifactory; the design is
-`docs/DESIGN-model-bundles.md` in the training project), which retires
-`make decide-install`.
-
-**The installed model must be the current one.** `make decide-install` copies the v3 export
-(`bond-decide-mbl-v3`, a schema-2 heads file with the twelve questions). An older install (the v2
-schema-1 heads) parks triage with the rail sentence "The installed decision model is an older
-version that this app no longer reads · N waiting · install the current decision model to resume
-sorting new mail", and Settings, Models says the same under the Decision model with a quieter
-`For developers: make decide-install` line beneath it. The box serves the decide slot under the
-GGUF's name less its `-<quant>.gguf` (`bond-decide-mbl-v3`, which `boxDecideModel` matches;
-`--decide-served` overrides it), and a served name that does not match the heads' model is refused.
-
-**Decision model on your server.** Settings, Models can point the Decision
-model at **Your server** instead, and what the URL serves decides what this Mac
-needs. A URL to ModernBERT on llama-server (`…/v1/embeddings`) returns vectors
-and the app applies the heads here, so this Mac still needs the heads file from
-`make decide-install`. A URL to a Kev 4B wrapper (`…/v1/systemone`) answers the
-questions on the server, and this Mac needs no decision files at all. The app
-detects which one it is when it checks the address and names it under the form.
+So this Mac downloads about 1.4 GB, and the large model stays on the server.
+Mail content goes to no model server you have not named.
 
 You need:
 
-- **An Apple Silicon Mac.** Intel Macs are not supported.
-- **Memory.** 40 GiB is the line the app itself draws. At or above it the
-  app's own server runs the 27B as the generative model beside the decision
-  and embedding models, which is what the defaults below are sized for; a
-  48 GB Mac is comfortable and a 36 GB one is not. Below it the shipped app is
-  on its INBOX tier: the 27B is not offered and the 4B is the generative model
-  on this Mac, unless the generative model runs on your own server. 16 GiB is
-  the smallest machine any measured row was taken on. Running the servers by
-  hand from this checkout ignores all of that: `make model` starts the 27B
-  whatever the machine has, and step 2 shows the one-line overrides for a
-  smaller one.
-- **Disk.** About 30 GB free: the weights above plus the app build.
-- **macOS 14 or newer** with Xcode installed. That is the Mac you build on;
-  the app itself deploys back to macOS 12. Xcode 26 on macOS 15 and 26 is
+- **An Apple Silicon Mac.** Intel Macs are not supported. 16 GB of memory is
+  enough for this setup. Running the generative model on this Mac instead is
+  Appendix B.
+- **About 5 GB of free disk**: the two models plus the app build.
+- **macOS 14 or newer** with Xcode installed. Xcode 26 on macOS 15 and 26 is
   what has been tested.
-- **A bond-mcps server URL** from the project owner. It never appears in this
-  repository. It is the only secret-ish thing you need, and it is not a secret:
-  you sign in to that server with your own login.
+- **Five values from the project owner.** None of them appears in this
+  repository:
+  1. the bond-mcps server URL (you sign in to it with your own login);
+  2. the model registry address;
+  3. a READ token for that registry;
+  4. your server's address, which is the GPU box that runs the 27B;
+  5. your server's access key.
 
 ## 1. Toolchain
 
-Command line tools, Homebrew, Flutter:
+Command line tools, Homebrew, Flutter, and the model runtime:
 
 ```sh
 xcode-select --install
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 brew install --cask flutter
+brew install llama.cpp
 flutter doctor
 flutter --version
 ```
@@ -94,12 +56,9 @@ flutter --version
 again. Ignore any Android or Chrome complaints; only the macOS row matters.
 There is no CocoaPods step: the macOS plugins use Swift Package Manager.
 
-If `flutter` works in your shell but `make` later says `flutter: command not
-found`, make's `/bin/sh` is not reading your shell profile. Pass the path once:
-
-```sh
-make app-run FLUTTER="$(which flutter)"
-```
+`llama.cpp` is needed even though the large model runs on your server: the
+app runs one `llama-server` of its own for the decision and embedding models.
+A Homebrew install is found without any configuration.
 
 ## 2. Clone and configure
 
@@ -107,380 +66,354 @@ make app-run FLUTTER="$(which flutter)"
 git clone https://github.com/jmcarnahan/bond-desktop.git
 cd bond-desktop
 cp .env.example .env
+cp local.mk.example local.mk
 ```
 
-Open `.env` and set the one line that matters:
+Both copies are git-ignored. Never commit either one.
+
+**`.env`** takes one line. Leave the `MICROSOFT_*` lines blank (they are only
+for "This device" mode, Appendix C):
 
 ```
 BOND_MCP_SERVER_URL=https://<the URL you were given>/mcp
 ```
 
-Leave the three `MICROSOFT_*` lines blank. They are only for "This device"
-mode (see the appendix), which needs an Entra app registration you control.
-
-Two defines decide where the models run. Both are optional and neither carries
-a secret:
-
-- `BOND_BOX_URL=https://box.example.com`, with the hostname you were given, for
-  a build whose generative model should run on your own server. It makes
-  **Your server** the generative model's default and fills its address in,
-  `<the address>/prose/v1/chat/completions`, on the wizard's **Where the models
-  run** step and under Settings, Models, where you can change it. It also
-  fills the decision model's Your server address,
-  `<the address>/decide/v1/embeddings`, but the decision model still defaults
-  to **This Mac**. The access key is never compiled in. You type it in the app
-  (once per role you point at the box) and it is kept in the macOS keychain. A
-  separate `BOND_BOX_KEY` line is read only by the bench recipes, which have no
-  keychain to read from.
-- `BOND_LLAMA_SERVER`, the path to a `llama-server` binary, for any dev build
-  that will start the local server. It is needed under **Your server** too,
-  because the embedding model always runs on this Mac. Without it the app
-  says `The model runtime is missing from this build`. It goes in `local.mk`
-  rather than `.env`, next to the other machine-local overrides below.
-
-**Smaller Macs.** Create a git-ignored `local.mk` next to the `Makefile` with
-whichever lines apply. Nothing else in the repo needs to change:
+**`local.mk`** takes four lines. It is the one place an environment is
+configured:
 
 ```make
-# local.mk — personal overrides, never committed
-# The context is 16K by default since Round F, so a CTX_SIZE line here is only
-# needed to go somewhere else.
-# CTX_SIZE = 16384
-# 16–24 GB: a smaller prose model. Its prose quality has not been benchmarked.
-# MODEL_HF = ggml-org/Qwen3-8B-GGUF:Q8_0
-# Ports, if something on your machine already uses one of ours.
-# MODEL_PORT  = 8080
-# FAST_PORT   = 8082
-# EMBED_PORT  = 8081
-# DECIDE_PORT = 8083
-# Lets the app run ONE bundled-style router from this dev build, instead of the
-# servers you start by hand. Needed under Your server too: the embedding
-# model always runs here.
-# BOND_LLAMA_SERVER = /opt/homebrew/bin/llama-server
-# Skips the first-run setup wizard. Your models are in the Homebrew cache, not
-# in the app's own folder, so it would offer to download ~22 GB you already have.
-# BOND_DEV_SKIP_SETUP = 1
-# Leaves the servers to you. The app runs its own llama-server by default since
-# Round H, and this is how a machine that already has `make decide model embed`
-# up says so: the decision model stays on :8083, the generative model on :8080
-# and embeddings on :8081 instead of following the app's router. Read as a
-# value, so `= 0` turns it back off.
-# BOND_DEV_HAND_SERVERS = 1
-# Serves a recorded sample mailbox instead of Microsoft (see "Running against a
-# sample" in step 5). Read-only, on its own database file; set the lookback in
-# Settings -> Sync & data, and pull Teams with Refresh. The path must be
-# ABSOLUTE: a relative path or `~` resolves against the app's working
-# directory. The sample is real mail: nothing from it may be committed.
-# BOND_SAMPLE_DIR = /absolute/path/to/sample-v2
+BOND_REGISTRY_URL = https://artifactory.example.com/artifactory/bond-models
+BOND_REGISTRY_TOKEN = <the registry read token>
+BOND_BOX_URL = https://box.example.com
+BOND_BOX_KEY = <the server access key>
 ```
 
-## 3. Models and servers
+- `BOND_REGISTRY_URL` is the repository URL, with nothing after the
+  repository name. Use the https address when your registry has one.
+- `BOND_BOX_URL` is the server's origin, with no path. The app adds
+  `/prose/v1/chat/completions` itself.
+- Write each value with a plain `=` and no comment after it on the same
+  line. `local.mk.example` explains why, and how to write a `$` or a `#`.
+
+Each of the four is a default the app is built with. All of them can be
+changed later in the app (step 5). The token and the key are compiled only
+into a build made from this checkout, and `make -n` never prints them.
+
+Now check the environment before the first build:
 
 ```sh
-make setup
-make embed
-make decide-install
-make decide
-make status
+make app-doctor
 ```
 
-What happens:
+It prints one line per check and exits non-zero when any fails:
 
-- `make setup` installs `llama.cpp` from Homebrew, starts the prose server on
-  :8080 and the bulk server on :8082, downloads their weights into
-  `~/.cache/huggingface/hub/`, waits for both to answer `/health`, hashes the
-  downloaded files, and runs one real completion. **The first run downloads
-  about 23 GB and takes ten minutes or more.** It prints an elapsed-time line
-  every 60 seconds so you can tell it is alive, and waits up to 30 minutes
-  for each of the two servers.
-- `make embed` starts the embeddings server on :8081. `make setup` does not
-  start this one yet, and the app degrades quietly without it (no storyline
-  clustering, no explanation), so do not skip it.
-- `make decide-install` copies the decision model's GGUF and heads file from
-  `DECIDE_SRC` into the app's models folder
-  (`~/Library/Application Support/com.bondinbox.app/models/local_bond-decide/`),
-  refusing unless both match the export's `SHA256SUMS`. The app reads the
-  heads file from there whichever server runs the model, so it is needed on
-  the hand-started path too. It fails with a pointer when the export is not on
-  this machine (see step 0). It copies the v3 model; an older v2 install
-  is refused and parks triage until it is run again (step 0).
-- `make decide` serves the installed model on :8083.
-- `make status` should show `model`, `embed`, `fast` and `decide` as `[up]`
-  with a pid. `fast` is up because `make setup` starts it for the benches; the
-  app does not need it. The `omlx` row is a benchmarking runtime this path
-  never starts; `[down]` there is correct.
+| Line | Means |
+|---|---|
+| `✓ Flutter 3.47…` | the toolchain is found |
+| `✓ llama-server at …` | the model runtime is found |
+| `✓ BOND_MCP_SERVER_URL is set in …/.env` | sign-in has a server to talk to |
+| `✓ the registry has bond-decide-mbl-v3swap` | the address and token work and the decision model is there |
+| `✓ your server answers at …` | the address and key work |
 
-Early in the first run you will see this from `make model`, and it is not a
-failure:
+A `✗` names what is wrong: a value that is not set, a refused token or key
+(`HTTP 401` or `403`), or an address that does not answer. It prints status
+codes only, never a token or a key. Fix `local.mk` and run it again until
+every line is a `✓`.
 
-```
-  ! model has not bound :8080 after 120s
-    On the FIRST run this is EXPECTED, not a failure: llama-server
-    downloads ~19GB of weights for ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
-    before it binds the port.
-    Watch it:   make logs
-    'make status' flips to [up] once loading finishes.
-```
-
-The download continues in the background; `make setup` keeps polling. Watch
-progress with:
-
-```sh
-make logs
-```
-
-`make setup` is idempotent. Re-running it against servers that are already up
-just re-verifies and re-smokes.
-
-Loading the 27B takes tens of seconds on a warm machine and a couple of
-minutes cold; `[up]` in `make status` means the port is bound, and the first
-request may still wait for the load to finish.
-
-## 4. Run the app
+## 3. Run the app
 
 ```sh
 make app-install
 make app-run
 ```
 
-The first build takes a few minutes.
+The first build takes a few minutes. The first launch opens the setup wizard,
+nine screens:
 
-**The first launch opens the setup wizard** — nine screens that check the Mac,
-ask where the models run, download what this Mac needs, sign in, and start
-Bond's own model server. That is not what you want on this path: you
-have just started the servers by hand and the weights are already in
-`~/.cache/huggingface/hub/`. Add `BOND_DEV_SKIP_SETUP = 1` and
-`BOND_DEV_HAND_SERVERS = 1` to `local.mk` (step 2) and rebuild: the app goes
-straight to sign-in as it always has, and it leaves your servers alone
-rather than starting one of its own.
-Run the wizard instead if you want the bundled shape — it downloads its own
-copies and switches the app onto one router. `docs/install.md` walks the
-screens; `docs/settings.md` (**First run**) is the reference.
+1. **Welcome to Bond.** Press **Get started**.
+2. **Your Mac.** The chip, the memory, and which models this Mac takes.
+3. **Where the models run.** Two questions. The **Decision model** opens on
+   **This Mac · recommended**: leave it. The **Generative model** opens on
+   **Your server · recommended** with the address from `local.mk` filled in
+   and the hint `Using the key from this build. Type to replace` in the key
+   field. Press **Continue**: the app asks the server which model it serves
+   and takes the name it lists.
+4. **Models.** The two downloads and their sizes.
+5. **Storage.** Where the models are kept. The default is fine.
+6. **Download.** Two bars, about 1.4 GB together. **Continue** waits for the
+   embedding model only. If the decision model's bar fails it says why, adds
+   `Bond tries again after setup, and under Settings, Models. You can
+   continue.`, and does not hold you here (step 6 below has the fixes).
+7. **Sign in.** Your browser opens the bond-mcps login. Sign in there and
+   come back to the app; it picks the session up on its own. If your
+   workspace has never connected a Microsoft account, a second step hands you
+   to the consent page.
+8. **Notifications.** Your choice.
+9. **All set.** Press **Finish**.
 
-**What the third screen asks.** **Where the models run** asks two questions,
-one per role, each answered by two cards, **This Mac · recommended** and
-**Your server**. The **Decision model** comes first and defaults to This Mac,
-where it answers in milliseconds (installed with `make decide-install`, never
-downloaded); its Your server form says **Connect** and writes at once. The
-**Generative model** follows: on a build with `BOND_BOX_URL` compiled in, Your
-server opens already chosen with the address filled in. Paste the access key
-you were given and press **Continue**. The app asks the server which model it
-serves and takes the name it lists, and the key is kept in the macOS keychain
-and nowhere else. Under This Mac you pick the 27B or the 4B (the 4B only on a
-smaller Mac); the download step that follows fetches the embedding model and,
-when it runs here, the generative model. This Mac for both is the offline
-choice: nothing leaves the machine. Either way, processing starts on by itself
-once the wizard finishes, so the inbox begins working without anybody finding
-a switch.
+The inbox opens and mail syncs. Nothing is sorted or summarised yet: AI
+processing is off until you turn it on (step 4).
 
-With the wizard skipped, the app opens on a sign-in screen:
+**Skipping the wizard.** On a machine that has been set up before, add this
+to `local.mk` and rebuild. The app goes straight to sign-in, and the models
+this setup needs still download in the background:
 
-1. Press **Sign in**. Your browser opens the bond-mcps login. Sign in there
-   and come back to the app; it picks the session up on its own.
-2. If your workspace has never connected a Microsoft account, a second step,
-   **Connect your Microsoft account**, hands you to the platform's consent
-   page. Finish it and press **I've connected — continue**.
-3. The inbox syncs. Mail arrives first; the rail shows a `Triaging N
-   remaining…` counter while the decision model sorts it (a fraction of a
-   second a message), summaries fill in behind it from the generative model,
-   and storylines and drafts over the next few minutes.
-
-Two things you may see and can ignore:
-
-- `Failed to foreground app; open returned 1` in the terminal on launch. The
-  app launches anyway.
-- A macOS notification permission prompt the first time Bond has something
-  worth telling you. Allow it if you want system notifications; the setting
-  is under Settings → Notifications either way.
-
-To confirm the app sees the servers, open the avatar menu → **Settings** →
-**Models**. The page is three role blocks: **Decision model** and **Generative
-model**, each **This Mac** or **Your server**, and **Embeddings**, which always
-runs here. Each block's status line should read ready. **Check** under the
-decision model re-reads its install, which is how a `make decide-install` run
-while the app is open is picked up.
-
-## 5. Day to day
-
-On the hand-started path, `BOND_DEV_HAND_SERVERS = 1` in `local.mk`, the
-servers are independent of the app. They survive app restarts and the weights
-are memory-mapped, so a second start is fast. After a reboot, or after
-`make stop`, bring them back yourself; the app does not start them. Without
-that define the app runs its own llama-server and none of this is needed.
-
-```sh
-make status
-make decide model embed
+```make
+BOND_DEV_SKIP_SETUP = 1
 ```
 
-The three start one after another, and each gives up after two minutes if its
-port has not bound, so on a cold cache start them one at a time.
+Two things you may see and can ignore: `Failed to foreground app; open
+returned 1` in the terminal on launch, and a macOS notification permission
+prompt the first time Bond has something worth telling you.
 
-Stop them when you need the memory back:
+## 4. Turn AI processing on
 
-```sh
-make stop fast-stop embed-stop decide-stop
-```
+It starts off on purpose, so you can look before any mail is sent to a model.
 
-Or let the app run them for you, which is what it does BY DEFAULT: with
-`BOND_LLAMA_SERVER` set in `local.mk` (step 2), the app runs one llama-server
-that serves the embedding model, the decision model and, when it runs here,
-the generative model, and starts and stops it with the app. What puts you back
-on `make decide model embed` exactly as above is
-`BOND_DEV_HAND_SERVERS = 1` in `local.mk` (step 2), which is a build define
-rather than a setting. **Set up again**, at the foot of Settings → Models,
-re-runs the first-run wizard from the top — it keeps the models already on
-disk and the session already signed in, so those two screens are a Continue
-each.
+1. Open the avatar menu, then **Settings**, then **Models**. The first line
+   is about Bond's own model server on this Mac, and says processing is off.
+   Under it are four blocks:
+   - **Decision model**: This Mac, on disk and loaded. While it is still
+     arriving the line reads `Downloading NN%`.
+   - **Generative model**: Your server, with your address and the model name
+     the server reported.
+   - **Embeddings**: on this Mac.
+   - **Model registry**: your address. Press **Check**; it should answer
+     `Registry reachable.`
+2. Switch **AI processing** on in the sidebar.
 
-Rebuild the app after a `git pull`:
+Mail is sorted first; the rail shows a `Triaging N remaining…` counter while
+the decision model works through it (a fraction of a second a message).
+Summaries fill in behind it from the generative model, and storylines and
+drafts over the next few minutes.
+
+Switching it off again stops new work at once and keeps everything already
+done.
+
+## 5. Changing things later
+
+Everything in `local.mk` has a field under **Settings, Models**:
+
+| `local.mk` | In the app |
+|---|---|
+| `BOND_REGISTRY_URL`, `BOND_REGISTRY_TOKEN` | **Model registry**: address, access token, **Save**, **Remove token**, **Check** |
+| `BOND_BOX_URL`, `BOND_BOX_KEY` | **Generative model**, Your server: address, access key, **Remove key** |
+
+- A value saved in the app wins over `local.mk`, on this Mac only.
+- **Remove token** and **Remove key** return to the value from `local.mk`.
+- A key or token typed in the app is kept in the macOS keychain and shown
+  nowhere. The one from `local.mk` is only ever sent to the address from
+  `local.mk`: type a different host and you type its key too.
+- Each role can be moved between **This Mac** and **Your server** there.
+  Moving a role to this Mac downloads its model; each block has a
+  **Download** button and says `Not downloaded yet.` until it has landed.
+- A changed `local.mk` takes effect on the next `make app-run`.
+- **Set up again**, at the foot of the page, re-runs the wizard. It keeps the
+  models on disk and the signed-in session.
+
+After a `git pull`, rebuild:
 
 ```sh
 make app-install
 make app-run
 ```
-
-### Running against a sample
-
-`BOND_SAMPLE_DIR = /absolute/path/to/sample-v2` in `local.mk` (step 2), then
-`make app-run`, points the app at a recorded sample directory instead of
-Microsoft. Every stage after the backend runs exactly as it does on a real
-account, so this is how the pipeline is reviewed by hand at a real mailbox's
-size. The path must be absolute: a relative path or `~` resolves against the
-app's working directory.
-
-- It is **read-only**: send, drafts and chat writes refuse with a sentence
-  that says "sandbox", and attachment previews and profile photos are absent.
-- It uses its **own database file**, `bond_inbox-sample.db`, beside the real
-  one. Remove the line and rebuild to go back; there is nothing to clean up.
-- A fresh file means fresh settings: the wizard shows unless
-  `BOND_DEV_SKIP_SETUP = 1` is set too, and the model servers are entered once.
-- The default lookback is one day and a recording ends on a fixed date, so the
-  first sync finds nothing. Set the window in **Settings → Sync & data** to
-  reach back into the sample, turn processing off, press **Forget everything
-  and re-sync** once, and turn processing back on, so the next drain is a first
-  run over the wide window. Widening without it ingests the whole sample as
-  quiet backfill: it is triaged, but no thread's state moves, so every thread
-  reads Waiting. The window caps at 365 days, so the oldest days of a
-  year-long recording are out of reach.
-- Teams is pulled with **Refresh**, as always. Chats never show unread in the
-  sandbox: the recording has no chat read state, so every chat message is
-  stored as read. Mail read state is the recording's, so most mail arrives
-  read.
-- The first sync of each launch waits while the sample is parsed: about 20
-  seconds for a year-long mailbox.
-- **Sign out** wipes the sandbox database and lands back in an empty inbox,
-  which works as a reset.
-- The sample is real mail. Nothing from it goes into the repo.
 
 ## 6. Troubleshooting
 
-**A port is busy.** `make model` (and `fast`, `embed`, `decide`) refuse to
-reuse a port held by anything that is not a `llama-server`; they print the pid
-and command. Either free the port or move ours in `local.mk` (step 2). On the
-hand-started path the app's addresses are build defines, so a moved port means
-one rebuild with the matching define (`LLAMA_URL`, `DECIDE_URL`, `EMBED_URL`;
-the last two are full `/v1/embeddings` URLs):
+Start with `make app-doctor`. It finds most of these before the app does.
+
+**"The model registry has no address. Add one under Settings, Models."**
+`BOND_REGISTRY_URL` was empty when the app was built. Add it to `local.mk`
+and rebuild, or type it under Settings, Models and press **Save**.
+
+**"The model registry refused the access token."** The token is wrong, has
+expired, or cannot read this repository. Replace it in `local.mk` and
+rebuild, or type the new one under Settings, Models. If you once typed a
+token in the app, that one is still winning: **Remove token** goes back to
+the one in `local.mk`.
+
+**"The model registry does not have this model. Check its address."** The
+address reaches a registry but not the repository that holds the decision
+model. It should end at the repository name, for example
+`…/artifactory/bond-models`.
+
+**"The model registry answered with a web page, not a model. Check its
+address."** The address reaches a login page or a proxy. An http address
+that the server upgrades to https also loses the token on the way: use the
+https address.
+
+**"The decision model is not downloaded yet. Open Settings, Models."** New
+mail waits at triage until the decision model is on disk. Settings, Models
+gives the reason under the Decision model and a **Download** button; once the
+registry answers, press it. `Download again` appears when a file on disk does
+not match what the app expects, and replaces it.
+
+**"The generative model has no server address. Add one under Settings,
+Models."** `BOND_BOX_URL` was empty when the app was built and no address has
+been typed. Summaries and drafts wait; the app does not fall back to a model
+on this Mac by itself. Add the address, or choose **This Mac** (Appendix B).
+
+**The server refuses the key.** Settings, Models says so under the
+Generative model. Replace `BOND_BOX_KEY` and rebuild, or type the key there.
+A key typed in the app wins until you press **Remove key**.
+
+**"The model runtime is missing from this build".** `llama-server` was not
+found when the app was built. `brew install llama.cpp`, or set
+`BOND_LLAMA_SERVER` in `local.mk` to a binary elsewhere, then rebuild.
+
+**"Bond's model server is starting or stopped. See Settings, Models".** The
+app's own server takes a few seconds after launch and restarts when a model
+lands. If it stays that way, the log is
+`~/Library/Application Support/com.bondinbox.app/logs/llama-server.log`.
+
+**Nothing is being sorted or summarised.** AI processing is off (step 4). If
+it is on, the rail says which model the work is waiting for.
+
+**`flutter: command not found` from make.** Make's `/bin/sh` is not reading
+your shell profile. Pass the path once, or put `FLUTTER = /path/to/flutter`
+in `local.mk`:
 
 ```sh
-make app-run EMBED_URL=http://localhost:9081/v1/embeddings
+make app-run FLUTTER="$(which flutter)"
 ```
 
 **Sign-in cannot start: "Port 8766 is in use".** Rare, and only against a
-server that offers no client registration. Every bond-mcps server registers the
-app at sign-in, and the app then listens on whichever loopback port is free; a
-server without registration knows the app only by a pre-registered redirect URI
-that names this one port. Find the holder and quit it, then press Sign in
-again:
+server that offers no client registration. Find the holder, quit it, and
+press Sign in again:
 
 ```sh
 lsof -nP -iTCP:8766 -sTCP:LISTEN
 ```
 
 **"Microsoft sign-in is not configured".** The app is in "This device" mode.
-Switch back to **MCP** under Settings → Microsoft connection, or see the
-appendix if you meant to use a direct Microsoft connection.
+Switch back to **MCP** under Settings, Microsoft connection.
 
-**The model outputs garbage: endless `0`s, or never stops.** A corrupted
-download. Every cheap check passes on it; only the hash catches it.
+## Appendix A: a model registry on this Mac
 
-```sh
-make verify
-make stop fast-stop embed-stop decide-stop
-make clean-model && make setup && make embed && make decide
+The model registry is a JFrog Artifactory generic repository. The app reads
+two files from it, each checked against a sha256 pinned in the app:
+
+```
+<BOND_REGISTRY_URL>/bundles/bond-decide-mbl-v3swap/model-f16.gguf
+<BOND_REGISTRY_URL>/bundles/bond-decide-mbl-v3swap/heads.json
 ```
 
-`make clean-model` refuses to run while any `llama-server` is alive, which is
-why all four are stopped first.
+Where there is no shared registry, a local Artifactory in Docker stands in
+for it. It is not part of this repository: the training project keeps its
+compose file and publishes the bundle into it. Once it is up:
 
-**The model never binds, or the Mac swaps and stalls.** Not enough memory for
-the model plus its context. Lower `CTX_SIZE` or choose the smaller prose model
-in `local.mk` (step 2), then:
-
-```sh
-make stop && make model
+```make
+BOND_REGISTRY_URL = http://localhost:18082/artifactory/bond-models
 ```
 
-**Nothing is being annotated.** `make status`: any server `[down]` parks the
-work that needs it until it comes back. Start the missing one. A rail line
-about a model that is not installed or not downloaded means the decision model
-needs `make decide-install` or a generative model the wizard has not
-downloaded needs **Set up again**.
+- Bring it up with `docker compose up -d` in its folder before `make
+  app-doctor` or the first launch. When it is down the decision model cannot
+  download; a model already on disk keeps working.
+- It refuses anonymous reads, so `BOND_REGISTRY_TOKEN` is still needed.
+- **Use a read token, not the admin one.** The token is compiled into your
+  build. Mint a token scoped to read this one repository and put that in
+  `local.mk`.
 
-**`flutter: command not found` from make.** See the `FLUTTER=` note in step 1.
+## Appendix B: models on this Mac
 
-## Appendix
+**The generative model on this Mac.** Settings, Models, **Generative model**,
+**This Mac**, or the same card on the wizard's third screen. A Mac with
+40 GiB of memory or more runs the 27B (about a 19 GB download); a smaller one
+runs the 4B (about 4 GB). With every role on this Mac nothing leaves the
+machine, and `BOND_BOX_URL` and `BOND_BOX_KEY` can stay empty; `make
+app-doctor` will then show a `✗` on those two lines, which is expected.
+
+**The decision model on your server.** Settings, Models, **Decision model**,
+**Your server**. A ModernBERT server returns vectors and the app applies the
+heads file here, so this Mac still downloads the decision model's files. The
+server must serve the same v3 swap model the app pins:
+`docs/inference-endpoint.md`.
+
+**Servers you start by hand.** For bench work, or to keep models loaded
+across app restarts:
+
+```make
+# local.mk
+BOND_DEV_HAND_SERVERS = 1
+BOND_DEV_SKIP_SETUP = 1
+```
+
+```sh
+make decide-fetch
+make decide embed
+make status
+```
+
+`make decide-fetch` downloads the decision model from the registry into the
+same folder the app uses, sha-checked, so a model the app has already
+downloaded needs no fetch. `make decide` serves it on :8083 and `make embed`
+serves embeddings on :8081. `make setup` adds the 27B on :8080 and the
+bench-only 4B on :8082 (about 23 GB of downloads into
+`~/.cache/huggingface/hub/`), for a generative model on this Mac: set the
+Generative model to **This Mac** too, or the app keeps using your server. With `BOND_DEV_HAND_SERVERS = 1` the app uses those ports and starts no
+server of its own; after a reboot you bring them back yourself. Stop them
+with `make stop fast-stop embed-stop decide-stop`. Ports, context size and
+model overrides are in `README.md`.
+
+## Appendix C: everything else
+
+**A sample mailbox.** `BOND_SAMPLE_DIR = /absolute/path/to/sample-v2` in
+`local.mk`, then `make app-run`, serves a recorded sample directory instead
+of Microsoft. Every stage after the backend runs as it does on a real
+account.
+
+- It is read-only: send, drafts and chat writes refuse with a sentence that
+  says "sandbox".
+- It uses its own database file, `bond_inbox-sample.db`. Remove the line and
+  rebuild to go back.
+- A fresh file means fresh settings: the wizard shows unless
+  `BOND_DEV_SKIP_SETUP = 1` is set too.
+- The default lookback is one day and a recording ends on a fixed date, so
+  the first sync finds nothing. Set the window under Settings, Sync & data,
+  press **Forget everything and re-sync** once with AI processing off, then
+  turn AI processing on. Widening without that step ingests the sample as
+  quiet backfill and every thread reads Waiting.
+- Teams is pulled with **Refresh**.
+- The path must be absolute. The sample is real mail: nothing from it goes
+  into the repo.
 
 **Where things live**
 
-- Weights: `~/.cache/huggingface/hub/` (shared with anything else that uses
-  llama.cpp's `-hf`; `make clean-model` deletes only the prose model's directory)
-- Server logs: `tmp/logs/model-<port>.log`
-- Server logs (the app's own server, managed mode):
-  `~/Library/Application Support/com.bondinbox.app/logs/llama-server.log`
-- The app's own server files: `~/Library/Application Support/com.bondinbox.app/servers/`
-  (the preset it writes, the pid file the next launch reaps, and an empty cache
-  directory the child is deliberately pointed at)
-- Models the app downloads for itself, and the decision model
-  `make decide-install` copies in:
+- Models the app downloads:
   `~/Library/Application Support/com.bondinbox.app/models/`, or the folder
-  chosen on the setup's Storage step (reach it again through **Set up
-  again**). Separate from the Homebrew cache above, which is what `make model`
-  fills.
+  chosen on the wizard's Storage step. The decision model is in
+  `artifactory_bond-decide-mbl-v3swap/` there.
 - App data (database, attachments, settings):
-  `~/Library/Application Support/com.bondinbox.app/`. A build made before the
-  app dropped the sandbox kept the same files under
-  `~/Library/Containers/com.bondinbox.app/`; the app migrates it on first
-  launch, copying rather than moving, so the old copy stays until you delete
-  it. Keychain items do not migrate — sign in again once.
+  `~/Library/Application Support/com.bondinbox.app/`
+- The app's own server: its log is `logs/llama-server.log` and its files are
+  in `servers/`, both under the app data folder.
+- Hand-started servers: logs in `tmp/logs/model-<port>.log`, weights in
+  `~/.cache/huggingface/hub/`.
+- An older checkout installed the decision model by hand into
+  `models/local_bond-decide/`. Nothing reads that folder now; delete it to
+  get about 0.8 GB back.
 
 **Uninstall**
 
 ```sh
-make stop fast-stop embed-stop decide-stop
-make clean-model
 rm -rf ~/Library/Application\ Support/com.bondinbox.app
 rm -rf ~/Library/Containers/com.bondinbox.app   # only if an older build ran here
 ```
 
-Delete the other two model directories under `~/.cache/huggingface/hub/` by
-hand if you want the space back, and `brew uninstall llama.cpp` if nothing
-else uses it.
+If you ran servers by hand: `make stop fast-stop embed-stop decide-stop`,
+`make clean-model`, and delete what is left under
+`~/.cache/huggingface/hub/`. `brew uninstall llama.cpp` if nothing else uses
+it.
 
-**"This device" mode (direct Microsoft Graph)**
-
-Only for someone who holds an Entra app registration for Bond. Fill the three
-`MICROSOFT_*` lines in `.env` (client id, tenant id, and, while the
-registration has no public-client platform, the client secret), rebuild with
-`make app-run`, and choose **This device** under Settings → Microsoft
+**"This device" mode (direct Microsoft Graph).** Only for someone who holds
+an Entra app registration for Bond. Fill the three `MICROSOFT_*` lines in
+`.env`, rebuild, and choose **This device** under Settings, Microsoft
 connection. The sign-in redirect uses `localhost:8001`, which must be free.
-The registration is single-tenant. Details: the "Microsoft backends" section
-of `README.md`.
+Details: the "Microsoft backends" section of `README.md`.
 
-**Going further**
-
-`README.md` covers the agent REPL (`make chat`), the benchmarks,
-`docs/model-bakeoff.md` covers swapping models and runtimes,
-`docs/inference-endpoint.md` covers running the generative model (and,
-optionally, the decision model) on a rented AWS GPU (`tools/inference.sh`), and `docs/settings.md` documents every setting in
-the app.
+**Going further.** `README.md` covers the agent REPL (`make chat`) and the
+benchmarks. `docs/settings.md` documents every setting in the app.
+`docs/model-bakeoff.md` covers swapping models and runtimes.
+`docs/inference-endpoint.md` covers running the generative model on a rented
+AWS GPU (`tools/inference.sh`). `docs/install.md` is the guide for the
+installer build, which is not how the app is shared yet.

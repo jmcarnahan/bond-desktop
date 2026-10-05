@@ -53,13 +53,19 @@ placed on its own (Settings → Models, or the first-run wizard):
   message fields and three storyline questions, the third (`same_effort`,
   whether two threads are one effort) asked only by `make golden-pairs`. It is served
   as a mean-pooled embedding model, and the app applies its heads itself from
-  the heads file on this Mac. It is not published yet: `make decide-install` copies
-  it, sha256-checked, from the training project's export (`DECIDE_SRC`) into
-  the app's models folder, where the app's own server (the managed router)
-  picks it up; `make decide` serves it by hand on `:8083`. It copies the v3
-  model (`bond-decide-mbl-v3`, a schema-2 heads file); an older v2 install,
-  whose nine-field heads file the app refuses, parks triage until
-  `make decide-install` is run again.
+  the heads file on this Mac. The app downloads it from the model registry
+  (a JFrog Artifactory repository, `BOND_REGISTRY_URL` and
+  `BOND_REGISTRY_TOKEN` in `local.mk`): the bundle `bond-decide-mbl-v3swap`,
+  its `model-f16.gguf` and `heads.json`, each sha256-pinned in
+  `app/assets/models/manifest.json`. They land as `bond-decide-mbl-v3-f16.gguf`
+  and `decide-heads.json` in the models folder's
+  `artifactory_bond-decide-mbl-v3swap/`, where the app's own server (the
+  managed router) picks them up. The download runs at launch and from
+  Settings → Models, not only in the wizard. `make decide-fetch` fetches the
+  same two files into the same folder for bench work, and `make decide`
+  serves the model by hand on `:8083`. The heads file is schema 2 and names
+  the model `bond-decide-mbl-v3`; an older nine-field heads file is refused
+  and Settings → Models offers **Download again**.
 
   **Decision model on your server.** Under Settings → Models the Decision
   role can instead be **Your server**, a URL, and what that URL serves decides
@@ -75,13 +81,18 @@ placed on its own (Settings → Models, or the first-run wizard):
   summary, action items and deadline, storylines, drafts. Whether a message
   needs you is the decision model's probability against your Needs You slider,
   never a chat model's call.
-  By default the 27B on your box when the build names one (`BOND_BOX_URL`);
-  otherwise the 27B above on this Mac, or Qwen3-4B on a Mac under 40 GiB.
-- **Embeddings** — Qwen3-Embedding-0.6B, always on this Mac.
+  By default the 27B on your server (`BOND_BOX_URL` and `BOND_BOX_KEY` in
+  `local.mk`). With no address it is unavailable and its work waits; the app
+  never falls back to this Mac by itself. Placed on This Mac, it is the 27B
+  above, or Qwen3-4B on a Mac under 40 GiB.
+- **Embeddings** — Qwen3-Embedding-0.6B, always on this Mac, downloaded from
+  Hugging Face.
 
-The next round ships the models as bundles from a registry (JFrog
-Artifactory; the design is `docs/DESIGN-model-bundles.md` in the training
-project), which retires `make decide-install`.
+So a new Mac on the defaults downloads about 1.4 GB (the decision and
+embedding models). The 19 GB 27B is downloaded only when the generative model
+is placed on This Mac. AI processing starts off; the sidebar switch turns it
+on. The setup steps are [QUICKSTART.md](QUICKSTART.md), and every value an
+environment needs is in [local.mk.example](local.mk.example).
 
 ## Requirements
 
@@ -89,12 +100,14 @@ project), which retires `make decide-install`.
 - 48GB RAM or more recommended for the 27B beside the decision and embedding
   models; 32GB works with a smaller `CTX_SIZE` in `local.mk`. Verified on an
   M1 Max with 64GB.
-- The shipped app decides for itself: at 40 GiB and up its own server runs the
-  27B as the generative model, and below that the 4B; the embedding and
-  decision models run here either way, and the generative model not at all
-  when it is placed on your own server (`docs/pipeline/10-model-routing.md`,
-  "The manifest").
-- ~30GB free disk: ~25GB of weights across the servers plus the app build.
+- The desktop app needs far less: on its defaults the generative model runs
+  on your own server and this Mac runs only the embedding and decision models,
+  so 16 GB is enough. With the generative model placed on This Mac, the app
+  decides for itself: at 40 GiB and up its own server runs the 27B, and below
+  that the 4B (`docs/pipeline/10-model-routing.md`, "The manifest").
+- ~30GB free disk for the hand-started servers: ~25GB of weights plus the
+  app build. The desktop app on its defaults needs about 5 GB
+  ([QUICKSTART.md](QUICKSTART.md)).
 - [Homebrew](https://brew.sh), for `llama.cpp`.
 - Dart SDK on `PATH`. If you have Flutter installed you already have it.
 
@@ -217,7 +230,7 @@ serving the decision model, the embeddings and, when it runs here, the
 generative model (see [The app's models](#the-apps-models)). A developer who
 would rather start them by hand sets `BOND_DEV_HAND_SERVERS = 1` in `local.mk`
 and runs three servers, all optional: `make decide` on `:8083` (the decision
-model, after `make decide-install`), `make model` on `:8080` (the generative
+model, after `make decide-fetch`), `make model` on `:8080` (the generative
 model: the message text, storylines and drafts) and
 `make embed` on `:8081` (`Qwen3-Embedding-0.6B`, which turns conversations
 into vectors so they can be clustered and searched). `make fast` on `:8082` is
@@ -225,9 +238,10 @@ the benches' bulk slot; the app does not use it. With none of them running the
 inbox works fine and simply stays un-annotated; each missing server parks only
 the work that needs it, and the work resumes when the server comes up.
 
-Nothing about the mail leaves the machine at inference time unless you place
-a model on a server of your own (the box). Otherwise every server is local,
-and the only network calls the app makes are the ones that fetch the mail in
+Mail goes at inference time only to a server of your own (the box) that a
+model is placed on. On the defaults that is the generative model, so message
+text and drafts travel to your server. With every role on This Mac every
+server is local, and the only network calls the app makes are the ones that fetch the mail in
 the first place — to Microsoft Graph, or to the Bond server that holds the
 Microsoft grant on your behalf. Cloud drafts, an opt-in in Settings, is the
 one place a third-party service may be used, for drafting only.
@@ -397,12 +411,13 @@ make embed                  # start the embedding server on :8081
 make embed-stop             # stop it
 make fast                   # start the bulk-work model server on :8082 (benches)
 make fast-stop              # stop it
-make decide-install         # copy the decision model into the app's models folder
+make decide-fetch           # download the decision model from the registry into the app's models folder
 make decide                 # serve it by hand on :8083
 make decide-stop            # stop it
 make verify                 # SHA256 the downloaded weights (~1 min)
 make clean-model            # delete the cache, forcing a re-download
 make clean                  # rm tmp/logs
+make app-doctor             # check local.mk and .env before the first run
 make app-run                # the desktop inbox
 make app-test               # its test suite
 make app-analyze            # its analyzer
