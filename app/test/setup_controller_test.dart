@@ -132,10 +132,35 @@ void main() {
     return testManifest(sizes: sizes, sha256s: digests);
   }
 
-  ModelDownloader buildDownloader() {
+  /// Serves the decision model's two files from the fake REGISTRY, puts the
+  /// registry entry describing them into [manifest] beside what [publish]
+  /// made, and returns it.
+  ModelFile publishDecide() {
+    const bundle = 'bond-decide-mbl-v3swap';
+    final weights = fakeWeights(3072, seed: 31);
+    final heads = fakeWeights(1024, seed: 32);
+    hub.registryContents['$bundle/model-f16.gguf'] = weights;
+    hub.registryContents['$bundle/heads.json'] = heads;
+    final decide = testDecideFile(
+      sizeBytes: weights.length,
+      sha256: sha256Hex(weights),
+      headsSizeBytes: heads.length,
+      headsSha256: sha256Hex(heads),
+    );
+    manifest = testManifest(
+      sizes: {for (final m in manifest.models) m.id: m.sizeBytes},
+      sha256s: {for (final m in manifest.models) m.id: m.sha256},
+      decide: decide,
+    );
+    return decide;
+  }
+
+  ModelDownloader buildDownloader({String Function()? registryBase}) {
     final downloader = ModelDownloader(
       manifest: manifest,
       modelsFolder: folder,
+      registryBase: registryBase,
+      registryToken: () => 'test-token-123',
       readLedger: store.downloadLedger,
       writeLedger: store.recordDownload,
       // Null makes every verify fall through to the Dart digest, which is
@@ -226,8 +251,9 @@ void main() {
     }
   }
 
-  /// A ledger and the files that say THIS MACHINE's set is already here —
-  /// three on the full tier, two on the inbox one.
+  /// A ledger and the files that say THIS MACHINE's hub set is already here
+  /// — three on the full tier, two on the inbox one. A registry entry is
+  /// left out: the cases about it seed it themselves.
   Future<void> seedComplete() async {
     var ledger = DownloadLedger.empty;
     // Every file this Mac's TIER holds, the unchosen generative model
@@ -235,6 +261,7 @@ void main() {
     final wanted =
         manifest.forTier(machineTierFor(system.hardwareInfo.memoryBytes));
     for (final model in wanted.models) {
+      if (model.isRegistry) continue;
       final file = File(destOf(model));
       await file.parent.create(recursive: true);
       await file.writeAsBytes(hub.contents['${model.repo}/${model.file}']!);
@@ -605,6 +632,75 @@ void main() {
     // The whole point: a relaunch after the download finished must not go
     // back to the hub to find out what it already knows.
     expect(hub.resolveCount, 0);
+  });
+
+  test('the download step fetches the registry decision model with its heads, '
+      'and the set is complete only once both are here', () async {
+    final decide = publishDecide();
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+
+    final controller = build(
+      downloader: buildDownloader(registryBase: () => hub.registryBase),
+    );
+    await controller.init();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the run to finish',
+    );
+
+    expect(controller.state.downloads[routerDecideId]?.status,
+        DownloadStatus.done);
+    expect(File(destOf(decide)).existsSync(), isTrue);
+    final heads = File(p.join(folder(), decide.headsRelativePath!));
+    expect(heads.existsSync(), isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
+    expect(hub.registryAuth, everyElement('Bearer test-token-123'));
+
+    // The heads file is part of "every file here": gone, the set is not
+    // complete, though the ledger still vouches for it.
+    await heads.delete();
+    await controller.setFolder(folder());
+    expect(controller.state.downloadsComplete, isFalse);
+  });
+
+  // Phase 2 records today's wizard rule rather than D7's: a FAILED registry
+  // file leaves `downloadsComplete` false, which is what holds the download
+  // step's Continue. Phase 3 makes Continue wait only for gating rows.
+  test('today a failed registry file leaves the set incomplete', () async {
+    publishDecide();
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+
+    final controller = build(
+      downloader: buildDownloader(registryBase: () => ''),
+    );
+    await controller.init();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the run to finish',
+    );
+
+    final decide = controller.state.downloads[routerDecideId];
+    expect(decide?.status, DownloadStatus.failed);
+    expect(decide?.error, DownloadError.registryNotConfigured);
+    expect(controller.state.downloads[routerEmbedId]?.status,
+        DownloadStatus.done);
+    expect(hub.registryCount, 0);
+    expect(controller.state.downloadsComplete, isFalse);
+  });
+
+  test('a stored done whose only gap is the registry decision model resumes '
+      'at the top, not on the download step', () async {
+    // Decision D7: the ledger check that sends a finished install back to
+    // the download step reads the GATING entries only.
+    publishDecide();
+    await seedComplete();
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+
+    final controller = build();
+    await controller.init();
+
+    expect(controller.state.step, SetupStep.welcome);
+    expect(hub.registryCount, 0);
   });
 
   test('pause holds the run and resume finishes it', () async {
@@ -1078,19 +1174,52 @@ void main() {
       expect(controller.state.step, SetupStep.welcome);
     });
 
-    test('the decision model on this Mac is listed apart from the downloads',
-        () async {
+    test('a hand-installed decision model on this Mac is listed apart from '
+        'the downloads', () async {
+      manifest = testManifest(
+        sizes: {for (final m in manifest.models) m.id: m.sizeBytes},
+        sha256s: {for (final m in manifest.models) m.id: m.sha256},
+        decide: testLocalDecideFile(),
+      );
       final controller = build();
       await controller.init();
       expect(
         controller.resolvedManifest.models.map((m) => m.role),
         isNot(contains(ModelRole.decide)),
       );
-      // The fixture manifest may or may not carry a decide entry; either way
-      // it is never downloaded, and on Your server it is not listed at all.
+      expect(controller.localDecisionModel?.isLocal, isTrue);
+      expect(controller.decisionInstalled, isFalse);
+      final decide = controller.localDecisionModel!;
+      for (final relative in [decide.relativePath, decide.headsRelativePath!]) {
+        final file = File(p.join(folder(), relative));
+        await file.parent.create(recursive: true);
+        await file.writeAsString('x');
+      }
+      expect(controller.decisionInstalled, isTrue);
+      // On Your server it is not listed at all.
       controller.chooseDecision(ModelPlacement.box);
       expect(controller.localDecisionModel, isNull);
       expect(controller.decisionInstalled, isFalse);
+    });
+
+    test('the registry decision model on this Mac is an ordinary download, '
+        'counted in the total', () async {
+      final decide = publishDecide();
+      final controller = build();
+      await controller.init();
+
+      // Not listed apart: it is in the downloads.
+      expect(controller.localDecisionModel, isNull);
+      expect(controller.resolvedManifest.byId(routerDecideId), decide);
+      expect(
+        controller.resolvedManifest.totalBytes,
+        greaterThanOrEqualTo(decide.sizeBytes + decide.heads!.sizeBytes),
+      );
+      final withoutDecide = controller.resolvedManifest.totalBytes -
+          decide.downloadBytes;
+      controller.chooseDecision(ModelPlacement.box);
+      expect(controller.resolvedManifest.totalBytes, withoutDecide);
+      expect(controller.localDecisionModel, isNull);
     });
 
     test('a user-defined install re-run choosing This Mac ends up local',

@@ -467,8 +467,8 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     // It is also where the prefs LEARN the machine tier (`setMachineTier`):
     // the managed generative target's model id depends on it, and this build
     // precedes every request the managed router can answer. And an entry
-    // whose files are missing (the decision model before `make
-    // decide-install`, a chosen generative model not yet downloaded) is left
+    // whose files are missing (the decision model before its download
+    // lands, a chosen generative model not yet downloaded) is left
     // out, because the server refuses to start with a preset file missing and
     // that must not cost the other models: that role parks on its own.
     buildPreset: () async {
@@ -540,12 +540,14 @@ final serverStateProvider = StreamProvider<ServerState>(
   (ref) => ref.watch(modelServerSupervisorProvider).states,
 );
 
-/// Where `make decide-install` must put the decision model for this app to
-/// read it, when that is not the Makefile's `DECIDE_DIR` default: the decide
-/// entry's folder inside a models folder the wizard moved. Null while the
-/// models folder is the default one, where the plain command already lands —
-/// and then the manifest is never read, so a host that did not override it
-/// still builds.
+/// Where a HAND-INSTALLED (`source: local`) decision model must be put for
+/// this app to read it, when that is not the Makefile's `DECIDE_DIR` default:
+/// the decide entry's folder inside a models folder the wizard moved. Null
+/// while the models folder is the default one, where the plain command
+/// already lands — and then the manifest is never read, so a host that did
+/// not override it still builds. Null too for a downloaded decide entry (the
+/// registry's): the app fetches that one itself, so there is no folder to
+/// tell anybody to copy into.
 final decideInstallDirProvider = Provider<String?>((ref) {
   final paths = ref.watch(appPathsProvider);
   final folder = ref.watch(
@@ -554,7 +556,7 @@ final decideInstallDirProvider = Provider<String?>((ref) {
   if (p.equals(folder, paths.models.path)) return null;
   final decide =
       ref.watch(modelManifestProvider).byRoleOrNull(ModelRole.decide);
-  if (decide == null) return null;
+  if (decide == null || !decide.isLocal) return null;
   return p.dirname(p.join(folder, decide.relativePath));
 });
 
@@ -579,8 +581,10 @@ final decideInstallDirProvider = Provider<String?>((ref) {
 /// tier unless the owner chose the 4B; the 4B on the inbox tier).
 /// [ManagedModelStatus.inUse] says whether the placements actually serve it:
 /// a role on the owner's server keeps its weights on this disk and holds none
-/// of them in memory. The decision row is hand-installed: on disk means the
-/// GGUF AND its heads file are in the models folder, with no ledger.
+/// of them in memory. The decision row is a registry download: on disk means
+/// the ledger is current for the GGUF AND its heads file and both are in the
+/// models folder. A hand-installed (`source: local`) decide entry has no
+/// ledger: on disk is both files in the folder.
 final managedModelsStatusProvider =
     FutureProvider<List<ManagedModelStatus>>((ref) async {
   ref.watch(setupRestartProvider);
@@ -617,7 +621,9 @@ final managedModelsStatusProvider =
       onDisk: local
           ? ModelManifest.localInstalled(file, folder)
           : ledger.isCurrent(file) &&
-              File(p.join(folder, file.relativePath)).existsSync(),
+              (file.isRegistry
+                  ? ModelManifest.filesPresent(file, folder)
+                  : File(p.join(folder, file.relativePath)).existsSync()),
       routerId: file.id,
       inUse: served.contains(file.id),
       local: local,
@@ -660,6 +666,12 @@ final modelDownloaderProvider = Provider<ModelDownloader>((ref) {
     sha256: system.sha256,
     beginActivity: system.beginActivity,
     endActivity: system.endActivity,
+    // Both LOOKUPS, read at the top of a run and per registry entry: the
+    // address as Settings or the build has it now, and the token through the
+    // one door that knows whether the build's may go to that address.
+    registryBase: () => ref.read(appPrefsProvider).effectiveRegistryUrl,
+    registryToken: () =>
+        ref.read(appPrefsProvider.notifier).bearerFor(registryId),
   );
   ref.onDispose(downloader.dispose);
   return downloader;

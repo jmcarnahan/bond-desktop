@@ -527,8 +527,12 @@ name the wrapper listed; `truncated` is always false.
 - **Timeout.** 15 s per HTTP request, not per decision, so the token path can
   take up to three requests.
 - **The heads file.** `decide-heads.json` in
-  `<models folder>/local_bond-decide/`, installed by `make decide-install`
-  beside the GGUF. `decisionHeadsProvider` loads it through
+  `<models folder>/artifactory_bond-decide-mbl-v3swap/`, downloaded from the
+  model registry as the decide entry's last leg, beside the GGUF (`make
+  decide-fetch` writes the same folder for a bench). The missing-file
+  sentence below still names the hand-install command the registry download
+  replaced, and is reworded with the other park sentences.
+  `decisionHeadsProvider` loads it through
   `DecisionHeadsFile`, cached and re-read when its mtime changes. **It is
   needed even when an encoder-heads server is remote**, because the heads
   run here; a systemone server never reads it. Missing, it throws
@@ -678,21 +682,37 @@ roles want.
 
 ### The manifest
 
-`app/assets/models/manifest.json` (`version: 2`) is the ONLY place the
+`app/assets/models/manifest.json` (`version: 3`) is the ONLY place the
 checkpoints are named, and `RouterPreset` knows how to write an INI and nothing
 about which models belong in one. One entry per model, in file order, which is
 the INI's section order and the router's load order: smallest first, so the
 embedding model is resident while the 27B is still mapping.
 
+Three sources. The embedding model, the 4B and the 27B come from Hugging Face.
+The decision model is a **registry** entry (`source: artifactory`): the
+`bond-decide-mbl-v3swap` bundle in the owner's model registry (Artifactory),
+fetched from `<registry base>/bundles/<bundle>/<remote file>` with
+`Authorization: Bearer <token>`, where the base and the token are
+`AppPrefs.effectiveRegistryUrl` and `bearerFor(registryId)` (Settings, else
+`local.mk`'s `BOND_REGISTRY_URL` / `BOND_REGISTRY_TOKEN`). Its two files keep
+the names the app reads (`model-f16.gguf` lands as
+`bond-decide-mbl-v3-f16.gguf`, `heads.json` as `decide-heads.json`, because
+the heads file's `model` must prefix the GGUF's name) in
+`<models folder>/artifactory_bond-decide-mbl-v3swap/`. A third source,
+`local`, is a model copied in by hand: never downloaded, no ledger row,
+installed when its files are present. The committed manifest ships none, and
+the parser and every reader still handle one.
+
 | Field | What it is |
 |-------|------------|
 | `id` | The router id: `bond-embed`, `bond-decide`, `bond-bulk`, `bond-prose`. |
 | `role` | `embed`, `decide`, `bulk` or `prose` (`ModelRole`). One model per role; the generative ROLE can be filled by either `bulk` or `prose`. |
-| `source` | Absent for a Hugging Face download; `local` for a model installed by hand (the decision model). A local entry has no `revision`, is never downloaded, and is served only once its files are present. |
-| `repo`, `file` | The Hugging Face repo and file (`local/bond-decide` for the local entry). On disk: `<repo with '/' → '_'>/<file>`. |
-| `revision` | A 40-character commit sha, never `main`, for every downloaded entry. |
-| `sizeBytes`, `sha256` | Measured size and LFS oid, checked against the hub's headers on the redirect. For the local entry, the installed file's. |
-| `heads` | The decide entry only: `file`, `sha256`, `sizeBytes` of `decide-heads.json`. `RouterPreset` ignores it; it is what the app reads. |
+| `source` | Absent for a Hugging Face download; `artifactory` for a registry download (the decision model); `local` for a model installed by hand. Anything else is refused. |
+| `repo`, `file` | The Hugging Face repo and file; `artifactory/<bundle>` for a registry entry and `local/<name>` for a local one, whose prefixes keep their folders apart. On disk: `<repo with '/' → '_'>/<file>`. |
+| `bundle`, `remoteFile` | A registry entry only, both required: the bundle id and the weights' name inside it. Each must be one URL path segment (`[A-Za-z0-9._-]+`, never `.` or `..`), as must `heads.remoteFile`; `repo` must be exactly `artifactory/<bundle>`, and a registry entry carries no `sidecar`. |
+| `revision` | A 40-character commit sha, never `main`, for every Hugging Face entry; optional for a registry entry, whose bytes `sha256` pins alone; absent for a local one. |
+| `sizeBytes`, `sha256` | Measured size and digest, checked against the hub's headers on the redirect (hub) and by the download's own sha256 (every source). For a local entry, the installed file's. |
+| `heads` | The decide entry only: `file`, `sha256`, `sizeBytes` of `decide-heads.json`, and for a registry entry its `remoteFile` in the bundle (`heads.json`). `RouterPreset` ignores it; it is what the app reads. For a registry entry it is a download leg of its own (below). Refused on a Hugging Face entry. |
 | `minRamBytes` | What the machine must have; informational (the tier decides). |
 | `license`, `licenseUrl`, `notice` | What the first-run screen shows. |
 | `sidecar` | Optional second file an entry cannot be served without: the 27B's MTP head. |
@@ -717,22 +737,28 @@ model always, the decision model when the decision spec is local, and the one
 managed generative model when the generative spec is local. It is
 `managedManifestProvider` in `app_providers.dart`, watched through `select`s on
 exactly those facts. Its `.downloadable` view (every entry but `source:
-local`) is what the wizard downloads and what `SetupGate` checks the ledger
-against, so a full-tier Mac on Managed downloads the embedding model and the
-27B, and the 4B only if chosen. The supervisor serves
+local`, so the registry's decision model is in it) is what the wizard
+downloads, so a full-tier Mac with both roles here downloads the embedding
+model, the decision model and the 27B, and the 4B only if chosen. Its
+`.gating` view (the Hugging Face entries only, `ModelFile.gatesSetup`) is what
+`SetupGate` and the wizard's resume check the ledger against (decision D7): a
+registry file is best-effort, because its address is set under Settings, which
+the wizard cannot reach, so a missing or failed one never reopens the wizard;
+its role parks on its own reason instead. The supervisor serves
 `forRoles(…).withPresentFiles(folder)`: any entry whose files (weights,
 sidecar, heads, whichever it has) are not all in the folder is left out of the
 preset, except the embedding model, which every stage needs and whose absence
 should fail the start with the preflight's own sentence. The server refuses to
 start with a file the preset names missing, and one missing model must not
-take the others down with it: a decision model not yet installed by
-`make decide-install`, or a chosen generative model not yet downloaded, leaves
-the preset and that role parks on its own reason while the rest run. The park
-is the CLIENT's, not the router's: `buildPreset` tells the prefs which managed
-ids it served (`setServedManagedIds`), and a managed target whose model is not
-among them resolves with an `LlmTarget.unavailable` sentence ("The Qwen3 4B is
-not downloaded on this Mac. Set up again to download it.", "The decision model
-is not installed. Run: make decide-install"), so `LlmClient` and
+take the others down with it: a decision model whose download has not landed,
+or a chosen generative model not yet downloaded, leaves the preset and that
+role parks on its own reason while the rest run. The park is the CLIENT's, not
+the router's: `buildPreset` tells the prefs which managed ids it served
+(`setServedManagedIds`), and a managed target whose model is not among them
+resolves with an `LlmTarget.unavailable` sentence ("The Qwen3 4B is not
+downloaded on this Mac. Set up again to download it.", and for the decision
+model a sentence that still names the hand-install command, reworded with the
+other park sentences), so `LlmClient` and
 `DecisionClient` throw their unavailable exception before any HTTP call. Asking
 the router for a model it does not serve would answer 400, and a 400 is fatal
 in both drains, so every message would end in error instead of waiting. The
@@ -769,28 +795,56 @@ comments:
 `ModelDownloader` (`app/lib/services/models/model_downloader.dart`) fills the
 models folder with the `.downloadable` set.
 
-- **One stream at a time, smallest first**; the wizard's Continue and the
-  server both wait for every file the set names.
+- **One stream at a time, smallest first**; the server waits for every file
+  the set names, and so, today, does the wizard's Continue.
 - **A failure moves on**: one file's failure is an event, the run continues.
+- **Legs.** One entry can cost several files, each its own transfer and its
+  own ledger row, and still ONE bar: the weights (row `<id>`), the 27B's MTP
+  sidecar (`<id>.draft`), and a registry entry's heads file (`<id>.heads`),
+  always last. Only the last leg's `done` is the entry's; the progress total
+  is `ModelFile.downloadBytes` (weights, sidecar, and a registry entry's
+  heads).
 - **`.part` beside the destination, HTTP Range resume**, the part's own length
   being the offset; a 200 to a ranged request truncates the part.
-- **Re-resolve on expiry**: a 403 mid-transfer is an aged-out CDN signature,
-  and the hub is asked again at once. No URL is ever stored.
+- **Re-resolve on expiry**: a 403 mid-transfer from the hub's CDN is an
+  aged-out signature, and the hub is asked again at once. No URL is ever
+  stored.
+- **The registry.** The base and the token are LOOKUPS the provider hands in
+  (`registryBase`, `registryToken`), the base read once per run and the token
+  per registry entry; neither is stored by the downloader. With no base the
+  entry fails at once as `registry_not_configured`, before any request (files
+  already here at the manifest's digests still count as done), and the rest
+  of the set downloads. `Authorization: Bearer <token>` goes to the registry's
+  own ORIGIN only (scheme, host, port: `sameOrigin`): every registry leg
+  follows its redirects by hand, one hop at a time (at most five after the
+  resolve, then `http_<code>`, never retried), so the object storage a hosted
+  registry redirects to never receives the token, and each answer is judged
+  by the hop that gave it. A 401 or 403 from the registry's own origin is
+  `unauthorized`, never retried; a 403 from another origin is the hub's
+  aged-signature rule, a re-resolve. No token sends no header, and the
+  registry's 401 says so. The hub's linked-size and etag checks and its
+  `GatedRepo` word are the hub's alone.
 - **sha256 on the platform side** (`SystemInfo.sha256`, CryptoKit); one
-  mismatch is retried from zero, a second is the wrong file.
+  mismatch is retried from zero, a second is the wrong file. `verify` checks
+  every leg, a registry entry's heads included.
 - **The ledger** is `setup_state['download']`: status, bytes and the manifest
-  sha each part belongs to; no URL, no host.
-- **A disk preflight with 10 GiB of headroom**; free space that cannot be
-  asked is not a refusal.
+  sha each part belongs to; no URL, no host, no token. A registry entry is
+  current (`isCurrent`) only when its `<id>.heads` row is done at the heads
+  digest as well.
+- **A disk preflight with 10 GiB of headroom**, counting each leg's remainder
+  (a registry entry's heads included); free space that cannot be asked is not
+  a refusal.
 - **The failure words**: `disk_full`, `checksum`, `network`, `gated`,
-  `manifest_mismatch`, `missing_folder`, `http_<code>`.
+  `manifest_mismatch`, `missing_folder`, `registry_not_configured`,
+  `unauthorized`, `http_<code>`.
 
-The decision model is not downloaded this round: `make decide-install` copies
-the GGUF and the heads file from the training export, sha256-pinned, into
-`local_bond-decide/`. Distributing it is an open packaging question. It copies the v3
-export (schema 2, sha256-pinned in the manifest); an older schema-1 install
-is refused (`olderModelText`, park `decision_older_model`;
-[03-triage.md](03-triage.md)).
+The decision model is the `bond-decide-mbl-v3swap` registry bundle: its GGUF
+and heads file (schema 2) are sha256-pinned in the manifest and downloaded
+into `artifactory_bond-decide-mbl-v3swap/`; `make decide-fetch` fetches the
+same two files into the same folder for a bench, checked against the same
+digests (`DECIDE_GGUF_SHA`, `DECIDE_HEADS_SHA`, held equal by the parity
+test). An older schema-1 heads file is refused (`olderModelText`, park
+`decision_older_model`; [03-triage.md](03-triage.md)).
 
 ### First run
 

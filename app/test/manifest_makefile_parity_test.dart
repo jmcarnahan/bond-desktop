@@ -159,12 +159,14 @@ void main() {
       );
     });
 
-    test('the decision model is the file `make decide-install` installs', () {
-      // No `-hf` here: the decision model is hand-installed (D12), so the
-      // join is the folder, the file, the quant and the heads, which is what
-      // `make decide-install` copies and `make decide` serves.
+    test('the decision model is the bundle `make decide-fetch` downloads', () {
+      // No `-hf` here: the decision model comes from the model registry, so
+      // the join is the folder, the file, the quant, the heads, the bundle,
+      // the two remote names and the two digests, which is what the app's
+      // downloader and `make decide-fetch` both fetch and `make decide`
+      // serves.
       final decide = manifest.byId(routerDecideId);
-      expect(decide.repo, 'local/bond-decide');
+      expect(decide.repo, 'artifactory/bond-decide-mbl-v3swap');
       final dir = defaults['DECIDE_DIR'];
       expect(dir, isNotNull, reason: '../Makefile has no `DECIDE_DIR ?=`');
       expect(
@@ -183,6 +185,17 @@ void main() {
               '${decide.file}');
       expect(_quant.firstMatch(decide.file)?.group(1)?.toLowerCase(), quant);
       expect(defaults['DECIDE_HEADS'], decide.heads!.file);
+      expect(defaults['DECIDE_BUNDLE'], decide.bundle,
+          reason: 'DECIDE_BUNDLE in ../Makefile is ${defaults['DECIDE_BUNDLE']}; '
+              'the manifest fetches bundle ${decide.bundle}');
+      expect(defaults['DECIDE_REMOTE_GGUF'], decide.remoteFile);
+      expect(defaults['DECIDE_REMOTE_HEADS'], decide.heads!.remoteFile);
+      expect(defaults['DECIDE_GGUF_SHA'], decide.sha256,
+          reason: 'DECIDE_GGUF_SHA in ../Makefile and the manifest\'s sha256 '
+              'pin different bytes');
+      expect(defaults['DECIDE_HEADS_SHA'], decide.heads!.sha256,
+          reason: 'DECIDE_HEADS_SHA in ../Makefile and the manifest\'s '
+              'heads.sha256 pin different bytes');
     });
 
     test('the decision server args are the same set', () {

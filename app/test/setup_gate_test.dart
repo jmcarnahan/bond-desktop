@@ -362,17 +362,62 @@ void main() {
 
   testWidgets('a hand-installed decision model that is missing does not '
       'reopen the wizard', (tester) async {
-    // The decision model is installed by `make decide-install`, never
+    // A `source: local` decision model is copied in by hand, never
     // downloaded, so it has no ledger row and may not be on disk at all. A
     // missing one parks the decision pass; it must not send a finished setup
     // back through the wizard for a file the wizard cannot fetch.
     await store.set(SetupStore.setupKey, SetupStep.done.name);
     await seedLedger();
+    await makeContainer(manifest: testManifest(decide: testLocalDecideFile()));
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('a registry decision model that is missing does not reopen the '
+      'wizard', (tester) async {
+    // Decision D7: the registry's address lives in Settings, which the
+    // wizard cannot reach, so its file is best-effort. No row at all.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
+    final manifest = testManifest(withDecide: true);
+    expect(manifest.byRole(ModelRole.decide).isRegistry, isTrue);
+    await makeContainer(manifest: manifest);
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('a registry decision model that FAILED does not reopen the '
+      'wizard either', (tester) async {
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
+    final ledger = await store.downloadLedger();
+    await store.recordDownload(ledger.record(const FileDownloadState(
+      id: routerDecideId,
+      status: DownloadStatus.failed,
+      sha256: '',
+      error: DownloadError.unauthorized,
+    )));
     await makeContainer(manifest: testManifest(withDecide: true));
 
     await mount(tester);
 
     expect(find.text('the app'), findsOneWidget);
+  });
+
+  testWidgets('with the registry entry in the manifest, a missing hub file '
+      'still reopens the wizard', (tester) async {
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger(bump: true);
+    await makeContainer(manifest: testManifest(withDecide: true));
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsNothing);
+    expect(find.text('Download'), findsOneWidget);
   });
 
   testWidgets('a full Mac goes through without the 4B', (tester) async {

@@ -526,9 +526,14 @@ mode, which needs only `BOND_MCP_SERVER_URL`.
 
 ## Bumping a model
 
-The three checkpoints are named in exactly one place: `app/assets/models/
-manifest.json`. A bump is an edit to that file and to nothing else — no Dart
-changes, and a diff a reviewer can read.
+The four checkpoints are named in exactly one place: `app/assets/models/
+manifest.json`. Three come from Hugging Face (`bond-embed`, `bond-bulk`,
+`bond-prose`) and one from the owner's model registry (`bond-decide`, a
+`source: artifactory` entry; see **Bumping the decision model** below). A bump
+is an edit to that file and to nothing else — no Dart changes, and a diff a
+reviewer can read.
+
+For a Hugging Face checkpoint:
 
 1. Get the size and the digest from the tree API. `size` is the byte count and
    `lfs.oid` is the sha256:
@@ -549,13 +554,14 @@ changes, and a diff a reviewer can read.
 
 3. Edit the entry: `repo`, `file`, `revision`, `sizeBytes`, `sha256`,
    `displayName`, and the licence fields if the licence changed. **Keep the
-   three `id`s** (`bond-embed`, `bond-bulk`, `bond-prose`) — they are what the
-   router routes on, what the slots resolve to, what the `tiers` array lists
-   and what the ledger is keyed by. Keep the file order smallest first.
+   four `id`s** (`bond-embed`, `bond-decide`, `bond-bulk`, `bond-prose`) —
+   they are what the router routes on, what the slots resolve to, what the
+   `tiers` array lists and what the ledger is keyed by. Keep the file order
+   smallest first.
 
 4. Leave the `tiers` array alone unless the SET changes. It names the rungs a
-   machine can be on, not the checkpoints: `full` takes all three ids, `inbox`
-   takes the embedding and inbox ids and overrides the inbox model's `c` and
+   machine can be on, not the checkpoints: `full` takes all four ids, `inbox`
+   takes all but `bond-prose` and overrides the inbox model's `c` and
    `parallel`. A new id, or an id that stops being shipped, has to be added to
    or removed from every tier that wants it — the parser refuses a tier naming
    a model the manifest does not ship, a tier without the embedding or the
@@ -574,6 +580,34 @@ changes, and a diff a reviewer can read.
    `c` and `parallel`. A bump that moves only the app leaves `make model`
    serving the previous checkpoint, silently, which is the failure the
    Makefile's own comment above `EMBED_HF` describes.
+
+### Bumping the decision model
+
+The decision model is a bundle in the model registry, fetched from
+`<registry base>/bundles/<bundle>/<remote file>`. Its entry carries `bundle`
+and `remoteFile` (the weights' name in the bundle, `model-f16.gguf`), and its
+`heads` record carries its own `remoteFile` (`heads.json`); `file` and
+`heads.file` are the names they land under, which the app reads
+(`bond-decide-mbl-v3-f16.gguf`, `decide-heads.json`: the heads file's `model`
+must prefix the GGUF's name). `repo` is `artifactory/<bundle>`, so a new
+bundle lands in a new folder beside the old one, as a Hugging Face bump does.
+
+1. Read the new bundle's `bundle.json` from the registry (with a read token):
+   it lists each file's name, size and sha256. Copy the GGUF's into
+   `sizeBytes` and `sha256` and the heads file's into `heads.sizeBytes` and
+   `heads.sha256`; set `bundle`, `repo` and, if the bundle renamed them, the
+   two `remoteFile`s. There is no `revision`: the digests pin the bytes.
+2. Change `file` only when the heads file's `model` changed, because the
+   GGUF's on-disk name must start with it.
+3. In the Makefile, set `DECIDE_BUNDLE`, `DECIDE_DIR`'s last segment,
+   `DECIDE_REMOTE_GGUF`, `DECIDE_REMOTE_HEADS`, `DECIDE_GGUF_SHA` and
+   `DECIDE_HEADS_SHA` to match — `manifest_makefile_parity_test.dart` refuses
+   any drift — and update the literals in `model_manifest_test.dart`.
+4. The ledger keys the heads file as `bond-decide.heads`; a changed digest on
+   either row makes the entry stale and the downloader fetches it again. A
+   registry file never reopens setup (it is not in the gate's `gating`
+   view), so the new bundle is fetched when the wizard's download step runs
+   (Set up again); nothing else downloads it yet.
 
 ### What an installed copy does with the bump
 

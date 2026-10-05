@@ -153,9 +153,9 @@ void main() {
     });
 
     test('matches never asks for a hand-installed entry', () {
-      // The decision model is installed by `make decide-install` and has no
+      // A `source: local` decision model is copied in by hand and has no
       // row: a ledger complete for the downloads is complete.
-      final manifest = testManifest(withDecide: true);
+      final manifest = testManifest(decide: testLocalDecideFile());
       var ledger = DownloadLedger.empty;
       for (final model in manifest.models) {
         if (model.isLocal) continue;
@@ -163,6 +163,88 @@ void main() {
       }
       expect(ledger['bond-decide'], isNull);
       expect(ledger.matches(manifest), isTrue);
+    });
+
+    test('isCurrent wants the heads row too for a registry entry', () {
+      final decide = testDecideFile();
+      final headsId = DownloadLedger.headsId(decide.id);
+      expect(headsId, 'bond-decide.heads');
+
+      final weightsOnly =
+          DownloadLedger.empty.record(state(decide.id, sha: decide.sha256));
+      expect(weightsOnly.isCurrent(decide), isFalse);
+
+      final both = weightsOnly.record(state(headsId, sha: decide.heads!.sha256));
+      expect(both.isCurrent(decide), isTrue);
+
+      // A heads row from another bundle is not this one's.
+      expect(
+        weightsOnly.record(state(headsId, sha: 'f' * 63 + '0')).isCurrent(decide),
+        isFalse,
+      );
+      expect(
+        weightsOnly
+            .record(state(headsId,
+                sha: decide.heads!.sha256, status: DownloadStatus.failed))
+            .isCurrent(decide),
+        isFalse,
+      );
+    });
+
+    test('a heads record on a non-registry entry asks for no heads row', () {
+      // `isRegistry` is the one rule for owning a heads leg: only a registry
+      // entry's heads are downloaded, so only theirs can be ledgered. A hub
+      // entry built in code with a heads record is current on its own row.
+      const hub = ModelFile(
+        id: 'bond-embed',
+        role: ModelRole.embed,
+        displayName: 'Hub with heads',
+        repo: 'owner/name',
+        file: 'x.gguf',
+        revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        sizeBytes: 1,
+        sha256: 'abc',
+        minRamBytes: 0,
+        license: 'Fictional-1.0',
+        licenseUrl: 'https://example.invalid/licence',
+        heads: ModelHeads(file: 'h.json', sha256: 'def', sizeBytes: 1),
+      );
+      final ledger = DownloadLedger.empty.record(state(hub.id, sha: 'abc'));
+      expect(ledger['bond-embed.heads'], isNull);
+      expect(ledger.isCurrent(hub), isTrue);
+    });
+
+    test('matches on the gating view ignores the registry entry, and on the '
+        'downloadable view does not', () {
+      final manifest = testManifest(withDecide: true);
+      var ledger = DownloadLedger.empty;
+      for (final model in manifest.models) {
+        if (model.isRegistry) continue;
+        ledger = ledger.record(state(model.id, sha: model.sha256));
+      }
+      expect(ledger['bond-decide'], isNull);
+      expect(ledger.matches(manifest.gating), isTrue);
+      expect(ledger.matches(manifest.downloadable), isFalse);
+      // A FAILED registry row does not reopen the gate either.
+      final failed = ledger.record(state('bond-decide',
+          status: DownloadStatus.failed,
+          error: DownloadError.unauthorized));
+      expect(failed.matches(manifest.gating), isTrue);
+    });
+
+    test('the registry errors round-trip through the ledger JSON', () {
+      for (final word in [
+        DownloadError.registryNotConfigured,
+        DownloadError.unauthorized,
+      ]) {
+        final ledger = DownloadLedger.empty.record(state('bond-decide.heads',
+            status: DownloadStatus.failed, error: word));
+        final again = DownloadLedger.parse(jsonEncode(ledger.toJson()));
+        expect(again, ledger);
+        expect(again['bond-decide.heads']?.error, word);
+      }
+      expect(DownloadError.registryNotConfigured, 'registry_not_configured');
+      expect(DownloadError.unauthorized, 'unauthorized');
     });
 
     test('parse tolerates null, empty and rubbish', () {

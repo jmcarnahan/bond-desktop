@@ -20,19 +20,21 @@ class ManagedModelStatus {
   final String roleId;
   final String displayName;
 
-  /// What this checkpoint costs on disk — the weights plus any sidecar (the
-  /// same number the wizard's row quotes), or for a hand-installed entry the
-  /// weights plus its heads file.
+  /// What this checkpoint costs on disk — its download bytes (the weights,
+  /// any sidecar, and a registry entry's heads file: the same number the
+  /// wizard's row quotes), or for a hand-installed entry the weights plus its
+  /// heads file.
   final int bytes;
 
   /// Whether the ledger says this file landed at today's digest AND the file
   /// is still there. Both, because a file can be deleted under a current row.
-  /// For a hand-installed ([local]) entry there is no ledger: it is whether
-  /// every one of its files is in the models folder.
+  /// A registry entry wants every one of its files, heads included. For a
+  /// hand-installed ([local]) entry there is no ledger: it is whether every
+  /// one of its files is in the models folder.
   final bool onDisk;
 
-  /// Whether this entry is installed by hand (`make decide-install`) rather
-  /// than downloaded, which is what a row says when it is missing.
+  /// Whether this entry is installed by hand (`source: local`) rather than
+  /// downloaded, which is what a row says when it is missing.
   final bool local;
 
   final String routerId;

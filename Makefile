@@ -137,18 +137,28 @@ FAST_SLOTS   ?= 4
 # port because 8090 is OMLX_PORT, and its own process because the embed server
 # pools `last` and one llama-server serves one pooling mode per model.
 DECIDE_PORT  ?= 8083
-# Where `make decide-install` copies from: the v3 export of the storyline-questions
-# training round (GGUF, heads JSON schema 2 with the twelve questions). Never downloaded — the weights
-# were trained on the owner's own mail (the plan's D12).
-DECIDE_SRC   ?= $(HOME)/projects/jev-prototype/runs/modernbert-large-v3/export
-# The app's models folder, where the managed server will look:
-# <models>/<repo with '/' as '_'>/<file> (RouterPreset.modelPath), for the repo
-# `local/bond-decide`. It holds a space, so every recipe quotes it.
-DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/local_bond-decide
+# The folder the app's downloader writes the decision model into, and where
+# the managed server will look: <models>/<repo with '/' as '_'>/<file>
+# (RouterPreset.modelPath), for the manifest repo
+# `artifactory/bond-decide-mbl-v3swap`. `make decide-fetch` fills the same
+# folder. It holds a space, so every recipe quotes it.
+DECIDE_DIR   ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/artifactory_bond-decide-mbl-v3swap
 DECIDE_QUANT ?= f16
 DECIDE_FILE  ?= bond-decide-mbl-v3-$(DECIDE_QUANT).gguf
 DECIDE_HEADS ?= decide-heads.json
 DECIDE_GGUF  ?= $(DECIDE_DIR)/$(DECIDE_FILE)
+# The weights' name inside the registry bundle (DECIDE_BUNDLE). On disk it is
+# renamed DECIDE_FILE, the name the heads file's `model` must prefix.
+DECIDE_REMOTE_GGUF  ?= model-f16.gguf
+# The heads file's name inside the bundle; on disk it is DECIDE_HEADS.
+DECIDE_REMOTE_HEADS ?= heads.json
+# The sha256 the downloaded GGUF must have — the manifest's `sha256` for the
+# decide entry, which the parity test holds equal. Bumped together, from the
+# bundle's bundle.json.
+DECIDE_GGUF_SHA  ?= e348ca9117036b8d8c79d93783d74092f5fcd3a8ac06bdc1ea153935243dfa88
+# The sha256 the downloaded heads file must have — the manifest's
+# `heads.sha256`, on DECIDE_GGUF_SHA's terms.
+DECIDE_HEADS_SHA ?= a38835a22858b28827561d1b9c85d752d14cb8277dc248699ec82ee82fa7ad72
 # 2048 because the heads were trained on states truncated at 2048 tokens: a
 # wider context would pool over text the model never saw in training. Batch and
 # ubatch match it because an embedding is one pass over the whole input.
@@ -178,7 +188,7 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
-        decide decide-stop decide-install _wait-decide \
+        decide decide-stop decide-fetch _wait-decide \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
@@ -203,7 +213,7 @@ help:
 	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
 	@printf "  make decide       → start the decision-model server :$(DECIDE_PORT) ($(DECIDE_FILE))\n"
 	@printf "  make decide-stop  → stop the decision-model server on :$(DECIDE_PORT)\n"
-	@printf "  make decide-install → copy the decision model from DECIDE_SRC into the models folder\n"
+	@printf "  make decide-fetch → download the decision model from the model registry (BOND_REGISTRY_URL) into the models folder, sha-checked\n"
 	@printf "  make omlx         → start the oMLX bakeoff server :$(OMLX_PORT) (all cached models)\n"
 	@printf "  make omlx-stop    → stop the oMLX server on :$(OMLX_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
@@ -297,7 +307,8 @@ install:
 # bulk slot defaults to the fast server, so a setup that skipped it would hand
 # over benches that fail on their first call. The app itself needs neither by
 # default (it runs its own router); the decision model is not downloaded here
-# at all — `make decide-install` copies it, `make decide` serves it by hand.
+# at all — the app downloads it from the model registry (`make decide-fetch`
+# does the same for a bench), and `make decide` serves it by hand.
 setup:
 	@printf "$(BLUE)==>$(RESET) [1/7] installing prerequisites\n"
 	@$(MAKE) --no-print-directory install
@@ -554,8 +565,9 @@ fast-stop:
 
 # The decision-model server. Same port guard as `embed:`, same split between the
 # launch line and the wait line so `make -n decide` stays a dry run. -m rather
-# than -hf: the weights are a local install (`make decide-install`), so a
-# missing file is a missing install, said as one, not a download to wait for.
+# than -hf: the weights come from the model registry (the app's download, or
+# `make decide-fetch`), so a missing file is said as one, not a download to
+# wait for.
 # Like `embed:`, any llama-server already on the port counts as up, whichever
 # model it holds — `make decide-stop` first to swap the file.
 decide:
@@ -571,7 +583,7 @@ decide:
 	 fi; \
 	 if [ ! -f "$(DECIDE_GGUF)" ]; then \
 	   printf "  $(RED)✗$(RESET) no decision model at %s\n" "$(DECIDE_GGUF)"; \
-	   printf "    install it first: make decide-install\n"; \
+	   printf "    download it first: run the app once, or make decide-fetch\n"; \
 	   exit 1; \
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
@@ -609,56 +621,63 @@ decide-stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(DECIDE_PORT) free\n"
 
-# Copies the GGUF and the heads file — the heads are needed even when the
-# decision server is remote, because the app applies them — from DECIDE_SRC
-# into the models folder, and refuses unless each is named exactly once in the
-# export's SHA256SUMS and matches it on both sides of the copy. Each file lands
-# as a dot-temp beside its final name and is renamed only once it verifies: a
-# running server has the installed GGUF mmapped, and overwriting it in place
-# can bring that server down or leave a half-written file behind. The two lines
-# it checked are kept as decide.sha256 beside them, so what is installed can be
-# named later.
-decide-install:
-	@src="$(DECIDE_SRC)"; dir="$(DECIDE_DIR)"; \
-	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
-	   if [ ! -f "$$src/$$f" ]; then \
-	     printf "  $(RED)✗$(RESET) %s is not in %s\n" "$$f" "$$src"; \
-	     printf "    the export is written by Phase 1 of tmp/PLAN-decision-model.md (distill/export/)\n"; \
-	     exit 1; \
-	   fi; \
-	 done; \
-	 if [ ! -f "$$src/SHA256SUMS" ]; then \
-	   printf "  $(RED)✗$(RESET) no SHA256SUMS in %s — refusing an unpinned copy\n" "$$src"; \
+# Downloads the decision model's two files — the GGUF and the heads file, which
+# are needed even when the decision server is remote, because the app applies
+# the heads — from the model registry into DECIDE_DIR, the folder the app's own
+# downloader fills, under the app's names. For a bench on a Mac where the app
+# has not run; the app needs none of this. Each file lands as the dot-temp
+# `.<name>.fetch` beside its final name — never the app's own `.part`, which
+# its downloader resumes from — and is renamed only once its sha256 matches
+# the pinned digest, so a running server's mmapped GGUF is never overwritten
+# in place; a failure of any kind deletes the temp and replaces nothing. A
+# file already present at its digest is skipped. Files placed this way have
+# no ledger row, so the app hashes them on its next download run and only
+# then counts them on disk. The token goes as the exported
+# "$$BOND_REGISTRY_TOKEN", so `make -n` prints the reference, never the
+# value; curl reads the header from a config on stdin (`-K -`), so it is not
+# in curl's argv for `ps` to show, and curl sends it only to the registry's
+# own host (it drops a custom Authorization header on a redirect elsewhere).
+# The two lines it checked are kept as decide.sha256 beside the files.
+decide-fetch:
+	@if [ -z "$(strip $(BOND_REGISTRY_URL))" ]; then \
+	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_URL is empty: set it in local.mk (see local.mk.example)\n"; \
 	   exit 1; \
 	 fi; \
-	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
-	   n=$$(awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a' "$$src/SHA256SUMS" | grep -c .); \
-	   if [ "$$n" -ne 1 ]; then \
-	     printf "  $(RED)✗$(RESET) SHA256SUMS must name %s exactly once (it names it %s times)\n" "$$f" "$$n"; \
+	 dir="$(DECIDE_DIR)"; base="$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)"; \
+	 mkdir -p "$$dir" || exit 1; \
+	 fetch() { \
+	   if [ -n "$$BOND_REGISTRY_TOKEN" ]; then \
+	     printf 'header = "Authorization: Bearer %s"\n' "$$BOND_REGISTRY_TOKEN" | \
+	       curl -K - -fSL --retry 2 -o "$$2" "$$1"; \
+	   else \
+	     curl -fSL --retry 2 -o "$$2" "$$1"; \
+	   fi; \
+	 }; \
+	 for spec in "$(DECIDE_REMOTE_GGUF) $(DECIDE_FILE) $(DECIDE_GGUF_SHA)" \
+	             "$(DECIDE_REMOTE_HEADS) $(DECIDE_HEADS) $(DECIDE_HEADS_SHA)"; do \
+	   set -- $$spec; remote=$$1; name=$$2; want=$$3; dest="$$dir/$$name"; tmp="$$dir/.$$name.fetch"; \
+	   if [ -f "$$dest" ] && [ "$$(shasum -a 256 "$$dest" | cut -d' ' -f1)" = "$$want" ]; then \
+	     printf "  $(GREEN)✓$(RESET) %s already present at its digest\n" "$$name"; \
+	     continue; \
+	   fi; \
+	   printf "→ %s/%s\n" "$$base" "$$remote"; \
+	   rm -f "$$tmp"; \
+	   if ! fetch "$$base/$$remote" "$$tmp"; then \
+	     rm -f "$$tmp"; \
+	     printf "  $(RED)✗$(RESET) %s did not download: check BOND_REGISTRY_URL and BOND_REGISTRY_TOKEN (make app-doctor)\n" "$$remote"; \
 	     exit 1; \
 	   fi; \
-	 done; \
-	 sums=$$(awk -v a="$(DECIDE_FILE)" -v b="$(DECIDE_HEADS)" \
-	   '{ g = $$2; sub(/^\*/, "", g) } g == a || g == b' "$$src/SHA256SUMS"); \
-	 if ! (cd "$$src" && printf '%s\n' "$$sums" | shasum -a 256 -c - >/dev/null 2>&1); then \
-	   printf "  $(RED)✗$(RESET) checksum mismatch in %s\n" "$$src"; \
-	   exit 1; \
-	 fi; \
-	 mkdir -p "$$dir"; \
-	 for f in "$(DECIDE_FILE)" "$(DECIDE_HEADS)"; do \
-	   want=$$(printf '%s\n' "$$sums" | awk -v a="$$f" '{ g = $$2; sub(/^\*/, "", g) } g == a { print $$1 }'); \
-	   cp "$$src/$$f" "$$dir/.$$f.tmp" || { rm -f "$$dir/.$$f.tmp"; exit 1; }; \
-	   got=$$(shasum -a 256 "$$dir/.$$f.tmp" | cut -d' ' -f1); \
+	   got=$$(shasum -a 256 "$$tmp" | cut -d' ' -f1); \
 	   if [ "$$got" != "$$want" ]; then \
-	     rm -f "$$dir/.$$f.tmp"; \
-	     printf "  $(RED)✗$(RESET) the copy of %s does not match — nothing was replaced\n" "$$f"; \
+	     rm -f "$$tmp"; \
+	     printf "  $(RED)✗$(RESET) %s does not match its pinned sha256 (got %s): nothing was replaced\n" "$$remote" "$$got"; \
 	     exit 1; \
 	   fi; \
-	   mv -f "$$dir/.$$f.tmp" "$$dir/$$f"; \
+	   mv -f "$$tmp" "$$dest" || { rm -f "$$tmp"; exit 1; }; \
+	   printf "  $(GREEN)✓$(RESET) %s\n" "$$name"; \
 	 done; \
-	 printf '%s\n' "$$sums" > "$$dir/decide.sha256"; \
-	 printf "  $(GREEN)✓$(RESET) decision model installed in %s\n" "$$dir"; \
-	 printf '%s\n' "$$sums" | sed 's/^/    /'
+	 printf '%s  %s\n%s  %s\n' "$(DECIDE_GGUF_SHA)" "$(DECIDE_FILE)" "$(DECIDE_HEADS_SHA)" "$(DECIDE_HEADS)" > "$$dir/decide.sha256"; \
+	 printf "  $(GREEN)✓$(RESET) decision model in %s\n" "$$dir"
 
 # ~0.8GB from local disk: no download, so a timeout here is a failure worth the
 # log.
@@ -1712,9 +1731,10 @@ app-analyze:
 # version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
 # registry answering for $(DECIDE_BUNDLE) with the token, and Your server
 # answering /prose/v1/models with the key. It prints HTTP status codes only,
-# never a secret: the two tokens reach curl as "$$BOND_…" shell references
+# never a secret: the two tokens reach the shell as "$$BOND_…" references
 # through the `export` beside MS_ENV, so `make -n app-doctor` shows the
-# reference. Exits non-zero when any line is ✗. Read-only: nothing is
+# reference, and curl reads its header from a config on stdin (`-K -`), so
+# the token is never in curl's argv for `ps` to show. Exits non-zero when any line is ✗. Read-only: nothing is
 # downloaded, started or written.
 app-doctor:
 	@fail=0; \
@@ -1738,7 +1758,8 @@ app-doctor:
 	 elif [ -z "$$BOND_REGISTRY_TOKEN" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_TOKEN is not set in local.mk\n"; fail=1; \
 	 else \
-	   code=$$(curl -s -o /dev/null -w '%{http_code}' -m 8 -H "Authorization: Bearer $$BOND_REGISTRY_TOKEN" "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/bundle.json"); \
+	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$BOND_REGISTRY_TOKEN" | \
+	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/bundle.json"); \
 	   case "$$code" in \
 	     200) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
 	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
@@ -1750,7 +1771,8 @@ app-doctor:
 	 elif [ -z "$$BOND_BOX_KEY" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_BOX_KEY is not set in local.mk\n"; fail=1; \
 	 else \
-	   code=$$(curl -s -o /dev/null -w '%{http_code}' -m 8 -H "Authorization: Bearer $$BOND_BOX_KEY" "$(BOND_BOX_URL:%/=%)/prose/v1/models"); \
+	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$BOND_BOX_KEY" | \
+	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 "$(BOND_BOX_URL:%/=%)/prose/v1/models"); \
 	   case "$$code" in \
 	     200) printf "  $(GREEN)✓$(RESET) your server answers at %s\n" "$(BOND_BOX_URL)";; \
 	     401|403) printf "  $(RED)✗$(RESET) your server refused the key — HTTP %s\n" "$$code"; fail=1;; \

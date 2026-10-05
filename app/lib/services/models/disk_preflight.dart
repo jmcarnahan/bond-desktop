@@ -134,6 +134,16 @@ Future<DiskPreflight> checkDisk({
         row: ledger[DownloadLedger.draftId(model.id)],
       );
     }
+    // A registry entry's heads file is a leg of its own, on its own row.
+    final heads = model.heads;
+    if (model.isRegistry && heads != null) {
+      needed += _remaining(
+        dest: p.join(folder, model.headsRelativePath!),
+        sizeBytes: heads.sizeBytes,
+        sha256: heads.sha256,
+        row: ledger[DownloadLedger.headsId(model.id)],
+      );
+    }
   }
   // Asked BEFORE the probe, so the answer still comes from the volume the
   // folder will live on rather than from a directory this call just made.
@@ -151,9 +161,9 @@ Future<DiskPreflight> checkDisk({
 /// a resumable `.part` is here, its whole size otherwise.
 ///
 /// [row] is that file's own ledger row: the parent's for a checkpoint, the
-/// `.draft` one for a sidecar. The suffix is [ModelDownloader.partSuffix]
-/// rather than a literal, because the only part worth discounting is one the
-/// downloader will actually find.
+/// `.draft` one for a sidecar, the `.heads` one for a heads file. The suffix
+/// is [ModelDownloader.partSuffix] rather than a literal, because the only
+/// part worth discounting is one the downloader will actually find.
 int _remaining({
   required String dest,
   required int sizeBytes,

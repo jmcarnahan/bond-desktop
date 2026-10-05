@@ -93,6 +93,11 @@ class SetupDownloadBody extends StatelessWidget {
         DownloadError.missingFolder =>
           'The models folder could not be created. Go back and choose '
               'another folder.',
+        DownloadError.registryNotConfigured =>
+          'The model registry has no address. Add one under Settings, Models.',
+        DownloadError.unauthorized =>
+          'The model registry refused the access token. Check it under '
+              'Settings, Models.',
         _ => _httpOrGeneric(error),
       };
 

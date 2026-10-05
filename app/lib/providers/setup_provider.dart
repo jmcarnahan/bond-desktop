@@ -439,9 +439,11 @@ class SetupController extends StateNotifier<SetupState> {
     // ledger the manifest has moved past, it is the MODEL BUMP path: the
     // weights on disk are the previous checkpoint, and the download step is
     // where that gets put right — its `_onEnter` starts the transfer for
-    // everything missing or stale.
+    // everything missing or stale. Only the entries that GATE setup decide
+    // it (decision D7): a registry file is best-effort and never reopens the
+    // wizard.
     if (step == SetupStep.done) {
-      step = _ledger.matches(resolvedManifest)
+      step = _ledger.matches(resolvedManifest.gating)
           ? SetupStep.welcome
           : SetupStep.download;
     }
@@ -685,8 +687,8 @@ class SetupController extends StateNotifier<SetupState> {
   /// The roles' manifest (`ModelManifest.forRoles`: embeddings, the decision
   /// model when it runs here, the managed generative model when that runs
   /// here — so choosing User defined drops the chat model from the download)
-  /// without the hand-installed entries, which are never downloaded: a
-  /// decision model that is not installed never holds the wizard up.
+  /// without the hand-installed entries, which are never downloaded. The
+  /// registry's decision model IS here, an ordinary download row.
   ModelManifest get resolvedManifest {
     return manifest
         .forRoles(
@@ -699,13 +701,16 @@ class SetupController extends StateNotifier<SetupState> {
         .downloadable;
   }
 
-  /// The decision model's entry when it runs on this Mac, or null. It is
-  /// installed by hand (`make decide-install`) and never downloaded, so the
-  /// models step lists it apart from the downloads.
-  ModelFile? get localDecisionModel =>
-      state.decisionPlacement == ModelPlacement.local
-          ? manifest.byRoleOrNull(ModelRole.decide)
-          : null;
+  /// The decision model's entry when it runs on this Mac AND is a
+  /// hand-installed (`source: local`) one, or null. Such an entry is never
+  /// downloaded, so the models step lists it apart from the downloads. A
+  /// downloaded decide entry (the registry's) is null here: it is in
+  /// [resolvedManifest] and the models step shows it as a download row.
+  ModelFile? get localDecisionModel {
+    if (state.decisionPlacement != ModelPlacement.local) return null;
+    final decide = manifest.byRoleOrNull(ModelRole.decide);
+    return decide != null && decide.isLocal ? decide : null;
+  }
 
   /// Whether [localDecisionModel]'s files are in the models folder.
   bool get decisionInstalled {
@@ -1018,6 +1023,12 @@ class SetupController extends StateNotifier<SetupState> {
       // granted without it hands over a server that will not start.
       final draft = model.sidecarRelativePath;
       if (draft != null && !File(p.join(folder, draft)).existsSync()) {
+        return false;
+      }
+      // And a registry entry's heads file, the one kind that downloads one:
+      // the decision model answers nothing without it.
+      final heads = model.isRegistry ? model.headsRelativePath : null;
+      if (heads != null && !File(p.join(folder, heads)).existsSync()) {
         return false;
       }
     }

@@ -455,9 +455,14 @@ enforce the ones that are commands.
   puts a sentence on `LlmTarget.unavailable` for a managed target the router
   does not serve, and `LlmClient` and `DecisionClient` throw on it before any
   HTTP, so only that role parks (`not_installed`). `machineTierProvider` still
-  answers what this Mac could hold. The decide entry is `source: local` (repo
-  `local/bond-decide`, no download): the downloader and the ledger skip it,
-  and it is installed when the GGUF AND the heads file are both in the folder.
+  answers what this Mac could hold. The decide entry is a REGISTRY entry
+  (`source: artifactory`, repo `artifactory/bond-decide-mbl-v3swap`, bundle
+  `bond-decide-mbl-v3swap`): downloaded with its heads file, ledgered as
+  `bond-decide` and `bond-decide.heads`, and on disk when both rows are
+  current and both files are in the folder. A `source: local` entry (repo
+  `local/<name>`, no download, no ledger row, installed when its files are
+  present) is still parsed and handled everywhere, and its cases are tested
+  with `testLocalDecideFile()`.
 - Whether the app runs its own llama-server is `managedServerDefault`, a
   CONSTANT read off `--dart-define=BOND_DEV_HAND_SERVERS` the way
   `SetupGate.skipDefine` reads its own, not a preference: `AppPrefs
@@ -586,13 +591,39 @@ enforce the ones that are commands.
   or fails the test: the four entries, three by `-hf` repo (`MODEL_HF`,
   `FAST_HF`, `EMBED_HF`, the quant either from a `:quant` suffix or from the
   repo name having to carry the manifest file's own quant token) and the
-  source-local decide entry by folder, file and heads (`DECIDE_DIR`,
-  `DECIDE_FILE`, `DECIDE_QUANT` f16, `DECIDE_HEADS`) and by its server args
+  registry decide entry by folder, file, heads, bundle, remote names and
+  digests (`DECIDE_DIR`, `DECIDE_FILE`, `DECIDE_QUANT` f16, `DECIDE_HEADS`,
+  `DECIDE_BUNDLE`, `DECIDE_REMOTE_GGUF`, `DECIDE_REMOTE_HEADS`,
+  `DECIDE_GGUF_SHA`, `DECIDE_HEADS_SHA`) and by its server args
   (`DECIDE_ARGS`: pooling, `-c`, `-ub`, `-b`, `-np` against the preset);
   `CTX_SIZE`, `MODEL_CTX`, `SLOTS`, `FAST_SLOTS`, the embed `--pooling` word
   and the prose spec type. One blind spot remains: the recipes launch the
   servers from `MODEL_FLAGS` and `FAST_FLAGS`, so a literal written into those
   in place of `$(CTX_SIZE)` drifts past every assertion the test makes.
+- Registry downloads (`ModelDownloader` with `registryBase` and
+  `registryToken`, both LOOKUPS: the provider's
+  `AppPrefs.effectiveRegistryUrl` and `bearerFor(registryId)`). A registry
+  leg's URL is `ModelFile.registryUri(base)` / `headsRegistryUri(base)`
+  (`<base>/bundles/<bundle>/<remoteFile>`, the base through
+  `normalizeBoxBaseUrl`); `resolveUri` and `sidecarResolveUri` throw for a
+  registry entry, they are Hugging Face's. A leg carries `Authorization` to
+  its OWN origin only (`sameOrigin`): every registry leg follows redirects by
+  hand, so object storage never gets the token and each answer is judged by
+  the hop that gave it (a storage 403 re-resolves). `isRegistry` is the ONE
+  rule for owning a heads leg (`isCurrent`, `_specsFor`, `downloadBytes`,
+  the preflight, `_allFilesPresent`), and the parser refuses `heads` on a
+  Hugging Face entry. 401/403 from that origin is
+  `DownloadError.unauthorized` (no retry); no base is
+  `registry_not_configured` before any request. The heads file is the
+  entry's LAST leg, ledger id `DownloadLedger.headsId(id)` = `<id>.heads`,
+  counted in `downloadBytes`, required by `isCurrent`, `verify`,
+  `_allFilesPresent` and the disk preflight. `ModelManifest.gating` (the
+  Hugging Face entries, `gatesSetup`) is what the wizard gate and the
+  resume's ledger check read (D7); `downloadable` (everything not local) is
+  what the wizard downloads. Tests serve a registry from
+  `FakeHubServer.registryContents` (`registryBase`, `registryBearer`,
+  `registryRedirect` + `startStorage()` for a second origin; `registryAuth`
+  / `storageAuth` record the header against the FAKE token only).
 - The MTP head is a nested `sidecar` record on the manifest's prose entry, not
   a fourth model: it carries its own revision, sha256 and size, lands in the
   parent's repo folder, and `downloadBytes` counts it so the wizard's total is
@@ -687,8 +718,9 @@ enforce the ones that are commands.
   answering yes answers `GET …/v1/models` too; without it (every older test)
   no listing is asked. The provider's HTTP client is
   `decisionHttpClientProvider`, the seam a wiring test overrides.
-- The heads file (`decide-heads.json`, installed beside the GGUF under
-  `<models>/local_bond-decide/` by `make decide-install`) is needed on THIS
+- The heads file (`decide-heads.json`, downloaded beside the GGUF under
+  `<models>/artifactory_bond-decide-mbl-v3swap/` from the registry's
+  `heads.json`; `make decide-fetch` fills the same folder) is needed on THIS
   Mac for the encoder-heads kind even when its server is remote: the heads, temperatures and
   softmax run in Dart. It is SCHEMA 2 with 12 `questions`: the nine message
   fields (renderer `message`, `decisionFields` order), then `same_effort`

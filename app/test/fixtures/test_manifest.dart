@@ -20,9 +20,10 @@ import 'package:bond_inbox/services/server/router_preset.dart';
 /// the ladder the app ships. The entries' own arguments stay fictional.
 /// [proseSidecar] is OPT-IN and null by default, so the fixture every other
 /// suite builds still describes three files and one INI line per model.
-/// [withDecide] is opt-in for the same reason: the hand-installed decision
-/// model (`source: local`, real repo and file names, a heads record) is a
-/// fourth INI section, and only the suites about it want one. A
+/// [withDecide] is opt-in for the same reason: the decision model (the
+/// registry entry, real repo and file names, a heads record) is a fourth INI
+/// section, and only the suites about it want one; [decide] hands in another
+/// decide entry instead, such as [testLocalDecideFile]. A
 /// sidecar changes the preset's text, the download count, the ledger's rows
 /// and the total, and only the suites that are about those want it.
 ModelManifest testManifest({
@@ -31,6 +32,7 @@ ModelManifest testManifest({
   String revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   ModelSidecar? proseSidecar,
   bool withDecide = false,
+  ModelFile? decide,
 }) {
   final defaultSha = '0' * 64;
   ModelFile file({
@@ -59,7 +61,8 @@ ModelManifest testManifest({
         sidecar: sidecar,
       );
 
-  return ModelManifest(version: 2, tiers: testTiers, models: [
+  return ModelManifest(
+      version: ModelManifest.manifestVersion, tiers: testTiers, models: [
     file(
       id: routerEmbedId,
       role: ModelRole.embed,
@@ -73,7 +76,7 @@ ModelManifest testManifest({
         'load-on-startup': 'true',
       },
     ),
-    if (withDecide) testDecideFile(),
+    if (withDecide || decide != null) decide ?? testDecideFile(),
     file(
       id: routerBulkId,
       role: ModelRole.bulk,
@@ -96,10 +99,48 @@ ModelManifest testManifest({
   ]);
 }
 
-/// The hand-installed decision model with the REAL repo, file and heads
-/// names (what the paths and the parity with `make decide-install` are
-/// written against) and fictional sizes and digests.
-ModelFile testDecideFile() => ModelFile(
+/// The decision model as the committed manifest ships it, a REGISTRY entry
+/// (`source: artifactory`), with the REAL repo, bundle, remote and on-disk
+/// file and heads names (what the paths, the registry URLs and the parity
+/// with `make decide-fetch` are written against) and fictional sizes and
+/// digests. A downloader test hands in the digests of the bytes its fake
+/// registry serves, so the sha checks pass, as the other fixtures do.
+ModelFile testDecideFile({
+  int sizeBytes = 2048,
+  String? sha256,
+  int headsSizeBytes = 512,
+  String? headsSha256,
+}) =>
+    ModelFile(
+      id: routerDecideId,
+      role: ModelRole.decide,
+      displayName: 'Test Decide',
+      repo: 'artifactory/bond-decide-mbl-v3swap',
+      file: 'bond-decide-mbl-v3-f16.gguf',
+      revision: '',
+      sizeBytes: sizeBytes,
+      sha256: sha256 ?? 'e' * 64,
+      minRamBytes: 0,
+      license: 'Fictional-1.0',
+      licenseUrl: 'https://example.invalid/licence',
+      source: sourceArtifactory,
+      bundle: 'bond-decide-mbl-v3swap',
+      remoteFile: 'model-f16.gguf',
+      heads: ModelHeads(
+        file: 'decide-heads.json',
+        remoteFile: 'heads.json',
+        sha256: headsSha256 ?? 'f' * 64,
+        sizeBytes: headsSizeBytes,
+      ),
+      serverArgs: _decideArgs,
+    );
+
+/// A HAND-INSTALLED decision model (`source: local`, repo
+/// `local/bond-decide`): never downloaded, never ledgered, installed when
+/// its GGUF and heads file are both in the folder. The committed manifest no
+/// longer ships one, and the `local` source is still supported, so the
+/// suites about that branch build it from here.
+ModelFile testLocalDecideFile() => ModelFile(
       id: routerDecideId,
       role: ModelRole.decide,
       displayName: 'Test Decide',
@@ -117,16 +158,18 @@ ModelFile testDecideFile() => ModelFile(
         sha256: 'f' * 64,
         sizeBytes: 512,
       ),
-      serverArgs: const {
-        'embedding': 'true',
-        'pooling': 'mean',
-        'c': '2048',
-        'ub': '2048',
-        'b': '2048',
-        'parallel': '1',
-        'load-on-startup': 'true',
-      },
+      serverArgs: _decideArgs,
     );
+
+const Map<String, String> _decideArgs = {
+  'embedding': 'true',
+  'pooling': 'mean',
+  'c': '2048',
+  'ub': '2048',
+  'b': '2048',
+  'parallel': '1',
+  'load-on-startup': 'true',
+};
 
 /// The fictional MTP head for the prose entry — the real file NAME, because
 /// the path and the INI line are what the assertions are written against, and
@@ -169,4 +212,7 @@ RouterPreset testPreset(String folder) => testManifest().toPreset(folder);
 /// A manifest holding exactly [files] — for the parser's refusals and for a
 /// downloader test that wants one model rather than three.
 ModelManifest manifestFor(List<ModelFile> files) =>
-    ModelManifest(version: 2, models: List.unmodifiable(files));
+    ModelManifest(
+      version: ModelManifest.manifestVersion,
+      models: List.unmodifiable(files),
+    );

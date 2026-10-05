@@ -9,6 +9,7 @@ import 'package:http/io_client.dart' show IOClient;
 import 'package:path/path.dart' as p;
 
 import '../../data/message_store.dart' show MessageStore;
+import '../llm/model_slots.dart' show normalizeBoxBaseUrl, sameOrigin;
 import 'download_state.dart';
 import 'model_manifest.dart';
 
@@ -53,14 +54,26 @@ class _Resolved {
   final http.StreamedResponse? response;
 }
 
-/// ONE file to fetch: a checkpoint's weights, or the sidecar that follows it.
+/// What one leg is, before anything about where it comes from: its ledger
+/// row, where it lands, and what it must hash to. Enough to draw a row or to
+/// fail an entry that has no address to be fetched from.
+typedef _LegSpec = ({
+  String ledgerId,
+  String relativePath,
+  String sha256,
+  int sizeBytes,
+});
+
+/// ONE file to fetch: a checkpoint's weights, the sidecar that follows it, or
+/// a registry entry's heads file, which comes last.
 ///
-/// A manifest ENTRY can cost two downloads and the run treats them as two
-/// transfers with two ledger rows — they resume and verify separately, and a
-/// single row could not say that one of them landed. It is still ONE row on
-/// the screen: [progressId] is the entry's id for both legs, [priorBytes] is
-/// what the legs before this one already account for, and [parentTotal] is
-/// every byte the entry costs, so a bar counts from zero to one once.
+/// A manifest ENTRY can cost several downloads and the run treats them as
+/// separate transfers with their own ledger rows — they resume and verify
+/// separately, and a single row could not say that one of them landed. It is
+/// still ONE row on the screen: [progressId] is the entry's id for every leg,
+/// [priorBytes] is what the legs before this one already account for, and
+/// [parentTotal] is every byte the entry costs, so a bar counts from zero to
+/// one once.
 class _Leg {
   _Leg({
     required this.parent,
@@ -71,17 +84,35 @@ class _Leg {
     required this.sizeBytes,
     required this.priorBytes,
     required this.isLast,
+    this.headers = const {},
   });
 
   final ModelFile parent;
 
-  /// The ledger's key — the entry's id, or `<id>.draft` for a sidecar.
+  /// The ledger's key — the entry's id, `<id>.draft` for a sidecar, or
+  /// `<id>.heads` for a heads file.
   final String ledgerId;
 
   final String relativePath;
+
+  /// Where the bytes are asked for first. Its ORIGIN is the only one
+  /// [headers] are ever sent to.
   final Uri uri;
   final String sha256;
   final int sizeBytes;
+
+  /// What every request to [uri]'s origin carries beyond `Range`: the
+  /// registry's `authorization`, or nothing for a hub leg. Never sent to
+  /// another origin, which is what a registry's redirect to object storage
+  /// is.
+  final Map<String, String> headers;
+
+  /// Whether this leg comes from the model registry rather than the hub,
+  /// which is what decides what a 401 or 403 means.
+  bool get registry => parent.isRegistry;
+
+  /// Whether [target] is [uri]'s own origin, the only place [headers] go.
+  bool ownOrigin(Uri target) => sameOrigin('$target', '$uri');
 
   /// Bytes belonging to the legs BEFORE this one, so a progress event can
   /// speak for the whole entry.
@@ -134,6 +165,8 @@ class ModelDownloader {
     this.sha256,
     this.beginActivity,
     this.endActivity,
+    this.registryBase,
+    this.registryToken,
     http.Client? httpClient,
     ResolveUri? resolveUri,
     ResolveSidecarUri? resolveSidecarUri,
@@ -205,6 +238,19 @@ class ModelDownloader {
 
   final Future<int?> Function(String reason)? beginActivity;
   final Future<void> Function(int token)? endActivity;
+
+  /// The model registry's address, read once at the top of a run like the
+  /// folder. Absent, or answering empty, means no registry is configured: a
+  /// registry entry then fails with [DownloadError.registryNotConfigured]
+  /// before any request, and the rest of the set still downloads.
+  final String Function()? registryBase;
+
+  /// The registry's bearer token, LOOKED UP for each registry entry as its
+  /// legs are built and held only on those legs' headers for as long as the
+  /// entry is fetched. Never a field holding the value, never a log line,
+  /// never a ledger row or a progress event. Null or empty sends no header,
+  /// and the registry's own 401 then says so.
+  final String? Function()? registryToken;
 
   final http.Client _client;
   final bool _ownsClient;
@@ -279,26 +325,25 @@ class ModelDownloader {
   }
 
   /// Whether the FINISHED files at [file]'s destinations hash to what the
-  /// manifest says — the weights, and the sidecar when there is one.
+  /// manifest says — the weights, the sidecar when there is one, and a
+  /// registry entry's heads file.
   ///
-  /// Both, because the question a caller is asking is whether this checkpoint
-  /// can be served, and a prose model whose draft head is the previous
-  /// build's cannot. The parent is hashed first and a mismatch answers at
-  /// once, so the cheap half never pays for the expensive one.
+  /// All of them, because the question a caller is asking is whether this
+  /// checkpoint can be served, and a prose model whose draft head is the
+  /// previous build's cannot. The legs are hashed in fetch order and a
+  /// mismatch answers at once, so a later file never pays for an earlier
+  /// failure.
   Future<bool> verify(ModelFile file) async {
     final folder = modelsFolder();
-    if (!await _digestMatches(
-      p.join(folder, file.relativePath),
-      file.sha256,
-    )) {
-      return false;
+    for (final spec in _specsFor(file)) {
+      if (!await _digestMatches(
+        p.join(folder, spec.relativePath),
+        spec.sha256,
+      )) {
+        return false;
+      }
     }
-    final head = file.sidecar;
-    if (head == null) return true;
-    return _digestMatches(
-      p.join(folder, file.sidecarRelativePath!),
-      head.sha256,
-    );
+    return true;
   }
 
   Future<void> dispose() async {
@@ -322,8 +367,8 @@ class ModelDownloader {
     int? token;
     try {
       _ledger = await readLedger();
-      // A `source: local` entry is installed by hand (`make decide-install`)
-      // and has no URL to fetch, so it never enters a run.
+      // A `source: local` entry is installed by hand and has no URL to
+      // fetch, so it never enters a run.
       final ordered = [
         for (final file in files ?? manifest.bySize)
           if (!file.isLocal) file,
@@ -332,13 +377,17 @@ class ModelDownloader {
       // The whole list before the first byte, so a screen draws every row at
       // once rather than growing one line at a time.
       final folder = modelsFolder();
+      // Read once per run, like the folder: an address changed in Settings
+      // mid-run is picked up by the next one.
+      final base = normalizeBoxBaseUrl(registryBase?.call() ?? '');
       for (final file in ordered) {
         // Summed across the legs, because the row is the ENTRY's: a prose
         // model whose weights are here and whose sidecar is half here draws
         // one bar that says so.
         var received = 0;
-        for (final leg in _legsFor(file)) {
-          received += _lengthOf('${p.join(folder, leg.relativePath)}$partSuffix');
+        for (final spec in _specsFor(file)) {
+          received +=
+              _lengthOf('${p.join(folder, spec.relativePath)}$partSuffix');
         }
         _emit(DownloadProgress(
           id: file.id,
@@ -352,7 +401,11 @@ class ModelDownloader {
       for (final file in ordered) {
         if (_cancelRequested) break;
         try {
-          await _runFile(file, folder);
+          if (file.isRegistry && base.isEmpty) {
+            await _withoutRegistry(file, folder);
+            continue;
+          }
+          await _runFile(file, folder, base);
         } on Object catch (e, stack) {
           // The LEGS look after themselves — see `_runFile`, which fails the
           // leg that threw. What is left for this net is a throw from
@@ -397,34 +450,128 @@ class ModelDownloader {
   }
 
   /// The files one manifest entry costs, in the order they are fetched: the
-  /// weights, then the sidecar. The sidecar goes SECOND because a draft head
-  /// without the model it drafts for is of no use to anybody, and a run that
-  /// stops between them leaves the more valuable file on disk.
-  List<_Leg> _legsFor(ModelFile file) {
+  /// weights, then the sidecar, then — for a registry entry — the heads
+  /// file. The weights go FIRST because a draft head or a heads file without
+  /// the model it belongs to is of no use to anybody, and a run that stops
+  /// between them leaves the more valuable file on disk. Their sizes add up
+  /// to [ModelFile.downloadBytes].
+  static List<_LegSpec> _specsFor(ModelFile file) {
     final head = file.sidecar;
+    final heads = file.isRegistry ? file.heads : null;
     return [
-      _Leg(
-        parent: file,
+      (
         ledgerId: file.id,
         relativePath: file.relativePath,
-        uri: _resolveUri(file),
         sha256: file.sha256,
         sizeBytes: file.sizeBytes,
-        priorBytes: 0,
-        isLast: head == null,
       ),
       if (head != null)
-        _Leg(
-          parent: file,
+        (
           ledgerId: DownloadLedger.draftId(file.id),
           relativePath: file.sidecarRelativePath!,
-          uri: _resolveSidecarUri(file, head),
           sha256: head.sha256,
           sizeBytes: head.sizeBytes,
-          priorBytes: file.sizeBytes,
-          isLast: true,
+        ),
+      if (heads != null)
+        (
+          ledgerId: DownloadLedger.headsId(file.id),
+          relativePath: file.headsRelativePath!,
+          sha256: heads.sha256,
+          sizeBytes: heads.sizeBytes,
         ),
     ];
+  }
+
+  /// [_specsFor] with where each file is asked for: the hub (through the
+  /// injected resolvers) or the registry at [base], whose legs carry the
+  /// token the lookup answers right now. Only the LAST leg may emit the
+  /// entry's `done`.
+  List<_Leg> _legsFor(ModelFile file, String base) {
+    final specs = _specsFor(file);
+    final headers =
+        file.isRegistry ? _registryHeaders() : const <String, String>{};
+    final legs = <_Leg>[];
+    var prior = 0;
+    for (var i = 0; i < specs.length; i++) {
+      final spec = specs[i];
+      legs.add(_Leg(
+        parent: file,
+        ledgerId: spec.ledgerId,
+        relativePath: spec.relativePath,
+        uri: _uriFor(file, spec.ledgerId, base),
+        sha256: spec.sha256,
+        sizeBytes: spec.sizeBytes,
+        priorBytes: prior,
+        isLast: i == specs.length - 1,
+        headers: headers,
+      ));
+      prior += spec.sizeBytes;
+    }
+    return legs;
+  }
+
+  Uri _uriFor(ModelFile file, String ledgerId, String base) {
+    if (ledgerId == DownloadLedger.headsId(file.id)) {
+      return file.headsRegistryUri(base)!;
+    }
+    if (ledgerId == DownloadLedger.draftId(file.id)) {
+      return _resolveSidecarUri(file, file.sidecar!);
+    }
+    return file.isRegistry ? file.registryUri(base) : _resolveUri(file);
+  }
+
+  /// The registry's `authorization` header, from a lookup made NOW, or none
+  /// when the lookup has no token.
+  Map<String, String> _registryHeaders() {
+    final token = registryToken?.call();
+    if (token == null || token.isEmpty) return const {};
+    return {'authorization': 'Bearer $token'};
+  }
+
+  /// A registry entry when no registry address is configured. Nothing is
+  /// asked of the network. Files already here at this manifest's digests
+  /// still count — an address removed after the download does not unmake
+  /// it — and the first file that is not fails the entry with
+  /// [DownloadError.registryNotConfigured], on its own row, so a landed
+  /// file's `done` row is never overwritten.
+  Future<void> _withoutRegistry(ModelFile file, String folder) async {
+    var landed = 0;
+    for (final spec in _specsFor(file)) {
+      final dest = p.join(folder, spec.relativePath);
+      final row = _ledger[spec.ledgerId];
+      if (row != null &&
+          row.status == DownloadStatus.done &&
+          row.sha256 == spec.sha256 &&
+          _exists(dest)) {
+        landed += spec.sizeBytes;
+        continue;
+      }
+      final part = _lengthOf('$dest$partSuffix');
+      _ledger = _ledger.record(FileDownloadState(
+        id: spec.ledgerId,
+        status: DownloadStatus.failed,
+        receivedBytes: part,
+        totalBytes: spec.sizeBytes,
+        sha256: spec.sha256,
+        error: DownloadError.registryNotConfigured,
+        updatedAt: MessageStore.isoStamp(DateTime.now()),
+      ));
+      await _persistLedger(force: true);
+      _emit(DownloadProgress(
+        id: file.id,
+        status: DownloadStatus.failed,
+        receivedBytes: landed + part,
+        totalBytes: file.downloadBytes,
+        error: DownloadError.registryNotConfigured,
+      ));
+      return;
+    }
+    _emit(DownloadProgress(
+      id: file.id,
+      status: DownloadStatus.done,
+      receivedBytes: file.downloadBytes,
+      totalBytes: file.downloadBytes,
+    ));
   }
 
   /// One entry, leg by leg. A leg that fails or is cancelled ends the ENTRY:
@@ -435,8 +582,8 @@ class ModelDownloader {
   /// failed. Failing the first leg instead would write `failed` at zero bytes
   /// over the parent's `done` row when it was the SIDECAR that threw — a
   /// finished eighteen-gigabyte file the next launch would fetch again.
-  Future<void> _runFile(ModelFile file, String folder) async {
-    for (final leg in _legsFor(file)) {
+  Future<void> _runFile(ModelFile file, String folder, String base) async {
+    for (final leg in _legsFor(file, base)) {
       final bool landed;
       try {
         landed = await _runLeg(leg, folder);
@@ -623,7 +770,7 @@ class ModelDownloader {
     final resolved = await _resolve(leg, offset);
     var response = resolved.response;
     if (response == null) {
-      response = await _fetch(resolved.cdnUri!, offset);
+      response = await _fetch(leg, resolved.cdnUri!, offset);
       if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
         await _drain(response);
         // The part already holds everything the CDN would send.
@@ -633,9 +780,13 @@ class ModelDownloader {
     return _consume(leg, part, offset, total, response, rate);
   }
 
-  /// Step 5. The hub's own answer: a redirect to the CDN, or the bytes.
+  /// Step 5. The hub's own answer: a redirect to the CDN, or the bytes. The
+  /// registry's the same way: a local one answers the bytes, a hosted one may
+  /// redirect to object storage.
   Future<_Resolved> _resolve(_Leg leg, int offset) async {
     final request = http.Request('GET', leg.uri)..followRedirects = false;
+    // The leg's own origin, so its headers ride on this request.
+    request.headers.addAll(leg.headers);
     // The Range rides on the RESOLVE as well, because a hub that answers the
     // body directly rather than redirecting has to resume too.
     if (offset > 0) {
@@ -644,20 +795,18 @@ class ModelDownloader {
     final response = await _send(request);
     final code = response.statusCode;
 
-    if (code == 301 ||
-        code == 302 ||
-        code == 303 ||
-        code == 307 ||
-        code == 308) {
+    if (_isRedirect(code)) {
       final location = response.headers[HttpHeaders.locationHeader];
       await _drain(response);
-      _checkLinked(leg, response.headers);
+      if (!leg.registry) _checkLinked(leg, response.headers);
       if (location == null || location.isEmpty) throw _Retryable();
       return _Resolved.redirect(leg.uri.resolve(location));
     }
     if (code == HttpStatus.ok || code == HttpStatus.partialContent) {
       try {
-        _checkLinked(leg, response.headers);
+        // The hub's linked-object headers. A registry sends none of its own,
+        // and is not trusted to mean the hub's thing by them.
+        if (!leg.registry) _checkLinked(leg, response.headers);
       } on _FileFailure {
         await _drain(response);
         rethrow;
@@ -665,7 +814,13 @@ class ModelDownloader {
       return _Resolved.body(response);
     }
     await _drain(response);
-    if (code == HttpStatus.unauthorized &&
+    if (leg.registry &&
+        (code == HttpStatus.unauthorized || code == HttpStatus.forbidden)) {
+      // No token, or one the registry refused. Asking again changes nothing.
+      throw _FileFailure(DownloadError.unauthorized);
+    }
+    if (!leg.registry &&
+        code == HttpStatus.unauthorized &&
         response.headers['x-error-code'] == 'GatedRepo') {
       throw _FileFailure(DownloadError.gated);
     }
@@ -676,13 +831,51 @@ class ModelDownloader {
     throw _FileFailure(DownloadError.http(code));
   }
 
-  /// Step 6. The CDN copy.
-  Future<http.StreamedResponse> _fetch(Uri uri, int offset) async {
-    final request = http.Request('GET', uri)..followRedirects = true;
-    if (offset > 0) {
-      request.headers[HttpHeaders.rangeHeader] = 'bytes=$offset-';
+  /// How many hops a leg with headers follows by hand after its resolve.
+  static const int _maxHops = 5;
+
+  static bool _isRedirect(int code) =>
+      code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+
+  /// Step 6. The CDN copy — or the object storage a registry redirected to.
+  ///
+  /// Every REGISTRY leg (and any leg with headers) follows its redirects BY
+  /// HAND, one hop at a time, so that each hop's origin is checked before
+  /// anything is attached: the leg's headers go to its own origin and to no
+  /// other, and a token never reaches a storage host the registry handed the
+  /// request on to. Following by hand also means the answer is judged by the
+  /// hop that gave it, so a storage host's 403 re-resolves rather than
+  /// reading as the registry refusing the token. A Hugging Face leg lets the
+  /// client follow, as it always has.
+  Future<http.StreamedResponse> _fetch(_Leg leg, Uri uri, int offset) async {
+    final manual = leg.registry || leg.headers.isNotEmpty;
+    var target = uri;
+    for (var hop = 0;; hop++) {
+      final request = http.Request('GET', target)..followRedirects = !manual;
+      if (manual && leg.ownOrigin(target)) request.headers.addAll(leg.headers);
+      if (offset > 0) {
+        request.headers[HttpHeaders.rangeHeader] = 'bytes=$offset-';
+      }
+      final response = await _send(request);
+      final code = response.statusCode;
+      if (manual && _isRedirect(code)) {
+        final location = response.headers[HttpHeaders.locationHeader];
+        await _drain(response);
+        if (location == null || location.isEmpty) throw _Retryable();
+        if (hop >= _maxHops) throw _FileFailure(DownloadError.http(code));
+        target = target.resolve(location);
+        continue;
+      }
+      return _fetched(leg, target, response);
     }
-    final response = await _send(request);
+  }
+
+  /// What one fetch's answer means, for the hop at [target].
+  Future<http.StreamedResponse> _fetched(
+    _Leg leg,
+    Uri target,
+    http.StreamedResponse response,
+  ) async {
     final code = response.statusCode;
     if (code == HttpStatus.ok ||
         code == HttpStatus.partialContent ||
@@ -690,6 +883,12 @@ class ModelDownloader {
       return response;
     }
     await _drain(response);
+    if (leg.registry &&
+        leg.ownOrigin(target) &&
+        (code == HttpStatus.unauthorized || code == HttpStatus.forbidden)) {
+      // The registry itself refusing the token, not a signature that aged.
+      throw _FileFailure(DownloadError.unauthorized);
+    }
     if (code == HttpStatus.forbidden) {
       // The signed URL aged out mid-download. Not a refusal — go round again
       // and ask the hub for a fresh signature, without a backoff, because

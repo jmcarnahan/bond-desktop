@@ -42,7 +42,7 @@ pooling = last
 load-on-startup = true
 
 [bond-decide]
-model = /tmp/Bond Models/local_bond-decide/bond-decide-mbl-v3-f16.gguf
+model = /tmp/Bond Models/artifactory_bond-decide-mbl-v3swap/bond-decide-mbl-v3-f16.gguf
 embedding = true
 pooling = mean
 c = 2048
@@ -170,7 +170,7 @@ spec-type = draft-mtp
       expect(start, greaterThan(0));
       expect(lines.sublist(start, start + 9), [
         '[bond-decide]',
-        'model = /tmp/models/local_bond-decide/bond-decide-mbl-v3-f16.gguf',
+        'model = /tmp/models/artifactory_bond-decide-mbl-v3swap/bond-decide-mbl-v3-f16.gguf',
         'embedding = true',
         'pooling = mean',
         'c = 2048',
@@ -182,8 +182,8 @@ spec-type = draft-mtp
       expect(preset.toIni(), isNot(contains('decide-heads.json')));
       expect(preset.draftPath(preset.models[1]), isNull);
       expect(
-        preset.missingFiles().where((f) => f.contains('local_bond-decide')),
-        ['/tmp/models/local_bond-decide/bond-decide-mbl-v3-f16.gguf'],
+        preset.missingFiles().where((f) => f.contains('artifactory_bond-decide-mbl-v3swap')),
+        ['/tmp/models/artifactory_bond-decide-mbl-v3swap/bond-decide-mbl-v3-f16.gguf'],
       );
     });
 

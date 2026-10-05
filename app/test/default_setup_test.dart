@@ -454,6 +454,40 @@ void main() {
       final none = await notifier(compiledRegistryToken: '');
       expect(none.bearerFor(registryId), isNull);
     });
+
+    test('the downloader looks the address and the token up through the '
+        'prefs, at the moment it asks', () async {
+      final support = await Directory.systemTemp.createTemp('default-setup');
+      addTearDown(() => support.delete(recursive: true));
+      final container = ProviderContainer(overrides: [
+        dbProvider.overrideWithValue(db),
+        appPathsProvider.overrideWithValue(AppPaths(support)),
+        modelManifestProvider.overrideWithValue(testManifest(withDecide: true)),
+        systemInfoProvider.overrideWithValue(FakeSystemInfo()),
+        // Built inside the override, so the container is its one owner.
+        appPrefsProvider.overrideWith(
+          (ref) => AppPrefsNotifier(
+            store,
+            tokens: MemoryTokenStore(),
+            compiledRegistryUrl: registryUrl,
+            compiledRegistryToken: registryToken,
+          ),
+        ),
+      ]);
+      addTearDown(container.dispose);
+      final prefs = container.read(appPrefsProvider.notifier);
+      await prefs.ready;
+
+      final downloader = container.read(modelDownloaderProvider);
+      expect(downloader.registryBase!(), registryUrl);
+      expect(downloader.registryToken!(), registryToken);
+
+      // Late-bound: a typed address on another host is read on the next ask,
+      // and the build's token does not follow it there.
+      await prefs.useRegistry(url: otherRegistry);
+      expect(downloader.registryBase!(), otherRegistry);
+      expect(downloader.registryToken!(), isNull);
+    });
   });
 
   group('the key field when the build carries the key', () {

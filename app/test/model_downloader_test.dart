@@ -172,10 +172,14 @@ void main() {
     OpenPart? openPart,
     Uri Function(ModelFile)? resolveUri,
     ResolveSidecarUri? resolveSidecarUri,
+    String Function()? registryBase,
+    String? Function()? registryToken,
   }) {
     final downloader = ModelDownloader(
       manifest: which ?? manifest,
       modelsFolder: at ?? folder,
+      registryBase: registryBase,
+      registryToken: registryToken,
       openPart: openPart,
       readLedger: () async => ledger,
       writeLedger: (updated) async {
@@ -278,18 +282,24 @@ void main() {
 
   test('a hand-installed entry is never fetched, listed or recorded',
       () async {
-    // `source: local` (the decision model) has no URL to fetch: it arrives by
-    // `make decide-install`. Handed to a run, whether by the caller or through
-    // the whole manifest, it must cost no request and no ledger row.
+    // A `source: local` decision model has no URL to fetch: it is copied in
+    // by hand. Handed to a run, whether by the caller or through the whole
+    // manifest, it must cost no request and no ledger row — even with a
+    // registry configured.
     final embed = manifest.byId(routerEmbedId);
-    final decide = testDecideFile();
+    final decide = testLocalDecideFile();
 
-    final events = await build().run([decide, embed]).toList();
+    final events = await build(
+      registryBase: () => hub.registryBase,
+      registryToken: () => _fakeToken,
+    ).run([decide, embed]).toList();
 
     expect(events.where((e) => e.id == routerDecideId), isEmpty);
     expect(statusesFor(events, routerEmbedId).last, DownloadStatus.done);
     expect(ledger[routerDecideId], isNull);
+    expect(ledger[DownloadLedger.headsId(routerDecideId)], isNull);
     expect(hub.resolveRanges, [null]);
+    expect(hub.registryCount, 0);
     expect(File(destOf(decide)).existsSync(), isFalse);
   });
 
@@ -1131,4 +1141,439 @@ void main() {
       );
     });
   });
+
+  group('the registry', () {
+    const bundle = 'bond-decide-mbl-v3swap';
+
+    String headsDestOf(ModelFile file) =>
+        p.join(folder(), file.headsRelativePath!);
+
+    /// Serves the decision model's two files from the fake registry and
+    /// returns a registry entry whose sizes and digests describe them.
+    /// [headsSha] lies about the heads file, for the checksum case.
+    ModelFile publishDecide({
+      int gguf = 6144,
+      int heads = 1536,
+      String? headsSha,
+    }) {
+      final weights = fakeWeights(gguf, seed: 21);
+      final head = fakeWeights(heads, seed: 22);
+      hub.registryContents['$bundle/model-f16.gguf'] = weights;
+      hub.registryContents['$bundle/heads.json'] = head;
+      return testDecideFile(
+        sizeBytes: weights.length,
+        sha256: sha256Hex(weights),
+        headsSizeBytes: head.length,
+        headsSha256: headsSha ?? sha256Hex(head),
+      );
+    }
+
+    ModelDownloader buildRegistry({String? Function()? token}) => build(
+          registryBase: () => hub.registryBase,
+          registryToken: token ?? () => _fakeToken,
+        );
+
+    test('weights and heads land under the app names with the bearer',
+        () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(File(destOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/model-f16.gguf']);
+      expect(File(headsDestOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/heads.json']);
+      expect(headsDestOf(decide),
+          endsWith('artifactory_bond-decide-mbl-v3swap/decide-heads.json'));
+      expect(File(partOf(decide)).existsSync(), isFalse);
+      expect(File('${headsDestOf(decide)}${ModelDownloader.partSuffix}')
+          .existsSync(), isFalse);
+
+      expect(ledger[routerDecideId]?.status, DownloadStatus.done);
+      expect(ledger[routerDecideId]?.sha256, decide.sha256);
+      final headsRow = ledger[DownloadLedger.headsId(routerDecideId)];
+      expect(headsRow?.status, DownloadStatus.done);
+      expect(headsRow?.sha256, decide.heads!.sha256);
+      expect(ledger.isCurrent(decide), isTrue);
+
+      // Two requests, both to the bundle's own names, both with the bearer.
+      expect(hub.registryCount, 2);
+      expect(hub.registryAuth, ['Bearer $_fakeToken', 'Bearer $_fakeToken']);
+      expect(
+        [for (final u in hub.requests) u.path],
+        [
+          '/artifactory/bond-models/bundles/$bundle/model-f16.gguf',
+          '/artifactory/bond-models/bundles/$bundle/heads.json',
+        ],
+      );
+      expect(hub.resolveCount, 0);
+
+      // ONE bar: every event speaks for the whole entry, and only the heads
+      // leg, the last, says done.
+      final mine = [for (final e in events) if (e.id == routerDecideId) e];
+      expect(decide.downloadBytes, decide.sizeBytes + decide.heads!.sizeBytes);
+      for (final e in mine) {
+        expect(e.totalBytes, decide.downloadBytes);
+      }
+      expect(mine.where((e) => e.status == DownloadStatus.done), hasLength(1));
+      expect(mine.last.status, DownloadStatus.done);
+      expect(mine.last.receivedBytes, decide.downloadBytes);
+      // Nothing the run wrote names the token.
+      for (final written in ledgerWrites) {
+        expect(written.contains(_fakeToken), isFalse);
+      }
+      for (final e in events) {
+        expect('$e'.contains(_fakeToken), isFalse);
+      }
+    });
+
+    test('a resumed registry leg sends the bearer AND the Range', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      final path = partOf(decide);
+      await Directory(p.dirname(path)).create(recursive: true);
+      await File(path).writeAsBytes(
+          hub.registryContents['$bundle/model-f16.gguf']!.sublist(0, 700));
+      ledger = ledger.record(FileDownloadState(
+        id: decide.id,
+        status: DownloadStatus.paused,
+        receivedBytes: 700,
+        totalBytes: decide.sizeBytes,
+        sha256: decide.sha256,
+      ));
+
+      await buildRegistry().run([decide]).toList();
+
+      expect(hub.registryRanges.first, 'bytes=700-');
+      expect(hub.registryAuth.first, 'Bearer $_fakeToken');
+      expect(File(destOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/model-f16.gguf']);
+      expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    test('a cross-origin redirect target never receives the token', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await hub.startStorage();
+      hub.registryRedirect = true;
+
+      // A trailing slash on the base, as a pasted address often has.
+      final events = await build(
+        registryBase: () => '${hub.registryBase}/',
+        registryToken: () => _fakeToken,
+      ).run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      expect(hub.registryAuth, ['Bearer $_fakeToken', 'Bearer $_fakeToken']);
+      expect(hub.storageCount, 2);
+      expect(hub.storageAuth, [null, null]);
+      expect(File(destOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/model-f16.gguf']);
+      expect(File(headsDestOf(decide)).readAsBytesSync(),
+          hub.registryContents['$bundle/heads.json']);
+      expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    test('no registry address fails the entry before any request, and the '
+        'rest of the set still downloads', () async {
+      final decide = publishDecide();
+      final embed = manifest.byId(routerEmbedId);
+
+      for (final base in <String Function()?>[() => '  ', null]) {
+        ledger = DownloadLedger.empty;
+        final events = await build(
+          registryBase: base,
+          registryToken: () => _fakeToken,
+        ).run([decide, embed]).toList();
+
+        final failed = events.lastWhere((e) => e.id == routerDecideId);
+        expect(failed.status, DownloadStatus.failed);
+        expect(failed.error, DownloadError.registryNotConfigured);
+        expect(failed.totalBytes, decide.downloadBytes);
+        expect(ledger[routerDecideId]?.status, DownloadStatus.failed);
+        expect(ledger[routerDecideId]?.error,
+            DownloadError.registryNotConfigured);
+        expect(statusesFor(events, routerEmbedId).last, DownloadStatus.done);
+        expect(hub.registryCount, 0);
+        await File(destOf(embed)).delete();
+      }
+    });
+
+    test('no registry address leaves an entry already here alone', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await buildRegistry().run([decide]).toList();
+      final landed = ledger;
+      final requests = hub.registryCount;
+
+      final events =
+          await build(registryBase: () => '').run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      expect(hub.registryCount, requests);
+      expect(ledger, landed);
+    });
+
+    test('a refused token fails as unauthorized with no retry storm',
+        () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+
+      final events = await build(
+        registryBase: () => hub.registryBase,
+        registryToken: () => 'not-the-test-token',
+      ).run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.unauthorized);
+      expect(hub.registryCount, 1);
+      expect(sleeps, isEmpty);
+      expect(ledger[routerDecideId]?.error, DownloadError.unauthorized);
+      expect(ledger[DownloadLedger.headsId(routerDecideId)], isNull);
+    });
+
+    test('a 403 from the registry itself is unauthorized too', () async {
+      final decide = publishDecide();
+      hub.registryStatusOverride = HttpStatus.forbidden;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.error, DownloadError.unauthorized);
+      expect(hub.registryCount, 1);
+      expect(sleeps, isEmpty);
+    });
+
+    test('no token sends no authorization header at all', () async {
+      final decide = publishDecide();
+
+      for (final token in <String? Function()>[() => null, () => '']) {
+        ledger = DownloadLedger.empty;
+        hub.registryAuth.clear();
+        final folderNow = Directory(folder());
+        if (folderNow.existsSync()) folderNow.deleteSync(recursive: true);
+
+        final events = await buildRegistry(token: token).run([decide]).toList();
+
+        expect(events.last.status, DownloadStatus.done);
+        expect(hub.registryAuth, [null, null]);
+      }
+    });
+
+    test('heads whose bytes are wrong fail the heads leg as checksum, and '
+        'the weights stay done', () async {
+      final decide = publishDecide(headsSha: '1' * 64);
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.checksum);
+      expect(ledger[routerDecideId]?.status, DownloadStatus.done);
+      final headsRow = ledger[DownloadLedger.headsId(routerDecideId)];
+      expect(headsRow?.status, DownloadStatus.failed);
+      expect(headsRow?.error, DownloadError.checksum);
+      expect(File(headsDestOf(decide)).existsSync(), isFalse);
+      expect(ledger.isCurrent(decide), isFalse);
+      // Taken twice, the checksum retry, then given up on.
+      expect(
+        [for (final u in hub.requests) p.basename(u.path)]
+            .where((name) => name == 'heads.json'),
+        hasLength(2),
+      );
+    });
+
+    test('a chain that returns to the registry origin carries the token '
+        'there again, and storage still gets none', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await hub.startStorage();
+      hub.registryRedirect = true;
+      hub.storageBounceBack = true;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      // Per file: the resolve, then the hop back. Every one with the token.
+      expect(hub.registryAuth, hasLength(4));
+      expect(hub.registryAuth, everyElement('Bearer $_fakeToken'));
+      expect(hub.storageCount, 2);
+      expect(hub.storageAuth, [null, null]);
+      expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    test('a relative Location on a hand-followed hop resolves against that '
+        'hop', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await hub.startStorage();
+      hub.registryRedirect = true;
+      hub.storageRelativeHop = true;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      // Resolved against the REGISTRY, `/served/...` would have been asked of
+      // the registry and answered 404; it was asked of storage instead.
+      expect(hub.storagePaths, [
+        '/store/$bundle/model-f16.gguf',
+        '/served/$bundle/model-f16.gguf',
+        '/store/$bundle/heads.json',
+        '/served/$bundle/heads.json',
+      ]);
+      expect(hub.storageAuth, everyElement(isNull));
+      expect(hub.registryCount, 2);
+    });
+
+    test('a redirect loop stops after the hop limit with the redirect code, '
+        'and is not retried', () async {
+      final decide = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await hub.startStorage();
+      hub.registryRedirect = true;
+      hub.storageLoop = true;
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.http(HttpStatus.found));
+      expect(sleeps, isEmpty);
+      expect(hub.registryCount, 1);
+      // The first hop and five more, then the limit.
+      expect(hub.storageCount, 6);
+      expect(hub.storageAuth, everyElement(isNull));
+    });
+
+    test('a 403 from the storage origin re-resolves rather than failing as '
+        'unauthorized, with a token and without one', () async {
+      final decide = publishDecide();
+      await hub.startStorage();
+      hub.registryRedirect = true;
+
+      for (final token in <String? Function()>[() => _fakeToken, () => null]) {
+        ledger = DownloadLedger.empty;
+        hub.registryAuth.clear();
+        hub.storageAuth.clear();
+        final folderNow = Directory(folder());
+        if (folderNow.existsSync()) folderNow.deleteSync(recursive: true);
+        hub.storageForbidden = 1;
+        final before = hub.registryCount;
+
+        final events = await buildRegistry(token: token).run([decide]).toList();
+
+        expect(events.last.status, DownloadStatus.done,
+            reason: 'token: ${token() != null}');
+        expect(events.where((e) => e.error == DownloadError.unauthorized),
+            isEmpty);
+        // The weights' resolve, its re-resolve after the 403, then the heads.
+        expect(hub.registryCount - before, 3);
+        expect(hub.storageAuth, everyElement(isNull));
+      }
+    });
+
+    test('a registry 404 fails as http_404 after one request', () async {
+      final decide = publishDecide();
+      hub.registryContents.remove('$bundle/model-f16.gguf');
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.http(HttpStatus.notFound));
+      expect(hub.registryCount, 1);
+      expect(sleeps, isEmpty);
+    });
+
+    test('weights done and here, heads missing: only the heads are asked for, '
+        'on one bar from the weights to the whole', () async {
+      final decide = publishDecide();
+      await File(destOf(decide)).create(recursive: true);
+      await File(destOf(decide))
+          .writeAsBytes(hub.registryContents['$bundle/model-f16.gguf']!);
+      ledger = DownloadLedger.empty.record(FileDownloadState(
+        id: decide.id,
+        status: DownloadStatus.done,
+        receivedBytes: decide.sizeBytes,
+        totalBytes: decide.sizeBytes,
+        sha256: decide.sha256,
+      ));
+
+      final events = await buildRegistry().run([decide]).toList();
+
+      expect(
+        [for (final u in hub.requests) p.basename(u.path)],
+        ['heads.json'],
+      );
+      final afterPending = events.skip(1).toList();
+      expect(afterPending.first.receivedBytes, decide.sizeBytes);
+      for (final e in afterPending) {
+        expect(e.receivedBytes, greaterThanOrEqualTo(decide.sizeBytes));
+        expect(e.totalBytes, decide.downloadBytes);
+      }
+      expect(events.where((e) => e.status == DownloadStatus.done),
+          hasLength(1));
+      expect(events.last.status, DownloadStatus.done);
+      expect(events.last.receivedBytes, decide.downloadBytes);
+      expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    test('a new heads digest replaces the heads file and leaves the weights '
+        'alone', () async {
+      final old = publishDecide();
+      hub.registryBearer = _fakeToken;
+      await buildRegistry().run([old]).toList();
+      expect(ledger.isCurrent(old), isTrue);
+      hub.requests.clear();
+
+      // The bundle republishes its heads; the GGUF is the same bytes.
+      final newHeads = fakeWeights(1600, seed: 23);
+      hub.registryContents['$bundle/heads.json'] = newHeads;
+      final bumped = testDecideFile(
+        sizeBytes: old.sizeBytes,
+        sha256: old.sha256,
+        headsSizeBytes: newHeads.length,
+        headsSha256: sha256Hex(newHeads),
+      );
+      expect(ledger.isCurrent(bumped), isFalse);
+
+      final events = await buildRegistry().run([bumped]).toList();
+
+      expect(events.last.status, DownloadStatus.done);
+      expect(
+        [for (final u in hub.requests) p.basename(u.path)],
+        ['heads.json'],
+      );
+      expect(File(headsDestOf(bumped)).readAsBytesSync(), newHeads);
+      expect(ledger.isCurrent(bumped), isTrue);
+    });
+
+    test('no address with the weights done and the heads missing fails the '
+        'heads row and leaves the weights row alone', () async {
+      final decide = publishDecide();
+      await File(destOf(decide)).create(recursive: true);
+      await File(destOf(decide))
+          .writeAsBytes(hub.registryContents['$bundle/model-f16.gguf']!);
+      final weightsRow = FileDownloadState(
+        id: decide.id,
+        status: DownloadStatus.done,
+        receivedBytes: decide.sizeBytes,
+        totalBytes: decide.sizeBytes,
+        sha256: decide.sha256,
+      );
+      ledger = DownloadLedger.empty.record(weightsRow);
+
+      final events =
+          await build(registryBase: () => '').run([decide]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.registryNotConfigured);
+      expect(events.last.receivedBytes, decide.sizeBytes);
+      expect(ledger[decide.id], weightsRow);
+      final headsRow = ledger[DownloadLedger.headsId(decide.id)];
+      expect(headsRow?.status, DownloadStatus.failed);
+      expect(headsRow?.error, DownloadError.registryNotConfigured);
+      expect(hub.registryCount, 0);
+    });
+  });
 }
+
+/// An obviously fake registry token.
+const String _fakeToken = 'test-token-123';

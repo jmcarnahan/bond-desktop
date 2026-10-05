@@ -58,13 +58,14 @@ void main() {
     AppPrefs prefs, {
     MemoryTokenStore? tokens,
     http.Client? httpClient,
+    ModelManifest? which,
   }) {
     final made = ProviderContainer(overrides: [
       if (httpClient != null)
         decisionHttpClientProvider.overrideWithValue(httpClient),
       dbProvider.overrideWithValue(db),
       appPathsProvider.overrideWithValue(AppPaths(support)),
-      modelManifestProvider.overrideWithValue(manifest),
+      modelManifestProvider.overrideWithValue(which ?? manifest),
       appPrefsProvider.overrideWith(
         (ref) => AppPrefsNotifier(
           MessageStore(db),
@@ -77,19 +78,48 @@ void main() {
     return made;
   }
 
-  test('the install folder is named only when the models folder moved',
-      () async {
-    final plain = containerFor(const AppPrefs());
+  test('a hand-installed decision model\'s folder is named only when the '
+      'models folder moved', () async {
+    final local = testManifest(decide: testLocalDecideFile());
+    final plain = containerFor(const AppPrefs(), which: local);
     expect(plain.read(decideInstallDirProvider), isNull);
 
     final moved = p.join(support.path, 'elsewhere');
-    final custom = containerFor(AppPrefs(modelsFolder: moved));
+    final custom = containerFor(AppPrefs(modelsFolder: moved), which: local);
     expect(
       custom.read(decideInstallDirProvider),
-      p.dirname(p.join(moved, decide.relativePath)),
+      p.dirname(p.join(
+          moved, local.byRole(ModelRole.decide).relativePath)),
     );
     expect(p.basename(custom.read(decideInstallDirProvider)!),
         'local_bond-decide');
+  });
+
+  test('the registry decision model names no install folder, moved or not',
+      () async {
+    // The app downloads it itself, so there is no folder to tell anybody to
+    // copy into, and no `DECIDE_DIR=` hint pointing at the old one.
+    expect(decide.isRegistry, isTrue);
+    expect(containerFor(const AppPrefs()).read(decideInstallDirProvider),
+        isNull);
+    final moved = p.join(support.path, 'elsewhere');
+    expect(
+      containerFor(AppPrefs(modelsFolder: moved))
+          .read(decideInstallDirProvider),
+      isNull,
+    );
+  });
+
+  test('the heads file is read from the registry entry\'s folder', () async {
+    final path = p.join(support.path, 'models',
+        'artifactory_bond-decide-mbl-v3swap', 'decide-heads.json');
+    expect(headsPath(), path);
+    final container = containerFor(const AppPrefs());
+    final heads = container.read(decisionHeadsProvider);
+    expect(heads.current, throwsA(anything), reason: 'nothing there yet');
+    await File(path).create(recursive: true);
+    await File(path).writeAsString(jsonEncode(syntheticHeadsJson()));
+    expect(heads.current().model, 'bond-decide-synthetic');
   });
 
   test('on this Mac it dials the managed router under bond-decide', () async {

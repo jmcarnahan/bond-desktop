@@ -459,4 +459,81 @@ void main() {
       expect(check.neededBytes, wholeSet + head);
     });
   });
+
+  group('the registry decision model', () {
+    // 2 KiB weights + 512 B heads, from the fixture.
+    const int weights = 2048;
+    const int heads = 512;
+
+    setUp(() => manifest = testManifest(withDecide: true));
+
+    test('its weights AND its heads are part of the budget', () async {
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: DownloadLedger.empty,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet + weights + heads);
+    });
+
+    test('weights done and here leave only the heads to pay for', () async {
+      final decide = manifest.byRole(ModelRole.decide);
+      await writeDone(decide.id);
+      final ledger = DownloadLedger.empty.record(FileDownloadState(
+        id: decide.id,
+        status: DownloadStatus.done,
+        sha256: decide.sha256,
+      ));
+
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: ledger,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet + heads);
+    });
+
+    test('both rows done and both files here cost nothing', () async {
+      final decide = manifest.byRole(ModelRole.decide);
+      await writeDone(decide.id);
+      final headsPath = p.join(folder(), decide.headsRelativePath!);
+      await File(headsPath).writeAsBytes(List.filled(heads, 0));
+      final ledger = DownloadLedger.empty
+          .record(FileDownloadState(
+            id: decide.id,
+            status: DownloadStatus.done,
+            sha256: decide.sha256,
+          ))
+          .record(FileDownloadState(
+            id: DownloadLedger.headsId(decide.id),
+            status: DownloadStatus.done,
+            sha256: decide.heads!.sha256,
+          ));
+
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: ledger,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet);
+    });
+
+    test('a hand-installed one still costs nothing', () async {
+      manifest = testManifest(decide: testLocalDecideFile());
+      final check = await checkDisk(
+        system: system,
+        manifest: manifest,
+        ledger: DownloadLedger.empty,
+        folder: folder(),
+      );
+
+      expect(check.neededBytes, wholeSet);
+    });
+  });
 }

@@ -17,8 +17,10 @@ import 'setup_controls.dart';
 /// sentence, so a person on a small Mac is told what is coming before the
 /// rows say it and before the total is a number they have to compare.
 ///
-/// The decision model, when it runs here, heads the list with its install
-/// state rather than a size: it is installed by hand and never downloaded.
+/// The decision model, when it runs here, is an ordinary download row from
+/// the model registry. A hand-installed (`source: local`) decide entry
+/// instead heads the list with its install state rather than a size, since
+/// it is never downloaded.
 ///
 /// The rows are in MANIFEST order (embed, bulk, prose) rather than by size,
 /// because this screen is about what each model does and that order is the
@@ -34,9 +36,10 @@ class SetupModelsBody extends StatelessWidget {
 
   final VoidCallback onContinue;
 
-  /// The decision model's entry when it runs on this Mac, or null. It is
-  /// installed by hand and never downloaded, so it is listed apart from the
-  /// downloads and counts toward neither the sentence nor the total.
+  /// A hand-installed decision model's entry when it runs on this Mac, or
+  /// null. It is never downloaded, so it is listed apart from the downloads
+  /// and counts toward neither the sentence nor the total. Null for the
+  /// registry's decision model, which is a row of [manifest].
   final ModelFile? decisionModel;
 
   /// Whether [decisionModel]'s files are already in the models folder.

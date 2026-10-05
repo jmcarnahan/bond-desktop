@@ -22,9 +22,15 @@ String sha256Hex(List<int> bytes) => crypto.sha256.convert(bytes).toString();
 /// scripted client would happily let a downloader that never sent a `Range`
 /// header pass.
 ///
-/// Two routes:
+/// Three routes:
 /// * `/<repo>/resolve/<revision>/<file>` — the hub. Redirects to the CDN.
 /// * `/cdn/<token>/<repo>/<file>` — the signed copy. Supports Range.
+/// * `<any base path>/bundles/<bundle>/<file>` — the model REGISTRY
+///   (Artifactory). Answers the bytes directly with Range support, as the
+///   local one does, or 401 without the expected bearer, or a redirect to a
+///   second loopback server on another port: another ORIGIN, playing the
+///   object storage a hosted registry hands requests on to. [registryBase]
+///   is the base path tests use, `/artifactory/bond-models`.
 class FakeHubServer {
   FakeHubServer._(this._server) {
     _server.listen(_handle);
@@ -32,12 +38,159 @@ class FakeHubServer {
 
   final HttpServer _server;
 
+  /// The second origin, once [startStorage] has run.
+  HttpServer? _storage;
+
   static Future<FakeHubServer> start() async =>
       FakeHubServer._(await HttpServer.bind(InternetAddress.loopbackIPv4, 0));
 
   int get port => _server.port;
 
-  Future<void> close() => _server.close(force: true);
+  Future<void> close() async {
+    await _storage?.close(force: true);
+    await _server.close(force: true);
+  }
+
+  // ── registry ───────────────────────────────────────────────────────
+
+  /// The registry base a downloader is pointed at.
+  String get registryBase => 'http://127.0.0.1:$port/artifactory/bond-models';
+
+  /// `'<bundle>/<file>'` to the bytes the registry serves.
+  final Map<String, List<int>> registryContents = {};
+
+  /// When set, a registry request answers 401 unless its `Authorization` is
+  /// exactly `Bearer <this>`. Tests set it to an obviously fake token.
+  String? registryBearer;
+
+  /// One-shot status for the next registry request.
+  int? registryStatusOverride;
+
+  /// Redirect every registry request to the second origin ([startStorage]).
+  bool registryRedirect = false;
+
+  int registryCount = 0;
+
+  /// The `Authorization` header of every registry request, in order — null
+  /// for a request that carried none. The fixture's own recorder: a test
+  /// compares it with its FAKE token and nothing else.
+  final List<String?> registryAuth = [];
+  final List<String?> registryRanges = [];
+
+  /// The second origin hands the request BACK to the registry
+  /// (`…/bundles/<key>?hop=back`), which then serves the bytes: a chain that
+  /// returns to the registry's own origin.
+  bool storageBounceBack = false;
+
+  /// The second origin answers its first hop with a RELATIVE `Location`
+  /// (`/served/<key>`), which resolves against the storage hop, not the leg.
+  bool storageRelativeHop = false;
+
+  /// The second origin redirects to itself for ever.
+  bool storageLoop = false;
+
+  /// The next this-many second-origin requests answer 403, an object
+  /// store's expired signature.
+  int storageForbidden = 0;
+
+  int storageCount = 0;
+
+  /// The paths the second origin was asked for, in order.
+  final List<String> storagePaths = [];
+
+  /// What the SECOND origin received for `Authorization`, per request.
+  final List<String?> storageAuth = [];
+  final List<String?> storageRanges = [];
+
+  /// Starts the second origin, serving [registryContents] at
+  /// `/store/<bundle>/<file>`, and returns its port.
+  Future<int> startStorage() async {
+    final storage = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    _storage = storage;
+    storage.listen((request) async {
+      try {
+        storageCount++;
+        storagePaths.add(request.uri.path);
+        storageAuth.add(request.headers.value(HttpHeaders.authorizationHeader));
+        storageRanges.add(request.headers.value(HttpHeaders.rangeHeader));
+        final segments = request.uri.pathSegments;
+        final key = segments.skip(1).join('/');
+        final body = registryContents[key];
+        final route = segments.isEmpty ? '' : segments.first;
+        if ((route != 'store' && route != 'served') || body == null) {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        if (storageForbidden > 0) {
+          storageForbidden--;
+          request.response.statusCode = HttpStatus.forbidden;
+          await request.response.close();
+          return;
+        }
+        Future<void> redirect(String location) async {
+          request.response.statusCode = HttpStatus.found;
+          request.response.headers.set(HttpHeaders.locationHeader, location);
+          await request.response.close();
+        }
+
+        if (route == 'store') {
+          if (storageLoop) return await redirect('/store/$key');
+          if (storageRelativeHop) return await redirect('/served/$key');
+          if (storageBounceBack) {
+            return await redirect('$registryBase/bundles/$key?hop=back');
+          }
+        }
+        await _serve(request, body, isCdn: false, key: 'store/$key');
+      } on Object {
+        // As for the main server: a killed socket is not this fake failing.
+      }
+    });
+    return storage.port;
+  }
+
+  /// `<base>/bundles/<bundle>/<file>`
+  Future<void> _registry(HttpRequest request, List<String> segments) async {
+    registryCount++;
+    final auth = request.headers.value(HttpHeaders.authorizationHeader);
+    registryAuth.add(auth);
+    registryRanges.add(request.headers.value(HttpHeaders.rangeHeader));
+    final at = segments.lastIndexOf('bundles');
+    final key = segments.sublist(at + 1).join('/');
+    final body = registryContents[key];
+
+    final override = registryStatusOverride;
+    if (override != null) {
+      registryStatusOverride = null;
+      request.response.statusCode = override;
+      await request.response.close();
+      return;
+    }
+    final bearer = registryBearer;
+    if (bearer != null && auth != 'Bearer $bearer') {
+      request.response.statusCode = HttpStatus.unauthorized;
+      await request.response.close();
+      return;
+    }
+    if (body == null) {
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+      return;
+    }
+    final storage = _storage;
+    final returned = request.uri.queryParameters['hop'] == 'back';
+    if (registryRedirect && storage != null && !returned) {
+      request.response.statusCode = HttpStatus.found;
+      request.response.headers.set(
+        HttpHeaders.locationHeader,
+        'http://127.0.0.1:${storage.port}/store/$key',
+      );
+      await request.response.close();
+      return;
+    }
+    request.response.headers.set('X-Checksum-Sha256', sha256Hex(body));
+    await _serve(request, body, isCdn: false, key: 'registry/$key');
+  }
 
   /// `'<repo>/<file>'` to the bytes the CDN serves.
   final Map<String, List<int>> contents = {};
@@ -131,7 +284,10 @@ class FakeHubServer {
     requests.add(request.uri);
     final segments = request.uri.pathSegments;
     try {
-      if (segments.length > 1 && segments.first == 'cdn') {
+      final bundles = segments.lastIndexOf('bundles');
+      if (bundles >= 0 && segments.length - bundles == 3) {
+        await _registry(request, segments);
+      } else if (segments.length > 1 && segments.first == 'cdn') {
         await _cdn(request, segments);
       } else if (segments.length >= 5 && segments[2] == 'resolve') {
         await _resolve(request, segments);

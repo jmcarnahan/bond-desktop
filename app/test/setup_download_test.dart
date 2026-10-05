@@ -147,6 +147,16 @@ void main() {
         'folder.',
       );
       expect(
+        SetupDownloadBody.describeDownloadError(
+            DownloadError.registryNotConfigured),
+        'The model registry has no address. Add one under Settings, Models.',
+      );
+      expect(
+        SetupDownloadBody.describeDownloadError(DownloadError.unauthorized),
+        'The model registry refused the access token. Check it under '
+        'Settings, Models.',
+      );
+      expect(
         SetupDownloadBody.describeDownloadError(DownloadError.http(503)),
         'The server answered HTTP 503.',
       );

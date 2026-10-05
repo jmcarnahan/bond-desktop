@@ -186,14 +186,14 @@ String goldenDecisionState(
 }
 
 /// The heads file a decision leg applies: `DECIDE_HEADS` (the Makefile
-/// passes `$(DECIDE_DIR)/$(DECIDE_HEADS)`), else where `make decide-install`
-/// puts it.
+/// passes `$(DECIDE_DIR)/$(DECIDE_HEADS)`), else where the app's download
+/// and `make decide-fetch` put it.
 String decideHeadsPath() {
   const defined = String.fromEnvironment('DECIDE_HEADS');
   if (defined.isNotEmpty) return defined;
   final home = Platform.environment['HOME'] ?? '';
   return '$home/Library/Application Support/com.bondinbox.app/models/'
-      'local_bond-decide/decide-heads.json';
+      'artifactory_bond-decide-mbl-v3swap/decide-heads.json';
 }
 
 /// Which gate rule a decision run file records.
