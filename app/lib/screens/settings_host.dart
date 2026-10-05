@@ -418,6 +418,9 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       // Settings pane moves the bar and the three roles' lines without the
       // reader touching anything.
       serverState: serverState,
+      // A build constant: under BOND_DEV_HAND_SERVERS `make embed` serves
+      // embeddings and the Embeddings line offers no Download.
+      managedServer: prefs.managedServer,
       parked: ref.watch(parkedProvider).valueOrNull,
       modelStatuses: statuses,
       // The model registry: where the decision model is downloaded from.

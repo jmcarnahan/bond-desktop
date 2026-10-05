@@ -28,7 +28,8 @@ class ManagedModelStatus {
 
   /// Whether the ledger says this file landed at today's digest AND the file
   /// is still there. Both, because a file can be deleted under a current row.
-  /// A registry entry wants every one of its files, heads included. For a
+  /// A registry entry wants every one of its files, heads included, which is
+  /// `DownloadLedger.servable`, the rule the router's preset uses. For a
   /// hand-installed ([local]) entry there is no ledger: it is whether every
   /// one of its files is in the models folder.
   final bool onDisk;
@@ -40,7 +41,9 @@ class ManagedModelStatus {
   final String routerId;
 
   /// Whether this entry's heads file is in the models folder, for an entry
-  /// that has one (the decision model); true for every other entry. Apart
+  /// that has one (the decision model); true for every other entry. For a
+  /// registry entry it is `DownloadLedger.servable`, because the heads reader
+  /// reads the file only on that rule. Apart
   /// from [onDisk] because the heads run in Dart on this Mac even when the
   /// decision model embeds on the owner's server (D12), so a remote decision
   /// model is only usable once this is true.

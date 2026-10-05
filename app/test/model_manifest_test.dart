@@ -2,9 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/current_ledger.dart';
 
 /// An asset bundle with exactly one asset in it.
 ///
@@ -749,8 +752,14 @@ spec-type = draft-mtp
       void touch(String relative) =>
           File('${folder.path}/$relative')..createSync(recursive: true);
 
-      List<String> kept(ModelManifest manifest) => [
-            for (final m in manifest.withPresentFiles(folder.path).models) m.id,
+      /// Against a ledger whose rows are current for every entry unless
+      /// [ledger] says otherwise: a registry entry is served on its rows too.
+      List<String> kept(ModelManifest manifest, {DownloadLedger? ledger}) => [
+            for (final m in manifest
+                .withPresentFiles(
+                    folder.path, ledger ?? currentLedgerFor(manifest.models))
+                .models)
+              m.id,
           ];
 
       test('drops the decision model until both of its files are there', () {
@@ -762,6 +771,19 @@ spec-type = draft-mtp
         expect(kept(manifest), isNot(contains(routerDecideId)));
         touch(decide.headsRelativePath!);
         expect(kept(manifest), contains(routerDecideId));
+      });
+
+      test('drops the decision model, both files there, until its rows are '
+          'current', () {
+        final manifest = realManifest().forTier(MachineTier.full);
+        final decide = manifest.byId(routerDecideId);
+        touch(decide.relativePath);
+        touch(decide.headsRelativePath!);
+
+        expect(kept(manifest, ledger: DownloadLedger.empty),
+            isNot(contains(routerDecideId)));
+        expect(kept(manifest, ledger: currentLedgerFor([decide])),
+            contains(routerDecideId));
       });
 
       test('a chosen generative model that was never downloaded leaves the '
@@ -785,7 +807,9 @@ spec-type = draft-mtp
         expect(kept(served), containsAll([routerEmbedId, routerDecideId]));
         // And the preset built from it names no missing file, so the
         // server's preflight lets the other models start.
-        final preset = served.withPresentFiles(folder.path).toPreset(folder.path);
+        final preset = served
+            .withPresentFiles(folder.path, currentLedgerFor(served.models))
+            .toPreset(folder.path);
         expect(preset.missingFiles(), isEmpty);
 
         touch(served.byId(routerBulkId).relativePath);
@@ -814,7 +838,9 @@ spec-type = draft-mtp
         );
         expect(kept(served), [routerEmbedId]);
         expect(
-          served.withPresentFiles(folder.path).toPreset(folder.path)
+          served
+              .withPresentFiles(folder.path, DownloadLedger.empty)
+              .toPreset(folder.path)
               .missingFiles(),
           isNotEmpty,
         );

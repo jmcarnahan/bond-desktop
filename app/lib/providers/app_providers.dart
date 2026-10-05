@@ -89,6 +89,7 @@ import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_tasks_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/models/download_state.dart' show DownloadLedger;
 import '../services/models/managed_model_status.dart';
 import '../services/models/model_downloader.dart';
 import '../services/models/model_ensurer.dart';
@@ -472,13 +473,23 @@ final modelServerSupervisorProvider = Provider<ModelServerSupervisor>((ref) {
     // whose files are missing (the decision model before its download
     // lands, a chosen generative model not yet downloaded) is left
     // out, because the server refuses to start with a preset file missing and
-    // that must not cost the other models: that role parks on its own.
+    // that must not cost the other models: that role parks on its own. So is
+    // a registry entry whose download record is not current
+    // (`DownloadLedger.servable`): its GGUF and heads must belong together.
     buildPreset: () async {
       final tier = await ref.read(machineTierProvider.future);
       ref.read(appPrefsProvider.notifier).setMachineTier(tier);
       final folder = ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+      var ledger = DownloadLedger.empty;
+      try {
+        ledger = await ref.read(setupStoreProvider).downloadLedger();
+      } on Object catch (e) {
+        // No ledger serves no registry entry, which parks that role with its
+        // own sentence; it must not cost the start of the others.
+        debugPrint('model server: could not read the download ledger: $e');
+      }
       final served = (await ref.read(managedManifestProvider.future))
-          .withPresentFiles(folder);
+          .withPresentFiles(folder, ledger);
       // What the router will serve, so a managed target naming a model left
       // out (not downloaded, not installed) parks rather than 400s.
       ref.read(appPrefsProvider.notifier).setServedManagedIds({
@@ -606,17 +617,20 @@ final managedModelsStatusProvider =
       bytes: local
           ? file.sizeBytes + (file.heads?.sizeBytes ?? 0)
           : file.downloadBytes,
-      onDisk: local
-          ? ModelManifest.localInstalled(file, folder)
+      // The router's own rule for a registry or hand-installed entry
+      // (`DownloadLedger.servable`), so the page never says `On disk` for a
+      // pair the router leaves out.
+      onDisk: local || file.isRegistry
+          ? ledger.servable(file, folder)
           : ledger.isCurrent(file) &&
-              (file.isRegistry
-                  ? ModelManifest.filesPresent(file, folder)
-                  : File(p.join(folder, file.relativePath)).existsSync()),
+              File(p.join(folder, file.relativePath)).existsSync(),
       routerId: file.id,
       inUse: served.contains(file.id),
       local: local,
+      // A registry entry's heads are read only on the same rule.
       headsOnDisk: switch (file.headsRelativePath) {
         null => true,
+        _ when file.isRegistry => ledger.servable(file, folder),
         final heads => File(p.join(folder, heads)).existsSync(),
       },
     ));
@@ -1628,22 +1642,53 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
 /// triage queue holds the decision client, so a container that never loaded
 /// a manifest (a widget test that builds the queue and never triages) must
 /// still be able to build it. An unreadable manifest reads as not installed.
+///
+/// A REGISTRY decide entry's heads are read only while
+/// `DownloadLedger.servable` holds for it, the rule the router's preset uses,
+/// on This Mac and under an encoder-heads Your server alike: a pair half
+/// replaced, or a Download again under way or failed, reads as not installed.
+/// The ledger is the store's [SetupStore.knownLedger], kept current by every
+/// write the downloader makes, so a row turning current is seen on the next
+/// call. Before the store has read it once, a load is started and the call
+/// reads as not installed, which parks the pass until the next pump. A
+/// `source: local` entry reads its heads file whenever it is there.
 final decisionHeadsProvider = Provider<DecisionHeadsFile>((ref) {
   final paths = ref.watch(appPathsProvider);
-  return DecisionHeadsFile(() {
-    final ModelManifest manifest;
+  ModelFile? decide() {
     try {
-      manifest = ref.read(modelManifestProvider);
+      return ref.read(modelManifestProvider).byRoleOrNull(ModelRole.decide);
     } catch (_) {
-      return '';
+      return null;
     }
-    final heads = manifest.byRoleOrNull(ModelRole.decide)?.headsRelativePath;
-    if (heads == null) return '';
-    return p.join(
-      ref.read(appPrefsProvider).effectiveModelsFolder(paths),
-      heads,
-    );
-  });
+  }
+
+  String folder() => ref.read(appPrefsProvider).effectiveModelsFolder(paths);
+  return DecisionHeadsFile(
+    () {
+      final heads = decide()?.headsRelativePath;
+      if (heads == null) return '';
+      return p.join(folder(), heads);
+    },
+    usable: () {
+      try {
+        final file = decide();
+        if (file == null || !file.isRegistry) return true;
+        final store = ref.read(setupStoreProvider);
+        final ledger = store.knownLedger;
+        if (ledger == null) {
+          unawaited(store.downloadLedger().then<void>(
+                (_) {},
+                onError: (Object _, StackTrace _) {},
+              ));
+          return false;
+        }
+        return ledger.servable(file, folder());
+      } catch (_) {
+        return false;
+      }
+    },
+    local: () => decide()?.isLocal ?? false,
+  );
 });
 
 /// The decision client's HTTP client: the one seam a test overrides with a

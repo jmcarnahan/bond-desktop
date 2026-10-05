@@ -7,12 +7,15 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/ai_workers.dart';
+import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/settings_models_page.dart'
+    show SettingsModelsPage;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -304,6 +307,51 @@ void main() {
         expect(line, isNot(contains('make')));
         expect(line, isNot(contains('retrying')));
       }
+    });
+
+    test('a hand-installed decision model says to copy the files, never to '
+        'press a Download again it has no button for', () {
+      final misconfigured = railProgressLine(
+        on: true,
+        remaining: 3,
+        reason: 'decision_misconfigured',
+        waiting: 3,
+        onBox: false,
+        decisionLocal: true,
+      );
+      expect(
+        misconfigured,
+        'The decision server is not the decision model, or its heads file '
+        'does not match · 3 waiting · check its address in Settings, or copy '
+        'the current model files into the models folder',
+      );
+      final older = railProgressLine(
+        on: true,
+        remaining: 3,
+        reason: 'decision_older_model',
+        waiting: 3,
+        onBox: false,
+        decisionLocal: true,
+      );
+      expect(
+        older,
+        'The installed decision model is an older version that this app no '
+        'longer reads · 3 waiting · copy the current model files into the '
+        'models folder to resume sorting new mail',
+      );
+      for (final line in [misconfigured, older]) {
+        expect(line, isNot(contains('Download')));
+        expect(line, isNot(contains('—')));
+        expect(line, isNot(contains('(')));
+      }
+      // The heads refusal itself says the same, in Settings' one spelling.
+      expect(
+        DecisionHeadsFile.mismatchLocalText,
+        "The decision model's heads file does not match this build. "
+        '${DecisionHeadsFile.copyFilesText}.',
+      );
+      expect(SettingsModelsPage.decisionOlderModelLocalHint,
+          '${DecisionHeadsFile.copyFilesText}.');
     });
 
     test('a refused decision key names the decision server, whatever the '

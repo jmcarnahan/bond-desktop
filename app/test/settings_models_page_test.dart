@@ -103,6 +103,7 @@ void main() {
     bool inboxTier = false,
     bool processingOn = true,
     ServerState serverState = const ServerStopped(),
+    bool managedServer = true,
     bool decisionKeyStored = false,
     DecisionServerKind? decisionKind,
     bool generativeKeyStored = false,
@@ -130,6 +131,7 @@ void main() {
             inboxTier: inboxTier,
             processingOn: processingOn,
             serverState: serverState,
+            managedServer: managedServer,
             decisionUrl: _decisionUrl,
             decisionModel: 'bond-decide-fixture',
             decisionKeyStored: decisionKeyStored,
@@ -356,6 +358,27 @@ void main() {
       await tester.tap(find.byKey(SettingsModelsPage.embedDownloadKey));
       await tester.pump();
       expect(downloads, 1);
+    });
+
+    testWidgets('with no managed server the embedding model is served by the '
+        'owner\'s own server: no Download, no Not downloaded yet',
+        (tester) async {
+      await open(
+        tester,
+        managedServer: false,
+        statuses: [
+          _row('decision', onDisk: false),
+          _row('embed', onDisk: false),
+        ],
+      );
+
+      expect(textOf(tester, SettingsModelsPage.embedStatusKey),
+          'Served by your own embedding server.');
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsNothing);
+      // The decision model still downloads under hand servers.
+      expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsOneWidget);
+      expect(SettingsModelsPage.embedHandServedText, isNot(contains('—')));
+      expect(SettingsModelsPage.embedHandServedText, isNot(contains('(')));
     });
 
     testWidgets('a refused heads file on a downloaded entry offers Download '

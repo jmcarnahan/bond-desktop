@@ -1578,8 +1578,7 @@ void main() {
 
       expect(refused.last.status, DownloadStatus.failed);
       expect(File(headsDestOf(decide)).existsSync(), isFalse,
-          reason: 'the router and the heads reader ask only whether the file '
-              'exists, so a file proven wrong must not stay');
+          reason: 'a file proven wrong must not stay');
       expect(ledger.isCurrent(decide), isFalse);
 
       hub.registryBearer = null;
@@ -1589,6 +1588,51 @@ void main() {
       expect(sha256Hex(File(headsDestOf(decide)).readAsBytesSync()),
           decide.heads!.sha256);
       expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    test('a rehash takes the entry out of service with its first ledger '
+        'write, and a good one is current again with no byte fetched',
+        () async {
+      final decide = publishDecide();
+      final downloader = buildRegistry();
+      await downloader.run([decide]).toList();
+      expect(ledger.servable(decide, folder()), isTrue);
+      final asked = hub.registryCount;
+      final before = ledgerWrites.length;
+
+      await downloader.run([decide], {decide.id}).toList();
+
+      final servable = [
+        for (final written in ledgerWrites.skip(before))
+          DownloadLedger.parse(written).servable(decide, folder()),
+      ];
+      expect(servable.first, isFalse,
+          reason: 'nothing serves the entry while it is hashed again');
+      expect(servable.last, isTrue);
+      expect(hub.registryCount, asked);
+      expect(ledger.isCurrent(decide), isTrue);
+    });
+
+    test('a registry leg proven wrong takes its row out of done before its '
+        'replacement is fetched', () async {
+      final decide = publishDecide();
+      final downloader = buildRegistry();
+      await downloader.run([decide]).toList();
+      await File(headsDestOf(decide)).writeAsBytes(List<int>.filled(16, 1));
+      hub.registryBearer = 'another-fake-token';
+      final before = ledgerWrites.length;
+
+      await downloader.run([decide], {decide.id}).toList();
+
+      final headsRows = [
+        for (final written in ledgerWrites.skip(before))
+          DownloadLedger.parse(written)[DownloadLedger.headsId(decide.id)]
+              ?.status,
+      ];
+      expect(headsRows, isNot(contains(DownloadStatus.done)));
+      expect(ledger[DownloadLedger.headsId(decide.id)]?.status,
+          DownloadStatus.failed);
+      expect(ledger.servable(decide, folder()), isFalse);
     });
 
     group('the address and the token come from one snapshot', () {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -286,6 +287,12 @@ class FakeHubServer {
   /// Sleep between 64 KiB chunks, so a test can pause mid-stream.
   Duration? chunkDelay;
 
+  /// A body longer than one 64 KiB chunk sends its FIRST chunk and then
+  /// waits for this before the rest: a transfer held mid-stream for as long
+  /// as the test likes, with no clock in it. The test completes it to let
+  /// every held body (and every later one) through.
+  Completer<void>? hold;
+
   /// One-shot status for the next CDN request.
   int? cdnStatusOverride;
 
@@ -514,18 +521,20 @@ class FakeHubServer {
 
     request.response.headers.contentLength = payload.length;
     final delay = chunkDelay;
-    if (delay == null) {
+    const chunk = 64 * 1024;
+    final gate = payload.length > chunk ? hold : null;
+    if (delay == null && gate == null) {
       request.response.add(payload);
       await request.response.close();
       return;
     }
-    const chunk = 64 * 1024;
     for (var i = 0; i < payload.length; i += chunk) {
       request.response.add(
         payload.sublist(i, min(i + chunk, payload.length)),
       );
       await request.response.flush();
-      await Future<void>.delayed(delay);
+      if (i == 0 && gate != null) await gate.future;
+      if (delay != null) await Future<void>.delayed(delay);
     }
     await request.response.close();
   }

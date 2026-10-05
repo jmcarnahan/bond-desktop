@@ -114,6 +114,7 @@ class SetupStore {
   /// isolate never sees the key missing: the first-run flow polls this table
   /// while a download writes to it.
   Future<void> set(String key, String value) async {
+    if (key == downloadKey) _knownLedger = null;
     await db.customUpdate(
       'INSERT INTO setup_state (key, value, updated_at) VALUES (?, ?, ?) '
       'ON CONFLICT(key) DO UPDATE SET value = excluded.value, '
@@ -123,21 +124,35 @@ class SetupStore {
   }
 
   Future<void> remove(String key) async {
+    if (key == downloadKey) _knownLedger = null;
     await db.customUpdate(
       'DELETE FROM setup_state WHERE key = ?',
       variables: _args([key]),
     );
   }
 
+  /// The ledger as this store last read or wrote it, or null before either.
+  ///
+  /// For the one reader that must answer SYNCHRONOUSLY: the decision heads
+  /// reader, asked at the top of every decision call, uses a registry entry's
+  /// heads only when its rows are current (`DownloadLedger.servable`). This
+  /// process is the ledger's only writer and every write comes through
+  /// [recordDownload], so the copy is never behind the row; the launch gate
+  /// and the router's preset read the row before the first decision call.
+  DownloadLedger? get knownLedger => _knownLedger;
+  DownloadLedger? _knownLedger;
+
   /// Writes the whole ledger over itself. The downloader owns the value and
   /// rewrites it as a unit, so there is nothing here to merge.
-  Future<void> recordDownload(DownloadLedger ledger) =>
-      set(downloadKey, jsonEncode(ledger.toJson()));
+  Future<void> recordDownload(DownloadLedger ledger) async {
+    await set(downloadKey, jsonEncode(ledger.toJson()));
+    _knownLedger = ledger;
+  }
 
   /// The ledger, or an empty one — [DownloadLedger.parse] never throws, so an
   /// unreadable row costs a re-verify rather than a launch.
   Future<DownloadLedger> downloadLedger() async =>
-      DownloadLedger.parse(await get(downloadKey));
+      _knownLedger = DownloadLedger.parse(await get(downloadKey));
 
   Future<Map<String, String>> all() async {
     final rows = await db
@@ -156,6 +171,7 @@ class SetupStore {
   /// disk and the container was still migrated. An empty [keep] clears
   /// everything, which is the honest reading of "keep nothing".
   Future<void> clearExcept(Set<String> keep) async {
+    if (!keep.contains(downloadKey)) _knownLedger = null;
     if (keep.isEmpty) {
       await db.customUpdate('DELETE FROM setup_state');
       return;

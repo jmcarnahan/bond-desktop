@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:bond_inbox/data/app_paths.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/data/setup_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/decision/decision_client.dart'
@@ -16,6 +17,7 @@ import 'package:bond_inbox/services/decision/decision_state.dart'
 import 'package:bond_inbox/services/decision/decision_heads_file.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/system/system_info.dart' show HardwareInfo;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,6 +26,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/decision_heads_fixture.dart';
 import 'fixtures/memory_token_store.dart';
 import 'fixtures/test_db.dart';
@@ -54,6 +57,21 @@ void main() {
   final decide = manifest.byRole(ModelRole.decide);
   String headsPath() =>
       p.join(support.path, 'models', decide.headsRelativePath!);
+
+  /// The rest of what makes the registry entry's heads readable
+  /// (`DownloadLedger.servable`): its GGUF beside them in [folder] and both
+  /// download rows current, written through the container's own store, the
+  /// one the heads reader asks.
+  Future<void> installDecide(ProviderContainer container,
+      {String? folder}) async {
+    final gguf = File(p.join(
+        folder ?? p.join(support.path, 'models'), decide.relativePath));
+    await gguf.parent.create(recursive: true);
+    await gguf.writeAsString('gguf');
+    await container
+        .read(setupStoreProvider)
+        .recordDownload(currentLedgerFor([decide]));
+  }
 
   ProviderContainer containerFor(
     AppPrefs prefs, {
@@ -159,6 +177,7 @@ void main() {
     expect(heads.current, throwsA(anything), reason: 'nothing there yet');
     await File(path).create(recursive: true);
     await File(path).writeAsString(jsonEncode(syntheticHeadsJson()));
+    await installDecide(container);
     expect(heads.current().model, 'bond-decide-synthetic');
   });
 
@@ -333,6 +352,7 @@ void main() {
     final file = File(headsPath());
     await file.parent.create(recursive: true);
     await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+    await installDecide(container);
 
     final heads = container.read(decisionHeadsProvider);
     final first = heads.current();
@@ -352,6 +372,7 @@ void main() {
     final file = File(p.join(elsewhere, decide.headsRelativePath!));
     await file.parent.create(recursive: true);
     await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+    await installDecide(container, folder: elsewhere);
     final heads = container.read(decisionHeadsProvider);
 
     expect(heads.current, throwsA(isA<DecisionUnavailableException>()));
@@ -390,6 +411,7 @@ void main() {
         final file = File(headsPath());
         await file.parent.create(recursive: true);
         await file.writeAsString(contents);
+        await installDecide(container);
         final heads = container.read(decisionHeadsProvider);
 
         Object? first;
@@ -425,5 +447,127 @@ void main() {
         expect(heads.current().model, 'bond-decide-synthetic');
       });
     }
+  });
+
+  group('a registry entry\'s heads are read only while its download record '
+      'is current', () {
+    Future<void> writeBoth() async {
+      for (final (path, text) in [
+        (p.join(support.path, 'models', decide.relativePath), 'gguf'),
+        (headsPath(), jsonEncode(syntheticHeadsJson())),
+      ]) {
+        await File(path).parent.create(recursive: true);
+        await File(path).writeAsString(text);
+      }
+    }
+
+    Matcher notInstalled() => throwsA(isA<DecisionNotInstalledException>()
+        .having((e) => parkReasonFor(e), 'park word', 'decision_not_installed')
+        .having((e) => e.message, 'message',
+            DecisionHeadsFile.notInstalledText));
+
+    test('files on disk with no rows read as not installed, and are read '
+        'once the rows are current', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      final store = container.read(setupStoreProvider);
+      await store.recordDownload(DownloadLedger.empty);
+      final heads = container.read(decisionHeadsProvider);
+
+      expect(heads.current, notInstalled());
+
+      // What the model ensurer's pass records once it has hashed them.
+      await store.recordDownload(currentLedgerFor([decide]));
+      expect(heads.current().model, 'bond-decide-synthetic');
+    });
+
+    test('a quit between the two legs after a digest change reads as not '
+        'installed: the heads row is at the old digest', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      await container.read(setupStoreProvider).recordDownload(
+            currentLedgerFor([decide]).record(FileDownloadState(
+              id: DownloadLedger.headsId(decide.id),
+              status: DownloadStatus.done,
+              sha256: 'an-older-heads-digest',
+            )),
+          );
+
+      expect(container.read(decisionHeadsProvider).current, notInstalled());
+    });
+
+    test('a loaded file stops being read the moment a Download again takes '
+        'its rows out of done', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      await installDecide(container);
+      final heads = container.read(decisionHeadsProvider);
+      expect(heads.current().model, 'bond-decide-synthetic');
+
+      await container.read(setupStoreProvider).recordDownload(
+            currentLedgerFor([decide]).record(FileDownloadState(
+              id: DownloadLedger.headsId(decide.id),
+              status: DownloadStatus.pending,
+              sha256: decide.heads!.sha256,
+            )),
+          );
+
+      expect(heads.current, notInstalled(), reason: 'not the cached heads');
+    });
+
+    test('under an encoder-heads Your server the same rule holds', () async {
+      final container = containerFor(const AppPrefs(
+        decisionPlacement: ModelPlacement.box,
+        decisionUrl: 'https://box.example.com/decide/v1/embeddings',
+      ));
+      await writeBoth();
+      await container
+          .read(setupStoreProvider)
+          .recordDownload(DownloadLedger.empty);
+      final heads = container.read(decisionHeadsProvider);
+
+      expect(heads.current, notInstalled());
+      await installDecide(container);
+      expect(heads.current().model, 'bond-decide-synthetic');
+    });
+
+    test('a ledger the store has not read yet is loaded, and the call after '
+        'the load reads the file', () async {
+      final container = containerFor(const AppPrefs());
+      await writeBoth();
+      // Written by ANOTHER store over the same database: the container's
+      // own has not read the row yet.
+      await SetupStore(db).recordDownload(currentLedgerFor([decide]));
+      final heads = container.read(decisionHeadsProvider);
+
+      expect(heads.current, notInstalled());
+      await container.read(setupStoreProvider).downloadLedger();
+      expect(heads.current().model, 'bond-decide-synthetic');
+    });
+
+    test('a source: local entry reads its heads whenever they are there, '
+        'with no ledger at all', () async {
+      final local = testLocalDecideFile();
+      final container = containerFor(
+        const AppPrefs(),
+        which: testManifest(decide: local),
+      );
+      final file =
+          File(p.join(support.path, 'models', local.headsRelativePath!));
+      await file.parent.create(recursive: true);
+      await file.writeAsString(jsonEncode(syntheticHeadsJson()));
+
+      expect(container.read(decisionHeadsProvider).current().model,
+          'bond-decide-synthetic');
+
+      // A file it refuses says to copy the files: no button downloads it.
+      await file.writeAsString('{not json');
+      await file.setLastModified(DateTime.now().add(const Duration(minutes: 1)));
+      expect(
+        container.read(decisionHeadsProvider).current,
+        throwsA(isA<DecisionMisconfiguredException>().having((e) => e.message,
+            'message', startsWith(DecisionHeadsFile.mismatchLocalText))),
+      );
+    });
   });
 }

@@ -617,7 +617,9 @@ class ModelDownloader {
   /// over the parent's `done` row when it was the SIDECAR that threw — a
   /// finished eighteen-gigabyte file the next launch would fetch again.
   Future<void> _runFile(ModelFile file, String folder, String base) async {
-    for (final leg in _legsFor(file, base)) {
+    final legs = _legsFor(file, base);
+    if (_rehash.contains(file.id)) await _unsettle(legs);
+    for (final leg in legs) {
       final bool landed;
       try {
         landed = await _runLeg(leg, folder);
@@ -637,6 +639,26 @@ class ModelDownloader {
       }
       if (!landed) return;
     }
+  }
+
+  /// An entry about to be HASHED again stops being current at once: each
+  /// `done` row of its legs goes back to `pending`, in one ledger write, and
+  /// returns to `done` only when its leg verifies or lands. So nothing serves
+  /// the entry while a Download again runs, nor after one that failed (the
+  /// router's preset and the heads reader both ask `DownloadLedger
+  /// .servable`). A good file is still kept without a byte fetched.
+  Future<void> _unsettle(List<_Leg> legs) async {
+    var changed = false;
+    for (final leg in legs) {
+      final row = _ledger[leg.ledgerId];
+      if (row == null || row.status != DownloadStatus.done) continue;
+      _ledger = _ledger.record(row.copyWith(
+        status: DownloadStatus.pending,
+        updatedAt: MessageStore.isoStamp(DateTime.now()),
+      ));
+      changed = true;
+    }
+    if (changed) await _persistLedger(force: true);
   }
 
   /// True when this leg's file is on disk under its finished name at the
@@ -694,11 +716,17 @@ class ModelDownloader {
         await _finish(leg, DownloadStatus.done, total, total);
         return true;
       }
-      // A file proven wrong goes NOW, before its replacement is fetched: the
-      // router and the heads reader ask only whether a file exists, never the
-      // ledger, so one left in place would be served. No file parks the role
-      // with a sentence; a wrong one answers wrongly without a word.
+      // A file proven wrong goes NOW, before its replacement is fetched: a
+      // Hugging Face entry is served on its files alone, so one left in
+      // place would be served. No file parks the role with a sentence; a
+      // wrong one answers wrongly without a word.
       _deleteQuietly(dest);
+      // A registry leg's row stops being `done` with it, so its entry is no
+      // longer current (`DownloadLedger.servable`) until this leg lands.
+      if (leg.registry) {
+        await _record(leg, DownloadStatus.pending, _lengthOf(part), total,
+            force: true);
+      }
     }
 
     var attempts = 0;

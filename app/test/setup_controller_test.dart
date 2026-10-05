@@ -770,7 +770,10 @@ void main() {
     test('a paused run does not outlive the download step: ${leave.key} '
         'cancels it and the downloader goes idle', () async {
       final decide = publishDecide(gguf: 512 * 1024);
-      hub.chunkDelay = const Duration(milliseconds: 5);
+      // The registry leg is HELD after its first chunk until released, so
+      // the pause lands mid-transfer whatever the machine's load.
+      final held = hub.hold = Completer<void>();
+      addTearDown(() => held.isCompleted ? null : held.complete());
       await store.set(SetupStore.setupKey, SetupStep.download.name);
       final downloader =
           buildDownloader(registryBase: () => hub.registryBase);
@@ -784,7 +787,7 @@ void main() {
       );
       await controller.pauseDownload();
       expect(downloader.paused, isTrue);
-      hub.chunkDelay = null;
+      held.complete();
 
       await leave.value(controller);
       await downloader.idle.timeout(const Duration(seconds: 10));
@@ -801,7 +804,9 @@ void main() {
 
   test('a run still moving is left alone when the step is left', () async {
     final decide = publishDecide(gguf: 512 * 1024);
-    hub.chunkDelay = const Duration(milliseconds: 5);
+    // Held after its first chunk until released: still moving, never done.
+    final held = hub.hold = Completer<void>();
+    addTearDown(() => held.isCompleted ? null : held.complete());
     await store.set(SetupStore.setupKey, SetupStep.download.name);
     final downloader = buildDownloader(registryBase: () => hub.registryBase);
     final controller = build(downloader: downloader);
@@ -815,7 +820,7 @@ void main() {
     await controller.next();
 
     expect(downloader.running, isTrue);
-    hub.chunkDelay = null;
+    held.complete();
     await downloader.idle.timeout(const Duration(seconds: 20));
     expect(File(destOf(decide)).existsSync(), isTrue);
   });

@@ -305,6 +305,24 @@ class DownloadLedger {
   static bool _rowIsCurrent(FileDownloadState? row, String sha256) =>
       row != null && row.status == DownloadStatus.done && row.sha256 == sha256;
 
+  /// Whether [file] may be USED from [modelsFolder]: the ONE rule the
+  /// router's preset, the decision heads reader and the Models page's
+  /// `On disk` share.
+  ///
+  /// Every entry needs its files in the folder. A REGISTRY entry needs
+  /// [isCurrent] as well: its GGUF and heads file are a PAIR that must belong
+  /// together, and existence alone would let a new GGUF run with old heads
+  /// (a quit between the two legs, a digest bump on the same file names), and
+  /// the decisions written that way are never redone. A file placed by hand
+  /// with no row (`make decide-fetch`) is used once the model ensurer's next
+  /// pass has hashed it in place and recorded it. A `source: local` entry has
+  /// no rows, and a Hugging Face entry is served on its files as it always
+  /// was.
+  bool servable(ModelFile file, String modelsFolder) {
+    if (!ModelManifest.filesPresent(file, modelsFolder)) return false;
+    return !file.isRegistry || isCurrent(file);
+  }
+
   /// Every file in [manifest] is [isCurrent] — the whole set, at this build's
   /// digests. What the gate and the wizard's resume both ask.
   ///

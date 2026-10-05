@@ -277,6 +277,7 @@ void main() {
     FakeDecisionClient? decision,
     ModelManifest? manifest,
     MemoryTokenStore? tokens,
+    bool managedServer = true,
     List<Override> extra = const [],
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1600));
@@ -286,7 +287,9 @@ void main() {
     // model on this Mac, which was the default until the default-setup round
     // moved it to Your server.
     await store.setPref(modelPlacementKey, ModelPlacement.local.name);
-    final prefs = await AppPrefsNotifier.read(store);
+    final read = await AppPrefsNotifier.read(store);
+    final prefs =
+        managedServer ? read : read.copyWith(managedServer: false);
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
@@ -906,6 +909,25 @@ void main() {
         'Downloading 50%',
       );
       expect(find.byKey(SettingsModelsPage.decisionDownloadKey), findsNothing);
+    });
+
+    testWidgets('a build with no managed server says its own server serves '
+        'embeddings and offers no Download for them', (tester) async {
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        managedServer: false,
+      );
+      await openHostSection(tester, 'Models');
+      await settle(tester);
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(SettingsModelsPage.embedStatusKey))
+            .data,
+        SettingsModelsPage.embedHandServedText,
+      );
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsNothing);
     });
   });
 

@@ -1,11 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/setup_store.dart';
+import 'package:bond_inbox/services/llm/model_slots.dart' show routerEmbedId;
 import 'package:bond_inbox/services/models/download_state.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
 
@@ -75,6 +79,24 @@ void main() {
       expect(written, isNot(contains('http')));
       expect(written, isNot(contains('cdn')));
       expect(written, isNot(contains('127.0.0.1')));
+    });
+
+    test('knownLedger is what the store last read or wrote, and nothing '
+        'after a raw write of the row', () async {
+      expect(store.knownLedger, isNull);
+      final ledger = DownloadLedger.empty.record(state('bond-embed'));
+
+      await store.recordDownload(ledger);
+      expect(store.knownLedger, ledger);
+
+      await store.set(SetupStore.downloadKey, 'not json at all');
+      expect(store.knownLedger, isNull);
+      await store.downloadLedger();
+      expect(store.knownLedger, DownloadLedger.empty);
+
+      await store.recordDownload(ledger);
+      await store.clearExcept(const {});
+      expect(store.knownLedger, isNull);
     });
   });
 
@@ -339,6 +361,70 @@ void main() {
       );
       expect(progress.fraction, 0);
       expect(progress.isTerminal, isFalse);
+    });
+  });
+
+  group('servable: may this entry be used from disk', () {
+    late Directory folder;
+
+    setUp(() async {
+      folder = await Directory.systemTemp.createTemp('ledger-servable');
+    });
+
+    tearDown(() async {
+      if (folder.existsSync()) await folder.delete(recursive: true);
+    });
+
+    Future<void> put(String? relative) async {
+      if (relative == null) return;
+      final file = File(p.join(folder.path, relative));
+      await file.parent.create(recursive: true);
+      await file.writeAsString('x');
+    }
+
+    test('a registry entry wants both files AND both rows current', () async {
+      final decide = testDecideFile();
+      await put(decide.relativePath);
+      await put(decide.headsRelativePath);
+
+      expect(DownloadLedger.empty.servable(decide, folder.path), isFalse,
+          reason: 'files placed with no rows are not used until hashed in');
+      expect(currentLedgerFor([decide]).servable(decide, folder.path), isTrue);
+
+      // A quit between the legs after a digest change: the GGUF row at the
+      // new digest, the heads row at the old one.
+      final halfway = currentLedgerFor([decide]).record(state(
+        DownloadLedger.headsId(decide.id),
+        sha: 'an-older-heads-digest',
+      ));
+      expect(halfway.servable(decide, folder.path), isFalse);
+
+      // A Download again under way: a row back at pending.
+      final rehashing = currentLedgerFor([decide]).record(state(
+        decide.id,
+        status: DownloadStatus.pending,
+        sha: decide.sha256,
+      ));
+      expect(rehashing.servable(decide, folder.path), isFalse);
+
+      await File(p.join(folder.path, decide.headsRelativePath!)).delete();
+      expect(currentLedgerFor([decide]).servable(decide, folder.path), isFalse,
+          reason: 'a current row over a deleted file');
+    });
+
+    test('a hand-installed entry and a Hugging Face entry are used on their '
+        'files alone', () async {
+      final local = testLocalDecideFile();
+      final embed = testManifest().byId(routerEmbedId);
+      expect(DownloadLedger.empty.servable(local, folder.path), isFalse);
+      expect(DownloadLedger.empty.servable(embed, folder.path), isFalse);
+
+      await put(local.relativePath);
+      await put(local.headsRelativePath);
+      await put(embed.relativePath);
+
+      expect(DownloadLedger.empty.servable(local, folder.path), isTrue);
+      expect(DownloadLedger.empty.servable(embed, folder.path), isTrue);
     });
   });
 }

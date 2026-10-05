@@ -15,6 +15,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'fixtures/current_ledger.dart';
 import 'fixtures/fake_system_info.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/test_manifest.dart';
@@ -140,7 +141,8 @@ void main() {
     expect(rows.first.roleId, 'decision');
     expect(rows.first.local, isFalse);
     expect(rows.first.onDisk, isFalse, reason: 'no ledger rows');
-    expect(rows.first.headsOnDisk, isTrue);
+    expect(rows.first.headsOnDisk, isFalse,
+        reason: 'the heads reader reads them only on the same rule');
 
     // The weights' row alone is not current: the heads row is wanted too.
     await setup.recordDownload(DownloadLedger({decide.id: done(decide)}));
@@ -155,6 +157,7 @@ void main() {
     rows =
         await containerFor(manifest).read(managedModelsStatusProvider.future);
     expect(rows.first.onDisk, isTrue);
+    expect(rows.first.headsOnDisk, isTrue);
 
     // And a heads file deleted under a current row is not on disk.
     await heads.delete();
@@ -323,7 +326,8 @@ void main() {
     final served = await container.read(managedManifestProvider.future);
     expect([for (final m in served.models) m.id], contains(routerBulkId));
 
-    final present = served.withPresentFiles(models.path);
+    final present =
+        served.withPresentFiles(models.path, currentLedgerFor([decide]));
     expect([for (final m in present.models) m.id],
         unorderedEquals([routerEmbedId, routerDecideId]));
     expect(present.toPreset(models.path).missingFiles(), isEmpty);

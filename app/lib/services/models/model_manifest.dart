@@ -7,6 +7,7 @@ import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 
 import '../llm/model_slots.dart';
 import '../server/router_preset.dart';
+import 'download_state.dart' show DownloadLedger;
 
 /// Which job a checkpoint fills — one FILE per role.
 ///
@@ -1276,7 +1277,8 @@ class ModelManifest {
 
   /// This manifest without the entries whose files are not all in
   /// [modelsFolder] (the GGUF, the MTP sidecar and the heads file, whichever
-  /// the entry has), EXCEPT the embedding model.
+  /// the entry has), or that [ledger] does not call current for a REGISTRY
+  /// entry ([DownloadLedger.servable]), EXCEPT the embedding model.
   ///
   /// What the managed server's preset is built from. The server refuses to
   /// start with a file the preset names missing, and one missing model must
@@ -1285,17 +1287,22 @@ class ModelManifest {
   /// (the 4B on a full Mac, since only the chosen one is fetched), leaves the
   /// preset and that role parks on its own reason while the rest run. The
   /// next `ensurePreset` after the file lands sees a new hash and restarts.
+  /// A registry entry whose files are here but whose ledger rows are not
+  /// current (a pair half replaced, a Download again under way or failed) is
+  /// left out exactly as a missing file is, and joins when the model
+  /// ensurer's pass makes it current.
   ///
   /// The embedding model is KEPT whatever the disk says: every stage needs
   /// it, and a router started without it would look healthy while nothing
   /// could work. Left in, its absence fails the start with the preflight's
   /// own `Model files are missing` sentence, which is the true report.
-  ModelManifest withPresentFiles(String modelsFolder) => ModelManifest(
+  ModelManifest withPresentFiles(String modelsFolder, DownloadLedger ledger) =>
+      ModelManifest(
         version: version,
         models: List.unmodifiable([
           for (final model in models)
             if (model.role == ModelRole.embed ||
-                filesPresent(model, modelsFolder))
+                ledger.servable(model, modelsFolder))
               model,
         ]),
         tiers: tiers,

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../providers/app_providers.dart' show ParkedFact;
 import '../screens/setup/setup_download_body.dart' show SetupDownloadBody;
 import '../services/decision/decision_client.dart' show DecisionServerKind;
+import '../services/decision/decision_heads_file.dart' show DecisionHeadsFile;
 import '../services/llm/llm_client.dart' as llm show decisionOlderModelText;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart'
@@ -76,6 +77,11 @@ class SettingsModelsPage extends StatefulWidget {
 
   /// Where the app's own llama-server stands.
   final ServerState serverState;
+
+  /// Whether this build runs its own llama-server. False under
+  /// `BOND_DEV_HAND_SERVERS`, where `make embed` serves embeddings and
+  /// nothing downloads them, so the Embeddings block offers no Download.
+  final bool managedServer;
 
   /// The decision remote's effective address and model, and whether its key
   /// is stored. Never a key.
@@ -173,6 +179,7 @@ class SettingsModelsPage extends StatefulWidget {
     this.inboxTier = false,
     this.processingOn = true,
     this.serverState = const ServerStopped(),
+    this.managedServer = true,
     this.decisionUrl = '',
     this.decisionModel = '',
     this.decisionKeyStored = false,
@@ -301,7 +308,7 @@ class SettingsModelsPage extends StatefulWidget {
 
   /// [decisionOlderModelHint] for a hand-installed decision model.
   static const String decisionOlderModelLocalHint =
-      'Copy the current model files into the models folder.';
+      '${DecisionHeadsFile.copyFilesText}.';
 
   /// Under Your server's decision form, what the server is.
   static const String systemOneKindText =
@@ -355,6 +362,11 @@ class SettingsModelsPage extends StatefulWidget {
   /// The Embeddings row's missing line, the same words as the other two
   /// roles' now that the model ensurer fetches it too.
   static const String notDownloadedText = notDownloadedYetText;
+
+  /// The Embeddings row on a build with no managed server: `make embed`
+  /// serves the model, and nothing here downloads it.
+  static const String embedHandServedText =
+      'Served by your own embedding server.';
   static const String onDiskLoadedText = 'On disk · loaded';
   static const String onDiskNotLoadedText = 'On disk · not loaded';
 
@@ -1037,6 +1049,8 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
     final String status;
     if (parked != null) {
       status = parked;
+    } else if (!widget.managedServer) {
+      status = SettingsModelsPage.embedHandServedText;
     } else if (row == null) {
       status = '${SettingsModelsPage.embedModelName} on this Mac';
     } else if (!row.onDisk) {
@@ -1061,6 +1075,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
             ),
           ),
           if (parked == null &&
+              widget.managedServer &&
               row != null &&
               !row.onDisk &&
               _offersDownload(row.routerId)) ...[

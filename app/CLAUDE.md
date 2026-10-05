@@ -55,7 +55,11 @@ enforce the ones that are commands.
   `frontend_server` child's) for as long as they run, so never list a running
   flutter process WITH its arguments either. The two recipes drop both from
   the environment (`APP_NO_SECRET_ENV`), so the app and its llama-server do
-  not inherit them.
+  not inherit them, and so does every recipe that uses neither (the
+  hand-started servers, `app-test`, the `dist-*` scripts): the Makefile's
+  `export` is global because GNU Make 3.81 has no target-specific `export
+  VAR`, and only `decide-fetch`, `app-doctor`, `app-run`, `app-build` and the
+  `BENCH_DEFINES` benches read them.
 - The Makefile resolves `BENCH_BEARER` into the `flutter test` command line,
   so never list a running bench's process WITH its arguments — `pgrep -f …
   >/dev/null` answers "is it running" without printing the key.
@@ -449,7 +453,7 @@ enforce the ones that are commands.
   role is on this Mac, plus the chosen generative model while that role is
   (`managedGenerativeIdFor`: full tier → 27B, inbox → 4B, a stored 27B on the
   inbox tier falls back to the 4B). The supervisor's `buildPreset` serves only
-  `withPresentFiles(folder)`, because the server refuses a preset with a
+  `withPresentFiles(folder, ledger)`, because the server refuses a preset with a
   missing file and one absent model must not cost the others, and records the
   served ids with `setServedManagedIds`; `AppPrefs.unavailableFor(spec)` then
   puts a sentence on `LlmTarget.unavailable` for a managed target the router
@@ -458,8 +462,18 @@ enforce the ones that are commands.
   answers what this Mac could hold. The decide entry is a REGISTRY entry
   (`source: artifactory`, repo `artifactory/bond-decide-mbl-v3swap`, bundle
   `bond-decide-mbl-v3swap`): downloaded with its heads file, ledgered as
-  `bond-decide` and `bond-decide.heads`, and on disk when both rows are
-  current and both files are in the folder. A `source: local` entry (repo
+  `bond-decide` and `bond-decide.heads`, and USABLE only when both rows are
+  current and both files are in the folder: `DownloadLedger.servable` is the
+  ONE rule the preset, the heads reader (`decisionHeadsProvider`, through
+  `SetupStore.knownLedger`, read synchronously per call) and the Models
+  page's `On disk` / `headsOnDisk` share, so a pair half replaced is never
+  served; a Hugging Face entry is served on its files, a local one on its
+  files. A Download again takes the entry's rows out of `done` as it starts
+  (`ModelDownloader._unsettle`), and files placed by `make decide-fetch`
+  join after the ensurer's next pass hashes them in. A fixture that puts
+  registry files on disk and expects them served writes
+  `currentLedgerFor([...])` (`test/fixtures/current_ledger.dart`) through
+  the container's own `setupStoreProvider`. A `source: local` entry (repo
   `local/<name>`, no download, no ledger row, installed when its files are
   present) is still parsed and handled everywhere, and its cases are tested
   with `testLocalDecideFile()`.
@@ -802,7 +816,13 @@ enforce the ones that are commands.
   in plain words and no command; Settings adds a quieter `Press Download again to
   replace it.` line. A missing file parks the decision pass
   (`decision_not_installed`, "The decision model is not downloaded yet. Open
-  Settings, Models."). Tests
+  Settings, Models."), and so does a registry entry's file whose download
+  rows are not current (`DownloadLedger.servable`). A hand-installed entry's
+  refusals (the heads reader's `mismatchLocalText`, the rail's
+  `decisionLocal`, Settings' local sentences) say
+  `DecisionHeadsFile.copyFilesText` instead of Download again; a Kev server's
+  `decision_misconfigured` still reads the default rail sentence, because the
+  park carries no kind (the client drops its kind cache on that throw). Tests
   build heads from `test/fixtures/decision_heads_fixture.dart`
   (`syntheticHeadsJson`, schema 2, one axis per option, `yesAxisOf`).
   `MessageStore.decisionFor` answers null for a row stored under another

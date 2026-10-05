@@ -337,6 +337,10 @@ class SettingsScreen extends StatefulWidget {
   /// the loading bar and the collapsed summary.
   final ServerState serverState;
 
+  /// Whether this build runs its own llama-server, for the Models page's
+  /// Embeddings line (see [SettingsModelsPage.managedServer]).
+  final bool managedServer;
+
   /// Why the pipeline is parked and how much is waiting, for the Models
   /// page's status line. Null is the ordinary state.
   final ParkedFact? parked;
@@ -632,6 +636,7 @@ class SettingsScreen extends StatefulWidget {
     this.onSetUpAgain,
     this.onShowLog,
     this.serverState = const ServerStopped(),
+    this.managedServer = true,
     this.parked,
     this.onCloudDraftsConsent,
     this.cloudDraftsStanding = false,
@@ -1317,6 +1322,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     inboxTier: widget.inboxTier,
     processingOn: widget.processingOn,
     serverState: widget.serverState,
+    managedServer: widget.managedServer,
     decisionUrl: widget.decisionUrl,
     decisionModel: widget.decisionModel,
     decisionKeyStored: widget.decisionKeyStored,

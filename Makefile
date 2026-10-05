@@ -408,7 +408,7 @@ model:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(MODEL_CTX))\n"; \
-	 nohup llama-server -hf $(MODEL_HF) $(MODEL_FLAGS) --port $(MODEL_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(MODEL_HF) $(MODEL_FLAGS) --port $(MODEL_PORT) \
 	   > $(LOG_DIR)/model-$(MODEL_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-model
 
@@ -475,7 +475,7 @@ embed:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_HF), embeddings)\n"; \
-	 nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
 	   $(EMBED_ARGS) \
 	   > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-embed
@@ -531,7 +531,7 @@ fast:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(FAST_PORT)  ($(FAST_HF), ctx $(CTX_SIZE))\n"; \
-	 nohup llama-server -hf $(FAST_HF) $(FAST_FLAGS) --port $(FAST_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(FAST_HF) $(FAST_FLAGS) --port $(FAST_PORT) \
 	   > $(LOG_DIR)/model-$(FAST_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-fast
 
@@ -588,7 +588,7 @@ decide:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(DECIDE_PORT)  ($(DECIDE_FILE), decision embeddings)\n"; \
-	 nohup llama-server -m "$(DECIDE_GGUF)" --embeddings --host 127.0.0.1 --port $(DECIDE_PORT) \
+	 $(APP_NO_SECRET_ENV) nohup llama-server -m "$(DECIDE_GGUF)" --embeddings --host 127.0.0.1 --port $(DECIDE_PORT) \
 	   -ngl 99 $(DECIDE_ARGS) \
 	   > $(LOG_DIR)/model-$(DECIDE_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-decide
@@ -647,7 +647,7 @@ decide-fetch:
 	 mkdir -p "$$dir" || exit 1; \
 	 fetch() { \
 	   if [ -n "$$BOND_REGISTRY_TOKEN" ]; then \
-	     printf 'header = "Authorization: Bearer %s"\n' "$$BOND_REGISTRY_TOKEN" | \
+	     printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_REGISTRY_TOKEN" | $(CURL_CONFIG_ESCAPE))" | \
 	       curl -K - -fSL --retry 2 -o "$$2" "$$1"; \
 	   else \
 	     curl -fSL --retry 2 -o "$$2" "$$1"; \
@@ -836,8 +836,18 @@ BOND_BOX_KEY        ?=
 # `make app-doctor` asks the registry for (its $(DECIDE_REMOTE_HEADS)).
 DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
 # The secrets travel as ENVIRONMENT, never as make text: every recipe that
-# needs one names it as a shell reference.
+# needs one names it as a shell reference. Exported to every recipe because
+# GNU Make 3.81, the one macOS ships, has no target-specific `export VAR`, and
+# make hands a variable set on its command line to every recipe whatever this
+# line says. So the recipes that must NOT carry them take them out instead,
+# with $(APP_NO_SECRET_ENV): the hand-started servers (model, fast, embed,
+# decide, omlx), app-test's flutter test, the dist scripts, and app-run /
+# app-build after the shell has read them into the defines.
 export BOND_REGISTRY_TOKEN BOND_BOX_KEY
+# A secret written into a curl config (`-K -`) sits inside double quotes,
+# where curl reads a backslash or a double quote as an escape: both are
+# escaped first, through a pipe, so the value is never on a command line.
+CURL_CONFIG_ESCAPE := sed 's/[\\"]/\\&/g'
 
 # A Homebrew llama-server (`brew install llama.cpp`) is found on PATH, so a
 # new environment needs no BOND_LLAMA_SERVER line in local.mk; a plain `=`
@@ -1130,7 +1140,7 @@ omlx:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ omlx serve on :$(OMLX_PORT)  (all cached models, guard $(OMLX_GUARD_GB)GB, $(OMLX_SLOTS) slots)\n"; \
-	 nohup $(OMLX_SERVE) \
+	 $(APP_NO_SECRET_ENV) nohup $(OMLX_SERVE) \
 	   > $(LOG_DIR)/omlx-$(OMLX_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-omlx
 
@@ -1240,7 +1250,8 @@ endif
 # the environment flutter, the app and the llama-server the app starts would
 # otherwise inherit from the `export` beside MS_ENV. They are still in the
 # flutter process's ARGUMENTS for as long as `make app-run` lives (see
-# app/CLAUDE.md: never list that process with its arguments).
+# app/CLAUDE.md: never list that process with its arguments). Every other
+# recipe that uses neither secret carries the same prefix (see the `export`).
 APP_NO_SECRET_ENV := env -u BOND_BOX_KEY -u BOND_REGISTRY_TOKEN
 ifneq ($(strip $(BOND_REGISTRY_TOKEN)),)
 APP_LLM_DEFINES += --dart-define=BOND_REGISTRY_TOKEN="$$BOND_REGISTRY_TOKEN"
@@ -1319,7 +1330,7 @@ background:
 	 printf "\n  main is back here; %s is on the worktree at %s.\n" "$$branch" "$$wt"
 
 app-test:
-	@cd $(APP_DIR) && $(FLUTTER) test
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) test
 
 # Regenerates Drift's code (*.g.dart) and migration snapshots. The output is
 # COMMITTED: app-analyze and app-test must stay green from a clean checkout
@@ -1731,7 +1742,8 @@ app-analyze:
 # version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
 # registry answering for $(DECIDE_BUNDLE) with the token (its first byte of
 # $(DECIDE_REMOTE_HEADS), a file the app really downloads, the way Settings'
-# Check asks; 200 or 206 is ✓), and Your server
+# Check asks: 200 or 206 is ✓ unless it is a `text/html` page, and a redirect
+# is ✗ because doctor follows none, as Check does not), and Your server
 # answering /prose/v1/models with the key. It prints HTTP status codes only,
 # never a secret: the two tokens reach the shell as "$$BOND_…" references
 # through the `export` beside MS_ENV, so `make -n app-doctor` shows the
@@ -1760,11 +1772,17 @@ app-doctor:
 	 elif [ -z "$$BOND_REGISTRY_TOKEN" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_TOKEN is not set in local.mk\n"; fail=1; \
 	 else \
-	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$BOND_REGISTRY_TOKEN" | \
-	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 -r 0-0 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/$(DECIDE_REMOTE_HEADS)"); \
+	   out=$$(printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_REGISTRY_TOKEN" | $(CURL_CONFIG_ESCAPE))" | \
+	     curl -K - -s -o /dev/null -w '%{http_code} %{content_type}' -m 8 -r 0-0 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/$(DECIDE_REMOTE_HEADS)"); \
+	   code=$${out%% *}; type=$$(printf '%s' "$${out#* }" | tr 'A-Z' 'a-z'); \
 	   case "$$code" in \
-	     200|206) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
+	     200|206) case "$$type" in \
+	       text/html*) printf "  $(RED)✗$(RESET) the registry answered with a web page, not a model — check BOND_REGISTRY_URL\n"; fail=1;; \
+	       *) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
+	     esac;; \
+	     3[0-9][0-9]) printf "  $(RED)✗$(RESET) the registry answered with a redirect — HTTP %s; use the address it redirects to, or the https address\n" "$$code"; fail=1;; \
 	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
+	     404) printf "  $(RED)✗$(RESET) the registry does not have $(DECIDE_BUNDLE) — HTTP 404; check BOND_REGISTRY_URL\n"; fail=1;; \
 	     *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for $(DECIDE_BUNDLE)\n" "$$code"; fail=1;; \
 	   esac; \
 	 fi; \
@@ -1773,7 +1791,7 @@ app-doctor:
 	 elif [ -z "$$BOND_BOX_KEY" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_BOX_KEY is not set in local.mk\n"; fail=1; \
 	 else \
-	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$BOND_BOX_KEY" | \
+	   code=$$(printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_BOX_KEY" | $(CURL_CONFIG_ESCAPE))" | \
 	     curl -K - -s -o /dev/null -w '%{http_code}' -m 8 "$(BOND_BOX_URL:%/=%)/prose/v1/models"); \
 	   case "$$code" in \
 	     200) printf "  $(GREEN)✓$(RESET) your server answers at %s\n" "$(BOND_BOX_URL)";; \
@@ -1899,42 +1917,42 @@ DIST_NOTARY_TIMEOUT ?= 30m
 BOND_DIST_ALLOW_NO_MCP ?=
 
 dist-llama:
-	@dist/build-llama.sh
+	@$(APP_NO_SECRET_ENV) dist/build-llama.sh
 
 dist-app: dist-llama
-	@MS_ENV="$(MS_ENV)" VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
+	@$(APP_NO_SECRET_ENV) MS_ENV="$(MS_ENV)" VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
 	 AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" \
 	 BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/bundle.sh
 
 dist-sign: dist-app
-	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/sign.sh
+	@$(APP_NO_SECRET_ENV) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/sign.sh
 
 dist-notarize: dist-sign
-	@AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
+	@$(APP_NO_SECRET_ENV) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/notarize.sh "dist/stage/Bond Desktop.app"
 
 # A real DMG is built from the STAPLED app: the ticket is written INTO the
 # bundle, so a copy taken before notarization carries none. AD_HOC=1 has
 # nothing to notarize and drops the prerequisite. `.NOTPARALLEL` at the top of
 # this file is what keeps the two prerequisites in this order.
 dist-dmg: dist-sign $(if $(AD_HOC),,dist-notarize)
-	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
+	@$(APP_NO_SECRET_ENV) VERSION=$(VERSION) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" DIST_NOTARY_TIMEOUT=$(DIST_NOTARY_TIMEOUT) dist/dmg.sh
 
 dist-check:
-	@MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+	@$(APP_NO_SECRET_ENV) MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
 # How a maintainer gets `generate_keys` without installing anything globally:
 # the pinned tools are staged under dist/stage/ and dist-clean takes them away
 # again. dist-appcast runs this itself; it is a target of its own only for the
 # one-off key generation in docs/distribution.md.
 dist-sparkle-tools:
-	@dist/sparkle-tools.sh
+	@$(APP_NO_SECRET_ENV) dist/sparkle-tools.sh
 
 # No prerequisite, deliberately. dist-app rebuilds the whole app on every run,
 # and re-running the appcast after a failed upload must not rebuild and
 # re-notarize an identical binary. What it needs is the DMG in dist/out/, which
 # the script checks for and names the command that produces.
 dist-appcast:
-	@VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/appcast.sh
+	@$(APP_NO_SECRET_ENV) VERSION=$(VERSION) BUILD=$(BUILD) AD_HOC=$(AD_HOC) DIST_ENV="$(DIST_ENV)" dist/appcast.sh
 
 # Internal, hence the leading underscore (the `_wait-*` convention). The strict
 # report runs FIRST so a release never begins on a machine that cannot finish
@@ -1945,7 +1963,7 @@ _dist-preflight:
 	   printf "  $(RED)✗$(RESET) make dist is the signed, notarized release — for a tester build use: make dist-dmg AD_HOC=1\n"; \
 	   exit 1; \
 	 fi
-	@STRICT=1 MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
+	@$(APP_NO_SECRET_ENV) STRICT=1 MS_ENV="$(MS_ENV)" DIST_ENV="$(DIST_ENV)" BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/check.sh
 
 # No $(MAKE) sub-invocations here: the prerequisite chain already gives the
 # order, and a sub-make would rebuild the app once per invocation.

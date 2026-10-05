@@ -513,11 +513,13 @@ the `decision_older_model` or `decision_misconfigured` park's sentence
 on a downloaded entry, on This Mac or under a ModernBERT Your server): it
 calls `ensure(reverify: {'bond-decide'})`, so the decide entry is fetched as
 though missing and the downloader HASHES the files already there, keeping a
-good one without a byte fetched and replacing a wrong or damaged one. A
-file proven wrong is deleted before its replacement is fetched, because the
-router and the heads reader ask only whether a file exists: with the
-registry down the role parks as not downloaded rather than answering from a
-wrong file. The
+good one without a byte fetched and replacing a wrong or damaged one. The
+entry stops being current the moment the pass starts (its download rows go
+back to pending until each file verifies or lands), and the router and the
+heads reader use a registry entry only while its rows are current
+(`DownloadLedger.servable`), so during the press, and after one that failed,
+the role parks as not downloaded rather than answering from a mismatched
+pair. A file proven wrong is deleted before its replacement is fetched. The
 older-model park adds the quieter line `Press Download again to replace it.`
 (`settings-decision-older-hint`); a hand-installed entry says `Copy the
 current model files into the models folder.` instead and has no button.
@@ -549,7 +551,7 @@ words (`Downloading NN%`, a failure sentence, or `Not downloaded yet.`) with a
 `ensure()`; a pick that moves the model also asks for it on its own. Until it
 arrives that model is LEFT OUT of the router
 (`ModelManifest.withPresentFiles`, which also drops a decision model not yet
-installed), so the embedding and decision models keep running and only the
+installed, or one whose download rows are not current), so the embedding and decision models keep running and only the
 generative role waits, parked on its own reason. The supervisor tells the
 preferences what it serves (`setServedManagedIds`), and a managed target
 naming a model left out carries the sentence `The Qwen3 4B is not downloaded
@@ -566,7 +568,9 @@ yet.`, `Downloading NN%`, a failure sentence) and, while the model is missing
 and nothing is running, a **Download** button keyed
 `settings-embed-download`. On a `BOND_DEV_HAND_SERVERS` build the model
 ensurer does not download it (`modelEnsureSetProvider` leaves it out): `make
-embed` serves it from the Homebrew/Hugging Face cache. The decision model is
+embed` serves it from the Homebrew/Hugging Face cache, so the block shows no
+**Download** and its status reads `Served by your own embedding server.`
+(the host passes `managedServer` to the page). The decision model is
 still ensured there, because the app reads its heads file from the models
 folder and `make decide` reads the same folder.
 

@@ -374,7 +374,10 @@ void main() {
   test('another owner\'s PAUSED run is cancelled rather than waited for, and '
       'the pass downloads the file itself', () async {
     decide = publishDecide(gguf: 512 * 1024);
-    hub.chunkDelay = const Duration(milliseconds: 5);
+    // Held after its first chunk until released, so the pause lands
+    // mid-transfer whatever the machine's load.
+    final held = hub.hold = Completer<void>();
+    addTearDown(() => held.isCompleted ? null : held.complete());
     final downloader = downloaderFor([decide]);
     final ensurer = ensurerFor(downloader, [decide]);
     // The wizard's run, paused and then left behind.
@@ -386,7 +389,7 @@ void main() {
     );
     await downloader.pause();
     expect(downloader.paused, isTrue);
-    hub.chunkDelay = null;
+    held.complete();
 
     final result =
         await ensurer.ensure().timeout(const Duration(seconds: 10));
@@ -671,6 +674,80 @@ void main() {
       expect(File(destOf(decide)).readAsBytesSync(),
           hub.registryContents['$_bundle/model-f16.gguf'],
           reason: 'the good weights were kept');
+    });
+  });
+
+  group('a registry entry is servable only once a pass has recorded it', () {
+    Future<void> place(ModelFile file, String key, String relative) async {
+      final out = File(p.join(folder(), relative));
+      await out.parent.create(recursive: true);
+      await out.writeAsBytes(hub.registryContents['$_bundle/$key']!);
+    }
+
+    test('files placed by hand with the right digests and no rows (make '
+        'decide-fetch) are adopted by one pass with no byte fetched', () async {
+      await place(decide, 'model-f16.gguf', decide.relativePath);
+      await place(decide, 'heads.json', decide.headsRelativePath!);
+      expect(ledger.servable(decide, folder()), isFalse,
+          reason: 'not served before a pass has hashed them');
+
+      final downloader = downloaderFor([decide]);
+      final ensurer = ensurerFor(downloader, [decide]);
+      final result = await ensurer.ensure();
+
+      expect(result.phase, EnsurePhase.done);
+      expect(hub.registryCount, 0, reason: 'hashed in place');
+      expect(ledger.servable(decide, folder()), isTrue);
+      expect(nudges, hasLength(1),
+          reason: 'afterRun asks for the preset, which now serves it');
+    });
+
+    test('a quit between the GGUF leg and the heads leg after a digest change '
+        'is not served, and the next pass replaces the old heads', () async {
+      // The NEW GGUF landed; the OLD heads are still on disk with their row.
+      await place(decide, 'model-f16.gguf', decide.relativePath);
+      final old = fakeWeights(1536, seed: 99);
+      final heads = File(headsOf(decide));
+      await heads.parent.create(recursive: true);
+      await heads.writeAsBytes(old);
+      ledger = DownloadLedger.empty
+          .record(FileDownloadState(
+            id: decide.id,
+            status: DownloadStatus.done,
+            sha256: decide.sha256,
+          ))
+          .record(FileDownloadState(
+            id: DownloadLedger.headsId(decide.id),
+            status: DownloadStatus.done,
+            sha256: sha256Hex(old),
+          ));
+      expect(ledger.servable(decide, folder()), isFalse);
+
+      final downloader = downloaderFor([decide]);
+      final result = await ensurerFor(downloader, [decide]).ensure();
+
+      expect(result.phase, EnsurePhase.done);
+      expect(heads.readAsBytesSync(), hub.registryContents['$_bundle/heads.json']);
+      expect(ledger.servable(decide, folder()), isTrue);
+    });
+
+    test('a Download again that fails leaves the entry unserved, the good '
+        'GGUF kept', () async {
+      final downloader = downloaderFor([decide]);
+      final ensurer = ensurerFor(downloader, [decide]);
+      await ensurer.ensure();
+      expect(ledger.servable(decide, folder()), isTrue);
+      await File(headsOf(decide)).writeAsBytes(List<int>.filled(1536, 9));
+
+      // The registry refuses the token: the replacement never arrives.
+      hub.registryBearer = 'another-fake-token';
+      final failed = await ensurer.ensure(reverify: {routerDecideId});
+
+      expect(failed.phase, EnsurePhase.failed);
+      expect(ledger.servable(decide, folder()), isFalse);
+      expect(ledger[decide.id]?.status, DownloadStatus.done,
+          reason: 'the GGUF hashed good and is current on its own row');
+      expect(File(destOf(decide)).existsSync(), isTrue);
     });
   });
 }

@@ -51,7 +51,9 @@ is the decision call's (`llm_label: decision`). There are no `action_items`
 or `deadline` keys any more — those ride on the text stage's `extract` row. A
 decision server that is down throws `DecisionUnavailableException`, which
 PARKS the drain under `decision_unavailable` without spending an attempt (a
-heads file not downloaded yet parks under its subclass's own
+heads file not downloaded yet, or a registry entry whose download rows are
+not current (`DownloadLedger.servable`: a pair half replaced, a Download
+again under way or failed), parks under its subclass's own
 `decision_not_installed`: "The decision model is not downloaded yet. Open
 Settings, Models.", and the model ensurer fetches it, see
 [10-model-routing.md](10-model-routing.md#ensured-outside-the-wizard)); an unusable vector is a
@@ -78,7 +80,10 @@ no longer reads. Install the current decision model to resume sorting new
 mail."  The model registry's download is the v3 swap bundle (schema 2), so
 this park means a damaged or hand-placed older file in the decision model's
 folder; Settings, Models offers **Download again**, which re-hashes the
-decide entry's files and replaces a wrong one. A stored `message_decisions` row whose `qhash` is not
+decide entry's files and replaces a wrong one, and the rail says to press
+it. A hand-installed (`source: local`) entry has no such button, so its rail
+line and its heads refusal say to copy the current model files into the
+models folder instead (`DecisionHeadsFile.copyFilesText`). A stored `message_decisions` row whose `qhash` is not
 `decisionQhash` came from another model, so `MessageStore.decisionFor` reads it
 as no decision.
 

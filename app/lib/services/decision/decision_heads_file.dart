@@ -25,7 +25,20 @@ class DecisionHeadsFile {
   /// move, so it is asked on every call rather than captured.
   final String Function() _path;
 
-  DecisionHeadsFile(this._path);
+  /// Whether the file at [_path] may be read at all, asked SYNCHRONOUSLY on
+  /// every call ahead of the cache: false answers exactly as a missing file
+  /// does. The provider answers `DownloadLedger.servable` for a registry
+  /// entry, whose heads belong to one GGUF and are used only while both
+  /// download rows are current; a row turning current is seen on the next
+  /// call. Null always reads.
+  final bool Function()? usable;
+
+  /// Whether the decide entry is installed by hand (`source: local`), asked
+  /// when a refusal is worded: no button downloads such a model, so its
+  /// sentence says to copy the files rather than to press Download again.
+  final bool Function()? local;
+
+  DecisionHeadsFile(this._path, {this.usable, this.local});
 
   /// What a missing file says. It reaches the rail through the
   /// `decision_not_installed` park, so the fix is in the sentence: the model
@@ -40,6 +53,17 @@ class DecisionHeadsFile {
   static const String mismatchText =
       "The decision model's heads file does not match this build. Open "
       'Settings, Models and press Download again.';
+
+  /// How a hand-installed (`source: local`) decision model is replaced: a
+  /// fragment, so the rail can say it in its own shape and Settings with a
+  /// full stop. The one spelling.
+  static const String copyFilesText =
+      'Copy the current model files into the models folder';
+
+  /// [mismatchText] for a hand-installed decision model.
+  static const String mismatchLocalText =
+      "The decision model's heads file does not match this build. "
+      '$copyFilesText.';
 
   DecisionHeads? _heads;
   String? _loadedPath;
@@ -63,7 +87,7 @@ class DecisionHeadsFile {
     final file = File(path);
     final DateTime modified;
     try {
-      if (!file.existsSync()) {
+      if (!file.existsSync() || !(usable?.call() ?? true)) {
         throw const DecisionNotInstalledException(notInstalledText);
       }
       modified = file.lastModifiedSync();
@@ -127,7 +151,10 @@ class DecisionHeadsFile {
       _remember(
         path,
         modified,
-        DecisionMisconfiguredException('$mismatchText. $why'),
+        DecisionMisconfiguredException(
+          '${(local?.call() ?? false) ? mismatchLocalText : mismatchText} '
+          '$why',
+        ),
       );
 
   DecisionMisconfiguredException _remember(
