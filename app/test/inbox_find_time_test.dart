@@ -2532,26 +2532,52 @@ void main() {
       return today.addDays((weekday - today.weekday + 7) % 7);
     }
 
-    // The rules read the last day named: the ruled-out Friday.
-    const notFriday =
-        "How about Monday instead? Friday doesn't work for me.";
+    // The ask names two working days, neither today, so these tests hold on
+    // any weekday at any hour: a day named today has no hours left by the
+    // evening (the search moves on and asks for another day), and a weekend
+    // day is not searched. The model's day is the first working day from
+    // the day after tomorrow; the rules read the last day named, the
+    // ruled-out one, the working day after it.
+    const dayNames = [
+      'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+      'Sunday',
+    ];
+    // `late`: `la` is set in setUp, after this group body has run.
+    late final today = la.dateOf(DateTime.now().toUtc());
+    // The first working day at or after [days] from today, as days.
+    int workingDayFrom(int days) {
+      var d = days;
+      while (today.addDays(d).weekday > DateTime.friday) {
+        d++;
+      }
+      return d;
+    }
+    late final namedOffset = workingDayFrom(2);
+    late final ruledOutOffset = workingDayFrom(namedOffset + 1);
+    // Both under a week out, so `next(namedWeekday)` is that very day.
+    late final namedWeekday = today.addDays(namedOffset).weekday;
+    late final ruledOutWeekday = today.addDays(ruledOutOffset).weekday;
+    late final named = dayNames[namedWeekday - 1];
+    late final notFriday =
+        "How about $named instead? ${dayNames[ruledOutWeekday - 1]} doesn't "
+        'work for me.';
 
     testWidgets("the model's reading replaces the rules': the row and the "
-        'search name Monday', (tester) async {
+        "search name the model's day", (tester) async {
       InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
       final llm = ScriptedLlm(delay: Duration.zero)
-        ..answer('ask_read', read(['Monday']));
+        ..answer('ask_read', read([named]));
       await seedAsk(body: notFriday, minutesAgo: 1);
       await pumpScreen(tester, askReader: readerWith(llm));
       await openAsk(tester);
       await pumps(tester);
 
-      final monday = next(DateTime.monday);
+      final day = next(namedWeekday);
       expect(llm.calls.map((c) => c.schemaName), ['ask_read']);
-      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
-      expect(askedDays(), [monday],
+      expect(find.text('Asked for: ${shortDate(day)}'), findsOneWidget);
+      expect(askedDays(), [day],
           reason: 'a quick reading seeds the first search: one search, '
-              'on Monday');
+              "on the model's day");
       final rows = await verdicts();
       expect(rows.single, contains('"applied":true'));
       expect(rows.single, contains('"agree":false'));
@@ -2581,7 +2607,7 @@ void main() {
       InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
       final gate = Completer<void>();
       final llm = ScriptedLlm(delay: Duration.zero)
-        ..scriptFor('ask_read', [gate, read(['Monday'])]);
+        ..scriptFor('ask_read', [gate, read([named])]);
       await seedAsk(body: notFriday, minutesAgo: 1);
       await pumpScreen(tester, askReader: readerWith(llm));
       await openAsk(tester);
@@ -2592,69 +2618,24 @@ void main() {
       await pumps(tester);
       expect(backend.windows, hasLength(1),
           reason: 'past the wait the rules search alone');
-      final monday = next(DateTime.monday);
-      expect(askedDays().single, isNot(monday));
+      final day = next(namedWeekday);
+      expect(askedDays().single, isNot(day));
       expect(await verdicts(), isEmpty);
 
       gate.complete();
       await pumps(tester);
       await pumps(tester);
       expect(askedDays(), hasLength(2), reason: 'one search more, no other');
-      expect(askedDays().last, monday);
-      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      expect(askedDays().last, day);
+      expect(find.text('Asked for: ${shortDate(day)}'), findsOneWidget);
       expect((await verdicts()).single, contains('"applied":true'));
     });
 
-    testWidgets('a pill the owner pressed survives a late reading',
-        (tester) async {
-      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
-      final gate = Completer<void>();
-      final llm = ScriptedLlm(delay: Duration.zero)
-        ..scriptFor('ask_read', [gate, read(['Monday'])]);
-      await seedAsk(body: notFriday, minutesAgo: 1);
-      await pumpScreen(tester, askReader: readerWith(llm));
-      await openAsk(tester);
-      await tester.pump(const Duration(milliseconds: 350));
-      await pumps(tester);
-      expect(backend.windows, hasLength(1), reason: 'the rules searched');
-
-      await tester.tap(find.byKey(SchedulingAskTile.windowKeyFor(
-          'email', 'c-ask', FindTimeWindow.nextWeek)));
-      await pumps(tester);
-      await pumps(tester);
-      expect(backend.windows, hasLength(2), reason: 'the pill searched');
-
-      gate.complete();
-      await pumps(tester);
-      await pumps(tester);
-      final monday = next(DateTime.monday);
-      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget,
-          reason: "the row says the model's day");
-      expect(backend.windows, hasLength(3),
-          reason: 'one search more for the new reading');
-      // Next week as the pill reads it with the model's Monday, not their
-      // day: the owner's pill was not re-seeded.
-      final model = readAskHintsFromRead(
-        read: AskRead.fromJson(read(['Monday'])),
-        subject: _subject,
-        body: notFriday,
-        now: DateTime.now(),
-        zone: la,
-      );
-      final nextWeek = findTimeWindowUtc(FindTimeWindow.nextWeek,
-          now: DateTime.now(),
-          zone: la,
-          durationMinutes: 30,
-          hints: model);
-      expect(askedDays().last, nextWeek.firstDay);
-      expect((await verdicts()).single, contains('"applied":true'));
-    });
-
-    /// Next week as the pill reads it with the model's Monday on the
+    /// Next week as the pill reads it with the model's day on the
     /// [notFriday] ask: its first day.
-    CalendarDate nextWeekWithMonday() {
+    CalendarDate nextWeekWithNamedDay() {
       final model = readAskHintsFromRead(
-        read: AskRead.fromJson(read(['Monday'])),
+        read: AskRead.fromJson(read([named])),
         subject: _subject,
         body: notFriday,
         now: DateTime.now(),
@@ -2677,12 +2658,44 @@ void main() {
       await pumps(tester);
     }
 
+    testWidgets('a pill the owner pressed survives a late reading',
+        (tester) async {
+      InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
+      final gate = Completer<void>();
+      final llm = ScriptedLlm(delay: Duration.zero)
+        ..scriptFor('ask_read', [gate, read([named])]);
+      await seedAsk(body: notFriday, minutesAgo: 1);
+      await pumpScreen(tester, askReader: readerWith(llm));
+      await openAsk(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      await pumps(tester);
+      expect(backend.windows, hasLength(1), reason: 'the rules searched');
+
+      await pressPills(tester);
+      await pumps(tester);
+      expect(backend.windows, hasLength(3), reason: 'each pill searched');
+
+      gate.complete();
+      await pumps(tester);
+      await pumps(tester);
+      final day = next(namedWeekday);
+      expect(find.text('Asked for: ${shortDate(day)}'), findsOneWidget,
+          reason: "the row says the model's day");
+      expect(backend.windows, hasLength(4),
+          reason: 'one search more for the new reading');
+      // The owner's pills were not re-seeded: the 45 minutes stand on
+      // every weekday, and next week is read with the model's day.
+      expect(backend.minutes.last, 45);
+      expect(askedDays().last, nextWeekWithNamedDay());
+      expect((await verdicts()).single, contains('"applied":true'));
+    });
+
     testWidgets("a pill the owner pressed during the wait survives the "
         "model's reading", (tester) async {
       InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
       final gate = Completer<void>();
       final llm = ScriptedLlm(delay: Duration.zero)
-        ..scriptFor('ask_read', [gate, read(['Monday'])]);
+        ..scriptFor('ask_read', [gate, read([named])]);
       await seedAsk(body: notFriday, minutesAgo: 1);
       await pumpScreen(tester, askReader: readerWith(llm));
       await openAsk(tester);
@@ -2697,10 +2710,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       await pumps(tester);
 
-      final monday = next(DateTime.monday);
-      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      final day = next(namedWeekday);
+      expect(find.text('Asked for: ${shortDate(day)}'), findsOneWidget);
       expect(backend.minutes.last, 45);
-      expect(askedDays().last, nextWeekWithMonday());
+      expect(askedDays().last, nextWeekWithNamedDay());
       expect(backend.windows, hasLength(1),
           reason: 'the one search, on the pills, after the reading');
     });
@@ -2708,11 +2721,11 @@ void main() {
     testWidgets("a stale answer forgotten on reopen keeps the owner's pills",
         (tester) async {
       InboxScreen.askReadWaitOverride = const Duration(milliseconds: 300);
-      // No model the first time (nothing stored), Monday the second.
+      // No model the first time (nothing stored), the named day the second.
       final llm = ScriptedLlm(delay: Duration.zero)
         ..scriptFor('ask_read', [
           const LlmUnavailableException('no server'),
-          read(['Monday']),
+          read([named]),
         ]);
       await seedAsk(body: notFriday, minutesAgo: 1);
       await pumpScreen(tester, askReader: readerWith(llm));
@@ -2733,11 +2746,11 @@ void main() {
       await pumps(tester);
 
       expect(llm.calls, hasLength(2));
-      final monday = next(DateTime.monday);
-      expect(find.text('Asked for: ${shortDate(monday)}'), findsOneWidget);
+      final day = next(namedWeekday);
+      expect(find.text('Asked for: ${shortDate(day)}'), findsOneWidget);
       expect(backend.minutes.last, 45);
-      expect(askedDays().last, nextWeekWithMonday(),
-          reason: 'Next week stands; their day would be the Monday itself');
+      expect(askedDays().last, nextWeekWithNamedDay(),
+          reason: 'Next week stands; their day would be the named day itself');
       expect((await verdicts()).single, contains('"applied":true'));
     });
 
