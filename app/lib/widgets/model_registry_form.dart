@@ -28,8 +28,8 @@ typedef RegistrySave = Future<String?> Function({
 ///
 /// [ModelServersForm]'s discipline without its probe-and-discover press: the
 /// registry serves files, not a model list, so **Save** writes what was
-/// typed and **Check** asks the saved address for the decision model's small
-/// file. PROP-ONLY: the host resolves the address it opens on and takes the
+/// typed and **Check** asks the saved address for a byte of each model it
+/// holds for this build. PROP-ONLY: the host resolves the address it opens on and takes the
 /// write back through [onSave]. One exception to "no state": the TOKEN lives
 /// in its [TextEditingController], is never copied into this State, never
 /// logged, never put in a result, and the field is emptied the moment a Save
@@ -53,8 +53,8 @@ class ModelRegistryForm extends StatefulWidget {
   /// Forgets the stored token. Null takes **Remove token** off.
   final Future<void> Function()? onRemoveToken;
 
-  /// Asks the saved address for the decision model's file. Null takes
-  /// **Check** off.
+  /// Asks the saved address for every model this build downloads from it,
+  /// and answers the first that is not reachable. Null takes **Check** off.
   final Future<RegistryCheck> Function()? onCheck;
 
   /// A line the host has about the registry, shown under the buttons until

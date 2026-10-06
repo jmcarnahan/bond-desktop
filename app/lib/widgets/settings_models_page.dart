@@ -155,8 +155,8 @@ class SettingsModelsPage extends StatefulWidget {
   /// Forgets the stored registry token. Null takes **Remove token** off.
   final Future<void> Function()? onRemoveRegistryToken;
 
-  /// Asks the saved registry for the decision model's file. Null takes
-  /// **Check** off the registry block.
+  /// Asks the saved registry for the embedding model's file and the decision
+  /// model's. Null takes **Check** off the registry block.
   final Future<RegistryCheck> Function()? onCheckRegistry;
 
   /// What the model ensurer is doing: a download's percentage, or why the

@@ -1809,11 +1809,11 @@ app-analyze:
 # Is this environment configured? One line each, ✓ or ✗: flutter and its
 # version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
 # registry answering with the token for each bundle the app downloads, one
-# line each: $(DECIDE_BUNDLE) (its first byte of $(DECIDE_REMOTE_HEADS), the
-# file Settings' Check asks for) and $(EMBED_BUNDLE) (its first byte of
-# $(EMBED_REMOTE_GGUF)); 200 or 206 is ✓ unless it is a `text/html` page, and
-# a redirect is a `!` warning, as Check words it, since the app's downloads
-# follow one though doctor itself does not; and Your server
+# line each: $(DECIDE_BUNDLE) (its first byte of $(DECIDE_REMOTE_HEADS)) and
+# $(EMBED_BUNDLE) (its first byte of $(EMBED_REMOTE_GGUF)), the same two
+# files Settings' Check asks for; 200 or 206 is ✓ unless it is a `text/html`
+# page, and a redirect is a `!` warning, as Check words it, since the app's
+# downloads follow one though doctor itself does not; and Your server
 # answering /prose/v1/models with the key. It prints HTTP status codes only,
 # never a secret: the two tokens reach the shell as "$$BOND_…" references
 # through the `export` beside MS_ENV, so `make -n app-doctor` shows the

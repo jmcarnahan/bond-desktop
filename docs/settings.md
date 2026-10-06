@@ -389,10 +389,13 @@ two guesses:
   for a token no header can carry, then fires `ensure()`.
   `onRemoveRegistryToken` is `notifier.clearRegistryToken()` then `ensure()`.
   `onCheckRegistry` asks `registryProbeProvider` (`probeRegistry` in
-  `services/models/registry_probe.dart`; a test overrides it) for the decide
-  entry's `headsRegistryUri(effectiveRegistryUrl)`, with
-  `bearerFor('model-registry')` resolved at the press, and answers
-  `notConfigured` without a request when there is no address.
+  `services/models/registry_probe.dart`; a test overrides it) for EVERY
+  registry entry of the manifest in order, the embed entry's
+  `registryUri(effectiveRegistryUrl)` and the decide entry's
+  `headsRegistryUri(…)`, with `bearerFor('model-registry')` resolved once at
+  the press. It answers the first result that is not `reachable`, so a
+  registry holding one bundle and not the other is never called reachable,
+  and `notConfigured` without a request when there is no address.
 - `serverState` is `ref.watch(serverStateProvider)` with the supervisor's own
   field as the fallback for the frame before the stream's first value lands,
   and `modelStatuses` is `managedModelsStatusProvider` watched ONCE. Both
@@ -598,9 +601,11 @@ address that is not one is refused under the field
 https:// and name a server.`) with nothing written. **Remove token**
 (`settings-registry-remove-token`) shows only while a token is in the
 keychain; the build's applies again when it may. **Check**
-(`settings-registry-check`) asks the SAVED address for the decision model's
-heads file with `Range: bytes=0-0` and says, under `settings-registry-status`,
-`Registry reachable.` (200 or 206 that is not a web page), `The model
+(`settings-registry-check`) asks the SAVED address for one byte
+(`Range: bytes=0-0`) of every model it serves this build, the embedding
+model's file and then the decision model's heads file, and says the first
+answer that is not reachable, under `settings-registry-status`:
+`Registry reachable.` (every file 200 or 206 and not a web page), `The model
 registry answered with a web page, not a model. Check its address.` (200 or
 206 with `text/html`, a sign-in page), `The registry answered with a
 redirect. A download will follow it.` (a 3xx, which the probe does not

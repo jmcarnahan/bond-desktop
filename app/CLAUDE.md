@@ -528,8 +528,10 @@ enforce the ones that are commands.
   refusal,status}`: the token field obscured, EMPTY after a Save, hints
   `Stored. Type to replace` / `Using the token from this build. Type to
   replace` / `A new address needs its own token`, another origin with a
-  blank token sends `clearToken`, Check is `registryProbeProvider` on the
-  heads file with `Range: bytes=0-0`. Also `settings-models-status`,
+  blank token sends `clearToken`, Check is `registryProbeProvider` with
+  `Range: bytes=0-0` on EVERY registry entry's file in manifest order (the
+  embed entry's GGUF, the decide entry's heads file) and says the first
+  answer that is not reachable. Also `settings-models-status`,
   `settings-models-progress`, `settings-show-log`, `settings-set-up-again`
   and `settings-idle-models`. Your server renders
   `ModelServersForm` (`widgets/model_servers_form.dart`), ONE one-address form
