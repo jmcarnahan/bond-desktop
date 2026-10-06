@@ -5,7 +5,7 @@ Fabrikam renewal terms
 </untrusted_data>
 With:
 <untrusted_data source="attendees">
-Sam Ortiz, Dana Lopez
+Dana Lopez, Sam Ortiz
 </untrusted_data>
 
 People, numbered, the organiser first:

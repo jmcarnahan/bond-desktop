@@ -57,10 +57,11 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// few minutes. So an event whose stored row is FAILED and has not moved
 /// since it was gathered less than [recheck] ago is not gathered again — a
 /// back-off for a brief that could not be written. That is the only row it
-/// holds. A READY row is gathered on every pass: a deck sent the morning of
-/// the meeting, or its text landing, should reach the brief on the next
-/// sync rather than a quarter of an hour later, and [_queuedFor] with the
-/// "fresh AND unchanged" rule keep an unchanged one from queueing. An event
+/// holds. A READY row is gathered on every pass, so a deck sent the morning
+/// of the meeting, or its text landing, is seen on the next sync — when the
+/// brief is then written again is the young-brief wait's to say
+/// ([rewriteAfter], [rewriteNearAfter]) — and [_queuedFor] with the "fresh
+/// AND unchanged" rule keep an unchanged one from queueing. An event
 /// with NO stored row is never throttled: that is the state after Clear AI
 /// results, and the next synced tick should plan it at once. Nor is a
 /// `skipped` row: its reason is the kind that goes away within seconds — a
@@ -192,8 +193,9 @@ class BriefPlanner {
         if (recorded.contains(quick)) await _record(e.id, quick, stored, stamp);
         continue;
       }
-      // Fresh no longer skips the gather: a young brief whose inputs moved is
-      // written again. Only a failed row is throttled, as a back-off.
+      // Fresh does not skip the gather: a young brief whose inputs moved is
+      // written again once past the young-brief wait (below). Only a failed
+      // row is throttled, as a back-off.
       final generated = stored?.generatedAtUtc;
       final fresh =
           generated != null && nowUtc.difference(generated) < freshFor;

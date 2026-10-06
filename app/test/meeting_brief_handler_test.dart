@@ -273,7 +273,7 @@ void main() {
       expect(detail['path'], 'related');
       expect(detail['search'], 'ok');
       expect(detail['related'], 1);
-      expect(detail['related_best'], 78);
+      expect(detail['search_best'], 78);
       expect(detail['threads'], 2);
     });
 
@@ -293,7 +293,7 @@ void main() {
       // by time, and the note says why.
       expect(detail['search'], 'off');
       expect(detail['related'], 0);
-      expect(detail.containsKey('related_best'), isFalse);
+      expect(detail.containsKey('search_best'), isFalse);
     });
   });
 

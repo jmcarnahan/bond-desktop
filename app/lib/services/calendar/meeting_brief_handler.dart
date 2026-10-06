@@ -321,8 +321,8 @@ class MeetingBriefHandler extends WorkHandler {
         'path': input.path.wire,
         if (input.search != null) 'search': input.search,
         'related': withThreads.relatedThreadCount,
-        if (input.relatedBest != null)
-          'related_best': (input.relatedBest! * 100).round(),
+        if (input.searchBest != null)
+          'search_best': (input.searchBest! * 100).round(),
       });
       _stored();
     } on LlmUnavailableException {

@@ -10916,7 +10916,7 @@ WHERE v.id IN (${_placeholders(near.length)}) AND v.embed_model = ?
         ? await db
             .customSelect(
               'SELECT p.source, p.conversation_key, p.source_message_id, '
-              'MAX(p.received_at) AS stamp, 1.0 AS distance '
+              'MAX(p.received_at) AS stamp '
               '$from WHERE $theirs '
               'GROUP BY p.source, p.conversation_key '
               'ORDER BY stamp DESC, p.conversation_key ASC LIMIT ?',
@@ -10954,7 +10954,10 @@ WHERE v.id IN (${_placeholders(near.length)}) AND v.embed_model = ?
         (
           source: row.data['source'] as String,
           conversationKey: row.data['conversation_key'] as String,
-          cosine: 1 - (row.data['distance'] as num).toDouble(),
+          // Nothing was compared without a query.
+          cosine: queryEmbedding == null
+              ? 0
+              : 1 - (row.data['distance'] as num).toDouble(),
           messageId: row.data['source_message_id'] as String,
           receivedAt: row.data['stamp'] as String,
         ),

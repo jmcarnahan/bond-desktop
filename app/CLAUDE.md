@@ -1269,13 +1269,16 @@ that bite.
     400), else BY TIME, their newest message standing for the conversation
     (`recent` for a topicless meeting — no embed call at all — `off`,
     `unavailable`); then the 30-day address match (the mail they are only
-    ON: the owner's unanswered thread to them), never bringing back what
-    the first read found or dropped. Ordered by meaning the found threads
-    lead and the address-matched only fill the room left (unread when there
-    is none); ordered by time both sort together, pressing first then
-    newest (an excerpt by its newest SHOWN message). `noMail` means no
-    invite thread, nothing they wrote AND no address match, so a meeting
-    whose only contact is a Teams chat is briefed. Found threads go through
+    ON: the owner's unanswered thread to them), minus what was found and
+    minus logistics SUBJECTS — another meeting's invite thread never leads
+    as a match but stays here as mail with these people, its files named
+    in `otherFiles`. `_fromPeopleOf` returns the list already ordered, the
+    shape `_relatedOf` has: by meaning the found threads lead and the
+    address-matched fill the room left, pressing first; by time both sort
+    together, pressing first then newest (an excerpt by its newest SHOWN
+    message). `noMail` means no thread at all — no invite thread and
+    nothing from either read — so a meeting whose only contact is a Teams
+    chat is briefed. Found threads go through
     the same `_threadsOf` as the related path's (logistics and other
     invites dropped, a chat an EXCERPT, a mail the match + newest two). On
     the related path ≤ 4 (`maxRelated`) from ONE
@@ -1335,8 +1338,8 @@ that bite.
     writing), so nobody is listed to be told "nothing from them"; nobody
     wrote → no block. `peopleMore` = others − listed on both paths. The
     PEOPLE path lists everyone, and what a person wrote in a chat excerpt
-    is theirs by the same name match; the With: line on the related
-    path is organiser first too (`briefOthers` puts an attendee copy's
+    is theirs by the same name match; the With: line is organiser first
+    on both paths (`briefOthers` puts an attendee copy's
     organiser LAST), `briefOrgOf` (the label before
     the public suffix; the tenant for `*.onmicrosoft.com`, past a
     routing `mail` label; '' for a
@@ -1390,7 +1393,7 @@ that bite.
     `BriefPath.wire` by `brief_path_test`; missing or any other value reads
     `people`) and per-thread `invite` (written only when true); no schema
     change. The ok note adds `path`, `search` (the search's state word),
-    `related` and `related_best` (cosine × 100, only when a search by
+    `related` and `search_best` (cosine × 100, only when a search by
     meaning kept a thread, either path); the activity sentence appends ", found by
     subject" on the related path. `MeetingBrief`
     writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,

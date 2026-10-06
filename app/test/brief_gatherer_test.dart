@@ -1687,7 +1687,7 @@ void main() {
       expect(related.threadLoads, isNot(contains('t-1')),
           reason: "a chat's history is never read");
       expect(input.threads.every((t) => !t.invite), isTrue);
-      expect(input.relatedBest, closeTo(0.82, 1e-9));
+      expect(input.searchBest, closeTo(0.82, 1e-9));
       final call = related.calls.single;
       expect(call.embedModel, EmbeddingsClient.documentModelTag);
       expect(call.floor, BriefGatherer.relatedFloor);
@@ -1885,7 +1885,7 @@ void main() {
 
         final input = await relatedInput(big());
         expect([for (final t in input.threads) t.conversationKey], ['c-a']);
-        expect(input.relatedBest, closeTo(0.8, 1e-9));
+        expect(input.searchBest, closeTo(0.8, 1e-9));
       });
 
       test("the room's later chatter leaves the hash alone; a reply that "
@@ -2144,8 +2144,8 @@ void main() {
       });
     });
 
-    test('With: on the related path leads with the organiser, who '
-        '`briefOthers` lists last; the people path keeps its order', () async {
+    test('With: leads with the organiser, who `briefOthers` lists last, on '
+        'either path', () async {
       CalendarEvent attendeeCopy(int n) {
         final start = now.add(const Duration(hours: 3));
         return CalendarEvent(
@@ -2177,12 +2177,12 @@ void main() {
               large.attendees.take(MeetingBriefTask.withCap).join(', '))));
       expect(msg, contains('Orla Grant'));
 
-      // Four others: the people path, the organiser still last.
+      // Four others: the people path, the organiser first there too.
       await conversation('c-g', people: const ['g1@northwind.com']);
       await message('m-c-g', 'c-g', from: 'g1@northwind.com', fromName: 'Guest 1');
       final small = await relatedInput(attendeeCopy(3));
       expect(small.path, BriefPath.people);
-      expect(small.attendees, ['Guest 1', 'Guest 2', 'Guest 3', 'Orla Grant']);
+      expect(small.attendees, ['Orla Grant', 'Guest 1', 'Guest 2', 'Guest 3']);
     });
 
     test('the people path still reads thirty days of mail', () async {
@@ -2226,7 +2226,7 @@ void main() {
           [true, true, true, false, false, false]);
       expect([for (final t in input.threads.skip(3)) t.conversationKey],
           ['c-0', 'c-1', 'c-2']);
-      expect(input.relatedBest, closeTo(0.9, 1e-9),
+      expect(input.searchBest, closeTo(0.9, 1e-9),
           reason: 'the invite hit was not kept as a related thread');
     });
 
@@ -2250,7 +2250,7 @@ void main() {
       expect([for (final t in input.threads) t.conversationKey],
           ['c-master', 'c-plain']);
       expect([for (final t in input.threads) t.invite], [true, false]);
-      expect(input.relatedBest, closeTo(0.7, 1e-9));
+      expect(input.searchBest, closeTo(0.7, 1e-9));
     });
 
     test('a big meeting with nothing to search by sends no query: still '
@@ -2278,7 +2278,7 @@ void main() {
       final input = await relatedInput(big());
       expect(input.threads, isEmpty);
       expect(input.path, BriefPath.related);
-      expect(input.relatedBest, isNull);
+      expect(input.searchBest, isNull);
       expect(input.inputsHash, isNotEmpty);
     });
 
@@ -2472,7 +2472,7 @@ void main() {
             reason: 'a topicless meeting has nothing to search by');
         expect([for (final c in related.senderCalls) c.ranked], [false]);
         expect(related.threadLoads, isNot(contains('t-dana')));
-        expect(input.relatedBest, isNull);
+        expect(input.searchBest, isNull);
       });
 
       test('nothing from them anywhere and no invite thread: no_mail; asked, '
@@ -2509,7 +2509,7 @@ void main() {
         expect(full.path, BriefPath.people);
         expect(full.search, 'ok');
         expect(keys(full), ['c-a']);
-        expect(full.relatedBest, closeTo(0.71, 1e-9));
+        expect(full.searchBest, closeTo(0.71, 1e-9));
         expect([for (final c in related.senderCalls) c.ranked], [true, true],
             reason: 'ordered by meaning, so never asked by time');
         final call = related.senderCalls.first;
@@ -2589,12 +2589,10 @@ void main() {
         expect(keys(input), ['inv-0', 'inv-1', 'c-0', 'c-1', 'c-2', 'c-3']);
         expect([for (final t in input.threads) t.invite],
             [true, true, false, false, false, false]);
-        expect(related.threadLoads, isNot(contains('c-4')));
-        expect(related.threadLoads, isNot(contains('c-5')));
       });
 
-      test('ordered by meaning with the list already full, the mail they are '
-          'only on is never read; with room left, it is', () async {
+      test('ordered by meaning with room left, the mail they are only on '
+          'fills it, pressing first', () async {
         for (var i = 0; i < 3; i++) {
           await danaMail('inv-$i', Duration(hours: 10 + i), eventId: 'evt-1');
         }
@@ -2602,25 +2600,17 @@ void main() {
           await danaMail('c-$i', Duration(hours: i + 1));
         }
         await onlyOn('c-only', const Duration(minutes: 30), pressing: true);
-        related.senderHits = [
-          for (var i = 0; i < 4; i++)
-            hit('c-$i', 0.9 - i / 100, ago: Duration(hours: i + 1)),
-        ];
-
-        final full = await relatedInput(small());
-        expect(keys(full), ['inv-0', 'inv-1', 'inv-2', 'c-0', 'c-1', 'c-2']);
-        expect(related.threadLoads, isNot(contains('c-only')));
-
-        // One found thread: room for two more, so the address match is read.
+        // One found thread: room for two more after the three invites.
         related.senderHits = [hit('c-0', 0.9, ago: const Duration(hours: 1))];
+
         final roomy = await relatedInput(small());
-        expect(related.threadLoads, contains('c-only'));
-        expect(keys(roomy).take(5),
-            ['inv-0', 'inv-1', 'inv-2', 'c-0', 'c-only']);
+        expect(keys(roomy),
+            ['inv-0', 'inv-1', 'inv-2', 'c-0', 'c-only', 'c-1']);
       });
 
-      test("logistics and another meeting's invite are dropped and not "
-          'brought back by the address match; an invite key is not doubled',
+      test('a logistics subject is dropped and not brought back by the '
+          "address match; another meeting's invite never leads as a match "
+          'but is still mail with these people; an invite key is not doubled',
           () async {
         await danaMail('inv', const Duration(hours: 6), eventId: 'evt-1');
         await danaMail('c-acc', const Duration(hours: 3),
@@ -2636,16 +2626,19 @@ void main() {
         ];
 
         final input = await relatedInput(small());
-        expect(keys(input), ['inv', 'c-plain'],
-            reason: 'Dana is on both dropped threads, inside thirty days');
-        expect([for (final t in input.threads) t.invite], [true, false]);
-        expect(input.relatedBest, closeTo(0.8, 1e-9));
-        // The unranked order lands on the same rule.
+        expect(keys(input), ['inv', 'c-plain', 'c-other'],
+            reason: 'Dana is on both threads the search left out, inside '
+                'thirty days: only the other invite comes back, and last');
+        expect([for (final t in input.threads) t.invite],
+            [true, false, false]);
+        expect(input.searchBest, closeTo(0.8, 1e-9));
+        // Ordered by time the same two are listed, newest first, and the
+        // answer is still left out.
         related.senderHits = null;
         final byTime = await BriefGatherer(related, calendar,
                 ownerAddress: () async => owner, zone: () => la)
             .gather(small(), now: now) as BriefEligible;
-        expect(keys(byTime.input), ['inv', 'c-plain']);
+        expect(keys(byTime.input), ['inv', 'c-other', 'c-plain']);
       });
 
       test('a chat excerpt on the people path: stamped and counted by what is '
@@ -2723,7 +2716,7 @@ void main() {
           expect(g.input.search, 'off');
           expect(keys(g.input), ['c-a']);
           expect(related.senderCalls.single.ranked, isFalse);
-          expect(g.input.relatedBest, isNull);
+          expect(g.input.searchBest, isNull);
         });
 
         test('embed down: unavailable and read by time; no second request '
@@ -2753,7 +2746,7 @@ void main() {
           expect([for (final c in related.senderCalls) c.ranked],
               [true, false]);
           expect(keys(input), ['c-a']);
-          expect(input.relatedBest, isNull);
+          expect(input.searchBest, isNull);
         });
 
         test('the ranked read throws: unavailable, read by time, the threads '
@@ -2900,7 +2893,7 @@ void main() {
       expect(t.excerpt, isTrue);
       expect(t.snippets.join(), contains('The Falcon launch moves a week.'));
       expect(t.lastAt, stampAgo(const Duration(hours: 2)));
-      expect(input.relatedBest, closeTo(1.0, 0.001));
+      expect(input.searchBest, closeTo(1.0, 0.001));
     });
 
     test('no scripted search on the people path: what Dana wrote, nearest '
@@ -2999,7 +2992,7 @@ void main() {
       expect([for (final t in input.threads) (t.source, t.conversationKey)],
           [('teams', 't-dana'), ('email', 'c-dana')]);
       expect(input.threads.first.excerpt, isTrue);
-      expect(input.relatedBest, closeTo(0.9, 0.001));
+      expect(input.searchBest, closeTo(0.9, 0.001));
     });
   });
 }

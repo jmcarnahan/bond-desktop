@@ -1233,7 +1233,7 @@ hashed:
   (`queryCacheMax` 64, the oldest dropped past it), and after a failed embed the
   gatherer does not ask again for 2 minutes (`embedRetryAfter`, on the
   caller's `now`). No embeddings client, no vector, no index or any error
-  leaves the related list empty, never the brief. `BriefInput.relatedBest` is
+  leaves the related list empty, never the brief. `BriefInput.searchBest` is
   the kept best cosine (not hashed).
 
   What a thread a SEARCH found quotes — the related path's, and the people
@@ -1288,7 +1288,7 @@ hashed:
   search by) or one with no text at all (`recent`), no embeddings client
   (`off`), or a query that could not be embedded, an index that is not
   there, or a read that threw (`unavailable`). `BriefInput.search` carries
-  the word (`ok` when ordered by meaning) and `relatedBest` the best kept
+  the word (`ok` when ordered by meaning) and `searchBest` the best kept
   cosine when it was. The entries become threads exactly as the related
   path's do (`_threadsOf`, shared): an invite thread is not listed twice,
   calendar logistics and another meeting's invite thread are dropped, a
@@ -1297,22 +1297,28 @@ hashed:
 
   Second, the mail they are merely ON: up to 20 address-matched candidate
   conversations of the last 30 days (`conversationsWithAddresses`; one
-  already an invite thread, already found, or dropped by the first read is
-  not listed again) — the owner's own unanswered thread to them, or one
-  they are copied on, which no message of theirs can find. Each is ranked
+  already an invite thread or already found is not listed again) — the
+  owner's own unanswered thread to them, or one they are copied on, which
+  no message of theirs can find. A thread whose subject is calendar
+  logistics (`briefIsLogisticsSubject`) is left out here as among the found
+  ones. Another meeting's invite thread is not: it never leads as a match,
+  but it is still mail with these people, and its files are named as not
+  sent for this meeting (`otherFiles`). Each is ranked
   by the decision on its newest inbound message (`urgency ∈ {high, urgent}`
   or `importance = high`, the invite-pinning rule), then by time, then key.
 
-  The order: ordered by meaning, the found threads lead in score order and
-  the address-matched ones only fill what room is left of the 6 (and are
-  not read at all when there is none); ordered by time, both sets are
+  The order (`_fromPeopleOf` returns the list already ordered, as
+  `_relatedOf` does): ordered by meaning, the found threads lead in score
+  order and the address-matched ones fill what room is left of the 6,
+  pressing first; ordered by time, both sets are
   sorted together by the one rule — pressing first, then newest (an
   excerpt by its newest message SHOWN), then key — so a pressing thread
   they are only on can still lead. Each kept thread carries its subject,
   state, last stamp and its quoted messages' text (attachment markers and
   link targets stripped, whitespace collapsed, capped, fenced). `no_mail`
-  is "no invite thread, nothing they wrote and no address match": a
-  meeting whose only contact is a Teams chat with an attendee is briefed.
+  is "no thread at all": no invite thread and nothing from either read. A
+  meeting whose only contact is a Teams chat with an attendee is briefed;
+  one whose only mail with its people is an "Accepted: …" is not.
 - **Open asks** (§1.1 point 1) — in a kept thread whose state is
   `needs_reply`, an inbound message from an attendee that came AFTER the
   owner's last message there (an ask before a reply is taken as answered),
@@ -1492,10 +1498,9 @@ number, a name, a date or a claim that is not in the inputs does not go in."
 The user message opens with `Now: <absolute local time>` and the meeting line,
 both absolute (`briefWhenLine`: "Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All
 day · Wed 7 Oct 2026"), the fenced attendees — at most 15 names
-(`MeetingBriefTask.withCap`; on the related path the organiser first, since
+(`MeetingBriefTask.withCap`; the organiser first on either path, since
 `briefOthers` appends an attendee copy's organiser LAST and who called the
-meeting must not be among "+N more"; the people path's order is as it
-was), then `+N more` on its own line OUTSIDE the
+meeting must not be among "+N more"), then `+N more` on its own line OUTSIDE the
 fence, since with no people cap a 300-person invite would otherwise put about
 36k characters of names in the prompt — and the last-met line, then
 the people block, headed **People, numbered, the organiser first:** on the
@@ -1685,7 +1690,7 @@ it asked for any, plus where the threads came from: `path` (`people` |
 `unavailable` on the related path; on the people path `ok` when its
 people's threads were ordered by meaning, else `recent`, `off` or
 `unavailable`, ordered by time), `related` (the related path's non-invite
-threads, 0 on the people path) and `related_best` (the best kept cosine ×
+threads, 0 on the people path) and `search_best` (the best kept cosine ×
 100, rounded, only when a search by meaning kept one, on either path) —
 enum words and numbers only. An empty headline is an
 `LlmFormatException`.
@@ -1755,8 +1760,10 @@ and walks the meetings soonest first, timed before all-day:
   unchanged reason writes and queues nothing (the row already says so, and
   `_queuedFor`);
 - past that, gathers the fresh hash and marks the meeting due when there is
-  no brief or the hash moved — at ANY age, so a deck or its digest landing
-  an hour after the first brief re-briefs the meeting on the next pass. The
+  no brief or the hash moved — whatever its age against `freshFor`, so a
+  deck or its digest landing an hour after the first brief re-briefs the
+  meeting on the next pass (a brief written minutes ago waits first: the
+  young-brief wait, below). The
   one skip is "younger than **2 hours** (`freshFor`) AND unchanged": a
   `failed` brief on unchanged inputs waits out the 2 hours before it is
   tried again, and a moved hash that was already queued once while the brief
@@ -1906,7 +1913,7 @@ meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks, materials,
-other_files, questions, people, text_chars, path, search, related, related_best}`
+other_files, questions, people, text_chars, path, search, related, search_best}`
 → "Meeting brief — written from 3 threads", with ", found by subject"
 appended when `path` is `related` and `related` is above 0; `skipped` with `{reason: <word>}` (a D6 word,
 `materials_pending` — "reading the files sent ahead" — or `unchanged`;
