@@ -85,14 +85,24 @@ placed on its own (Settings → Models, or the first-run wizard):
   `local.mk`). With no address it is unavailable and its work waits; the app
   never falls back to this Mac by itself. Placed on This Mac, it is the 27B
   above, or Qwen3-4B on a Mac under 40 GiB.
-- **Embeddings** — Qwen3-Embedding-0.6B, always on this Mac, downloaded from
-  Hugging Face.
+- **Embeddings** — Qwen3-Embedding-0.6B (Q8_0), always on this Mac,
+  downloaded from the same model registry as the decision model: the bundle
+  `bond-embed-qwen3-0.6b`, its `model-q8_0.gguf`, sha256-pinned in
+  `app/assets/models/manifest.json`. It lands as
+  `Qwen3-Embedding-0.6B-Q8_0.gguf` in the models folder's
+  `Qwen_Qwen3-Embedding-0.6B-GGUF/`, the folder it had when it came from
+  Hugging Face, so an existing install downloads nothing again and keeps
+  running with no registry configured. A new install needs the registry
+  address and token before setup can finish, because setup waits for this
+  model. `make embed-fetch` fetches the same file into the same folder, and
+  `make embed` serves it by hand on `:8081`.
 
 So a new Mac on the defaults downloads about 1.4 GB (the decision and
-embedding models). The 19 GB 27B is downloaded only when the generative model
-is placed on This Mac. AI processing starts off; the sidebar switch turns it
-on. The setup steps are [QUICKSTART.md](QUICKSTART.md), and every value an
-environment needs is in [local.mk.example](local.mk.example).
+embedding models), both from the model registry. The 19 GB 27B is downloaded
+only when the generative model is placed on This Mac. AI processing starts
+off; the sidebar switch turns it on. The setup steps are
+[QUICKSTART.md](QUICKSTART.md), and every value an environment needs is in
+[local.mk.example](local.mk.example).
 
 ## Requirements
 
@@ -233,7 +243,8 @@ and runs three servers, all optional: `make decide` on `:8083` (the decision
 model, after `make decide-fetch`), `make model` on `:8080` (the generative
 model: the message text, storylines and drafts) and
 `make embed` on `:8081` (`Qwen3-Embedding-0.6B`, which turns conversations
-into vectors so they can be clustered and searched). `make fast` on `:8082` is
+into vectors so they can be clustered and searched; after `make
+embed-fetch`, or one run of the app). `make fast` on `:8082` is
 the benches' bulk slot; the app does not use it. With none of them running the
 inbox works fine and simply stays un-annotated; each missing server parks only
 the work that needs it, and the work resumes when the server comes up.
@@ -407,7 +418,8 @@ and the app makes no Teams request at all.
 make status                 # up/down + pid
 make logs                   # tail the server log
 make stop                   # stop the chat server on :8080
-make embed                  # start the embedding server on :8081
+make embed-fetch            # download the embedding model from the registry into the app's models folder
+make embed                  # serve it by hand on :8081
 make embed-stop             # stop it
 make fast                   # start the bulk-work model server on :8082 (benches)
 make fast-stop              # stop it
@@ -418,6 +430,7 @@ make verify                 # SHA256 the downloaded weights (~1 min)
 make clean-model            # delete the cache, forcing a re-download
 make clean                  # rm tmp/logs
 make app-doctor             # check local.mk and .env before the first run
+make registry-verify        # live: the app's downloader fetches every registry model to its pinned digest
 make app-run                # the desktop inbox
 make app-test               # its test suite
 make app-analyze            # its analyzer
@@ -592,5 +605,7 @@ app/              Flutter macOS app — the desktop inbox
 tmp/logs/         runtime logs; make clean removes it, keep it out of git
 ```
 
-Model weights live in `~/.cache/huggingface/hub/`, deliberately outside the
-repo.
+Model weights live outside the repo: the generative models the hand-started
+servers download in `~/.cache/huggingface/hub/`, and the decision and
+embedding models in the app's models folder
+(`~/Library/Application Support/com.bondinbox.app/models/`).

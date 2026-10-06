@@ -102,9 +102,11 @@ The knobs, all `?=` in the `Makefile` and all overridable on the command line
   whatever `local.mk` says.
 - `EMBED_ARGS` — extra flags on `make embed`'s `llama-server` line, for a
   candidate embedding model whose pooling llama.cpp does not read off the GGUF.
-  Empty by default, so the shipping server's launch line is unchanged. `make
+  `--pooling last` by default, which the shipping Qwen3-Embedding needs. `make
   embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS='--pooling last'` is how a
-  candidate is stood up beside the shipping one.
+  candidate is stood up beside the shipping one. `EMBED_HF` is an opt-in
+  override with no default: the shipping server serves the models folder's
+  file (`EMBED_GGUF`) with `-m`, and only a candidate downloads through `-hf`.
 
 Name the weights in a label, not just the runtime: two quantizations of one
 model otherwise produce two identical-looking tables. Once two runs have
@@ -3708,10 +3710,10 @@ it can be measured at all, let alone adopted.
 (`make app-run`, set up by `QUICKSTART.md` with one `local.mk`). The app
 downloads its models itself, at launch and from Settings, Models, each file
 sha256-pinned in `app/assets/models/manifest.json`: the decision model (the
-`bond-decide-mbl-v3swap` bundle, GGUF plus heads file) from the model registry
-(JFrog Artifactory) with a read token, and the embedding model from Hugging
-Face. The generative model runs on your server by default, so the 27B is
-downloaded only when it is placed on This Mac. The installer is still future
+`bond-decide-mbl-v3swap` bundle, GGUF plus heads file) and the embedding model
+(the `bond-embed-qwen3-0.6b` bundle) from the model registry (JFrog
+Artifactory) with a read token. The generative model runs on your server by
+default, so the 27B is downloaded only when it is placed on This Mac. The installer is still future
 work: the installer round built a DMG that bundles its own `llama-server`,
 built from a SHA-pinned llama.cpp source tarball, and `docs/distribution.md`
 is the authority on how a checkout becomes an installable build, but no DMG

@@ -47,6 +47,11 @@ enforce the ones that are commands.
   `llm_target_verify_test.dart`, `golden_storyline_test.dart`,
   `golden_sweep_test.dart`) sit in every run as skipped; they never get
   accuracy thresholds (`docs/model-bakeoff.md`).
+- `make registry-verify` (`test/registry_fetch_live_test.dart`, `@Skip`'d) is
+  the one live REGISTRY check that asserts: the real `ModelDownloader` fetches
+  every registry entry of the committed manifest and each must land at its
+  pinned digest. It reads `BOND_REGISTRY_URL` and `BOND_REGISTRY_TOKEN` from
+  the environment, never a `--dart-define`, and is never part of the gate.
 - Never run `flutter test` or `flutter analyze` while a live `make` bench is
   running: any load moves the timings the bench exists to measure, and the
   run is spent.
@@ -142,7 +147,10 @@ enforce the ones that are commands.
   `build/native_assets/macos/libsqlite3.dylib` while the gate's isolates are
   loading it, and a store test fails with `sqlite3_initialize`. A red gate
   carrying only that error is re-run once `ps -axo pid,etime,comm | command
-  grep flutter_tester` shows nothing.
+  grep flutter_tester` shows nothing. Nor does a gate overlap an agent that
+  EDITS files in the same checkout, even one that runs no flutter: the gate
+  reads the tree while it runs, and a baseline went red that way on
+  2026-10-06 (a `manifest.json` edit landed mid-run).
 - The keychain under `flutter test` throws `MissingPluginException` and
   `SecureTokenStore` does not catch it: tests hand `AppPrefsNotifier` a
   `MemoryTokenStore` or a `RefusingTokenStore` from

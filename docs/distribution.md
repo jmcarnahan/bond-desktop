@@ -527,9 +527,10 @@ mode, which needs only `BOND_MCP_SERVER_URL`.
 ## Bumping a model
 
 The four checkpoints are named in exactly one place: `app/assets/models/
-manifest.json`. Three come from Hugging Face (`bond-embed`, `bond-bulk`,
-`bond-prose`) and one from the owner's model registry (`bond-decide`, a
-`source: artifactory` entry; see **Bumping the decision model** below). A bump
+manifest.json`. Two come from Hugging Face (`bond-bulk`, `bond-prose`) and
+two from the owner's model registry (`bond-embed` and `bond-decide`, each a
+`source: artifactory` entry; see **Bumping the decision model** and **Bumping
+the embedding model** below). A bump
 is an edit to that file and to nothing else — no Dart changes, and a diff a
 reviewer can read.
 
@@ -574,12 +575,14 @@ For a Hugging Face checkpoint:
    checks the digests and revisions, resolves both tiers and pins the INI the
    preset writes; update the size and digest literals in it in the same commit,
    because they are the second pair of eyes on a copy-paste. The second is what
-   stops the manifest and the Makefile drifting: `MODEL_HF`, `FAST_HF` and
-   `EMBED_HF` have to name the same repos and quants as the entries, and
-   `CTX_SIZE`, `SLOTS` and `FAST_SLOTS` the same numbers as the full tier's
-   `c` and `parallel`. A bump that moves only the app leaves `make model`
-   serving the previous checkpoint, silently, which is the failure the
-   Makefile's own comment above `EMBED_HF` describes.
+   stops the manifest and the Makefile drifting: `MODEL_HF` and `FAST_HF` have
+   to name the same repos and quants as the entries, and `CTX_SIZE`, `SLOTS`
+   and `FAST_SLOTS` the same numbers as the full tier's `c` and `parallel`. A
+   bump that moves only the app leaves `make model` serving the previous
+   checkpoint, silently, which is the failure the Makefile's own comment above
+   `EMBED_PORT` describes for the embedding model. The two registry entries
+   are held the same way by their own Makefile variables, in the sections
+   below.
 
 ### Bumping the decision model
 
@@ -605,11 +608,72 @@ bundle lands in a new folder beside the old one, as a Hugging Face bump does.
    any drift — and update the literals in `model_manifest_test.dart`.
 4. The ledger keys the heads file as `bond-decide.heads`; a changed digest on
    either row makes the entry stale and the downloader fetches it again. A
-   registry file never reopens setup (it is not in the gate's `gating`
-   view); the model ensurer picks the new pin up instead, at the next launch
+   decision-model file never reopens setup (it is not in the gate's
+   `gating` view, which the embedding model's file is); the model ensurer
+   picks the new pin up instead, at the next launch
    once the app shows (and on Settings, Models' Check or Download), and the
    router restarts onto it when it lands
    ([10-model-routing.md](pipeline/10-model-routing.md#ensured-outside-the-wizard)).
+
+### Bumping the embedding model
+
+The embedding model is a bundle in the same registry, fetched from
+`<registry base>/bundles/bond-embed-qwen3-0.6b/model-q8_0.gguf`. Unlike the
+decision model it is not trained here: the bundle republishes an upstream
+file unmodified, so the registry is the one source an environment needs.
+Its entry carries `bundle` and `remoteFile` (`model-q8_0.gguf`); `file` is
+the name it lands under (`Qwen3-Embedding-0.6B-Q8_0.gguf`). `repo` is NOT
+`artifactory/<bundle>`: it stayed `Qwen/Qwen3-Embedding-0.6B-GGUF` when the
+download moved off Hugging Face, because `repo` only names the folder the
+file lands in, and the same folder, id and sha256 meant an existing install
+downloaded nothing again.
+
+1. **The bundle** is one directory, `bond-embed-qwen3-0.6b/`, holding:
+   - `model-q8_0.gguf`: the upstream `Qwen3-Embedding-0.6B-Q8_0.gguf` from
+     `Qwen/Qwen3-Embedding-0.6B-GGUF` at revision
+     `370f27d7550e0def9b39c1f16d3fbaa13aa67728`, unmodified (639150592 bytes,
+     sha256 `06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439`);
+   - `NOTICE`: the licence (Apache-2.0), the upstream repo, the revision and
+     the file it was renamed from;
+   - `bundle.json`: `schema` 1, `id`, `role` `embed`, `kind` `embedding`,
+     `display_name`, `qhash` `none`, `created`, `provenance` (upstream repo,
+     revision, file, licence), `files` with each file's `sha256` and `bytes`,
+     and `runtime`, whose `args` carry `embedding` and `pooling` `last`;
+   - `SHA256SUMS`.
+2. **Publish it** with the training project's bundle publisher, the same one
+   the decision model's bundles go through. It verifies the directory
+   against `bundle.json`, refuses an id that already has a `bundle.json` in
+   the registry (bundles are immutable), uploads every file with
+   `bundle.json` last, then fetches them back and verifies them. So a new or
+   changed model is a NEW bundle id, never a re-upload under the old one.
+3. **Every registry an environment points at** must hold the bundle before a
+   new install there can finish setup: the embedding model holds the
+   wizard's Continue wherever it comes from. Publish the same directory to
+   each.
+4. **Then, in this repo, in one change:** the `bond-embed` entry in
+   `app/assets/models/manifest.json` (`bundle`, `remoteFile`, `file`,
+   `sizeBytes`, `sha256`, and `repo` only if the file should land in another
+   folder) and the Makefile's `EMBED_BUNDLE`, `EMBED_REMOTE_GGUF`,
+   `EMBED_FILE`, `EMBED_DIR` (its last segment is the `repo` with `/` as
+   `_`) and `EMBED_GGUF_SHA`. `manifest_makefile_parity_test.dart` holds them
+   equal, holds `EMBED_GGUF` at `$(EMBED_DIR)/$(EMBED_FILE)` and holds
+   `EMBED_HF` with no default, so `make embed` cannot drift back to a Hugging
+   Face download. Update the literals in `model_manifest_test.dart` too. The
+   embed file is in the gate's `gating` view, so a changed digest reopens
+   setup at its download step on the next launch, as a Hugging Face bump
+   does (below).
+5. **Different bytes are a different model**, whatever the bundle is called.
+   Every stored vector is read through the tags in
+   `app/lib/services/llm/embeddings_client.dart`, so a new model ships with a
+   tag bump and the re-embed one-shot that moves the stored corpus over
+   ([05-embeddings.md](pipeline/05-embeddings.md), "A tag bump and a one-shot
+   is how any of this ships" and "The document corpus moved too"). A model
+   of another width does not fit the 1,024-wide indexes at all, and nothing
+   throws when it is wrong (the Makefile's comment above `EMBED_PORT`).
+6. **Check it:** `make app-doctor` prints a `✓ the registry has
+   bond-embed-qwen3-0.6b` line, and `make registry-verify` (live, never a
+   gate) has the app's own downloader fetch every registry file and assert
+   each lands at its pinned digest.
 
 ### What an installed copy does with the bump
 

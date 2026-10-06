@@ -15,8 +15,8 @@
 # `make app-build`), never into a distributed one, and `make -n` never prints
 # them. Ask the project owner for all four.
 
-# The model registry the app downloads the decision model from: an
-# Artifactory repository URL. A local stand-in answers on
+# The model registry the app downloads the decision model and the embedding
+# model from: an Artifactory repository URL. A local stand-in answers on
 # http://localhost:18082/artifactory/bond-models.
 BOND_REGISTRY_URL = https://artifactory.example.com/artifactory/bond-models
 
