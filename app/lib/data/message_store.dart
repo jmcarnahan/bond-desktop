@@ -1025,6 +1025,24 @@ WHERE source = ? AND conversation_key = ?
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
+  }) async =>
+      [
+        for (final row
+            in await conversationRows(sources: sources, state: state))
+          Conversation.fromRow(row),
+      ];
+
+  /// The conversation list's rows as the query returned them — see
+  /// [loadConversations], which is these rows made into models.
+  ///
+  /// Raw, because the list provider compares two reads' maps to decide
+  /// whether anything on screen changed. A hand-written thirty-field `==` on
+  /// the model would do the same job until the day a column is added to this
+  /// SELECT and not to the `==`, and from then on would silently call two
+  /// different rows the same.
+  Future<List<Map<String, Object?>>> conversationRows({
+    List<String> sources = const ['email'],
+    ConversationState? state,
   }) async {
     if (sources.isEmpty) return const [];
     final where =
@@ -1193,7 +1211,7 @@ WHERE source = ? AND conversation_key = ?
           variables: _args(args),
         )
         .get();
-    return [for (final row in result) Conversation.fromRow(row.data)];
+    return [for (final row in result) row.data];
   }
 
   /// The conversations, of every source, that any of [addresses] took part
@@ -5098,27 +5116,62 @@ FROM messages
     }
   }
 
-  /// Stores one thread's ranking score. Same targeted insert-then-update as
-  /// [setConversationBucket]: the score is recomputed on every list load and
-  /// must never disturb an embedding or a bucket sitting on the same row.
-  Future<void> writeAttentionScore(
-    String source,
-    String conversationKey,
-    double score,
-  ) async {
-    final now = _nowIso();
-    await db.transaction(() async {
-      await db.customUpdate(
-        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
-        'VALUES (?, ?, ?) '
-        'ON CONFLICT(source, conversation_key) DO NOTHING',
-        variables: _args([source, conversationKey, now]),
-      );
-      await db.customUpdate(
-        'UPDATE conversation_ai SET attention_score = ?, updated_at = ? '
-        'WHERE source = ? AND conversation_key = ?',
-        variables: _args([score, now, source, conversationKey]),
-      );
+  /// One attention pass's writes, in ONE batch: every score in [scores], then
+  /// every bucket in [buckets].
+  ///
+  /// A score for every thread scored and a bucket for every thread filed,
+  /// none skipped, and each one stamps `updated_at`. That
+  /// stamp is load-bearing rather than bookkeeping: the notification settle
+  /// reads `conversation_ai.updated_at` at or after the message's own stamp
+  /// as "the attention pass has seen this thread since its message last
+  /// changed", so a write left out for being unchanged would hold a
+  /// notification back. What changes is the cost: one round trip to the
+  /// database and one transaction, instead of one of each per thread — which
+  /// with the database on its own isolate was most of a list load.
+  ///
+  /// An upsert per row rather than the insert-then-update pair: the insert
+  /// names only the key, the column it sets and `updated_at`, so a row that
+  /// did not exist is created as the pair created it, and a row that did
+  /// keeps its embedding, its date and the other kind's column.
+  ///
+  /// One [stamp] for the whole pass ([isoStamp]), and the CALLER's: it is
+  /// taken before the pass's reads, not here after them. A message that
+  /// changed after the pass read it then carries the later stamp of the two,
+  /// so the settle holds it for the next pass instead of taking this one's
+  /// score — computed from the older version — as a verdict on the new one.
+  /// Nothing at all is written when both lists are empty.
+  Future<void> writeAttentionPass({
+    required List<({String source, String key, double score})> scores,
+    required List<({String source, String key, String? bucket, String? reason})>
+        buckets,
+    required String stamp,
+  }) async {
+    if (scores.isEmpty && buckets.isEmpty) return;
+    final now = stamp;
+    await db.batch((b) {
+      for (final s in scores) {
+        b.customStatement(
+          'INSERT INTO conversation_ai '
+          '  (source, conversation_key, attention_score, updated_at) '
+          'VALUES (?, ?, ?, ?) '
+          'ON CONFLICT(source, conversation_key) DO UPDATE SET '
+          '  attention_score = excluded.attention_score, '
+          '  updated_at = excluded.updated_at',
+          [s.source, s.key, s.score, now],
+        );
+      }
+      for (final f in buckets) {
+        b.customStatement(
+          'INSERT INTO conversation_ai '
+          '  (source, conversation_key, bucket, bucket_reason, updated_at) '
+          'VALUES (?, ?, ?, ?, ?) '
+          'ON CONFLICT(source, conversation_key) DO UPDATE SET '
+          '  bucket = excluded.bucket, '
+          '  bucket_reason = excluded.bucket_reason, '
+          '  updated_at = excluded.updated_at',
+          [f.source, f.key, f.bucket, f.reason, now],
+        );
+      }
     });
   }
 
@@ -5907,7 +5960,15 @@ SELECT conversation_key FROM (
   ///
   /// [count] and [durationMs] must be Dart ints: the table is STRICT and an
   /// INTEGER column rejects a double at write time.
-  Future<void> recordActivity({
+  ///
+  /// Returns the stored row, id and stamp included, so the caller can announce
+  /// exactly the row it wrote without a second read. A second read would also
+  /// be the wrong one under concurrent drains: "the newest row" is a sibling's
+  /// as often as not when three lanes record at once. A write that hands rows
+  /// back goes through `customWriteReturning`, never `customSelect`: a write
+  /// must not travel on a read path. Callers with no use for the row ignore
+  /// it.
+  Future<Map<String, Object?>?> recordActivity({
     required String kind,
     required String status,
     String? source,
@@ -5917,10 +5978,10 @@ SELECT conversation_key FROM (
     String? detailJson,
     String? createdAt,
   }) async {
-    await db.customUpdate(
+    final rows = await db.customWriteReturning(
       'INSERT INTO activity_events '
       '(kind, source, status, entity_id, count, duration_ms, detail_json, '
-      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
       variables: _args([
         kind,
         source,
@@ -5932,6 +5993,7 @@ SELECT conversation_key FROM (
         createdAt ?? _nowIso(),
       ]),
     );
+    return rows.isEmpty ? null : Map<String, Object?>.from(rows.first.data);
   }
 
   /// The newest events first. Bounded by [limit] because the panel that reads
@@ -5955,6 +6017,34 @@ SELECT conversation_key FROM (
             )
             .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// `'$source|$conversationKey'` → subject, for every conversation of
+  /// [sources] that has one.
+  ///
+  /// The activity pane's lookup for the thread an event was about. A narrow
+  /// two-column read in place of the whole list query the pane used to run
+  /// for it: that query counts unread mail, busy work, attachments and drafts
+  /// per thread, and the pane wanted none of it, only the subject, on every
+  /// activity tick. `Conversation.subject` is this column verbatim, so the
+  /// map is the one the old loop built.
+  Future<Map<String, String>> conversationSubjects({
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return const {};
+    final result = await db
+        .customSelect(
+          'SELECT source, conversation_key, subject FROM conversations '
+          'WHERE source IN (${_placeholders(sources.length)}) '
+          "AND subject IS NOT NULL AND subject <> ''",
+          variables: _args(sources),
+        )
+        .get();
+    return {
+      for (final row in result)
+        '${row.data['source']}|${row.data['conversation_key']}':
+            row.data['subject'] as String,
+    };
   }
 
   /// Everything the log holds about one message: its own events, its thread's,
@@ -9002,22 +9092,6 @@ WHERE m.source = ? AND m.source_message_id = ?
     );
   }
 
-  /// What was announced recently — the backing read for the "what did I miss"
-  /// list, newest first.
-  Future<List<Map<String, Object?>>> recentNotified({
-    required String sinceIso,
-    int limit = 20,
-  }) async {
-    final result = await db
-        .customSelect(
-          "SELECT * FROM message_notify WHERE state = 'notified' "
-          'AND settled_at >= ? ORDER BY settled_at DESC LIMIT ?',
-          variables: _args([sinceIso, limit]),
-        )
-        .get();
-    return [for (final row in result) Map<String, Object?>.from(row.data)];
-  }
-
   // ── pipeline progress ────────────────────────────────────────────────
 
   /// The states a stage stops at. `skipped` is one of them: a message the
@@ -10778,6 +10852,225 @@ $where
     return ranked;
   }
 
+  /// The conversations nearest [queryEmbedding], nearest first, each scored
+  /// by its BEST message's cosine (`1 - distance`): what a meeting brief's
+  /// related search reads. Mail and Teams, dropped messages excluded,
+  /// messages received since [sinceIso] only.
+  ///
+  /// [semanticSearch]'s KNN and its model, dropped, date and source filters,
+  /// but a read of its own: that one hydrates a feed row per hit (five joins
+  /// and four subqueries) and keeps only the nearest [semanticSearch] `limit`
+  /// messages, where this is asked once per meeting on every brief plan and
+  /// must not let one busy chat's hundred near messages crowd every other
+  /// conversation out. So it takes ALL of the [_keywordCap] neighbours, keeps
+  /// those at or above [floor] (the list is nearest first, so it stops at the
+  /// first below), and reads three columns for them. The first, and so best,
+  /// message per `(source, conversationKey)` is the conversation's; it stops
+  /// at [limit] conversations.
+  ///
+  /// Null when the index is unavailable, [semanticSearch]'s third answer.
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async {
+    if (!await _vecIndex.ensureReady()) return null;
+    // Heal before asking, as [semanticSearch] does and for its reason.
+    await _vecIndex.backfill();
+    final near = [
+      for (final hit in await _vecIndex.knn(queryEmbedding, k: _keywordCap))
+        if (1 - hit.distance >= floor) hit,
+    ];
+    if (near.isEmpty) return const [];
+
+    final result = await db
+        .customSelect(
+          '''
+SELECT v.id AS vector_id, p.source, p.conversation_key,
+       p.source_message_id, p.received_at
+FROM message_vectors v
+JOIN message_progress p
+  ON p.source = v.source AND p.source_message_id = v.source_message_id
+WHERE v.id IN (${_placeholders(near.length)}) AND v.embed_model = ?
+  AND p.dropped = 0 AND p.received_at >= ?
+  AND p.source IN ('email', 'teams')
+''',
+          variables: _args([
+            for (final hit in near) hit.id,
+            embedModel,
+            sinceIso,
+          ]),
+        )
+        .get();
+    final byVector = {
+      for (final row in result) row.data['vector_id'] as int: row.data,
+    };
+
+    final seen = <(String, String)>{};
+    final out = <RelatedConversation>[];
+    for (final hit in near) {
+      if (out.length >= limit) break;
+      final row = byVector[hit.id];
+      if (row == null) continue;
+      final source = row['source'] as String;
+      final key = row['conversation_key'] as String;
+      if (!seen.add((source, key))) continue;
+      out.add((
+        source: source,
+        conversationKey: key,
+        cosine: 1 - hit.distance,
+        messageId: row['source_message_id'] as String,
+        receivedAt: row['received_at'] as String,
+      ));
+    }
+    return out;
+  }
+
+  /// The conversations a set of PEOPLE wrote in since [sinceIso], each with
+  /// the one message of theirs that stands for it: what a meeting brief
+  /// reads about the people in a small meeting. Mail and Teams, kept inbound
+  /// messages only. A mail is theirs by its sender's address ([addresses]);
+  /// a chat message by its sender's display name ([names]), because a chat
+  /// knows its people by id and name and never by address.
+  ///
+  /// With [queryEmbedding] it is [relatedConversations]' search with the
+  /// senders and the date as an extra constraint, and no floor: each
+  /// conversation is scored by the cosine of their message nearest the
+  /// query, nearest first. vec0 can only be asked for neighbours, not for
+  /// neighbours-matching-a-predicate, and these people's messages can sit
+  /// far outside the mailbox's nearest [_keywordCap]; so the stored vectors
+  /// of just their messages are compared in SQL (`vec_distance_cosine`), a
+  /// few hundred rows at most. Only a message with a vector under
+  /// [embedModel] can be scored. Null when the index's functions are not on
+  /// this connection, [semanticSearch]'s third answer.
+  ///
+  /// Without it nothing is compared and no vector is needed: each
+  /// conversation is stood for by their NEWEST message, newest first, and
+  /// the cosine reads 0.
+  ///
+  /// One row per conversation either way (SQLite hands a bare column the
+  /// value of the row its one `MIN` or `MAX` came from), so a chat busy
+  /// with one of them cannot crowd the other conversations out of [limit].
+  /// Both sides of the sender match are folded as SQLite's `lower` folds
+  /// (ASCII letters only), so a name's accented capital matches itself.
+  Future<List<RelatedConversation>?> conversationsFromSenders({
+    Uint8List? queryEmbedding,
+    required String embedModel,
+    required Set<String> addresses,
+    required Set<String> names,
+    required String sinceIso,
+    int limit = 12,
+  }) async {
+    List<String> folded(Set<String> values) => {
+          for (final v in values)
+            if (v.trim().isNotEmpty) _asciiLower(v.trim()),
+        }.toList();
+    final mail = folded(addresses);
+    final chat = folded(names);
+    if (mail.isEmpty && chat.isEmpty) return const [];
+    if (queryEmbedding != null && !await _vecIndex.ensureReady()) return null;
+
+    final sender = [
+      if (mail.isNotEmpty)
+        "(p.source = 'email' AND lower(trim(m.from_address)) "
+            'IN (${_placeholders(mail.length)}))',
+      if (chat.isNotEmpty)
+        "(p.source = 'teams' AND lower(trim(m.from_name)) "
+            'IN (${_placeholders(chat.length)}))',
+    ].join(' OR ');
+    const from = 'FROM message_progress p '
+        'JOIN messages m ON m.source = p.source '
+        '  AND m.source_message_id = p.source_message_id ';
+    final theirs = "p.dropped = 0 AND p.received_at >= ? "
+        "AND m.direction = 'inbound' AND ($sender) ";
+
+    final result = queryEmbedding == null
+        ? await db
+            .customSelect(
+              'SELECT p.source, p.conversation_key, p.source_message_id, '
+              'MAX(p.received_at) AS stamp '
+              '$from WHERE $theirs '
+              'GROUP BY p.source, p.conversation_key '
+              'ORDER BY stamp DESC, p.conversation_key ASC LIMIT ?',
+              variables: _args([sinceIso, ...mail, ...chat, limit]),
+            )
+            .get()
+        : await db
+            .customSelect(
+              'SELECT p.source, p.conversation_key, p.source_message_id, '
+              'p.received_at AS stamp, '
+              'MIN(vec_distance_cosine(v.embedding, ?)) AS distance '
+              '$from JOIN message_vectors v ON v.source = p.source '
+              '  AND v.source_message_id = p.source_message_id '
+              // The width with the tag: the distance function refuses two
+              // vectors of different widths, and that would fail the whole
+              // statement for one old row.
+              'WHERE v.embed_model = ? AND v.dims = ? AND $theirs '
+              'GROUP BY p.source, p.conversation_key '
+              'ORDER BY distance ASC, p.conversation_key ASC LIMIT ?',
+              variables: [
+                Variable<Uint8List>(queryEmbedding),
+                ..._args([
+                  embedModel,
+                  MessageVectorIndex.dims,
+                  sinceIso,
+                  ...mail,
+                  ...chat,
+                  limit,
+                ]),
+              ],
+            )
+            .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String,
+          conversationKey: row.data['conversation_key'] as String,
+          // Nothing was compared without a query.
+          cosine: queryEmbedding == null
+              ? 0
+              : 1 - (row.data['distance'] as num).toDouble(),
+          messageId: row.data['source_message_id'] as String,
+          receivedAt: row.data['stamp'] as String,
+        ),
+    ];
+  }
+
+  /// [s] with its ASCII capitals lowered and nothing else touched: what
+  /// SQLite's `lower` does, for a value compared against a `lower(column)`.
+  static String _asciiLower(String s) => s.replaceAllMapped(
+      RegExp('[A-Z]'), (m) => m[0]!.toLowerCase());
+
+  /// One conversation's messages received from [fromIso] to [toIso], both
+  /// inclusive, oldest first: the part of a chat around one moment, for a
+  /// caller that must not load a room's whole history to read one exchange.
+  /// No attachments are hydrated ([loadThread] is the read that draws a
+  /// thread), and nothing is filtered: the owner's own messages and a
+  /// dropped one are part of what was said. A message with no `received_at`
+  /// is placed by when it was stored, [loadThread]'s rule and the stamp
+  /// `message_progress` (and so [relatedConversations]) carries for it.
+  Future<List<Message>> messagesBetween(
+    String source,
+    String conversationKey, {
+    required String fromIso,
+    required String toIso,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          'WHERE source = ? AND conversation_key = ? '
+          'AND COALESCE(received_at, created_at) >= ? '
+          'AND COALESCE(received_at, created_at) <= ? '
+          'ORDER BY COALESCE(received_at, created_at) ASC, '
+          'source_message_id ASC',
+          variables: _args([source, conversationKey, fromIso, toIso]),
+        )
+        .get();
+    return [for (final row in result) Message.fromRow(row.data)];
+  }
+
   /// The most rowids either word read will carry back into Dart.
   ///
   /// `semanticSearch` caps its `k` at the same number and for the same reason:
@@ -11859,8 +12152,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
         variables: _args([source, messageId, attachmentId]),
       );
       for (final chunk in chunks) {
-        final row = await db
-            .customSelect(
+        final rows = await db
+            .customWriteReturning(
               'INSERT INTO attachment_chunks '
               '(source, source_message_id, attachment_id, seq, locator, '
               ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
@@ -11877,9 +12170,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
                 chunk.text.length,
                 now,
               ]),
-            )
-            .getSingle();
-        ids.add(row.data['id'] as int);
+            );
+        ids.add(rows.single.data['id'] as int);
       }
     });
     return ids;
@@ -11902,8 +12194,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
     final now = _nowIso();
     var id = 0;
     await db.transaction(() async {
-      final row = await db
-          .customSelect(
+      final rows = await db
+          .customWriteReturning(
             'INSERT INTO attachment_chunks '
             '(source, source_message_id, attachment_id, seq, locator, '
             ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
@@ -11926,9 +12218,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
               messageId,
               attachmentId,
             ]),
-          )
-          .getSingle();
-      id = row.data['id'] as int;
+          );
+      id = rows.single.data['id'] as int;
     });
     return id;
   }

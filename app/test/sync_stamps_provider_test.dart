@@ -59,6 +59,9 @@ void main() {
     await container.read(syncStampsProvider.future);
 
     await container.read(activityLogProvider).record('sync_mail', count: 2);
+    // The provider hears at most one event per [activityTickWindow], at the
+    // window's end.
+    await Future<void>.delayed(activityTickWindow);
     // The event goes out on a stream; give the provider the turn it needs to
     // hear it and start the re-read.
     await Future<void>.delayed(Duration.zero);
@@ -86,4 +89,57 @@ void main() {
     final stamps = await container.read(syncStampsProvider.future);
     expect(stamps.teamsIso, '2026-09-05T10:00:00.000Z');
   });
+
+  // On the fake clock, where the five records share one window by
+  // construction: on the real one a loaded machine could put a quarter of a
+  // second between two of them, and the count would be two for no defect.
+  testWidgets('a burst of events inside one tick window is one re-read, and '
+      'it ends on the last write', (tester) async {
+    final counted = _StampReadCountingStore(db);
+    final burstContainer = ProviderContainer(
+      overrides: [
+        dbProvider.overrideWithValue(db),
+        messageStoreProvider.overrideWithValue(counted),
+      ],
+    );
+    final held = burstContainer.listen(syncStampsProvider, (_, _) {});
+    await burstContainer.read(syncStampsProvider.future);
+    counted.mailReads = 0;
+
+    // Five passes recorded back to back, as a drain burst records its items.
+    final log = burstContainer.read(activityLogProvider);
+    for (var i = 1; i <= 5; i++) {
+      await log.record('sync_mail', count: i);
+    }
+    expect(counted.mailReads, 0, reason: 'the window is still open');
+
+    // The window closes, then the provider's own refresh runs: Riverpod
+    // schedules it on a timer, and a bare pump does not move the clock.
+    await tester.pump(activityTickWindow);
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 1));
+    }
+
+    final stamps = await burstContainer.read(syncStampsProvider.future);
+    expect(counted.mailReads, 1, reason: 'one re-read per window, not five');
+    expect(stamps.mailIso, await counted.getPref(activityLastSyncMailKey));
+
+    held.close();
+    await tester.pump(const Duration(milliseconds: 1));
+    burstContainer.dispose();
+  });
+}
+
+/// Counts the stamp provider's reads of the mail stamp, which is one per run
+/// of the provider.
+class _StampReadCountingStore extends MessageStore {
+  _StampReadCountingStore(super.db);
+
+  int mailReads = 0;
+
+  @override
+  Future<String?> getPref(String key) {
+    if (key == activityLastSyncMailKey) mailReads++;
+    return super.getPref(key);
+  }
 }

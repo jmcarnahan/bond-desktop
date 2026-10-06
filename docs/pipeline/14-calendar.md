@@ -1105,17 +1105,34 @@ the mail rule in `BriefGatherer.gather`; each failure is an enum word
 | starts after now (an all-day event at its local midnight) | `past` |
 | starts today or tomorrow in the display zone (`briefHorizonEnd(nowUtc, zone)`: the local midnight that ends tomorrow; 23:59 tomorrow is in, 00:00 the day after is not) — lifted when a person asked (`asked`) | `too_far` |
 | at least one other person: an attendee whose address is not the owner's (case-insensitive) and whose type is not `resource`, or an organiser who is not the owner — an attendee's copy with a hidden guest list names only the organiser, and is still a meeting with someone | `no_others` |
-| at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast — a narrowing of D6, which set no ceiling | `too_many` |
-| at least one thread (lifted when a person asked: the brief is written from the invite and its people alone): the meeting's own invite mail (`CalendarStore.messagesForEvent` of the occurrence, then of its series master — any sender, any age), or a conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
+| (people path only — the related path never refuses for it, below) at least one thread (lifted when a person asked: the brief is written from the invite and its people alone): the meeting's own invite mail (`CalendarStore.messagesForEvent` of the occurrence, then of its series master — any sender, any age), a mail or Teams chat one of those people wrote in during the last 21 days (`MessageStore.conversationsFromSenders`), or a conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
 | (handler only) the event is no longer in the mirror | `gone` |
 | (handler only) a file sent ahead is still being read, no ready brief is stored, and the meeting starts more than 20 minutes from now (`MeetingBriefHandler.pendingGrace`) — not a rule about the meeting but a wait, below | `materials_pending` |
 
-**Mail only for now.** Teams participants are stored as `teams:<id>`, not
-addresses, so the address match never finds a chat; mapping them through the
-people directory is a follow-up. And `participants_json` holds at most 8
-people per conversation, so an attendee beyond the 8th in a busy thread is
-not matched by that thread. The prompt says so too: it speaks of the owner's
-"mail" only, never chats.
+No meeting is refused for its size: there is no people cap. A meeting of six
+or more others takes the related path (below; a topicless one of up to 15
+stays on the people path) and is briefed from its invite
+and the threads about its subject — a useless brief for a meeting with no
+conversations, no files and no agenda is rare and accepted. Older builds
+refused more than 15 others as `too_many`; no build writes the word now, a
+stale stored row reads "No brief for this meeting." until the planner's next
+pass gathers it again (its hash differs, so it is queued), and the activity
+log still words old rows that carry it.
+
+**Both paths read mail AND Teams, and both search by meaning.** The related
+path (below) searches the whole mailbox by the meeting's subject and needs
+no attendee on a thread. The people path runs the same search with the
+SENDERS and the date as an extra constraint: only what the meeting's people
+wrote. A mail is theirs by the sender's address; a Teams message by the
+sender's display NAME as the invite gives it, because a chat stores its
+people as `teams:<id>` and a name, never an address — the name is the one
+link there is. So an attendee the invite names only by address is matched in
+mail alone, and two people with one display name are one person to it;
+mapping participants through a people directory is the follow-up that would
+close both. On either path a Teams chat is quoted as an EXCERPT around the
+message that was found (below). The address match the people path also keeps
+reads `participants_json`, which holds at most 8 people per conversation, so
+an attendee beyond the 8th in a busy thread is not matched by that thread.
 
 The owner's address unknown (the keychain has not answered), the gatherer
 throws `BriefOwnerUnknown` rather than answer — the owner's own attendee row
@@ -1132,27 +1149,176 @@ the panel reads.
 
 **What is gathered** (`lib/services/calendar/brief_gatherer.dart`, no model).
 The planner gathers with `passages: false` — the light gather: the store reads
-the hash needs and nothing else (no file text, no people block, no embedding),
-so it can gather every meeting in the window; the handler's gather (the
-default) also reads each read file's text, builds the people block and embeds
-the meeting once to find the materials' passages. None of those is hashed, so
-the two gathers hash alike:
+the hash needs and nothing else (no file text, no people block, no passage
+embedding), so it can gather every meeting in the window; the handler's gather
+(the default) also reads each read file's text, builds the people block and
+embeds the meeting once to find the materials' passages. None of those is
+hashed, so the two gathers hash alike. The search for the threads (below,
+on either path) runs in BOTH gathers, because the threads it finds are
+hashed:
 
-- **Threads** — first the meeting's own mail: the distinct conversations of
+- **Threads** — two paths, one switch (`briefPathOf`,
+  `lib/services/calendar/brief_path.dart`; `BriefInput.path`). The
+  **people** path when there are at most 5 other people (`briefPeopleMax`)
+  and none of their addresses looks like a distribution list
+  (`briefLooksLikeList`: the local part split on `-_.+` starts or ends with
+  `dl`, `dist`, `team`, `all`, `everyone`, `staff`, `group`, `grp`, `list`,
+  `allhands` or `allstaff` — `dl-eng@`, `eng-team@` yes, `dlopez@`,
+  `allen@` no), and also for a TOPICLESS meeting of at most 15
+  (`briefTopiclessPeopleMax`; `briefIsTopicless`: the invite's own words,
+  `briefAgendaOf` — the preview cut at the first join-boilerplate marker
+  (a rule of `_`/`-`/`=`, the Teams, Zoom, Meet and Webex join lines,
+  "Meeting ID:", a bare "Join: <link>"), links out — are under 40
+  characters, `briefAgendaMin`, AND the subject has no content word once
+  one-character, all-digit, people's-name and generic meeting words —
+  "weekly", "sync", "1:1", "status", "update(s)", "discussion", "session",
+  "meet", "follow(up)", a weekday… — are set aside). A name word is a
+  PERSON's: an attendee of `type: resource` (a room) or with a list address
+  (`briefLooksLikeList`) is named after the very thing a subject is about,
+  so "Falcon weekly" with "Conf Room Falcon" or "Falcon Team" in it keeps
+  its topic, where with a person called "Falcon Lee" it is topicless. The
+  subject is judged without its `Re:`/`Fw:` markers (`stripReFw`, the
+  message card's own), so a forwarded "FW: Weekly sync" is topicless and
+  "FW: Falcon weekly" is not.
+  Everything else takes the **related** path. From 6 others up the address
+  match is the newest mail with anyone in the room, and the nearest threads by
+  meaning did better on precision and recall in the study that set the 5/6
+  switch. The list test, the boilerplate strip, the topicless test and the
+  logistics list below are a-priori heuristics: unmeasured, tested on
+  fictional fixtures only, English only.
+
+  On both paths, first the meeting's own mail: the distinct conversations of
   `messagesForEvent(event.id)` (newest first), then of
   `messagesForEvent(event.seriesMasterId)` for an occurrence — whoever sent
   them (an organiser's assistant matches no attendee) and however old. At
   most 3 of them (`maxInviteThreads`, so a long weekly series cannot push out
-  the mail with the people) lead the list and count toward the 6. Then up to
-  20 address-matched
-  candidate conversations (one already found as an invite thread is not
-  listed twice), ranked first by the
-  decision on each one's newest inbound message (`urgency ∈ {high, urgent}` or
-  `importance = high`, the invite-pinning rule), then by `last_message_at`,
-  then key, fill the rest. Each kept thread carries its subject, state, last
-  stamp and
-  its last two messages' text (attachment markers and link targets stripped,
-  whitespace collapsed, capped at 600, fenced).
+  the rest) lead the list, count toward the 6, and are flagged
+  (`BriefThread.invite`). On the **related** path, up to 4 (`maxRelated`)
+  conversations whose text is nearest the meeting fill the rest, in score
+  order: the query is `briefQueryText` — the subject without its
+  `Re:`/`Fw:` markers (`stripReFw` from `conversation_state.dart`, the same
+  strip a message's search card is built with, so a forwarded invite's "FW:"
+  is not in the query when it is nowhere in the corpus; a subject that is
+  only "Re:" leaves the agenda alone), then on its own line the invite's own
+  words (`briefAgendaOf`) — embedded under
+  `EmbeddingsClient.searchQueryPrefix`, and searched with ONE
+  `MessageStore.relatedConversations` — `semanticSearch`'s KNN, model, dropped,
+  date and source filters, but a lean read of its own: ALL 400 neighbours
+  (`_keywordCap`) over `message_vectors` under `documentModelTag`, those at or
+  above 0.60 (`relatedFloor`; the list is nearest first, so it stops at the
+  first below), then three columns of `message_progress` for them (mail and
+  Teams, dropped messages out, received in the last 21 days,
+  `briefRelatedWindow` — shorter than the address match's 30 on purpose: a
+  brief is a catch-up on what is being said about the subject now). The
+  feed read `semanticSearch` hydrates per hit is not paid, and nothing keeps
+  only the nearest hundred messages, so one busy chat's hundred near
+  messages cannot crowd every other conversation out. One entry per
+  conversation: its best message's cosine `1 − distance`, AND that
+  message's id and `received_at` (`RelatedConversation.messageId`,
+  `.receivedAt`), at most 12 conversations (`relatedCandidateLimit`).
+  There is NO attendee filter. A conversation
+  already among the invite threads is not listed twice, and calendar
+  logistics is dropped: a subject that opens (after its reply and forward
+  markers, `stripReFw` again, so `RE[2]:` too)
+  with `Accepted:`, `Tentative:`, `Tentatively accepted:`, `Declined:`,
+  `Canceled:`/`Cancelled:`, `Invitation:`, `Updated invitation`, `New time
+  proposed` or `Automatic reply` (`briefIsLogisticsSubject`), or a thread
+  carrying ANOTHER meeting's invite (a message whose `meetingEventId` is
+  neither this occurrence nor its series master). Three invite threads leave
+  room for three related ones. Only gated-in inbound messages have vectors,
+  so a thread is found through its inbound messages; an outbound-only thread
+  is invisible to the search. The related path never answers `no_mail`: with
+  nothing found the brief is written from the invite and its people. The
+  query vector is cached in the gatherer per query text for the app run
+  (`queryCacheMax` 64, the oldest dropped past it), and after a failed embed the
+  gatherer does not ask again for 2 minutes (`embedRetryAfter`, on the
+  caller's `now`). No embeddings client, no vector, no index or any error
+  leaves the related list empty, never the brief. `BriefInput.searchBest` is
+  the kept best cosine (not hashed).
+
+  What a thread a SEARCH found quotes — the related path's, and the people
+  path's found by sender (below) — turns on the matched message. A **Teams
+  chat** is one conversation however many subjects pass through it, so its
+  newest messages say nothing about why it was found: it is an EXCERPT
+  (`BriefThread.excerpt`), read with `MessageStore.messagesBetween` (one
+  conversation's messages in a window, both ends inclusive, oldest first,
+  no attachments hydrated) and never with `loadThread` — the match, then
+  what followed it within 24 hours (`excerptSpan`), then, only to fill three
+  (`relatedShown`), what came just before within 3 hours (`excerptLead`:
+  yesterday's talk in a room is as likely another subject as not, and the
+  backward fill only runs when nothing followed). A bot's post (a message
+  gated `auto_generated`, `teamsBotGate`) is never part of an excerpt and
+  takes no slot — an app's card between two people is not what was said —
+  unless it is the matched message itself, which is always quoted. A hit
+  whose message is no longer in the store skips that chat. An excerpt's
+  `lastAt` is the newest message SHOWN and its `messageCount` how many are
+  shown, so the room's later chatter moves neither (nor the hash), while a
+  reply that joins the excerpt does; it is never an open ask nor "waiting
+  on them" (it has no state of its own). A related **mail** thread is one
+  subject, so its tail is the follow-up: it quotes the matched message and
+  the thread's newest two, oldest first, at most three (the last three when
+  the match is already among the newest). Three quoted are capped at 400
+  each (`relatedSnippetCap`), the same characters as two at 600; a one- or
+  two-message thread quotes them at 600. Invite threads and the people
+  path's address-matched threads quote their last two at 600.
+
+  On the **people** path the threads come from two reads.
+
+  First, what its people WROTE (`BriefGatherer._fromPeopleOf`, one
+  `MessageStore.conversationsFromSenders`): the kept inbound messages of the
+  last 21 days (`briefRelatedWindow`) whose sender is one of the others — a
+  mail by `from_address`, a Teams message by `from_name` equal to the
+  invite's name for them (both sides trimmed and ASCII-lowercased, as
+  SQLite's `lower` folds) — one entry per conversation, at most 12
+  (`relatedCandidateLimit`), of which at most 4 (`maxRelated`) are kept.
+  When the meeting has something to search by, the entries are ordered BY
+  MEANING: the same query vector as the related path (`briefQueryText`
+  under `searchQueryPrefix`, the same cache and the same 2-minute back-off),
+  each conversation scored by the cosine of THEIR message nearest it,
+  nearest first, with NO floor — these are the meeting's own people, so the
+  nearest of what they wrote is worth reading even when it is not near. vec0
+  can only be asked for neighbours, not for neighbours matching a predicate,
+  and a few people's messages can sit far outside the mailbox's nearest 400;
+  so the stored vectors of just their messages are compared in SQL
+  (`vec_distance_cosine` over `message_vectors` under `documentModelTag` at
+  1024 wide), a few hundred rows at most, and only a message with a vector
+  is scored. Otherwise they are ordered BY TIME — each conversation stood
+  for by their newest message, newest first, no vector needed: a topicless
+  meeting (`briefIsTopicless`: "1:1", "Weekly sync" are words, but none to
+  search by) or one with no text at all (`recent`), no embeddings client
+  (`off`), or a query that could not be embedded, an index that is not
+  there, or a read that threw (`unavailable`). `BriefInput.search` carries
+  the word (`ok` when ordered by meaning) and `searchBest` the best kept
+  cosine when it was. The entries become threads exactly as the related
+  path's do (`_threadsOf`, shared): an invite thread is not listed twice,
+  calendar logistics and another meeting's invite thread are dropped, a
+  Teams chat is an EXCERPT around their message, a mail thread quotes that
+  message and its newest two.
+
+  Second, the mail they are merely ON: up to 20 address-matched candidate
+  conversations of the last 30 days (`conversationsWithAddresses`; one
+  already an invite thread or already found is not listed again) — the
+  owner's own unanswered thread to them, or one they are copied on, which
+  no message of theirs can find. A thread whose subject is calendar
+  logistics (`briefIsLogisticsSubject`) is left out here as among the found
+  ones. Another meeting's invite thread is not: it never leads as a match,
+  but it is still mail with these people, and its files are named as not
+  sent for this meeting (`otherFiles`). Each is ranked
+  by the decision on its newest inbound message (`urgency ∈ {high, urgent}`
+  or `importance = high`, the invite-pinning rule), then by time, then key.
+
+  The order (`_fromPeopleOf` returns the list already ordered, as
+  `_relatedOf` does): ordered by meaning, the found threads lead in score
+  order and the address-matched ones fill what room is left of the 6,
+  pressing first; ordered by time, both sets are
+  sorted together by the one rule — pressing first, then newest (an
+  excerpt by its newest message SHOWN), then key — so a pressing thread
+  they are only on can still lead. Each kept thread carries its subject,
+  state, last stamp and its quoted messages' text (attachment markers and
+  link targets stripped, whitespace collapsed, capped, fenced). `no_mail`
+  is "no thread at all": no invite thread and nothing from either read. A
+  meeting whose only contact is a Teams chat with an attendee is briefed;
+  one whose only mail with its people is an "Accepted: …" is not.
 - **Open asks** (§1.1 point 1) — in a kept thread whose state is
   `needs_reply`, an inbound message from an attendee that came AFTER the
   owner's last message there (an ask before a reply is taken as answered),
@@ -1181,10 +1347,10 @@ the two gathers hash alike:
   zone), its `text_status`, and its digest (`attachments.digest_json`) when
   there is one. A file whose text is not read yet is still listed — the brief
   names it as arrived. **Other files** (`BriefInput.otherFiles`): the files
-  on the kept address-matched threads — mail with these people that is not
-  this meeting's — by the same filter (both directions, newest first, one
+  on the kept threads that are not this meeting's own invite threads (the
+  address-matched or related mail) — by the same filter (both directions, newest first, one
   per name), NAMES only, at most 4 (`BriefGatherer.maxOtherFiles`), never
-  read. The task lists them as other files with these people, not sent for
+  read. The task lists them as files on the other threads, not sent for
   this meeting, and the prompt forbids reading the meeting's purpose from
   them: a resume the owner sent the same person for another interview is
   not what this meeting is about. Both gathers carry them alike. **Text**
@@ -1229,11 +1395,28 @@ the two gathers hash alike:
   rows. The handler fetches those details once before the first brief
   (below), so the brief names the file; its text and digest arrive through
   the attachment lane and move the hash, which re-briefs the meeting.
-- **Last met** — `lastMetWith` → `lastMetLabel`.
+- **Last met** — `lastMetWith` → `lastMetLabel`: with any of the others on
+  the people path; on the related path with the people the block lists
+  (only who wrote in the kept threads, below, at most 8), because having
+  met one of three hundred people says nothing and the lookup binds two
+  variables per address.
 - **People** (`BriefPerson`, handler's gather only) — the other people,
   the organiser first and then the attendees in the invite's order, at most
   8 (`BriefGatherer.maxPeople`, applied after the ordering; the rest are
-  counted in `peopleMore`). The organiser first is a deliberate departure
+  counted in `peopleMore`). On the RELATED path the block lists ONLY the
+  others who WROTE a message in the kept threads — a mail by their
+  address, a Teams message by the name the invite gives them,
+  case-insensitive (a chat's people are `teams:<id>` and a name, never an
+  address), so a chat counts as much as a mail — the organiser first when
+  they are one of them, then the invite's order, at most 8. Being on a mail
+  thread's roster without writing is not enough, and whoever wrote nothing
+  is not listed but counted (`peopleMore` is everyone the block does not
+  list, on both paths): in a large room most people have said nothing on
+  the subject, and a person listed with nothing known would only be told
+  "nothing from them", eight times over. Nobody wrote → no block. The
+  people path's block lists everyone (organiser first, cap 8), and what a
+  person wrote in a chat excerpt is theirs by the same name match. The
+  organiser first is a deliberate departure
   from D14's literal "attendee order": `briefOthers` appends the organiser
   last (a Graph attendee copy does not list them among the attendees), and
   who called the meeting is the one person the block must not count among
@@ -1247,7 +1430,8 @@ the two gathers hash alike:
   `*.calendar.google.com` resource, an address written as an IP, or a label
   that is not letters, digits and hyphens), whether they organised it, their answer (below), their own
   "Last met …" (`lastMetWith([address])`), how many kept threads they are in
-  (by `participants_json` or a message from them), and their newest inbound
+  (by `participants_json` or a message from them; in a chat excerpt by a
+  message under their invite name), and their newest inbound
   message in those threads: how long ago (`briefAgo`), its thread's subject,
   and its own words — cut at the first quoted-reply header (`askOwnWords`),
   whitespace collapsed, at most 240 at a word (`lastWordsCap`), fenced as
@@ -1278,7 +1462,15 @@ message_count`, each ask's message id, each storyline's id with the sha256
 of its shown text (the recap, else the summary), and each material's
 `message id|attachment id|text_status|digest_status`, and each other
 file's `otherfile|<lower-cased name>` (a new file with these people changes
-what the brief is told). A new
+what the brief is told). On the RELATED path only, two lines follow the
+owner's: `path|related` and `related|<state>` — `ok`, `off` (no embeddings
+client), `no_query` (nothing to search by) or `unavailable` (no vector, no
+index, an error) — so a search that comes back moves the hash; the related
+threads are hashed exactly like address-matched ones, so new mail on the
+topic re-briefs — except that a chat excerpt's line carries the stamp of the
+newest message SHOWN and the count shown, so only a reply that joins the
+excerpt moves it. The people path adds no line: a search of its own that
+comes back reorders its threads, and their lines are the hash. A new
 message moves its thread's stamp and count, so it moves the hash; an edit to
 an existing message's text alone does not. A storyline's text is hashed
 because a recap is rewritten in place, moving no id or stamp. A material's
@@ -1288,7 +1480,14 @@ new), and neither are its text or passages (they follow from the text
 status), nor the people block. The hash never reads the clock.
 
 **The task** (`MeetingBriefTask`, `lib/services/llm/meeting_brief_task.dart`):
-a const system prompt ending in `untrustedDataClause`. v3 is written for an
+a const system prompt ending in `untrustedDataClause`. Its opening says the
+inputs are "what the owner's recent mail and Teams chats say, with these
+people or about this meeting's subject (the thread list says which)". The
+people rule gives a person the threads show nothing from the line "nothing
+from them in these threads", because the threads are all the model was
+shown, mail and Teams chats alike, and it must never say what someone has
+or has not written elsewhere — the brief prompt no longer says "no recent
+mail" anywhere. v3 is written for an
 owner who wants to walk in completely on top of the meeting: it speaks to them
 as "you" and never "the owner", asks for DENSITY — every sentence carries a
 name, a number, a date, a decision or a claim from a file; thin inputs mean
@@ -1298,17 +1497,44 @@ is read for up to a day and a half after it is written) and "Never invent: a
 number, a name, a date or a claim that is not in the inputs does not go in."
 The user message opens with `Now: <absolute local time>` and the meeting line,
 both absolute (`briefWhenLine`: "Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All
-day · Wed 7 Oct 2026"), the fenced attendees and the last-met line, then
-**People, numbered, the organiser first:** — per person `[n]` and the fenced
+day · Wed 7 Oct 2026"), the fenced attendees — at most 15 names
+(`MeetingBriefTask.withCap`; the organiser first on either path, since
+`briefOthers` appends an attendee copy's organiser LAST and who called the
+meeting must not be among "+N more"), then `+N more` on its own line OUTSIDE the
+fence, since with no people cap a 300-person invite would otherwise put about
+36k characters of names in the prompt — and the last-met line, then
+the people block, headed **People, numbered, the organiser first:** on the
+people path and **People who wrote in the threads below (mail or Teams
+chat), numbered:** on the related path — per person `[n]` and the fenced
 `name · organisation` (the organisation is a DNS label whoever owns the
 domain chose, so it is untrusted text like the name), then the app's words
 outside the fence: "no organisation known" when there is none,
 `organiser|attendee` and the answer; then, only when present, their "Last
 met …" line, "in N of the threads", "last wrote <ago>:" with the fenced
 subject and the fenced last words, and "open ask: yes (see Open asks)" — the ask itself is said once, in
-"Open asks", not repeated here; "+N more" past eight. Then the numbered threads, each with its
+"Open asks", not repeated here; then the tail, `+N more` on the people
+path and `+N more in the meeting who wrote nothing in these threads` on the
+related path. Then the numbered threads, each with its
 last message as an age from `now` (`briefAgo`: "3 hours ago", "2 days ago"),
-and each section. Every label is capped at 120 characters (`labelCap`)
+and each section. The thread list is headed by the path: "Threads with
+these people (mail and Teams chats), numbered:" on the people path, "Threads related to this
+meeting, numbered (found by their text, not by their people):" on the related
+one; a thread's first line gains " · this meeting's own invite" for an
+invite thread, the app's words outside the fence. A chat excerpt has a line
+of its own, with no state and no urgent marker: `[n] part of a Teams chat ·
+the latest message shown is from <ago>` (there is no " · Teams chat" marker
+any more). A rule after the PURPOSE rule says that under the related heading
+the threads after the invite's own were found by their text, some are about
+something else, a thread is used only when clearly about this meeting's
+topic, and never tied to a person it does not name (about half of what the
+search finds is unrelated); a rule for the people heading says its threads
+are mail and Teams chats these people wrote in or are on, whatever their
+subject, so the brief says what is going on with these people and never
+presents a thread about something else as what the meeting is for; then, a
+rule of its own for both paths, "A thread shown as part of a Teams chat is
+only the few messages around the one that was found; say nothing about the
+rest of that chat." and "Trust the inputs in this order: the meeting's own
+subject and invite text, then the files sent ahead, then the threads." Every label is capped at 120 characters (`labelCap`)
 before it is fenced: file names, thread and last subjects, the meeting's
 subject, storyline titles, attendee and people names. After the storylines and before the invite, **Materials
 sent ahead, numbered ("you" is the owner):** — per material `[n] (<state>)`
@@ -1327,8 +1553,8 @@ left, for every material whose text was not written whole and uncut (a text
 written whole that the gatherer did not cut — `BriefMaterial.textCut`, set
 when the squeezed words ran past `materialTextCap` — is the whole document,
 and its passages would be duplicates). After the materials and before the
-invite, when there are any, **Files on other threads with these people (NOT
-sent for this meeting):** — one `- ` line per name, capped at 80 characters as fenced
+invite, when there are any, **Files on the other threads (NOT sent for
+this meeting):** (both paths) — one `- ` line per name, capped at 80 characters as fenced
 (`otherFileNameCap`, not `labelCap`'s 120) and fenced as `file`, outside the budget. The rule after `materials` says the
 meeting's PURPOSE comes from its own invite — the subject, the invite text
 and the threads about this meeting — never from a file or thread that merely
@@ -1354,15 +1580,33 @@ tokens), and a truncated answer is invalid JSON — a failed brief retried on
 the same inputs — so the budget sits over the realistic answer, and a test
 holds the caps' sum / 4 within 1.2 × `maxTokens`. Worst case in, measured by
 the size guard in `meeting_brief_task_test` (every cap full, every label 300
-characters of `&<>`, so each costs its full escaped 120): about 38.1k
-characters (38133) with the 4.5k system prompt — six threads with their two
-600-character snippets, four asks, two storylines, the materials' 10k plus
+characters of `&<>`, so each costs its full escaped 120, on the related
+path with three invite threads and three related threads, and 300
+attendees): about 39.4k characters (39363) with the 5.2k system prompt —
+three invite threads with their two 600-character snippets under the
+longest first line, three related threads with three 400-character snippets
+each (the same characters, one more fence) under a mail thread's line,
+which is longer than an excerpt's, four asks, two storylines, the materials' 10k plus
 six name lines, four other files (each name fenced at 80,
-`otherFileNameCap`), eight people, fifteen attendee names, the invite 0.7k
-and the headers — about 12.7k tokens at three characters a token, plus the
-2.7k answer: about 15.4k, inside the 16384 context. The ceiling is (16384 −
-2700) × 3 = 41052 characters of prompt; the guard holds it at 38500 (the
-measurement plus about 1%; 37800 before the other files and their rule).
+`otherFileNameCap`), eight people under the related header and its
+"+292 more in the meeting who wrote nothing in these threads" tail,
+fifteen attendee names and "+285 more",
+the invite 0.7k
+and the headers — about 13.1k tokens at three characters a token, plus the
+2.7k answer: about 15.8k, inside the 16384 context. The ceiling is (16384 −
+2700) × 3 = 41052 characters of prompt; the guard holds it at 39760 (the
+measurement plus about 1%; 39510 over 39120 before the people block listed
+only who wrote, with its longer header, tail and people rule; 39120 over
+38742 before the chat excerpt, its
+three-snippet related threads and the two rule sentences, and unchanged by
+the With: cap, which measured 10 characters over the old fifteen names;
+38500 before the related path, 37800 before the other files and their
+rule). The whole user message for a fictional twelve-person related-path
+meeting — an invite with a read file, a related mail thread, a chat excerpt
+with a skipped bot post, a storyline — is kept readable in
+`app/test/fixtures/briefs/large_meeting_prompt.txt`, pinned byte for byte by
+`brief_prompt_fixture_test` on a fixed clock; on a deliberate change the
+test prints the new text between BEGIN/END marker lines to copy over.
 
 The schema (v3) is flat and in THIS order, which is the order the grammar
 makes the model write: `evidence` (one sentence — what the meeting is for and
@@ -1426,7 +1670,12 @@ there to read meanwhile), a meeting inside the grace is briefed with what
 is read, and an asked-for row (Regenerate, Write a brief) never waits. Otherwise
 it runs the task and stores `ready` with the brief JSON — plus a `threads`
 list of `{source, conversation_key, subject}` in the order the model was
-shown them, so the panel links a point to its thread without gathering again,
+shown them, so the panel links a point to its thread without gathering again
+(with `"invite": true` on the meeting's own invite threads, the key written
+only when true, so a ref without it keeps the older shape), the `path` the
+threads were found by (`people` or `related`, `BriefPath.wire`; a row
+written before it has none and reads as `people`, which it was; anything but
+the exact word `related` reads as `people`; no schema change),
 and a `material_refs` list of `{source, message_id, attachment_id, name}` in
 the materials' order, so a material line opens its file the same way
 (`MeetingBrief.materialAt`) — and the resolved model name. Stored v1 and v2
@@ -1436,7 +1685,15 @@ characters of the materials' text the message actually carried —
 `MeetingBriefTask.materialTextCharsWritten`, the same spend as the message —
 not what was gathered), `queued_text` when it queued any, and `fetched`
 (how many unlisted messages the fetch completed, failures not counted) when
-it asked for any. An empty headline is an `LlmFormatException`.
+it asked for any, plus where the threads came from: `path` (`people` |
+`related`), `search` (how the search went: `ok`, `off`, `no_query` or
+`unavailable` on the related path; on the people path `ok` when its
+people's threads were ordered by meaning, else `recent`, `off` or
+`unavailable`, ordered by time), `related` (the related path's non-invite
+threads, 0 on the people path) and `search_best` (the best kept cosine ×
+100, rounded, only when a search by meaning kept one, on either path) —
+enum words and numbers only. An empty headline is an
+`LlmFormatException`.
 A dead server (`LlmUnavailableException` and its subclasses) propagates and
 PARKS the kind like a draft, writing nothing; any other failure writes
 `failed` and rethrows, so the worker's retry-once-then-error policy applies.
@@ -1464,7 +1721,9 @@ arriving on the Day stop — whose outcome is `synced`, and only while
 processing is on, it fires the planner. The forced syncs `CalendarWrites`
 starts after a write call `syncNow` directly and plan no briefs. The planner
 runs (never awaited by the mail load; every failure a trace) and pumps
-the draft lane when it queued anything. It returns 0 at once while the
+the draft lane when it queued anything. A pass that takes 100 ms or more
+prints its duration and how many it queued (`briefs planned: N queued in M
+ms`, counts only), so its cost can be read off a real mailbox. It returns 0 at once while the
 owner's address is unknown (the keychain has not answered): without it the
 owner counts among every meeting's people. The host skips the pass while the
 display zone has not resolved (UTC's tomorrow is not the owner's). Otherwise
@@ -1476,9 +1735,14 @@ however far off — the window is where briefs are written, not where they
 may live, so a brief asked for by hand for next week survives the pass —
 and walks the meetings soonest first, timed before all-day:
 
+- costs no model call, and at most ONE embedding call per distinct meeting
+  text per app run: a related-path meeting's query (subject and
+  description) is embedded once and cached in the gatherer, then each pass
+  runs only the local KNN — this amends the earlier "not even an embedding
+  call" rule on purpose, because a related set that is not hashed would never
+  re-brief when mail on the topic lands;
 - on `briefQuickCheck`, skips it — writing a `skipped` row for `no_others`
-  or `too_many` (below; `no_mail`, the gather's word, is recorded from the
-  gather path);
+  (below; `no_mail`, the gather's word, is recorded from the gather path);
 - does not gather again an event it gathered less than **15 minutes** ago
   (`BriefPlanner.recheck`, in memory) whose stored row is `failed` and has
   not moved since — a back-off for a brief that could not be written, and
@@ -1496,8 +1760,10 @@ and walks the meetings soonest first, timed before all-day:
   unchanged reason writes and queues nothing (the row already says so, and
   `_queuedFor`);
 - past that, gathers the fresh hash and marks the meeting due when there is
-  no brief or the hash moved — at ANY age, so a deck or its digest landing
-  an hour after the first brief re-briefs the meeting on the next pass. The
+  no brief or the hash moved — whatever its age against `freshFor`, so a
+  deck or its digest landing an hour after the first brief re-briefs the
+  meeting on the next pass (a brief written minutes ago waits first: the
+  young-brief wait, below). The
   one skip is "younger than **2 hours** (`freshFor`) AND unchanged": a
   `failed` brief on unchanged inputs waits out the 2 hours before it is
   tried again, and a moved hash that was already queued once while the brief
@@ -1511,7 +1777,20 @@ and walks the meetings soonest first, timed before all-day:
   queue every pass); and once more on the same hash when the meeting comes
   inside the 20-minute grace, so it is briefed with what is read rather than
   waiting on a file that may never finish;
-- when the gather says `no_mail`, `no_others` or `too_many`, writes
+- on either path, leaves a READY brief younger than **30 minutes**
+  (`rewriteAfter`) alone when its hash moved; once the meeting starts
+  within the hour (`rewriteNear`, or has no readable start) the wait is **5
+  minutes** (`rewriteNearAfter`). A person's Regenerate never waits (it
+  does not go through the planner). The threads follow the search vectors,
+  which land a message at a time behind the AI backlog, and a chat with the
+  meeting's people moves with every line: after a first sync or a Clear AI
+  results every pass would find a slightly different set and buy a rewrite
+  of every meeting, every pass, on the one generative model the backlog is
+  itself waiting for; and in the last hour a chat going on with an attendee
+  would buy one per pass. The guard only delays — the moved hash is still
+  there once the brief is old enough — and it touches no other row: no
+  brief, a `failed` row and a `skipped` row are planned as before;
+- when the gather says `no_mail` or `no_others` (`recorded`), writes
   `skipped` with `inputs_hash = ineligible:<word>` (no model call) unless the
   row already says so or holds a ready brief, which stands; once the reason
   goes away the hash differs and the meeting is queued like any other on the
@@ -1538,7 +1817,7 @@ a request does not lift (a stored `no_mail` row over a meeting that has since
 started draws its sentence alone). An asked request also bypasses `too_far` and
 `no_mail` in the quick check and the gather (`briefQuickCheck(asked:)`,
 `gather(asked:)`, which the handler passes from the row's payload), never
-`past`, `cancelled`, `declined`, `no_others` or `too_many`; with no thread
+`past`, `cancelled`, `declined` or `no_others`; with no thread
 the brief is written from the invite and its people ("Threads: none."). The
 handler notes `asked` on every activity row.
 
@@ -1560,18 +1839,27 @@ file's name — tooltip "Open the file" — when the brief still holds its
 alone), **People** (per person the name in bold, " — ", the line; key
 `brief-person-<i>`), **Questions** numbered "1.", "2.", **Prep**, **Open
 asks**, then the points with a chip naming the thread under **References**
-— what it rests on last —, then "Generated 2h ago · Regenerate" — or
+— what it rests on last —, then the **source caption** (muted, key
+`brief-source`, `BriefSection.sourceText`, the one rule): no thread but the
+invite's own, on either path (none at all included), "From the
+invite alone — no other threads were found."; the related path "From
+threads related to this meeting — a sample, not everything on the
+subject."; else "From your mail and Teams chats with the people in this meeting." (an old
+row with no path is the people path), then "Generated 2h ago · Regenerate" — or
 "Rewriting…" while a new one is queued; the old brief stands until the new
 one lands; "Writing the brief…"; "Briefs are paused while processing is off.";
-a skipped row's reason ("No brief — no recent mail with these people.",
-"No brief — nobody else is invited.", "No brief — too many people for a
-brief.", "No brief — this meeting has started.", "Reading the files sent
+a skipped row's reason ("No brief — no recent mail or Teams chats with these people.",
+"No brief — nobody else is invited.", "No brief — this meeting has started.", "Reading the files sent
 ahead — brief coming." for `materials_pending`, else "No brief for this
 meeting." — a `materials_pending` row gives way to the quick check's
 sentence when it says no, so a meeting that has started says "No brief —
 this meeting has started.", not "brief coming"); "The brief couldn't be
 written." with Regenerate; when the
-no-read rules already say no, the same sentence for their word ("Briefs are
+no-read rules already say no (`briefQuickCheck` with the owner's address —
+`mail`, then the UPN — once the account has answered, so the owner's own
+attendee row never counts as somebody else and a meeting with nobody else
+says so at once; unknown, a pass is left for the planner to settle), the
+same sentence for their word ("Briefs are
 written for today and tomorrow." for `too_far`, with **Write a brief**); else
 "Brief coming after the next calendar sync." with **Write a brief**. A
 skipped `no_mail` or `too_far` row draws **Write a brief** beside its
@@ -1606,7 +1894,8 @@ draws `BriefSection(compact: true)` under itself from the subject column
 (`DayPane.subjectIndent`): the panel's body in the panel's order — Briefing,
 From the materials, People, Questions, Prep, Open asks, at most three points
 with their thread chips under References (`BriefSection.compactPointsCap`;
-the panel shows them all) — and one Regenerate: no headline (the glance is
+the panel shows them all) — the same source caption (`brief-source`)
+and one Regenerate under it: no headline (the glance is
 it) and no footer. A brief waiting on the files sent ahead
 (`materials_pending`) has no glance to open, so the agenda says so in the
 glance slot instead: `dayBriefsWaitingProvider(day)` (the event ids, from
@@ -1624,9 +1913,13 @@ meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks, materials,
-other_files, questions, people, text_chars}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word,
-`materials_pending` — "reading the files sent ahead" — or `unchanged`) →
-"Meeting brief — skipped (no recent mail with these people)";
+other_files, questions, people, text_chars, path, search, related, search_best}`
+→ "Meeting brief — written from 3 threads", with ", found by subject"
+appended when `path` is `related` and `related` is above 0; `skipped` with `{reason: <word>}` (a D6 word,
+`materials_pending` — "reading the files sent ahead" — or `unchanged`;
+`too_many` — "too many people" — only on rows older builds stored, since no
+build writes it now) →
+"Meeting brief — skipped (no recent mail or Teams chats with these people)";
 `error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)
 adds "; the last brief stands"; a park keeps the general sentence. Counts
 and enum words only: an answer that was not the JSON asked for is recorded as
@@ -2695,10 +2988,15 @@ server or the real calendar.
 
 **Follow-ups, not built:**
 
-- **Teams participants in briefs.** Briefs read mail only. A Teams
-  participant is `teams:<id>` and never matches an attendee's address, so the
-  fix is to map participants through the people directory. The 8-person cap
-  on `participants_json` also hides attendees in busy threads.
+- **Teams participants in briefs, by identity.** Briefs read Teams on both
+  paths, but a chat's writer is tied to an attendee only by display NAME: a
+  Teams participant is `teams:<id>` and never an address. An attendee the
+  invite names only by address is matched in mail alone, and two people
+  with one name are one person to the match; the fix is to map participants
+  through a people directory. A chat excerpt also never yields an open ask
+  or "waiting on them" (it has no state of its own), and a chat only the
+  OWNER wrote in is not found. The 8-person cap on `participants_json` also
+  hides attendees in busy threads from the address match.
 - **"move my 3pm to 4".** A bare hour after "to" is refused with "Add am or
   pm", not read daytime-first. Keeping that rule, or reading the hour in the
   meeting's own half of the day, is an owner call. Either way it changes

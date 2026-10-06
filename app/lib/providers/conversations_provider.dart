@@ -20,6 +20,7 @@ import '../services/read_ack_queue.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
+import '../utils/coalescer.dart';
 import 'app_providers.dart';
 
 /// The inbox's read model.
@@ -123,11 +124,49 @@ class MarkDoneUndo {
   });
 }
 
+/// Whether two reads of the list returned the same rows: same length, same
+/// order, and for every row the same keys with `==` values.
+///
+/// Plain `==` per value is enough because the list query selects no BLOB:
+/// every column of [MessageStore.conversationRows] is TEXT, INTEGER or REAL
+/// (the labels arrive packed into one TEXT column). A BLOB would come back as
+/// a fresh `Uint8List` on every read and compare unequal by identity — safe,
+/// since it only ever says "changed", but it would defeat the point; one added
+/// to that SELECT belongs under `listEquals` here.
+bool sameConversationRows(
+  List<Map<String, Object?>> a,
+  List<Map<String, Object?>> b,
+) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    final x = a[i];
+    final y = b[i];
+    if (identical(x, y)) continue;
+    if (x.length != y.length) return false;
+    for (final entry in x.entries) {
+      if (!y.containsKey(entry.key)) return false;
+      if (y[entry.key] != entry.value) return false;
+    }
+  }
+  return true;
+}
+
 class ConversationsNotifier extends StateNotifier<ConversationsState> {
+  /// How long the progress reports must go quiet before the list re-reads.
+  ///
   /// Triage annotates roughly one message every seventeen seconds and reports
-  /// each one. The debounce is what keeps a burst — a gated run skips messages
-  /// in milliseconds — from turning into a burst of full list reads.
+  /// each one. The quiet window is what keeps a burst — a gated run skips
+  /// messages in milliseconds — from turning into a burst of full list reads.
   static const Duration _triageReloadDelay = Duration(milliseconds: 400);
+
+  /// The longest a burst of progress reports holds the list back.
+  ///
+  /// A quiet window alone never opens while the drains report steadily, which
+  /// they do for minutes through a backlog; with this bound a long burst still
+  /// moves the list every two seconds instead of holding it until the burst
+  /// ends.
+  static const Duration _reloadMaxWait = Duration(seconds: 2);
 
   final MessageStore _store;
   final MailSync _sync;
@@ -160,9 +199,9 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// would put the badge on the sixty-second tick.
   final Future<void> Function()? _pumpWorkers;
 
-  /// Scores and re-files the mailbox immediately before every read. Null in
-  /// tests that only exercise the read model; the list then renders whatever
-  /// scores and buckets were last written.
+  /// Scores and re-files the mailbox on every list load, over the rows that
+  /// load just read. Null in tests that only exercise the read model; the
+  /// list then renders whatever scores and buckets were last written.
   final AttentionService? _attention;
 
   /// Tells the server what [markRead] has already flipped locally. Reached
@@ -198,10 +237,36 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// on the next sync.
   StreamSubscription<WorkProgress>? _aiProgress;
 
-  Timer? _triageReload;
+  /// The progress-driven reload: [_triageReloadDelay] after the last report,
+  /// at most [_reloadMaxWait] into a burst, one at a time. Only progress goes
+  /// through it — a load the user asked for (the poll, refresh, a sender
+  /// action, sign-in) calls [load] directly and is never held or dropped.
+  ///
+  /// Built in the constructor, before either subscription, so [dispose]
+  /// cancels the one instance that can hold a timer.
+  late final Coalescer _reload;
 
   /// Incremented per [load]; a load whose number is stale writes nothing.
   int _fetchSeq = 0;
+
+  /// The raw rows behind the state currently shown, or null when the state
+  /// was last set by anything other than [load]'s final assignment.
+  ///
+  /// What lets a reload that read the same rows as last time leave the state
+  /// alone. Every other assignment drops it (see [state]'s setter), which is
+  /// what makes an optimistic patch the store did not take get corrected by
+  /// the next reload: the screen no longer shows these rows, so the same rows
+  /// read again ARE a change.
+  List<Map<String, Object?>>? _shownRows;
+
+  @override
+  set state(ConversationsState value) {
+    _shownRows = null;
+    super.state = value;
+  }
+
+  @override
+  ConversationsState get state => super.state;
 
   ConversationsNotifier(
     this._store,
@@ -221,6 +286,15 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         _aiWorker = aiWorker,
         _pipeline = progress,
         super(const ConversationsInitial()) {
+    _reload = Coalescer(
+      quiet: _triageReloadDelay,
+      maxWait: _reloadMaxWait,
+      run: () async {
+        if (!mounted) return;
+        await load(syncFirst: false);
+      },
+    );
+
     // Subscribed before the triage early-return below, because a notifier can
     // be wired with an AI queue and no triage queue at all.
     //
@@ -247,25 +321,30 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     _triageProgress = queue.progress.listen((_) => _scheduleReload());
   }
 
-  /// Re-reads the list from sqlite alone — no sync — so a CTA appears under
-  /// the row it belongs to as soon as the model writes it.
-  void _scheduleReload() {
-    _triageReload?.cancel();
-    _triageReload = Timer(_triageReloadDelay, () {
-      if (!mounted) return;
-      load(syncFirst: false);
-    });
-  }
+  /// Asks for a re-read of the list from sqlite alone — no sync — so a CTA
+  /// appears under the row it belongs to soon after the model writes it:
+  /// [_triageReloadDelay] after the reports go quiet, at most
+  /// [_reloadMaxWait] into a steady stream of them, never two at once.
+  void _scheduleReload() => _reload.poke();
 
   @override
   void dispose() {
-    _triageReload?.cancel();
+    _reload.cancel();
     _triageProgress?.cancel();
     _aiProgress?.cancel();
     super.dispose();
   }
 
+  /// Whether a load numbered [seq] should stop where it is: a later load has
+  /// started, or this notifier has gone.
+  ///
+  /// The second half is what lets a load outlive its notifier quietly. A read
+  /// that comes back after `dispose` used to go on to touch `state`, which a
+  /// disposed notifier refuses.
+  bool _stale(int seq) => seq != _fetchSeq || !mounted;
+
   Future<void> load({bool syncFirst = true}) async {
+    if (!mounted) return;
     // Stamped before the first await, so a load started later always wins
     // however the two finish.
     final seq = ++_fetchSeq;
@@ -289,21 +368,22 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         // arrive later through the progress stream.
         _startPumpChain();
       } on AuthException catch (e) {
-        if (seq != _fetchSeq) return;
+        if (_stale(seq)) return;
         // Only these two mean "sign in again". A generic AuthException is a
         // 5xx or an offline laptop, and signing a user out over one would
         // cost them their session for a dropped packet.
         sessionEnded = e is NotSignedIn || e is ReconsentRequired;
         loadError = sessionEnded ? e.message : _staleInboxMessage;
       } catch (_) {
-        if (seq != _fetchSeq) return;
+        if (_stale(seq)) return;
         loadError = _staleInboxMessage;
       }
     }
 
-    if (seq != _fetchSeq) return;
+    if (_stale(seq)) return;
 
     final List<Conversation> rows;
+    List<Map<String, Object?>> raw;
     try {
       // Deferrals whose date has arrived come back HERE, in front of the read
       // that is about to render them. Every path that refreshes the list runs
@@ -318,18 +398,38 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       for (final key in resurfaced) {
         await _raiseNeedsYou(key.source, key.conversationKey);
       }
-      // Immediately before the read rather than on a timer of its own: it is
-      // four indexed queries and some arithmetic, and running it anywhere
-      // else would mean the rows about to render could carry scores
-      // computed against a sender rule the user has since changed. Inside the
-      // same try as the read because both are the same database — a failure in
-      // either is "could not read the local inbox".
-      await _attention?.recomputeAll(sources: inboxSources);
-      rows = await _store.loadConversations(sources: inboxSources);
+      // Then the read, and the attention pass on exactly the rows it
+      // returned. The pass runs here rather than on a timer of its own,
+      // because anywhere else the rows about to render could carry scores
+      // computed against a sender rule the user has since changed. It is
+      // handed the rows just read rather than reading them itself, and its
+      // writes — a score and a bucket are the only columns of these rows it
+      // touches — are applied to them in place: that is the list a second
+      // read after the pass would return, without the second read. Only the
+      // rows whose score or bucket moved are made into models again. Inside
+      // one try because all of it is the same database — a failure anywhere
+      // in here is "could not read the local inbox".
+      raw = await _store.conversationRows(sources: inboxSources);
+      final models = [for (final row in raw) Conversation.fromRow(row)];
+      final attention = _attention;
+      if (attention != null) {
+        final pass = await attention.recompute(
+          sources: inboxSources,
+          conversations: models,
+        );
+        final patched = pass.applyTo(raw);
+        for (var i = 0; i < patched.length; i++) {
+          if (!identical(patched[i], raw[i])) {
+            models[i] = Conversation.fromRow(patched[i]);
+          }
+        }
+        raw = patched;
+      }
+      rows = models;
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
       // fall back to beyond whatever is already on screen.
-      if (seq != _fetchSeq) return;
+      if (_stale(seq)) return;
       final current = state;
       state = current is ConversationsLoaded
           ? current.withRows(current.conversations, _staleInboxMessage)
@@ -337,7 +437,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       return;
     }
 
-    if (seq != _fetchSeq) return;
+    if (_stale(seq)) return;
 
     // Signed out AND nothing stored: there is no inbox to keep, so route to
     // sign-in. With rows in hand the banner says the session ended and the
@@ -347,7 +447,20 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       return;
     }
 
+    // Nothing on screen would change: no new state, so nothing rebuilds. A
+    // progress-driven reload over an idle mailbox is most of them, and each
+    // one used to rebuild the whole inbox to draw the same rows.
+    final current = state;
+    final shown = _shownRows;
+    if (current is ConversationsLoaded &&
+        current.loadError == loadError &&
+        shown != null &&
+        sameConversationRows(shown, raw)) {
+      return;
+    }
+    // The state first, whose setter drops the cache, then the rows behind it.
     state = ConversationsLoaded(rows, loadError);
+    _shownRows = raw;
   }
 
   /// Pulls Teams chats, then re-reads the list.
@@ -432,8 +545,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// [load] scores BEFORE the pumps it starts have finished, which is right
   /// for the frame the user is looking at and wrong for the mail the model was
   /// still reading — so the mailbox is scored a second time here, against what
-  /// the drain has since learned. The load-time
-  /// [AttentionService.recomputeAll] STAYS: it is the pass that makes a sender
+  /// the drain has since learned. The load-time pass
+  /// ([AttentionService.recompute]) STAYS: it is the one that makes a sender
   /// correction show up in the frame the user made it in.
   ///
   /// Nothing is enqueued here any more. Drafting is queued from the end of

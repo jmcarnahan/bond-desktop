@@ -1,7 +1,8 @@
 # 8 · Attention rescore
 
-**What happens.** `AttentionService.recomputeAll`
-(`app/lib/services/attention_service.dart`) scores every open thread for the
+**What happens.** `AttentionService.recompute`
+(`app/lib/services/attention_service.dart`; `recomputeAll` is its count-only
+face, which the settle pass and the tests call) scores every open thread for the
 Needs You rail: thread state, recency of movement, what the model found in it
 (triage/extraction verdicts), and how often that sender gets answered. The
 score ORDERS Needs You and the rail and never gates either: whether a thread is
@@ -21,8 +22,44 @@ move, so every reader below moved with them (see
 [03-triage.md](03-triage.md)).
 
 **No model call.** Pure arithmetic over stored rows — which is why it can be
-awaited synchronously right before the list renders (called from
-`conversations_provider.dart`).
+awaited inside the list load (`ConversationsNotifier.load`), on the rows that
+load has just read: `load` reads the list once (`MessageStore.conversationRows`)
+and hands those rows to the pass, which then makes seven reads of its own
+rather than eight.
+
+**One batch, nothing skipped.** The pass collects every score and every
+bucket and writes them in ONE batch (`MessageStore.writeAttentionPass`): one
+round trip and one transaction instead of one of each per thread, which with
+the database on its own isolate was most of a list load. No write is left out
+for being unchanged. Each one stamps `conversation_ai.updated_at`, and the
+notification settle's freshness check (attention newer than the message, see
+[09-notifications.md](09-notifications.md)) reads that stamp as the pass
+having seen the thread. The stamp is one per pass and is taken as the pass
+starts, before its reads: a message that changes while the pass runs then
+sorts later than the pass and is held for the next one.
+
+**The clock ticks once a minute.** Without an injected `now` the pass scores
+at the start of the current minute. The decay is continuous, so on the raw
+clock every pass would store a new number for every thread and no two reads
+of the list would ever be equal; on the minute an unchanged thread scores
+bit-identically, at a cost of at most a minute of decay (0.007 % at the
+seven-day half-life) applied to every thread alike.
+
+**The list applies the pass instead of reading twice.** `recompute` answers
+with what it wrote (`AttentionPass`), and `load` applies those scores and
+buckets to the rows it read (`AttentionPass.applyTo`) — the list a second read
+would return, without the second read; only the rows that moved are made into
+models again. A reload whose rows equal the ones on screen, with the same
+error line, sets no new state, so nothing rebuilds. Any other assignment to
+the state (an optimistic patch, an error) forgets the rows on screen, so the
+next reload always lands after one.
+
+**When the list reloads on its own.** Every triage and worker progress report
+asks for a reload from sqlite alone, through a `Coalescer`
+(`app/lib/utils/coalescer.dart`): 400 ms after the last report, at most two
+seconds into a steady stream of them, one at a time. A load the user asked
+for (the poll, refresh, a sender action, sign-in) calls `load` directly and is
+never held back by it.
 
 **Clearing rules.** `needs_you` clears on the user's own exits — a reply from
 anywhere, or marking done — never on merely reading (PR #10). Attention v2
@@ -52,7 +89,7 @@ for as long as it stays unanswered, and the only exits are a reply, Done, or
 the owner's own Later.
 
 **Known documentation gap.** The code documents ownership rules well, but the
-scoring formula itself is under-commented — `recomputeAll` is the place to
+scoring formula itself is under-commented — `recompute` is the place to
 add prose if the formula changes. Also a recorded residual from PR #9:
 `latestInboundMeta` and attention still key on bare conversation keys rather
 than `(source, conversationKey)`.
@@ -148,7 +185,7 @@ the user's instruction; when it fires, the result is exactly what "keep this
 thread in my inbox" writes.
 
 It is called from **one** place: `ConversationsNotifier.load()`, immediately
-before `recomputeAll` and so immediately before the read that renders the rows.
+before the read that renders the rows and the attention pass over them.
 Every path that refreshes the list runs `load()` — the sixty-second poll, the
 refresh button, every Later action — so one call site covers them all, and the
 sweep that follows sees the `'user'` reason and leaves the row alone. It

@@ -214,6 +214,124 @@ void main() {
       expect(result.notice, startsWith('Words only'));
       expect(result.query, 'invoice');
     });
+
+    // Plain connections opened before anything in this file registers
+    // sqlite-vec (the 'end to end' group's setUpAll does, process-wide):
+    // the index's functions are not on them.
+    group('the people search without the index', () {
+      Future<List<RelatedConversation>?> fromDana(Uint8List? query) =>
+          store.conversationsFromSenders(
+            queryEmbedding: query,
+            embedModel: EmbeddingsClient.documentModelTag,
+            addresses: const {'dana@fabrikam.com'},
+            names: const {'Dana Lopez'},
+            sinceIso: '2026-08-01T00:00:00Z',
+          );
+
+      setUp(() => store.upsertMessage({
+            'source': 'email',
+            'source_message_id': 'm-dana',
+            'conversation_key': 'c-dana',
+            'direction': 'inbound',
+            'subject': 'Fabrikam renewal',
+            'from_name': 'Dana Lopez',
+            'from_address': 'dana@fabrikam.com',
+            'received_at': '2026-08-29T10:00:00Z',
+          }));
+
+      test('ranked has nothing to rank with: null, the third answer',
+          () async {
+        expect(await fromDana(encodeEmbedding(List.filled(embedDims, 0.1))),
+            isNull);
+      });
+
+      test('unranked needs no index and still answers', () async {
+        final hits = (await fromDana(null))!;
+        expect([for (final h in hits) (h.conversationKey, h.messageId)],
+            [('c-dana', 'm-dana')]);
+      });
+    });
+  });
+
+  group('messagesBetween', () {
+    late BondDatabase db;
+    late MessageStore store;
+    final now = DateTime.now().toUtc();
+    String ago(Duration d) => MessageStore.isoStamp(now.subtract(d));
+
+    setUp(() {
+      db = testDb();
+      store = MessageStore(db);
+    });
+
+    tearDown(() async => db.close());
+
+    Future<void> chat(String id, Duration age,
+        {String key = 't-1', String source = 'teams'}) async {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Falcon room',
+        'from_name': 'Dana',
+        'from_address': 'teams:dana',
+        'received_at': ago(age),
+        'body_text': 'Message $id',
+      });
+    }
+
+    test('inclusive at both ends, oldest first, one source and one '
+        'conversation, no attachments', () async {
+      await chat('before', const Duration(hours: 10));
+      await chat('from', const Duration(hours: 8));
+      await chat('mid-b', const Duration(hours: 6));
+      await chat('mid-a', const Duration(hours: 7));
+      await chat('to', const Duration(hours: 4));
+      await chat('after', const Duration(hours: 2));
+      // The same key in another source, and another chat, inside the window.
+      await chat('mail', const Duration(hours: 6), source: 'email');
+      await chat('other', const Duration(hours: 6), key: 't-2');
+      await store.upsertAttachments('teams', 'mid-a', [
+        {
+          'attachment_id': 'a-1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'plan.pdf',
+          'content_type': 'application/pdf',
+          'size': 4096,
+        },
+      ]);
+
+      final between = await store.messagesBetween('teams', 't-1',
+          fromIso: ago(const Duration(hours: 8)),
+          toIso: ago(const Duration(hours: 4)));
+      expect([for (final m in between) m.id], ['from', 'mid-a', 'mid-b', 'to']);
+      expect(between.every((m) => m.attachments.isEmpty), isTrue,
+          reason: 'loadThread is the read that draws attachments');
+      // The thread read does hydrate it, so the fixture is real.
+      final whole = await store.loadThread('t-1', sources: const ['teams']);
+      expect(whole.firstWhere((m) => m.id == 'mid-a').attachments,
+          hasLength(1));
+    });
+
+    test('a message with no received_at is placed by when it was stored, '
+        'the stamp its progress row carries', () async {
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'unstamped',
+        'conversation_key': 't-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': 'teams:dana',
+        'received_at': null,
+        'body_text': 'No stamp of its own.',
+      });
+      final between = await store.messagesBetween('teams', 't-1',
+          fromIso: ago(const Duration(hours: 1)),
+          toIso: MessageStore.isoStamp(now.add(const Duration(hours: 1))));
+      expect([for (final m in between) m.id], ['unstamped']);
+    });
   });
 
   group('end to end', () {
@@ -376,6 +494,442 @@ void main() {
       expect(result, isA<MessageSearchHits>());
       expect((result as MessageSearchHits).hits, isEmpty);
       expect(result.notice, isNull, reason: 'both passes ran');
+    });
+
+    group('relatedConversations', () {
+      final now = DateTime.now().toUtc();
+      String ago(Duration d) => MessageStore.isoStamp(now.subtract(d));
+
+      /// One embedded inbound message in conversation [key].
+      Future<void> message(String id, String key, String subject,
+          {Duration age = const Duration(hours: 2),
+          String source = 'email'}) async {
+        await store.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': key,
+          'direction': 'inbound',
+          'subject': subject,
+          'from_name': 'Dana',
+          'from_address': 'dana@fabrikam.com',
+          'received_at': ago(age),
+          'body_text': subject,
+        });
+        await writeTriaged(store, source, id,
+            status: 'triaged',
+            urgency: 'normal',
+            category: 'work',
+            summary: subject,
+            needsAction: false,
+            actionItems: const []);
+        await embed(id, source: source);
+      }
+
+      Future<List<RelatedConversation>?> related({
+        double floor = 0.6,
+        int limit = 12,
+        Duration window = const Duration(days: 30),
+      }) async {
+        // The invoice axis: cosine 1 to an invoice, 0.9 to parking, 0.5 to
+        // a launch, 0 to anything else.
+        final q = (await server.client.embedResult('invoice',
+                prefix: EmbeddingsClient.searchQueryPrefix))
+            .vector!;
+        return store.relatedConversations(
+          encodeEmbedding(q),
+          embedModel: EmbeddingsClient.documentModelTag,
+          sinceIso: ago(window),
+          floor: floor,
+          limit: limit,
+        );
+      }
+
+      test('one entry per conversation, scored by its best message, '
+          'nearest first; a Teams chat is one too', () async {
+        if (!available) return;
+        await message('inv-1', 'c-inv', 'Invoice 4471 is overdue');
+        // A second, farther message in the same conversation: it adds no
+        // entry, and the conversation keeps the 1.0 of its best.
+        await message('park-in-inv', 'c-inv', 'Parking for the audit call');
+        await message('park', 'c-park', 'Parking permit renewal',
+            source: 'teams');
+
+        final hits = (await related())!;
+        expect([for (final h in hits) (h.source, h.conversationKey)],
+            [('email', 'c-inv'), ('teams', 'c-park')]);
+        expect(hits.first.cosine, closeTo(1.0, 0.001));
+        expect(hits[1].cosine, closeTo(0.9, 0.001));
+      });
+
+      test('each entry names its best message and that message\'s stamp',
+          () async {
+        if (!available) return;
+        await message('park-in-inv', 'c-inv', 'Parking for the audit call',
+            age: const Duration(hours: 1));
+        await message('inv-1', 'c-inv', 'Invoice 4471 is overdue',
+            age: const Duration(hours: 5));
+        await message('park', 'c-park', 'Parking permit renewal',
+            age: const Duration(hours: 3), source: 'teams');
+
+        final hits = (await related())!;
+        expect(
+            [for (final h in hits) (h.conversationKey, h.messageId, h.receivedAt)],
+            [
+              // The older message is the nearer one, so it is the entry's,
+              // not the conversation's newest.
+              ('c-inv', 'inv-1', ago(const Duration(hours: 5))),
+              ('c-park', 'park', ago(const Duration(hours: 3))),
+            ]);
+      });
+
+      test('a dropped message is not a hit, and its conversation falls back '
+          'to its next best', () async {
+        if (!available) return;
+        await message('inv-1', 'c-inv', 'Invoice 4471 is overdue');
+        await message('park-in-inv', 'c-inv', 'Parking for the audit call');
+        await message('inv-gone', 'c-gone', 'Invoice 4470 is overdue');
+        for (final id in ['inv-1', 'inv-gone']) {
+          await store.writeSettledProgress('email', id,
+              needsYou: false, reason: 'not_worthy', dropped: true);
+        }
+
+        final hits = (await related())!;
+        expect([for (final h in hits) (h.conversationKey, h.messageId)],
+            [('c-inv', 'park-in-inv')]);
+        expect(hits.single.cosine, closeTo(0.9, 0.001));
+      });
+
+      test('one busy chat with more than a hundred near messages does not '
+          'crowd out a second conversation', () async {
+        if (!available) return;
+        // 120 messages in one chat, every one on the query's axis: nearer
+        // than anything else. A read that kept the nearest hundred messages
+        // would see this chat alone.
+        for (var i = 0; i < 120; i++) {
+          final id = 'busy-$i';
+          await store.upsertMessage({
+            'source': 'teams',
+            'source_message_id': id,
+            'conversation_key': 't-busy',
+            'direction': 'inbound',
+            'subject': 'Invoice chatter',
+            'from_name': 'Dana',
+            'from_address': 'teams:dana',
+            'received_at': ago(Duration(minutes: 10 + i)),
+            'body_text': 'Invoice chatter $i',
+          });
+          await store.upsertMessageVector(
+            source: 'teams',
+            sourceMessageId: id,
+            embedding: encodeEmbedding(axes({0: 1.0})),
+            dims: embedDims,
+            embeddedHash: 'h-$id',
+            embedModel: EmbeddingsClient.documentModelTag,
+          );
+        }
+        await message('park', 'c-park', 'Parking permit renewal');
+
+        final hits = (await related())!;
+        expect([for (final h in hits) (h.source, h.conversationKey)],
+            [('teams', 't-busy'), ('email', 'c-park')]);
+        expect(hits[1].cosine, closeTo(0.9, 0.001));
+      });
+
+      test('stops at the floor, and at the limit', () async {
+        if (!available) return;
+        await message('inv', 'c-inv', 'Invoice 4471 is overdue');
+        await message('park', 'c-park', 'Parking permit renewal');
+        await message('launch', 'c-launch', 'Launch date moved to Friday');
+
+        final atSixty = (await related())!;
+        expect([for (final h in atSixty) h.conversationKey],
+            ['c-inv', 'c-park'],
+            reason: 'the launch sits at 0.5, under the floor');
+        final atFortyFive = (await related(floor: 0.45))!;
+        expect([for (final h in atFortyFive) h.conversationKey],
+            ['c-inv', 'c-park', 'c-launch']);
+        final one = (await related(floor: 0.45, limit: 1))!;
+        expect([for (final h in one) h.conversationKey], ['c-inv']);
+      });
+
+      test('respects sinceIso', () async {
+        if (!available) return;
+        await message('inv-old', 'c-old', 'Invoice 4470 is overdue',
+            age: const Duration(days: 40));
+        await message('park', 'c-park', 'Parking permit renewal');
+
+        final hits = (await related())!;
+        expect([for (final h in hits) h.conversationKey], ['c-park']);
+      });
+    });
+
+    group('conversationsFromSenders', () {
+      final now = DateTime.now().toUtc();
+      String ago(Duration d) => MessageStore.isoStamp(now.subtract(d));
+
+      /// One message [id] in conversation [key], written by [name] at
+      /// [address]: a mail by default, a Teams message with [source]
+      /// `teams`. With [vector] it is embedded on those axes under the
+      /// search's model tag; without it, not embedded at all.
+      Future<void> said(
+        String id,
+        String key, {
+        String source = 'email',
+        String name = 'Dana Lopez',
+        String address = 'dana@fabrikam.com',
+        Duration age = const Duration(hours: 2),
+        bool outbound = false,
+        Map<int, double>? vector,
+      }) async {
+        await store.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': key,
+          'direction': outbound ? 'outbound' : 'inbound',
+          'subject': 'Thread $key',
+          'from_name': name,
+          'from_address': address,
+          'received_at': ago(age),
+          'body_text': 'Message $id.',
+        });
+        if (vector != null) {
+          await store.upsertMessageVector(
+            source: source,
+            sourceMessageId: id,
+            embedding: encodeEmbedding(axes(vector)),
+            dims: embedDims,
+            embeddedHash: 'h-$id',
+            embedModel: EmbeddingsClient.documentModelTag,
+          );
+        }
+      }
+
+      /// Dana by her address and her name; the query on axis 0, so a
+      /// message's cosine is its axis-0 component.
+      Future<List<RelatedConversation>?> fromSenders({
+        bool ranked = true,
+        Set<String> addresses = const {'dana@fabrikam.com'},
+        Set<String> names = const {'Dana Lopez'},
+        Duration window = const Duration(days: 21),
+        int limit = 12,
+      }) =>
+          store.conversationsFromSenders(
+            queryEmbedding: ranked ? encodeEmbedding(axes({0: 1.0})) : null,
+            embedModel: EmbeddingsClient.documentModelTag,
+            addresses: addresses,
+            names: names,
+            sinceIso: ago(window),
+            limit: limit,
+          );
+
+      List<String> keysOf(List<RelatedConversation>? hits) =>
+          [for (final h in hits!) h.conversationKey];
+
+      test('ranked: one entry per conversation, scored by THEIR nearest '
+          'message, nearest first; a Teams chat matched by name is one too',
+          () async {
+        if (!available) return;
+        await said('inv-1', 'c-inv',
+            age: const Duration(hours: 5), vector: {0: 1.0});
+        // Newer, farther, same conversation: it adds no entry and does not
+        // stand for it.
+        await said('park-in-inv', 'c-inv',
+            age: const Duration(hours: 1), vector: {0: 0.9, 2: 0.4359});
+        await said('park', 'c-park',
+            age: const Duration(hours: 3), vector: {0: 0.9, 2: 0.4359});
+        await said('chat-1', 't-dana',
+            source: 'teams',
+            address: 'teams:dana-id',
+            age: const Duration(hours: 4),
+            vector: {0: 0.5, 1: 0.866});
+
+        final hits = (await fromSenders())!;
+        expect([for (final h in hits) (h.source, h.conversationKey)], [
+          ('email', 'c-inv'),
+          ('email', 'c-park'),
+          ('teams', 't-dana'),
+        ]);
+        expect(hits[0].cosine, closeTo(1.0, 0.001));
+        expect(hits[1].cosine, closeTo(0.9, 0.001));
+        expect(hits[2].cosine, closeTo(0.5, 0.001));
+        expect((hits[0].messageId, hits[0].receivedAt),
+            ('inv-1', ago(const Duration(hours: 5))));
+        expect((hits[2].messageId, hits[2].receivedAt),
+            ('chat-1', ago(const Duration(hours: 4))));
+      });
+
+      test("ranked: a stranger's message is never found, even as the "
+          'nearest in the mailbox; an outbound one never is', () async {
+        if (!available) return;
+        await said('stranger', 'c-stranger',
+            name: 'Sam Ortiz', address: 'sam@contoso.com', vector: {0: 1.0});
+        await said('stranger-chat', 't-stranger',
+            source: 'teams',
+            name: 'Sam Ortiz',
+            address: 'teams:sam-id',
+            vector: {0: 1.0});
+        // Sent under Dana's address, but outbound: not something she wrote.
+        await said('sent', 'c-sent', outbound: true, vector: {0: 1.0});
+        await said('park', 'c-park', vector: {0: 0.9, 2: 0.4359});
+
+        expect(keysOf(await fromSenders()), ['c-park']);
+        expect(keysOf(await fromSenders(ranked: false)), ['c-park']);
+      });
+
+      test('a mail is matched by address only, a Teams message by name only',
+          () async {
+        if (!available) return;
+        // Dana's name on another address's mail: not hers.
+        await said('namesake', 'c-namesake',
+            address: 'other@northwind.com', vector: {0: 1.0});
+        // A chat message under an id passed among the addresses, from a
+        // name that is not given: not hers either.
+        await said('by-id', 't-by-id',
+            source: 'teams',
+            name: 'D. L.',
+            address: 'teams:dana-id',
+            vector: {0: 1.0});
+        // The controls: her mail by address, her chat message by name.
+        await said('mail', 'c-mail', vector: {0: 0.9, 2: 0.4359});
+        await said('chat', 't-chat',
+            source: 'teams',
+            address: 'teams:dana-id',
+            vector: {0: 0.5, 1: 0.866});
+
+        for (final ranked in [true, false]) {
+          final hits = await fromSenders(
+              ranked: ranked,
+              addresses: const {'dana@fabrikam.com', 'teams:dana-id'});
+          expect(keysOf(hits).toSet(), {'c-mail', 't-chat'},
+              reason: 'ranked: $ranked');
+        }
+      });
+
+      test('ASCII letters match in either case on both sides; a name with a '
+          'non-ASCII capital matches itself', () async {
+        if (!available) return;
+        await said('lower', 'c-lower');
+        await said('upper', 'c-upper',
+            address: ' Dana@FABRIKAM.com ', age: const Duration(hours: 3));
+        await said('chat', 't-dana',
+            source: 'teams',
+            address: 'teams:dana-id',
+            age: const Duration(hours: 4));
+        await said('elodie', 't-elodie',
+            source: 'teams',
+            name: 'Élodie Martin',
+            address: 'teams:elodie-id',
+            age: const Duration(hours: 5));
+
+        final hits = await fromSenders(
+          ranked: false,
+          addresses: const {'Dana@Fabrikam.com'},
+          names: const {'dana LOPEZ', 'Élodie Martin'},
+        );
+        expect(keysOf(hits), ['c-lower', 'c-upper', 't-dana', 't-elodie']);
+      });
+
+      test('sinceIso is honoured in both modes, and a dropped message is '
+          'never found', () async {
+        if (!available) return;
+        await said('old', 'c-old',
+            age: const Duration(days: 30), vector: {0: 1.0});
+        await said('gone', 'c-gone', vector: {0: 1.0});
+        await store.writeSettledProgress('email', 'gone',
+            needsYou: false, reason: 'not_worthy', dropped: true);
+        await said('park', 'c-park', vector: {0: 0.9, 2: 0.4359});
+
+        expect(keysOf(await fromSenders()), ['c-park']);
+        expect(keysOf(await fromSenders(ranked: false)), ['c-park']);
+        // The window is the only thing keeping the old one out.
+        expect(keysOf(await fromSenders(window: const Duration(days: 40))),
+            ['c-old', 'c-park']);
+      });
+
+      test('ranked: a message with no vector is not scored, and a vector '
+          'under another tag or width is not scored and fails nothing',
+          () async {
+        if (!available) return;
+        await said('bare', 'c-bare', age: const Duration(hours: 1));
+        await said('ghost', 'c-ghost', age: const Duration(hours: 3));
+        await store.upsertMessageVector(
+          source: 'email',
+          sourceMessageId: 'ghost',
+          embedding: encodeEmbedding(axes({0: 1.0})),
+          dims: embedDims,
+          embeddedHash: 'h-ghost',
+          embedModel: EmbeddingsClient.modelTag,
+        );
+        await said('short', 'c-short', age: const Duration(hours: 4));
+        await store.upsertMessageVector(
+          source: 'email',
+          sourceMessageId: 'short',
+          embedding: Uint8List(16),
+          dims: 4,
+          embeddedHash: 'h-short',
+          embedModel: EmbeddingsClient.documentModelTag,
+        );
+        await said('park', 'c-park',
+            age: const Duration(hours: 5), vector: {0: 0.9, 2: 0.4359});
+
+        expect(keysOf(await fromSenders()), ['c-park']);
+        expect(keysOf(await fromSenders(ranked: false)),
+            ['c-bare', 'c-ghost', 'c-short', 'c-park']);
+      });
+
+      test('unranked: their newest message stands for each conversation, '
+          'newest first, at cosine 0', () async {
+        if (!available) return;
+        await said('a-old', 'c-a', age: const Duration(hours: 5));
+        await said('a-new', 'c-a', age: const Duration(hours: 1));
+        await said('b', 'c-b', age: const Duration(hours: 3));
+        // Somebody else's newer message in c-b does not stand for it.
+        await said('b-sam', 'c-b',
+            name: 'Sam Ortiz',
+            address: 'sam@contoso.com',
+            age: const Duration(minutes: 30));
+
+        final hits = (await fromSenders(ranked: false))!;
+        expect(
+            [for (final h in hits) (h.conversationKey, h.messageId, h.receivedAt)],
+            [
+              ('c-a', 'a-new', ago(const Duration(hours: 1))),
+              ('c-b', 'b', ago(const Duration(hours: 3))),
+            ]);
+        expect(hits.every((h) => h.cosine == 0.0), isTrue);
+      });
+
+      test('one busy chat is one conversation and cannot crowd the others '
+          'out of the limit', () async {
+        if (!available) return;
+        for (var i = 0; i < 15; i++) {
+          await said('busy-$i', 't-busy',
+              source: 'teams',
+              address: 'teams:dana-id',
+              age: Duration(minutes: 10 + i),
+              vector: {0: 1.0});
+        }
+        await said('park', 'c-park',
+            age: const Duration(hours: 1), vector: {0: 0.9, 2: 0.4359});
+        await said('launch', 'c-launch',
+            age: const Duration(hours: 2), vector: {0: 0.5, 1: 0.866});
+
+        expect(keysOf(await fromSenders(limit: 2)), ['t-busy', 'c-park']);
+        expect(keysOf(await fromSenders(ranked: false, limit: 2)),
+            ['t-busy', 'c-park']);
+      });
+
+      test('no addresses and no names: nothing, in both modes', () async {
+        if (!available) return;
+        await said('park', 'c-park', vector: {0: 0.9, 2: 0.4359});
+        for (final ranked in [true, false]) {
+          expect(
+              await fromSenders(
+                  ranked: ranked, addresses: const {}, names: const {' '}),
+              isEmpty,
+              reason: 'ranked: $ranked');
+        }
+      });
     });
 
     group('dropped rows', () {

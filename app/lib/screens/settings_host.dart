@@ -214,16 +214,16 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     final prefs = ref.watch(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
     // `watch` is legal here because this runs inside `build`, and it is what
-    // keeps the three sync stamps live while the pane is open: the stamps
-    // re-read on every recorded event, so a sync that lands behind Settings
-    // moves the numbers in it. The stamps alone, not the activity snapshot —
-    // that one re-reads the whole pane's table per event, and this pane wants
-    // three preferences. The two below answer null in a widget test, where
+    // keeps the sync stamps live while the pane is open: the stamps re-read
+    // on the activity tick, so a sync that lands behind Settings moves the
+    // numbers in it. The stamps alone, not the activity snapshot — that one
+    // re-reads the whole pane's table per tick, and this pane wants four
+    // preferences. The two below answer null in a widget test, where
     // there is no platform on the other end of the channel — the About
     // section then says 'Version unknown' rather than throwing.
     final stamps = ref.watch(syncStampsProvider).valueOrNull;
     // Watched for the same reason the stamps are: the library re-reads on
-    // every recorded activity event, so a reconcile that finishes behind an
+    // the activity tick, so a reconcile that finishes behind an
     // open Settings pane moves `reading…` to `12 files · read just now`
     // without the user touching anything.
     final contextDirs = ref.watch(contextDirectoriesProvider);
@@ -536,7 +536,7 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
           unawaited(notifier.setCloudDraftsStanding(on)),
       improveTargetName: prefs.specForStage('draft_improve')?.name,
       // Watched for the reason the sync stamps are: the count re-reads on
-      // every recorded event, so a draft that leaves behind an open Settings
+      // the activity tick, so a draft that leaves behind an open Settings
       // moves the line without the reader touching anything.
       cloudDraftsToday: ref.watch(cloudDraftsTodayProvider).valueOrNull,
       cloudDraftsDailyCap: prefs.cloudDraftsDailyCap,

@@ -1081,7 +1081,9 @@ sender's gated mail looks alike enough to cluster into a proposal about mail
 nobody was ever going to read. The vec0 index can lag the durable table for a
 sweep — it is diff-backfilled from `conversation_ai` — but that changes
 nothing: `_indexedSimilarities` maps every probe hit back through the
-candidate rows and ignores a neighbour that is not among them. The card's
+candidate rows and ignores a neighbour that is not among them. The diff reads
+keys and hashes from both sides and fetches a vector only for a row it
+writes, so a sweep over an unchanged corpus writes nothing. The card's
 message-side data (`newestInboundCardData`) prefers a kept inbound too,
 falling back to a gated one only when there is nothing else, so a no-reply
 autoresponder landing on a live thread cannot become the sentence that thread

@@ -5,7 +5,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/context_models.dart';
 import '../services/attachments/file_dialogs.dart';
-import 'activity_provider.dart' show activityEventsProvider;
+import 'activity_provider.dart' show activityTickProvider;
 import 'app_providers.dart';
 import 'draft_provider.dart' show DraftTarget;
 
@@ -33,14 +33,15 @@ typedef ContextDirRow = ({
   int digestsEligible,
 });
 
-/// The Settings library, re-read after every recorded activity event.
+/// The Settings library, re-read on the activity tick, at most once per
+/// 250 ms.
 ///
-/// Watching [activityEventsProvider] is the whole liveness mechanism, copied
+/// Watching [activityTickProvider] is the whole liveness mechanism, copied
 /// from `syncStampsProvider` and kept for the same reason: the reconcile pass
 /// records when it finishes, so a walk that lands behind an open Settings
 /// pane moves `N files · read just now` with no timer of its own. Riverpod
 /// carries the previous value through the reload, so the rows do not blink
-/// between an event and its re-read.
+/// between a tick and its re-read.
 ///
 /// Three extra reads per directory rather than one joined query, because the
 /// library is a handful of rows a person registered by hand — a join written
@@ -48,7 +49,7 @@ typedef ContextDirRow = ({
 /// a pass adds a number to this row.
 final contextDirectoriesProvider =
     FutureProvider.autoDispose<List<ContextDirRow>>((ref) async {
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   final store = ref.watch(contextStoreProvider);
   final rows = <ContextDirRow>[];
   for (final dir in await store.directories()) {
@@ -84,14 +85,14 @@ typedef ContextScope = ({
 
 /// The directories linked to ONE room — what the panel's switches read.
 ///
-/// Re-read on every activity event, exactly as the library is and for the
+/// Re-read on the activity tick, exactly as the library is and for the
 /// same reason: a link written by the panel and a directory registered from
 /// inside it both land as activity, and the switch under the reader's finger
 /// has to agree with the row it just wrote.
 final contextLinksProvider =
     FutureProvider.autoDispose.family<List<String>, ContextScope>(
   (ref, scope) async {
-    ref.watch(activityEventsProvider);
+    ref.watch(activityTickProvider);
     return ref
         .watch(contextStoreProvider)
         .dirIdsLinkedTo(scope.kind, scope.source, scope.scopeKey);
@@ -116,7 +117,7 @@ final contextLinksProvider =
 final contextInheritedProvider = FutureProvider.autoDispose.family<
     List<({String storyline, String dirId, String dirName})>, DraftTarget>(
   (ref, target) async {
-    ref.watch(activityEventsProvider);
+    ref.watch(activityTickProvider);
     final messages = ref.watch(messageStoreProvider);
     final store = ref.watch(contextStoreProvider);
     final inherited = <({String storyline, String dirId, String dirName})>[];
@@ -163,13 +164,13 @@ typedef ContextFileView = ({
 /// Null for a file nobody indexed — the panel says so in a sentence rather
 /// than showing an empty reader.
 ///
-/// Re-read on every activity event for [contextLinksProvider]'s reason: a
+/// Re-read on the activity tick for [contextLinksProvider]'s reason: a
 /// reconcile pass that lands while the panel is open changes the words on
 /// screen, and a file the walk deleted stops being a file.
 final contextFileProvider = FutureProvider.autoDispose
     .family<ContextFileView?, ({int fileId, String? locator})>(
   (ref, key) async {
-    ref.watch(activityEventsProvider);
+    ref.watch(activityTickProvider);
     final store = ref.watch(contextStoreProvider);
     final file = await store.fileById(key.fileId);
     if (file == null) return null;
@@ -211,7 +212,7 @@ final contextFileProvider = FutureProvider.autoDispose
 final contextFilesProvider =
     FutureProvider.autoDispose.family<List<ContextFile>, String>(
   (ref, dirId) async {
-    ref.watch(activityEventsProvider);
+    ref.watch(activityTickProvider);
     return ref.watch(contextStoreProvider).filesFor(dirId);
   },
 );

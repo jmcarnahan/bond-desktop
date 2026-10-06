@@ -10,6 +10,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/counting_interceptor.dart';
 import 'fixtures/vec_test_db.dart';
 
 /// A unit vector in the plane spanned by dimensions `2 * plane` and
@@ -249,6 +250,221 @@ void main() {
       // table, so this is the assertion that the previous mailbox's floats are
       // not still sitting in the shadow tables.
       expect(await contents(), isEmpty);
+    });
+  });
+
+  group('the backfill reads only what it writes', () {
+    late bool available;
+    setUpAll(() {
+      available = ensureSqliteVecLoaded();
+      if (!available) {
+        printOnFailure('sqlite-vec native asset missing — vec tests skipped');
+      }
+    });
+
+    late CountingInterceptor counter;
+    late BondDatabase db;
+    late MessageStore store;
+    late ConversationVectorIndex index;
+
+    setUp(() {
+      // sqlite-vec is registered (setUpAll) before this connection opens,
+      // which is the only order in which the connection knows vec0.
+      counter = CountingInterceptor();
+      db = countingTestDb(counter);
+      store = MessageStore(db);
+      index = ConversationVectorIndex(db);
+    });
+
+    tearDown(() => db.close());
+
+    Future<void> seed(
+      String key,
+      List<double> vector, {
+      String source = 'email',
+      String hash = 'h1',
+      String embedModel = EmbeddingsClient.modelTag,
+    }) =>
+        store.upsertConversationAi(
+          source,
+          key,
+          embedding: encodeEmbedding(vector),
+          embeddedHash: hash,
+          embedModel: embedModel,
+        );
+
+    Future<int> indexed() async => (await db
+            .customSelect('SELECT count(*) AS n FROM vec_conversations')
+            .getSingle())
+        .data['n'] as int;
+
+    /// The selects that read a vector out of `conversation_ai` — any mention
+    /// of the column other than its `length(...)`.
+    List<String> blobReads() => [
+          for (final sql in counter.selects)
+            if (sql
+                .replaceAll('length(embedding)', '')
+                .replaceAll('embedding IS NOT NULL', '')
+                .contains('embedding'))
+              sql,
+        ];
+
+    test('an unchanged corpus is read by key and written not at all',
+        () async {
+      if (!available) return;
+      await seed('a', ray(0, 0), hash: 'h-a');
+      await seed('b', ray(1, 0), hash: 'h-b');
+      await seed('c', ray(2, 0), hash: 'h-c', source: 'teams');
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 3);
+
+      counter.reset();
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 3);
+
+      expect(counter.batched, 0);
+      expect(counter.singleWrites, 0);
+      expect(blobReads(), isEmpty);
+      expect(counter.selects, hasLength(2));
+    });
+
+    test('one new embedding is one batch and one more row', () async {
+      if (!available) return;
+      await seed('a', ray(0, 0), hash: 'h-a');
+      await seed('b', ray(1, 0), hash: 'h-b');
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 2);
+      expect(await indexed(), 2);
+
+      await seed('c', ray(2, 0), hash: 'h-c');
+      counter.reset();
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 3);
+
+      expect(counter.batched, 1);
+      expect(counter.singleWrites, 0);
+      // The one select that read a vector, for the one row written.
+      expect(blobReads(), hasLength(1));
+      expect(await indexed(), 3);
+      final hits = await index.neighbors(encodeEmbedding(ray(2, 0)), k: 3);
+      expect(hits.first.key, 'c');
+    });
+
+    test('a re-embedded thread replaces its index row', () async {
+      if (!available) return;
+      await seed('a', ray(0, 0), hash: 'h-a');
+      await seed('b', ray(1, 0), hash: 'h-b');
+      await index.backfill(embedModel: EmbeddingsClient.modelTag);
+
+      await seed('a', ray(3, 0), hash: 'h-a2');
+      counter.reset();
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 2);
+
+      expect(counter.batched, 1);
+      expect(await indexed(), 2);
+      final hits = await index.neighbors(encodeEmbedding(ray(3, 0)), k: 2);
+      expect(hits.first.key, 'a');
+      expect(hits.first.similarity, closeTo(1.0, 1e-6));
+      final rows = await db
+          .customSelect("SELECT embedded_hash FROM vec_conversations "
+              "WHERE conversation_key = 'a'")
+          .get();
+      expect([for (final r in rows) r.data['embedded_hash']], ['h-a2']);
+    });
+
+    test('a vector set NULL or re-tagged takes its index row away', () async {
+      if (!available) return;
+      await seed('a', ray(0, 0), hash: 'h-a');
+      await seed('b', ray(1, 0), hash: 'h-b');
+      await seed('c', ray(2, 0), hash: 'h-c');
+      await index.backfill(embedModel: EmbeddingsClient.modelTag);
+
+      await db.customUpdate(
+        'UPDATE conversation_ai SET embedding = NULL '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: [const Variable('email'), const Variable('a')],
+      );
+      await seed('b', ray(1, 0), hash: 'h-b', embedModel: 'another-model');
+      counter.reset();
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 1);
+
+      expect(counter.batched, 1);
+      // Deletes only: no vector was read.
+      expect(blobReads(), isEmpty);
+      expect(await indexed(), 1);
+      final hits = await index.neighbors(encodeEmbedding(ray(2, 0)), k: 5);
+      expect([for (final h in hits) h.key], ['c']);
+    });
+
+    test('more than a chunk of missing rows is fetched in chunks, one batch',
+        () async {
+      if (!available) return;
+      for (var i = 0; i < 230; i++) {
+        await seed('t$i', ray(i % 400, i * 0.01), hash: 'h-$i');
+      }
+      // The table's creation is ensureReady's write, not the backfill's.
+      expect(await index.ensureReady(), isTrue);
+
+      counter.reset();
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 230);
+
+      expect(counter.batched, 1);
+      expect(counter.singleWrites, 0);
+      // 100 + 100 + 30.
+      expect(blobReads(), hasLength(3));
+      expect(await indexed(), 230);
+    });
+
+    test('the index holds every durable row once, with its current hash',
+        () async {
+      if (!available) return;
+      // A corpus with every kind of row the old full-blob diff handled: a
+      // plain one, one on another source, one re-embedded after the first
+      // fill, one under another model, one at another width, one with a NULL
+      // hash, and one deleted after the first fill.
+      await seed('a', ray(0, 0), hash: 'h-a');
+      await seed('b', ray(1, 0), hash: 'h-b', source: 'teams');
+      await seed('c', ray(2, 0), hash: 'h-c');
+      await seed('d', ray(3, 0), hash: 'h-d', embedModel: 'another-model');
+      await seed('narrow', const [1.0, 0.0], hash: 'h-n');
+      await seed('e', ray(4, 0), hash: 'h-e');
+      await seed('gone', ray(5, 0), hash: 'h-g');
+      await db.customUpdate(
+        'UPDATE conversation_ai SET embedded_hash = NULL '
+        "WHERE conversation_key = 'e'",
+      );
+      await index.backfill(embedModel: EmbeddingsClient.modelTag);
+
+      await seed('c', ray(2, 1), hash: 'h-c2');
+      await seed('f', ray(6, 0), hash: 'h-f');
+      await db.customUpdate(
+        "DELETE FROM conversation_ai WHERE conversation_key = 'gone'",
+      );
+      expect(await index.backfill(embedModel: EmbeddingsClient.modelTag), 5);
+
+      final durable = await db
+          .customSelect(
+            'SELECT source, conversation_key, embedded_hash '
+            'FROM conversation_ai WHERE embedding IS NOT NULL '
+            'AND embed_model = ? AND length(embedding) = ? '
+            'ORDER BY source, conversation_key',
+            variables: [
+              const Variable(EmbeddingsClient.modelTag),
+              const Variable(ConversationVectorIndex.dims * 4),
+            ],
+          )
+          .get();
+      final held = await db
+          .customSelect('SELECT source, conversation_key, embedded_hash '
+              'FROM vec_conversations ORDER BY source, conversation_key')
+          .get();
+      String row(Map<String, Object?> r) =>
+          '${r['source']}/${r['conversation_key']}@${r['embedded_hash'] ?? ''}';
+      expect([for (final r in held) row(r.data)],
+          [for (final r in durable) row(r.data)]);
+      expect([for (final r in held) row(r.data)], [
+        'email/a@h-a',
+        'email/c@h-c2',
+        'email/e@',
+        'email/f@h-f',
+        'teams/b@h-b',
+      ]);
     });
   });
 }

@@ -20,10 +20,11 @@ part 'database.g.dart';
 /// timestamp landing in an INTEGER count fails loudly here instead of
 /// surfacing as a wrong number three screens away.
 ///
-/// The executor is the same-isolate [NativeDatabase], not
-/// `NativeDatabase.createInBackground`: the store this backs was synchronous
-/// until now, and moving the work to a second isolate at the same time as
-/// making the calls async would change two things at once.
+/// This class takes whatever executor its caller hands it. The APP's is chosen
+/// by `appExecutor` in `db.dart`: a background isolate drift spawns, so no
+/// statement steps on the UI isolate. [BondDatabase.open] and
+/// [BondDatabase.memory] are same-isolate, and they are what tests open,
+/// because a widget test's fake-async zone must never wait on a real isolate.
 @DriftDatabase(include: {'schema.drift'})
 class BondDatabase extends _$BondDatabase {
   BondDatabase.open(String path) : super(NativeDatabase(File(path)));
@@ -1070,8 +1071,8 @@ FROM (
 /// for a new one and run `onCreate` against tables that already exist.
 ///
 /// Stamping the version is the whole migration: the file already has exactly
-/// the shape `schema.drift` describes. Must run BEFORE [BondDatabase.open]
-/// touches the file.
+/// the shape `schema.drift` describes. Must run BEFORE the app's executor
+/// (or [BondDatabase.open]) touches the file.
 Future<void> adoptLegacyDatabase(String path) async {
   if (!File(path).existsSync()) return;
   final db = raw.sqlite3.open(path);

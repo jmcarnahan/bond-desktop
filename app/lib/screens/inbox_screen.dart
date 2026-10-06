@@ -1525,6 +1525,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return pass.whenComplete(() => _tending = null);
   }
 
+  /// How long a brief plan may take before [_planBriefs] says so.
+  static const int _slowBriefPlanMs = 100;
+
   /// Queues the briefs the calendar now makes due and wakes the draft lane
   /// when it queued any. Fire-and-forget off [_syncCalendar]; a failure is a
   /// trace and never reaches the mail.
@@ -1534,9 +1537,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // is not the owner's.
       final zone = ref.read(calendarZoneProvider).valueOrNull;
       if (zone == null) return;
+      final watch = Stopwatch()..start();
       final queued = await ref
           .read(briefPlannerProvider)
           .plan(now: DateTime.now(), zone: zone);
+      // The plan's gathers are store reads on this isolate, one search per
+      // large meeting: a slow pass is said, in counts only, so its cost can
+      // be read off a real mailbox.
+      if (watch.elapsedMilliseconds >= _slowBriefPlanMs) {
+        debugPrint('briefs planned: $queued queued in '
+            '${watch.elapsedMilliseconds} ms');
+      }
       if (!mounted || queued == 0) return;
       ref.read(briefRevisionProvider.notifier).state++;
       unawaited(ref.read(draftWorkerProvider).pump());
@@ -8534,12 +8545,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             : zone.localDateTime(shown.endDate!, 0, 0).toUtc())
         : shown.endUtc;
     if (end == null || !end.isAfter(nowUtc)) return null;
-    // The rules that need no store read, with the owner unknown here: a
-    // "no" from them is said, by its reason, when nothing is stored, and a
-    // pass is left as "not known" for the planner, which knows the owner, to
-    // settle (it records no_mail, no_others and too_many on the row).
+    // The rules that need no store read: a "no" from them is said, by its
+    // reason, when nothing is stored. The owner's address (the gatherer's own
+    // `mail` then UPN), once the account has answered, keeps their own
+    // attendee row from counting as somebody else, so a meeting with nobody
+    // else says so at once; unknown, a pass is still left as "not known" for
+    // the planner to settle (it records no_mail and no_others on the row).
+    final owner = _owner?.mail ?? _owner?.userPrincipalName;
     final quick =
-        briefQuickCheck(shown, owner: null, now: nowUtc, zone: zone);
+        briefQuickCheck(shown, owner: owner, now: nowUtc, zone: zone);
     return BriefSection(
       view: ref.watch(eventBriefProvider(shown.id)).valueOrNull,
       eligible: quick == null ? null : false,
@@ -8551,11 +8565,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onRegenerate: () => unawaited(_regenerateBrief(shown.id)),
       // Offered only where a request would be honoured: the quick check with
       // the horizon lifted must be clear, or a far-off block with nobody
-      // else would offer a button whose press ends as a skipped row. The
-      // owner's address (the gatherer's own `mail` then UPN) keeps their own
-      // attendee row from counting as somebody else; unknown, it does.
+      // else would offer a button whose press ends as a skipped row, with
+      // the same owner as above.
       onWrite: briefQuickCheck(shown,
-                  owner: _owner?.mail ?? _owner?.userPrincipalName,
+                  owner: owner,
                   now: nowUtc,
                   zone: zone,
                   asked: true) ==
@@ -10038,7 +10051,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the sync and the local model have been doing, over the last week.
   ///
-  /// [activitySnapshotProvider] re-reads once per recorded event, so a sync
+  /// [activitySnapshotProvider] re-reads on the activity tick, so a sync
   /// landing while the panel is open appears without a refresh. It also
   /// re-reads on the events the recorder SUPPRESSED — a poll that brought
   /// nothing in emits a transient tick and writes no row — and that is what
@@ -10046,10 +10059,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// prefs read in that same pass, so without a tick roughly once a minute they
   /// would freeze at whatever they said when the panel opened.
   ///
-  /// Each re-read is a handful of indexed queries. Even a first sync of a large
-  /// mailbox records one row per drained item, not per message. If a future
-  /// drain ever ticks fast enough to be felt here, the debounce in
-  /// `conversations_provider` is the documented pattern to copy.
+  /// Each re-read is a handful of indexed queries, and the tick comes at most
+  /// once per 250 ms (`activityTickWindow`): the drains record one row per
+  /// item, several a second in a burst, and the window is what keeps that
+  /// from being a re-read per row.
   Widget _activityLog() {
     // The previous snapshot is carried through a reload, so this is null only
     // before the very first read of the pane.

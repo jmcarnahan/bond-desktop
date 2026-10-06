@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -193,7 +194,7 @@ void main() {
       'state': 'needs_reply',
       'last_message_at': '2026-08-28T10:00:00Z',
     });
-    await store.writeAttentionScore('email', 'conv-1', 0.9);
+    await writeScore(store, 'email', 'conv-1', 0.9);
 
     final log = <String>[];
     final triage = TriageQueue(store, decisionClient: ScriptedDecisionClient(loggingLlm(log)));

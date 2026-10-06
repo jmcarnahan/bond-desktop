@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show SocketException;
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -241,6 +242,198 @@ void main() {
     test('mismatched lengths and empties are 0', () {
       expect(cosine(const [1.0, 0.0], const [1.0]), 0);
       expect(cosine(const [], const []), 0);
+    });
+  });
+
+  group('decoding as float32', () {
+    // The decode before it returned a Float32List: a growable list of boxed
+    // doubles, read one by one. Kept here as the oracle the new one must
+    // agree with element for element.
+    List<double> oldDecode(Uint8List b) {
+      final view = ByteData.sublistView(b);
+      final count = b.lengthInBytes ~/ 4;
+      return [
+        for (var i = 0; i < count; i++) view.getFloat32(i * 4, Endian.little),
+      ];
+    }
+
+    // None of these but 0.0 and -0.0 is exactly a float32, which is the
+    // point: the rounding happens in encode, and decode must read back the
+    // very float32 the old loop read. 1e-40 is subnormal in float32.
+    final values = <double>[
+      0.1,
+      1 / 3,
+      -2.7,
+      1e-7,
+      3.4e38,
+      1e-40,
+      0.0,
+      -0.0,
+      double.nan,
+    ];
+
+    test('returns a Float32List the old decode agrees with exactly', () {
+      final blob = encodeEmbedding(values);
+      final decoded = decodeEmbedding(blob);
+      final old = oldDecode(blob);
+
+      expect(decoded, isA<Float32List>());
+      expect(decoded.length, values.length);
+      for (var i = 0; i < values.length; i++) {
+        if (old[i].isNaN) {
+          expect(decoded[i].isNaN, isTrue, reason: 'index $i');
+          continue;
+        }
+        expect(decoded[i] == old[i], isTrue, reason: 'index $i');
+      }
+      // -0.0 == 0.0 in Dart, so the sign is asserted on its own.
+      final negZero = values.indexOf(-0.0, values.indexOf(0.0) + 1);
+      expect(decoded[negZero].isNegative, isTrue);
+      expect(old[negZero].isNegative, isTrue);
+    });
+
+    test('equals Float32List.fromList and re-encodes byte for byte', () {
+      final finite = values.where((v) => !v.isNaN).toList();
+      final blob = encodeEmbedding(finite);
+      final decoded = decodeEmbedding(blob);
+
+      final expected = Float32List.fromList(finite);
+      for (var i = 0; i < finite.length; i++) {
+        expect(decoded[i] == expected[i], isTrue, reason: 'index $i');
+      }
+      expect(encodeEmbedding(decoded), blob);
+    });
+
+    test('an unaligned blob takes the copying path and agrees', () {
+      final source = encodeEmbedding(const [0.1, -2.7, 1e-7, 0.5]);
+      final bytes = Uint8List(source.length + 1);
+      bytes.setRange(1, bytes.length, source);
+      final unaligned = Uint8List.sublistView(bytes, 1);
+      expect(unaligned.offsetInBytes, 1);
+
+      final decoded = decodeEmbedding(unaligned);
+      final expected = List<double>.of(decodeEmbedding(source));
+
+      expect(decoded, isA<Float32List>());
+      expect(decoded, expected);
+      // A copy, not a view: the source bytes changing afterwards does not
+      // reach it.
+      bytes.fillRange(1, bytes.length, 0);
+      expect(decoded, expected);
+    });
+
+    test('a truncated blob decodes the whole floats only', () {
+      final blob = encodeEmbedding(const [1.0, 2.0, 3.0]);
+      final truncated = Uint8List.fromList([...blob, 9, 9, 9]);
+
+      expect(truncated.length, 4 * 3 + 3);
+      expect(decodeEmbedding(truncated), [1.0, 2.0, 3.0]);
+    });
+
+    test('a blob that starts part-way into a larger buffer is read from '
+        'its own offset, and no further than its own length', () {
+      // Junk on both sides of the vector: a view that ignored the blob's
+      // offset or its length would read it.
+      final floats = encodeEmbedding(values);
+      final big = Uint8List(8 + floats.length + 8)
+        ..fillRange(0, 8, 0xAB)
+        ..setRange(8, 8 + floats.length, floats)
+        ..fillRange(8 + floats.length, 16 + floats.length, 0xCD);
+      final blob = Uint8List.sublistView(big, 8, 8 + floats.length);
+      expect(blob.offsetInBytes, 8);
+
+      final decoded = decodeEmbedding(blob);
+      final old = oldDecode(blob);
+
+      expect(decoded, isA<Float32List>());
+      expect(decoded.length, values.length);
+      for (var i = 0; i < values.length; i++) {
+        if (old[i].isNaN) {
+          expect(decoded[i].isNaN, isTrue, reason: 'index $i');
+          continue;
+        }
+        expect(decoded[i] == old[i], isTrue, reason: 'index $i');
+      }
+
+      // And cut short inside that buffer: fifteen bytes are three floats.
+      final short = Uint8List.sublistView(big, 8, 8 + 15);
+      final three = decodeEmbedding(short);
+      expect(three.length, 3);
+      for (var i = 0; i < 3; i++) {
+        expect(three[i] == old[i], isTrue, reason: 'index $i');
+      }
+    });
+
+    test('an empty blob decodes to an empty list', () {
+      expect(decodeEmbedding(Uint8List(0)), isEmpty);
+    });
+
+    test('an aligned blob is read in place, sharing its bytes', () {
+      // The documented consequence, pinned rather than hidden: the result
+      // is a view over the blob, so it is read and never written to.
+      if (Endian.host != Endian.little) return;
+      final blob = encodeEmbedding(const [0.25, 0.5]);
+      final decoded = decodeEmbedding(blob) as Float32List;
+
+      // `==`, not `identical`: the VM hands out a fresh ByteBuffer wrapper
+      // per `.buffer` read, and its `==` is what compares the bytes behind.
+      expect(decoded.buffer == blob.buffer, isTrue);
+      // And the aliasing itself: a write to the blob shows through.
+      blob.setAll(0, encodeEmbedding(const [0.75]));
+      expect(decoded[0], 0.75);
+    });
+
+    test('the result is fixed-length', () {
+      final decoded = decodeEmbedding(encodeEmbedding(const [0.25, 0.5]));
+
+      expect(() => decoded.add(1.0), throwsUnsupportedError);
+    });
+  });
+
+  group('cosine over Float32List', () {
+    // The typed branch must return the bit-identical double the general
+    // loop returns for the same values: same sums, same order.
+    Float32List randomVector(math.Random random) => Float32List.fromList([
+          for (var i = 0; i < 1024; i++) random.nextDouble() * 2 - 1,
+        ]);
+
+    void same(Float32List a, Float32List b) {
+      final typed = cosine(a, b);
+      final boxed = cosine(List<double>.of(a), List<double>.of(b));
+      expect(typed == boxed, isTrue, reason: 'typed $typed, boxed $boxed');
+      // A mixed pair takes the general loop and agrees with both.
+      expect(cosine(a, List<double>.of(b)) == boxed, isTrue);
+      expect(cosine(List<double>.of(a), b) == boxed, isTrue);
+    }
+
+    test('random 1024-wide pairs', () {
+      final random = math.Random(7);
+      for (var n = 0; n < 20; n++) {
+        same(randomVector(random), randomVector(random));
+      }
+    });
+
+    test('identical, opposite, zero and mismatched vectors', () {
+      final random = math.Random(7);
+      final v = randomVector(random);
+      final opposite = Float32List.fromList([for (final x in v) -x]);
+
+      same(v, v);
+      same(v, opposite);
+      same(v, Float32List(1024));
+      same(Float32List(1024), Float32List(1024));
+      same(v, Float32List(512));
+      same(Float32List(0), Float32List(0));
+    });
+
+    test('decoded stored vectors take the typed loop to the same number', () {
+      final random = math.Random(7);
+      final a = decodeEmbedding(encodeEmbedding(randomVector(random)));
+      final b = decodeEmbedding(encodeEmbedding(randomVector(random)));
+
+      expect(a, isA<Float32List>());
+      expect(cosine(a, b) == cosine(List<double>.of(a), List<double>.of(b)),
+          isTrue);
     });
   });
 }

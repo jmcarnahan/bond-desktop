@@ -946,8 +946,9 @@ compact numeric **Daily cap** field beside it (`settings-cloud-cap`, stored
 `cloud_drafts_daily_cap`, default 50, clamped 1..1000, committed on Enter and
 on losing focus, an unreadable entry ignored). N is
 `MessageStore.cloudDraftsSince(local midnight)` — the sum of the `cloud`
-counts on today's `draft` and `draft_improve` activity rows, re-read on every
-recorded event — so it covers all four doors a draft can leave by: the
+counts on today's `draft` and `draft_improve` activity rows, re-read on the
+activity tick (at most once per 250 ms) — so it covers all four doors a draft
+can leave by: the
 Improve button, the standing rule above, a prefetched draft on a draft stage
 pointed at a third-party target, and a draft a person presses for on such a
 stage, which the composer refuses before anything is queued. Nothing more goes
@@ -1072,15 +1073,16 @@ one, and the table above is pinned verbatim by tests either way.
 
 The four stamps — `Mail`, `Mail reconcile`, `Teams`, `Storyline sweep` — come
 from `syncStampsProvider` (`app/lib/providers/activity_provider.dart`), which
-`SettingsHost` **watches** — it re-reads on every recorded event, so a sync
-landing behind an open Settings pane moves the numbers in it. `Mail reconcile`
-sits directly under `Mail` because it qualifies it: the 24-hour re-enumeration
+`SettingsHost` **watches** — it re-reads on the activity tick (at most once per
+250 ms), so a sync landing behind an open Settings pane moves the numbers in
+it. `Mail reconcile` sits directly under `Mail` because it qualifies it: the
+24-hour re-enumeration
 that catches what the delta feed skipped runs on its own cadence, and a mail
 sync minutes fresher than it is the normal state (see
 [pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md)). The provider is
 split from `activitySnapshotProvider` on purpose: the snapshot pays for the
 whole activity pane (three hundred events and every conversation subject) per
-event, and this section needs four preference reads.
+tick, and this section needs four preference reads.
 `sync_stamps_provider_test.dart` pins it. Times are relative
 and in one unit (`relativeTime` in `app/lib/widgets/time_format.dart`), and
 `null` reads as `never` in the rows. The clock is a `now` parameter rather than
@@ -1206,7 +1208,7 @@ Nothing here reaches for a provider: the section takes rows and six closures,
 and the host wires them through `ContextDirectoriesActions` in
 `app/lib/providers/context_provider.dart`. The list itself is
 `contextDirectoriesProvider`, which the screen **watches** and which re-reads
-on every recorded activity event — so a reconcile landing behind an open
+on the activity tick, at most once per 250 ms — so a reconcile landing behind an open
 Settings pane moves `reading…` to `12 files · read just now` with no timer of
 its own.
 
