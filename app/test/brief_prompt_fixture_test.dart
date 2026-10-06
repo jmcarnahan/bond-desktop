@@ -1,5 +1,6 @@
 // The one place a person can read exactly what the model is shown for a
-// large meeting: test/fixtures/briefs/large_meeting_prompt.txt. On a mismatch
+// large meeting, test/fixtures/briefs/large_meeting_prompt.txt, and for a
+// small one, test/fixtures/briefs/small_meeting_prompt.txt. On a mismatch
 // the test prints the actual text between two marker lines; copy it over.
 import 'dart:convert';
 import 'dart:io';
@@ -20,10 +21,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fixtures/fake_embed_server.dart';
 import 'fixtures/test_db.dart';
 
-/// A fictional twelve-person topical meeting, gathered in full over a real
-/// in-memory store with a scripted related search and a FIXED clock, and
-/// laid out as the brief task's user message. Every stamp below is derived
-/// from [now], so the text is the same on every run.
+/// A fictional twelve-person topical meeting and a three-person one, each
+/// gathered in full over a real in-memory store with a scripted search and a
+/// FIXED clock, and laid out as the brief task's user message. Every stamp
+/// below is derived from [now], so the text is the same on every run.
 void main() {
   setUpAll(initCalendarZones);
 
@@ -71,12 +72,13 @@ void main() {
           required Duration ago,
           required String body,
           String? eventId,
-          String? gateReason}) =>
+          String? gateReason,
+          bool outbound = false}) =>
       store.upsertMessage({
         'source': source,
         'source_message_id': id,
         'conversation_key': key,
-        'direction': 'inbound',
+        'direction': outbound ? 'outbound' : 'inbound',
         'subject': subject,
         'from_name': fromName,
         'from_address': from,
@@ -296,14 +298,181 @@ void main() {
     }
     expect(actual, expected, reason: 'regenerate $golden from the output');
   });
+
+  test('a small topical meeting: the whole user message', () async {
+    const smallGolden = 'test/fixtures/briefs/small_meeting_prompt.txt';
+    const dana = 'dana@fabrikam.com';
+    const sam = 'sam@contoso.com';
+    final zone = CalendarZone.tryNamed('America/Los_Angeles')!;
+
+    // The invite, sent by Dana, who organised it.
+    const invite = 'Fabrikam renewal terms';
+    await conversation('c-invite', 'email', invite,
+        people: const [dana, sam], last: const Duration(hours: 20), count: 1);
+    await message('m-invite', 'c-invite', 'email', invite,
+        fromName: 'Dana Lopez',
+        from: dana,
+        ago: const Duration(hours: 20),
+        body: 'Let us agree the renewal terms and the support tier.',
+        eventId: 'evt-renewal');
+
+    // Dana's 1:1 chat with the owner, matched by her name: the match and
+    // the owner's reply; her note a day on is not part of the exchange.
+    await store.upsertConversation({
+      'source': 'teams',
+      'conversation_key': 't-dana',
+      'subject': 'Dana Lopez',
+      'participants_json': jsonEncode([
+        {'name': 'Dana Lopez', 'email': 'teams:dana-id'},
+        {'name': 'Me', 'email': 'teams:me-id'},
+      ]),
+      'state': 'waiting',
+      'message_count': 3,
+      'last_message_at': at(const Duration(hours: 2)),
+    });
+    await message('t-match', 't-dana', 'teams', 'Dana Lopez',
+        fromName: 'Dana Lopez',
+        from: 'teams:dana-id',
+        ago: const Duration(hours: 30),
+        body: 'The renewal draft caps the price rise at 4 percent.');
+    await message('t-reply', 't-dana', 'teams', 'Dana Lopez',
+        fromName: 'Me',
+        from: 'teams:me-id',
+        ago: const Duration(hours: 29),
+        body: 'Good. Send me the redline when legal is done.',
+        outbound: true);
+    await message('t-late', 't-dana', 'teams', 'Dana Lopez',
+        fromName: 'Dana Lopez',
+        from: 'teams:dana-id',
+        ago: const Duration(hours: 2),
+        body: 'Running five minutes late.');
+
+    // A mail thread Sam wrote in.
+    const support = 'Support tier for the renewal';
+    await conversation('c-support', 'email', support,
+        people: const [sam], last: const Duration(days: 1), count: 2);
+    await message('m-s1', 'c-support', 'email', support,
+        fromName: 'Sam Ortiz',
+        from: sam,
+        ago: const Duration(days: 3),
+        body: 'Support stays on the premium tier at the current rate.');
+    await message('m-s2', 'c-support', 'email', support,
+        fromName: 'Sam Ortiz',
+        from: sam,
+        ago: const Duration(days: 1),
+        body: 'Procurement confirmed the premium tier.');
+
+    // A thread they are only ON: the owner's quote, unanswered.
+    const quote = 'Renewal quote';
+    await conversation('c-quote', 'email', quote,
+        people: const [dana, sam], last: const Duration(hours: 5), count: 1);
+    await message('m-quote', 'c-quote', 'email', quote,
+        fromName: 'Me',
+        from: owner,
+        ago: const Duration(hours: 5),
+        body: 'The updated quote is attached.',
+        outbound: true);
+
+    store.senderHits = [
+      (
+        source: 'teams',
+        conversationKey: 't-dana',
+        cosine: 0.78,
+        messageId: 't-match',
+        receivedAt: at(const Duration(hours: 30)),
+      ),
+      (
+        source: 'email',
+        conversationKey: 'c-support',
+        cosine: 0.64,
+        messageId: 'm-s1',
+        receivedAt: at(const Duration(days: 3)),
+      ),
+    ];
+
+    final start = DateTime.utc(2026, 10, 7, 22); // 3 PM in Los Angeles.
+    final event = CalendarEvent(
+      id: 'evt-renewal',
+      subject: invite,
+      startUtc: start,
+      endUtc: start.add(const Duration(minutes: 30)),
+      responseStatus: 'accepted',
+      organizerName: 'Dana Lopez',
+      organizerAddress: dana,
+      changeKey: 'ck-1',
+      bodyPreview: 'Agree the renewal terms and the support tier.',
+      attendees: const [
+        Attendee(name: 'Me', address: owner),
+        Attendee(name: 'Sam Ortiz', address: sam),
+        Attendee(name: 'Dana Lopez', address: dana),
+      ],
+    );
+
+    final gathered = await BriefGatherer(
+      store,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: () => zone,
+      embeddings: FakeEmbedServer().client,
+    ).gather(event, now: now);
+    final input = (gathered as BriefEligible).input;
+    expect(input.path, BriefPath.people);
+    expect(input.search, 'ok');
+    expect([for (final t in input.threads) t.conversationKey],
+        ['c-invite', 't-dana', 'c-support', 'c-quote']);
+    final actual = MeetingBriefTask(
+      threadCount: input.threads.length,
+      materialCount: input.materials.length,
+    ).buildUserMessage(input);
+
+    // The lines a regenerated golden must not lose.
+    expect(actual,
+        contains('Threads with these people (mail and Teams chats), '
+            'numbered:'));
+    expect(actual, contains("this meeting's own invite"));
+    expect(actual, contains('[2] part of a Teams chat · the latest message '
+        'shown is from'));
+    expect(actual, contains('People, numbered, the organiser first:'));
+    expect(actual, isNot(contains('Running five minutes late.')));
+
+    final file = File(smallGolden);
+    final expected = file.existsSync() ? file.readAsStringSync() : null;
+    if (actual != expected) {
+      // ignore: avoid_print
+      print('----- BEGIN $smallGolden -----\n$actual----- END $smallGolden '
+          '-----');
+    }
+    expect(actual, expected, reason: 'regenerate $smallGolden from the output');
+  });
 }
 
-/// A store whose related search answers [hits]: the test is about what the
-/// prompt shows, and `message_search_test.dart` tests the real read.
+/// A store whose related search answers [hits], and whose people search
+/// ordered by meaning answers [senderHits]: the test is about what the
+/// prompt shows, and `message_search_test.dart` tests the real reads.
 class _RelatedStore extends MessageStore {
   _RelatedStore(super.db);
 
   List<RelatedConversation> hits = const [];
+  List<RelatedConversation> senderHits = const [];
+
+  @override
+  Future<List<RelatedConversation>?> conversationsFromSenders({
+    Uint8List? queryEmbedding,
+    required String embedModel,
+    required Set<String> addresses,
+    required Set<String> names,
+    required String sinceIso,
+    int limit = 12,
+  }) async =>
+      queryEmbedding == null
+          ? super.conversationsFromSenders(
+              embedModel: embedModel,
+              addresses: addresses,
+              names: names,
+              sinceIso: sinceIso,
+              limit: limit,
+            )
+          : senderHits.take(limit).toList();
 
   @override
   Future<List<RelatedConversation>?> relatedConversations(

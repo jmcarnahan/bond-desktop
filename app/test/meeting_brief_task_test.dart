@@ -143,6 +143,8 @@ void main() {
         '- materials:',
         "- The meeting's PURPOSE",
         "- When the thread list is headed 'Threads related",
+        "- When it is headed 'Threads with these people'",
+        '- A thread shown as part of a Teams chat',
         '- questions:',
         '- open_asks:',
         '- points:',
@@ -256,27 +258,29 @@ void main() {
       // JSON-ish text tokenise denser than prose): (16384 - 2700) * 3 =
       // 41052 characters of prompt. The guard sits under that with a margin
       // for the digits the materials budget weights but the rest does not,
-      // at the measured maximum plus about 1-2%. Measured at 39363 with every
+      // at the measured maximum plus about 1-2%. Measured at 39646 with every
       // cap full, every label 300 characters of `&<>` (which the fence
       // escapes, so each costs its full escaped cap), four other files
       // whose names are fenced at 80 (`otherFileNameCap`), the related
-      // path's longer header, its rule (with the chat-excerpt and
-      // trust-order sentences), three invite threads quoting two at 600
+      // path's longer header, the people and related rules and the
+      // chat-excerpt and trust-order rule, three invite threads quoting two at 600
       // under the longest first line, three related threads quoting three at
       // 400 (`relatedSnippetCap`: the same characters, one more fence each)
       // under a mail thread's line, which is longer than an excerpt's, and
       // 300 attendees: the With: line's `withCap` names and its "+285 more",
       // and the related path's people header and its "+292 more in the
-      // meeting who wrote nothing in these threads" tail; it was 39120
+      // meeting who wrote nothing in these threads" tail; it was 39363
+      // (pinned at 39760) before the people path read Teams chats and had a
+      // rule of its own, 39120
       // before the people block listed only who wrote (the old header and
       // "+7 more", and a shorter people rule), 38742 before the chat excerpt (two quoted at 600 and a
       // ` · Teams chat` marker on the three related threads), 38732 before
       // the With: cap (fifteen names, the old people cap), 38133 before the
       // related path and 37012 before the other files and their rule. A
       // thousand attendees would add one digit to the count, inside the
-      // margin. 39760 (about 13.3k tokens, 16.0k with the answer). A cap
+      // margin. 40040 (about 13.3k tokens, 16.1k with the answer). A cap
       // bump that moves it past this has to pay for itself elsewhere.
-      const promptCharBudget = 39760;
+      const promptCharBudget = 40040;
       expect(promptCharBudget,
           lessThanOrEqualTo((16384 - MeetingBriefTask.maxTokens) * 3));
       String words(int n) => List.filled(n ~/ 5, 'word').join(' ');
@@ -554,7 +558,9 @@ void main() {
 
     test('the thread list is headed by its path', () {
       final people = const MeetingBriefTask().buildUserMessage(input());
-      expect(people, contains('Threads with these people, numbered:'));
+      expect(people,
+          contains('Threads with these people (mail and Teams chats), '
+              'numbered:'));
       expect(people, isNot(contains('Threads related to this meeting')));
       final related = const MeetingBriefTask()
           .buildUserMessage(input(path: BriefPath.related));
@@ -640,26 +646,89 @@ void main() {
 
       final plain = const MeetingBriefTask().buildUserMessage(input());
       expect(plain, isNot(contains("this meeting's own invite")));
-      expect(plain, isNot(contains('Teams chat')));
+      // The people header names Teams chats; no thread's line does.
+      expect(
+          plain.split('\n').where((l) => l.startsWith('[')),
+          everyElement(isNot(contains('Teams chat'))));
     });
 
-    test('the related-threads rule bounds an excerpt and orders trust', () {
+    test('on the people path a part of a Teams chat has its own line under '
+        'the people header', () {
+      final msg = const MeetingBriefTask().buildUserMessage(input(
+        now: DateTime.utc(2026, 9, 28, 13),
+        threads: [
+          const BriefThread(
+            source: 'email',
+            conversationKey: 'c-1',
+            subject: 'Fabrikam renewal',
+            state: 'waiting',
+            lastAt: '2026-09-28T09:00:00.000000Z',
+          ),
+          BriefThread(
+            source: 'teams',
+            conversationKey: 't-1',
+            subject: 'Dana Lopez',
+            state: 'needs_reply',
+            lastAt: '2026-09-28T10:00:00.000000Z',
+            messageCount: 2,
+            snippets: [wrapUntrusted('message', 'Dana Lopez: tiers are final')],
+            excerpt: true,
+          ),
+        ],
+      ));
+      final header = msg.indexOf(
+          'Threads with these people (mail and Teams chats), numbered:\n');
+      expect(header, greaterThanOrEqualTo(0));
+      expect(
+          msg,
+          contains('[2] part of a Teams chat · the latest message shown is '
+              'from 3 hours ago\n'
+              '${wrapUntrusted('subject', 'Dana Lopez')}\n'
+              '${wrapUntrusted('message', 'Dana Lopez: tiers are final')}'));
+      expect(msg.indexOf('[2] part of a Teams chat'), greaterThan(header));
+      expect(msg, contains('[1] waiting on them · last message 4 hours ago'));
+      expect(msg.split('\n').where((l) => l.startsWith('[2]')).single,
+          isNot(contains('waiting')));
+    });
+
+    test('each header has its rule; the excerpt bound and the trust order '
+        'are a rule of their own, for both paths', () {
       final prompt = const MeetingBriefTask().systemPrompt;
+      final lines = prompt.split('\n');
+      // The related rule ends at its own last sentence now.
       expect(
-          prompt,
-          contains('A thread shown as part of a Teams chat is only the few '
+          lines,
+          contains(startsWith(
+              "- When the thread list is headed 'Threads related to this "
+              "meeting'")));
+      expect(
+          lines.singleWhere((l) => l.startsWith(
+              "- When the thread list is headed 'Threads related")),
+          endsWith('never tie a thread to a person it does not name.'));
+      expect(
+          lines,
+          contains("- When it is headed 'Threads with these people', the "
+              "threads after the invite's own are mail and Teams chats these "
+              'people wrote in or are on, whatever their subject: say what is '
+              'going on with these people, and never present a thread about '
+              'something else as what this meeting is for.'));
+      expect(
+          lines,
+          contains('- A thread shown as part of a Teams chat is only the few '
               'messages around the one that was found; say nothing about the '
-              'rest of that chat.'));
-      expect(
-          prompt,
-          contains("Trust the inputs in this order: the meeting's own subject "
-              'and invite text, then the files sent ahead, then these '
-              'threads.'));
-      // Both ride the related-threads rule, before the questions.
-      final rule = prompt.indexOf("- When the thread list is headed 'Threads "
-          "related");
-      final trust = prompt.indexOf('Trust the inputs in this order');
-      expect(rule, lessThan(trust));
+              'rest of that chat. Trust the inputs in this order: the '
+              "meeting's own subject and invite text, then the files sent "
+              'ahead, then the threads.'));
+      expect(prompt, isNot(contains('then these threads')));
+      // Related, then people, then the excerpt and trust rule, all before
+      // the questions.
+      final related = prompt.indexOf("- When the thread list is headed "
+          "'Threads related");
+      final people = prompt.indexOf("- When it is headed 'Threads with these "
+          "people'");
+      final trust = prompt.indexOf('- A thread shown as part of a Teams chat');
+      expect(related, lessThan(people));
+      expect(people, lessThan(trust));
       expect(trust, lessThan(prompt.indexOf('- questions:')));
     });
 

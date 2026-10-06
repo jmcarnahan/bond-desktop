@@ -90,7 +90,7 @@ class BriefSection extends StatelessWidget {
   static const String pausedText =
       'Briefs are paused while processing is off.';
   static const String noMailText =
-      'No brief — no recent mail with these people.';
+      'No brief — no recent mail or Teams chats with these people.';
   static const String noOthersText = 'No brief — nobody else is invited.';
   static const String tooFarText = 'Briefs are written for today and tomorrow.';
   static const String startedText = 'No brief — this meeting has started.';
@@ -105,7 +105,7 @@ class BriefSection extends StatelessWidget {
   /// threads came from, so a brief written from threads found by subject is
   /// read as a sample rather than everything there is.
   static const String fromPeopleText =
-      'From your mail with the people in this meeting.';
+      'From your mail and Teams chats with the people in this meeting.';
   static const String fromRelatedText =
       'From threads related to this meeting — a sample, not everything on '
       'the subject.';

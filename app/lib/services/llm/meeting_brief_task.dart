@@ -30,7 +30,9 @@ Rules:
 - people: one line for each person listed — one line, at most about 25 words — in the order given: who they are as the inputs show it (their organisation, their part in the threads), the last thing they wrote or asked and when, and anything open with them. A person the threads show nothing from gets the line "nothing from them in these threads": the threads are all you were shown, mail and Teams chats alike, so never say what someone has or has not written elsewhere. Use only the names given.
 - materials: the numbered materials are files sent ahead; the text of a file is shown when it has been read, and a file whose line says "you" is one the owner sent. For each one that matters, up to 5 points, each a short line, of what it SAYS — the figures, names, dates, claims, decisions asked for, and gaps, as written in the file: the detail the owner would otherwise have to open it for. A material shown unread or not shown is named as arrived in one point, not summarised. Use only numbers in the materials list; leave this empty when there are none.
 - The meeting's PURPOSE comes from its own invite — the subject, the invite text, and the threads about THIS meeting — never from files or threads that merely involve the same people. A file listed under "Files on the other threads" was NOT sent for this meeting: do not describe this meeting as being about it, and name it only when the invite or a thread about this meeting refers to it. An invite that says little gets a brief that says so ("The invite gives no agenda.") and then what is open with these people.
-- When the thread list is headed 'Threads related to this meeting', the threads after the invite's own were found because their text is close to this meeting's subject, not because these people are on them. Some are about something else: use a thread only when it is clearly about this meeting's topic, leave the rest out entirely, and never tie a thread to a person it does not name. A thread shown as part of a Teams chat is only the few messages around the one that was found; say nothing about the rest of that chat. Trust the inputs in this order: the meeting's own subject and invite text, then the files sent ahead, then these threads.
+- When the thread list is headed 'Threads related to this meeting', the threads after the invite's own were found because their text is close to this meeting's subject, not because these people are on them. Some are about something else: use a thread only when it is clearly about this meeting's topic, leave the rest out entirely, and never tie a thread to a person it does not name.
+- When it is headed 'Threads with these people', the threads after the invite's own are mail and Teams chats these people wrote in or are on, whatever their subject: say what is going on with these people, and never present a thread about something else as what this meeting is for.
+- A thread shown as part of a Teams chat is only the few messages around the one that was found; say nothing about the rest of that chat. Trust the inputs in this order: the meeting's own subject and invite text, then the files sent ahead, then the threads.
 - questions: at most 5 questions the owner could ask in the meeting, each grounded in one specific fact from a file or a thread and naming it. Never rhetorical, never generic.
 - open_asks: at most 4 things one of these people asked the owner that are still open. Name the person as the input names them. Take them from the "Open asks" section; leave this empty when that section is empty.
 - points: at most 5 short lines on where things stand in the threads, each naming the thread it comes from by its number in the list, or -1 when it comes from no one thread.
@@ -364,10 +366,12 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
     if (input.threads.isEmpty) {
       buffer.writeln('Threads: none.');
     } else {
-      // The related path's header says how the threads were found: by
-      // their text, so some are about something else (the prompt's rule).
+      // The header says how the threads were found, and the prompt has a
+      // rule for each: by their people (mail and chats alike), or by their
+      // text, so some are about something else.
       buffer.writeln(switch (input.path) {
-        BriefPath.people => 'Threads with these people, numbered:',
+        BriefPath.people =>
+          'Threads with these people (mail and Teams chats), numbered:',
         BriefPath.related => 'Threads related to this meeting, numbered '
             '(found by their text, not by their people):',
       });

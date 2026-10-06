@@ -315,9 +315,11 @@ class MeetingBriefHandler extends WorkHandler {
         'people': input.people.length,
         // What the model was shown of the files, not what was gathered.
         'text_chars': MeetingBriefTask.materialTextCharsWritten(input),
-        // Which way the threads were found, how many the related search
-        // gave, and its best cosine in hundredths: words and numbers only.
+        // Which way the threads were found, how the search for them went,
+        // how many the related search gave, and the best cosine in
+        // hundredths: words and numbers only.
         'path': input.path.wire,
+        if (input.search != null) 'search': input.search,
         'related': withThreads.relatedThreadCount,
         if (input.relatedBest != null)
           'related_best': (input.relatedBest! * 100).round(),

@@ -450,7 +450,8 @@ void main() {
       EventBriefView(
           brief: row(EventBrief.skipped, hash: 'ineligible:no_mail')),
     );
-    expect(status(tester), 'No brief — no recent mail with these people.');
+    expect(status(tester),
+        'No brief — no recent mail or Teams chats with these people.');
 
     await pump(
       tester,
@@ -678,7 +679,7 @@ void main() {
         }
       }
       expect(BriefSection.fromPeopleText,
-          'From your mail with the people in this meeting.');
+          'From your mail and Teams chats with the people in this meeting.');
       expect(BriefSection.fromRelatedText,
           'From threads related to this meeting — a sample, not everything '
           'on the subject.');

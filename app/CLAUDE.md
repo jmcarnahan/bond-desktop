@@ -1244,9 +1244,9 @@ that bite.
 - **Briefs:**
   - Two paths (`briefPathOf`, `brief_path.dart`, pure): `people` for ≤ 5
     others (`briefPeopleMax`) with no list address (`briefLooksLikeList`), or
-    a topicless meeting (`briefIsTopicless`) of ≤ 15; else `related`. The
-    people path reads MAIL only (Teams participants are `teams:<id>`, no
-    address to match); the related path reads mail AND Teams by meaning. The
+    a topicless meeting (`briefIsTopicless`) of ≤ 15; else `related`. BOTH
+    paths read mail AND Teams and search by meaning; the people path adds
+    the senders and the date as a constraint (below). The
     four heuristics (list, `briefAgendaOf`'s boilerplate strip — a bare
     `Join: <link>` included — topicless, `briefIsLogisticsSubject`) are
     unmeasured and English only. Topicless sets aside PERSONS' name words
@@ -1258,8 +1258,27 @@ that bite.
     (`conversation_state.dart`), never a regex of their own.
   - Threads: the event's own invite threads first (`messagesForEvent` for the
     occurrence, then its series master; ≤ 3, `BriefThread.invite`), then on
-    the people path the 30-day address match (`noMail` means no threads at
-    all), on the related path ≤ 4 (`maxRelated`) from ONE
+    the people path what its people WROTE (`_fromPeopleOf`, ONE
+    `MessageStore.conversationsFromSenders`: kept inbound messages of the
+    last 21 days, a mail by `from_address`, a Teams message by `from_name`
+    = the invite's name, ASCII-case-insensitive — the name is the only link
+    to a chat's `teams:<id>` people; ≤ 4 kept of ≤ 12 conversations, no
+    floor), ordered BY MEANING when there is a query (`BriefInput.search`
+    `ok`: `vec_distance_cosine` in SQL over just their messages' stored
+    vectors, since vec0 cannot filter and theirs may sit outside the nearest
+    400), else BY TIME, their newest message standing for the conversation
+    (`recent` for a topicless meeting — no embed call at all — `off`,
+    `unavailable`); then the 30-day address match (the mail they are only
+    ON: the owner's unanswered thread to them), never bringing back what
+    the first read found or dropped. Ordered by meaning the found threads
+    lead and the address-matched only fill the room left (unread when there
+    is none); ordered by time both sort together, pressing first then
+    newest (an excerpt by its newest SHOWN message). `noMail` means no
+    invite thread, nothing they wrote AND no address match, so a meeting
+    whose only contact is a Teams chat is briefed. Found threads go through
+    the same `_threadsOf` as the related path's (logistics and other
+    invites dropped, a chat an EXCERPT, a mail the match + newest two). On
+    the related path ≤ 4 (`maxRelated`) from ONE
     `MessageStore.relatedConversations` (a lean read of its own over ALL 400
     KNN neighbours at/above 0.60 `relatedFloor`, never `semanticSearch`'s
     nearest 100, so one busy chat cannot crowd the rest out; best message
@@ -1281,9 +1300,10 @@ that bite.
     embedded under `searchQueryPrefix`, cached per text in the gatherer, and
     a failed embed is not retried for 2 min (`embedRetryAfter`). Its hash
     adds `path|related` + `related|<ok|off|no_query|unavailable>` after the
-    owner line; the people path's hash is byte-identical to before. Tests
-    script the search by overriding `relatedConversations`
-    (`_RelatedStore`). Materials (`BriefMaterial`) are the
+    owner line; the people path adds no line (a search that comes back
+    reorders its threads, and their lines are the hash). Tests script the
+    searches by overriding `relatedConversations` and
+    `conversationsFromSenders` (`_RelatedStore`). Materials (`BriefMaterial`) are the
     files on THIS MEETING'S OWN invite threads only (the occurrence's, then
     its series master's) — inbound and outbound, non-inline `file|reference`
     attachments that are not images (the owner's own: sender `you`). Files on
@@ -1302,9 +1322,9 @@ that bite.
     `(messageId, attachmentId)` pair). The planner gathers with
     `passages: false`, the LIGHT gather: no text, no people, no passage
     embedding (none of them hashed, so the hash is the same); only the
-    handler reads them and embeds the meeting, once, lazily. The related
-    search runs in both gathers (it is hashed): one cached query embed per
-    meeting text per run. The hash carries
+    handler reads them and embeds the meeting, once, lazily. The thread
+    search (either path) runs in both gathers (it is hashed): one cached
+    query embed per meeting text per run. The hash carries
     `material|msg|att|textStatus|digestStatus`, so a deck whose text or
     digest lands later re-briefs on the next pass.
   - People (`BriefPerson`, handler's gather only): the organiser first,
@@ -1314,8 +1334,8 @@ that bite.
     by the invite's name, case-insensitive — a roster alone is not
     writing), so nobody is listed to be told "nothing from them"; nobody
     wrote → no block. `peopleMore` = others − listed on both paths. The
-    PEOPLE path still lists everyone and matches MAIL only: a chat's roster
-    carries `teams:<id>` and a name, never an address; the With: line on the related
+    PEOPLE path lists everyone, and what a person wrote in a chat excerpt
+    is theirs by the same name match; the With: line on the related
     path is organiser first too (`briefOthers` puts an attendee copy's
     organiser LAST), `briefOrgOf` (the label before
     the public suffix; the tenant for `*.onmicrosoft.com`, past a
@@ -1369,8 +1389,9 @@ that bite.
     also carries `path` (`MeetingBrief.pathPeople`/`pathRelated`, pinned to
     `BriefPath.wire` by `brief_path_test`; missing or any other value reads
     `people`) and per-thread `invite` (written only when true); no schema
-    change. The ok note adds `path`, `related` and `related_best` (cosine ×
-    100, only when known); the activity sentence appends ", found by
+    change. The ok note adds `path`, `search` (the search's state word),
+    `related` and `related_best` (cosine × 100, only when a search by
+    meaning kept a thread, either path); the activity sentence appends ", found by
     subject" on the related path. `MeetingBrief`
     writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,
     and `BriefMaterialOut.takeaway` (the points joined) is kept for old
@@ -1383,17 +1404,22 @@ that bite.
     headed `People, numbered, the organiser first:` / tail `+N more` on the
     people path, `People who wrote in the threads below (mail or Teams
     chat), numbered:` / `+N more in the meeting who wrote nothing in these
-    threads` on the related path); the prompt's opening says "recent mail
-    and Teams chats", and a person the threads show nothing from gets
-    "nothing from them in these threads" — never "no recent mail" (that
-    phrase is only the `no_mail` skip's, a different thing);
+    threads` on the related path); the thread list is headed `Threads with
+    these people (mail and Teams chats), numbered:` or `Threads related to
+    this meeting, numbered (found by their text, not by their people):`,
+    and the prompt has a rule keyed on each heading; the prompt's opening
+    says "recent mail and Teams chats", and a person the threads show
+    nothing from gets "nothing from them in these threads" — never "no
+    recent mail" (the `no_mail` skip's sentence is "no recent mail or Teams
+    chats with these people", a different thing);
     every label (file names, thread and last subjects, the meeting's
     subject, storyline titles, attendee and people names) is capped at 120
     AS ESCAPED (`labelCap`, `_label`: the fence writes `&` as five). A
     chat excerpt's thread line is `[n] part of a Teams chat · the latest
     message shown is from <ago>` (no state, no urgent marker; there is no
-    ` · Teams chat` marker), and the related rule ends with the excerpt
-    sentence and "Trust the inputs in this order: …". The
+    ` · Teams chat` marker), on either path; the excerpt sentence and "Trust
+    the inputs in this order: …" are a rule of their own, after the two
+    heading rules. The
     materials' digest + `material_text` + passages share `materialsBudget`
     10000, a block costing its length PLUS its digit count, in two rounds
     (`_spend`): digest then text (whole, else a word-cut head while > 1000
@@ -1418,11 +1444,12 @@ that bite.
     block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
     forced sync after a write); `_planBriefs` prints a pass of ≥ 100 ms as
-    counts only. A READY related-path brief younger than
-    `relatedRewriteAfter` (30 min) is not rewritten when its hash moves
-    unless the meeting is within `relatedRewriteNear` (1 h): the related set
-    follows vectors landing behind the AI backlog. Only delays; no brief,
-    failed, skipped and the people path are untouched. A planner test of it
+    counts only. A READY brief (either path) younger than `rewriteAfter` (30
+    min) is not rewritten when its hash moves; within `rewriteNear` (1 h) of
+    the meeting the wait is `rewriteNearAfter` (5 min): the threads follow
+    vectors landing behind the AI backlog, and a chat with an attendee
+    moves with every line. Only delays; no brief, failed and skipped rows
+    are untouched. A planner test of it
     stores a ready brief under an OLD hash with no pending work row, or a 0
     proves nothing. It skips an event only when its brief is
     fresh (< 2 h) AND the inputs hash is unchanged; `_queuedFor` (event id →

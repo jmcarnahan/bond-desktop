@@ -17,6 +17,7 @@ import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
 import 'package:bond_inbox/services/llm/prompt_guard.dart';
+import 'package:bond_inbox/services/teams_sync.dart' show teamsBotGate;
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
@@ -196,6 +197,14 @@ void main() {
     expect(g, isA<BriefIneligible>());
     return (g as BriefIneligible).why;
   }
+
+  /// What [server] embedded as a DOCUMENT — the meeting, for the passages —
+  /// leaving out the people search's query, which a topical meeting on the
+  /// people path embeds too.
+  List<String> documentEmbeds(FakeEmbedServer server) => [
+        for (final i in server.inputs)
+          if (!i.startsWith(EmbeddingsClient.searchQueryPrefix)) i,
+      ];
 
   /// Pins [now] to Tue 6 Oct 2026 09:00 in Los Angeles — never the wall
   /// clock, so the end-of-tomorrow edge cannot flake at 23:59 — and gives
@@ -1142,8 +1151,12 @@ void main() {
       expect(sheet.passages.single, contains('x' * (BriefGatherer.passageCap - 30)));
       expect(sheet.passages.single, isNot(contains('x' * BriefGatherer.passageCap)));
 
-      expect(server.inputs, ['Fabrikam sync\nAgenda: pricing.'],
+      expect(documentEmbeds(server), ['Fabrikam sync\nAgenda: pricing.'],
           reason: 'the meeting, embedded once, under the document prefix');
+      expect(server.inputs,
+          contains('${EmbeddingsClient.searchQueryPrefix}Fabrikam sync\n'
+              'Agenda: pricing.'),
+          reason: "the people search's query, the only other embedding");
       // One scoped search per file, never one shared shortlist.
       expect([for (final c in chunks.knnCalls) c.attachmentIds],
           unorderedEquals([
@@ -1164,7 +1177,14 @@ void main() {
           passages: false);
       expect((quiet as BriefEligible).input.inputsHash, input.input.inputsHash);
       expect(quiet.input.materials.every((m) => m.passages.isEmpty), isTrue);
-      expect(server.calls, 1, reason: 'still only the first gather embedded');
+      expect(documentEmbeds(server), hasLength(1),
+          reason: 'still only the first gather embedded the meeting');
+      expect(
+          server.inputs
+              .where((i) => i.startsWith(EmbeddingsClient.searchQueryPrefix)),
+          hasLength(2),
+          reason: "the people search's query, once per gatherer: each "
+              'caches its own');
     });
 
     test('a long deck cannot starve the other files of passages', () async {
@@ -1188,7 +1208,8 @@ void main() {
       expect(
           materials.firstWhere((m) => m.attachmentId == 'a-deck').passages,
           hasLength(BriefGatherer.passagesPerMaterial));
-      expect(server.calls, 1, reason: 'the meeting is still embedded once');
+      expect(documentEmbeds(server), hasLength(1),
+          reason: 'the meeting is still embedded once');
     });
 
     test('no chunks, no embedding call', () async {
@@ -1198,7 +1219,10 @@ void main() {
       final server = FakeEmbedServer();
       final input = await withChunks(chunks, server).gather(meeting(), now: now);
       expect((input as BriefEligible).input.materials.single.passages, isEmpty);
-      expect(server.calls, 0);
+      expect(documentEmbeds(server), isEmpty);
+      expect(server.inputs.single,
+          startsWith(EmbeddingsClient.searchQueryPrefix),
+          reason: "the one call is the people search's query");
       expect(chunks.knnCalls, isEmpty);
     });
 
@@ -1238,15 +1262,18 @@ void main() {
 
     final input = await eligible(meeting(bodyPreview: 'Agenda: renewal.'));
     final snippets = input.threads.single.snippets;
-    expect(snippets, hasLength(2), reason: 'the last two messages');
+    // Dana wrote in it, so the people search finds it by her newest message
+    // and quotes that and the newest two: all three, at the smaller cap.
+    expect(snippets, hasLength(3), reason: 'the match and the newest two');
     for (final s in snippets) {
       expect(s, startsWith('<untrusted_data source="message">'));
       expect(s, endsWith('</untrusted_data>'));
     }
-    expect(snippets.first, contains('&lt;b&gt;'), reason: 'escaped, not raw');
+    expect(snippets[1], contains('&lt;b&gt;'), reason: 'escaped, not raw');
     // The cap holds on the text inside the fence.
+    expect(snippets.last, contains('x' * 300));
     expect(snippets.last.length,
-        lessThan(BriefGatherer.snippetCap + 100));
+        lessThan(BriefGatherer.relatedSnippetCap + 100));
     expect(input.openAsks.single.ask, startsWith('<untrusted_data source="ask">'));
     expect(input.invitePreview, startsWith('<untrusted_data source="invite">'));
   });
@@ -1671,18 +1698,21 @@ void main() {
           '${EmbeddingsClient.searchQueryPrefix}Falcon launch plan');
     });
 
-    /// A Teams chat row for [key]: [count] messages, the newest [last] ago.
+    /// A Teams chat row for [key]: [count] messages, the newest [last] ago,
+    /// with [roster] as the Teams sync writes it — a name and a `teams:` id.
     Future<void> chatRow(String key,
             {required Duration last,
             required int count,
-            String state = 'waiting'}) =>
+            String state = 'waiting',
+            String subject = 'Falcon room',
+            List<Map<String, String>> roster = const [
+              {'name': 'Kim', 'email': 'teams:kim'},
+            ]}) =>
         store.upsertConversation({
           'source': 'teams',
           'conversation_key': key,
-          'subject': 'Falcon room',
-          'participants_json': jsonEncode([
-            {'name': 'Kim', 'email': 'teams:kim'},
-          ]),
+          'subject': subject,
+          'participants_json': jsonEncode(roster),
           'state': state,
           'message_count': count,
           'last_message_at': stampAgo(last),
@@ -2315,8 +2345,8 @@ void main() {
       expect(noIndex.inputsHash, isNot(off.input.inputsHash));
     });
 
-    test("a five-person meeting's hash is the pre-change formula, byte for "
-        'byte', () async {
+    test("a five-person meeting's hash: the people path adds no path or "
+        'search line, byte for byte', () async {
       await thread('c-1');
       final e = meeting(attendees: const [
         Attendee(name: 'Dana Lee', address: dana),
@@ -2325,9 +2355,14 @@ void main() {
         Attendee(name: 'Lu', address: 'lu@northwind.com'),
         Attendee(name: 'Mo', address: 'mo@northwind.com'),
       ]);
+      // A topical meeting: the people search embeds its query and finds
+      // Dana's thread by her message.
+      related.senderHits = [hit('c-1', 0.7, messageId: 'm-c-1')];
       final input = await relatedInput(e);
       expect(input.path, BriefPath.people);
-      expect(server.calls, 0, reason: 'the people path embeds no query');
+      expect(input.search, 'ok');
+      expect(server.inputs.single,
+          startsWith(EmbeddingsClient.searchQueryPrefix));
       final row = (await store.getConversationRow('email', 'c-1'))!;
       final lines = [
         'event|${e.id}|${e.changeKey}',
@@ -2355,6 +2390,415 @@ void main() {
       expect([for (final t in input.threads) t.conversationKey], ['c-1']);
       expect(related.calls, isEmpty);
       expect(server.calls, 0);
+    });
+
+    group('the people path reads what its people wrote, mail and Teams', () {
+      const lopez = Attendee(name: 'Dana Lopez', address: dana);
+      const danaRoster = [
+        {'name': 'Dana Lopez', 'email': 'teams:dana-id'},
+      ];
+
+      CalendarEvent small({
+        String subject = 'Fabrikam renewal pricing',
+        List<Attendee> attendees = const [
+          Attendee(name: 'Me', address: owner),
+          lopez,
+        ],
+      }) =>
+          meeting(subject: subject, attendees: attendees);
+
+      /// Topicless: nothing to search by, so ordered by time.
+      CalendarEvent oneOnOne() => small(subject: '1:1');
+
+      /// Dana's 1:1 chat with the owner: its row, as the Teams sync writes
+      /// it, [count] messages, the newest [last] ago.
+      Future<void> danaChat(String key,
+              {required Duration last,
+              int count = 1,
+              String state = 'waiting'}) =>
+          chatRow(key,
+              last: last,
+              count: count,
+              state: state,
+              subject: 'Renewal chat',
+              roster: danaRoster);
+
+      /// Dana writing in a chat: no address, her id and her name.
+      Future<void> danaSays(String id, String key, Duration ago,
+              {String? body}) =>
+          chatSays(id, key, ago,
+              fromName: 'Dana Lopez', fromAddress: 'teams:dana-id', body: body);
+
+      /// A mail thread Dana wrote in: the row with her on it, one message.
+      Future<void> danaMail(String key, Duration ago,
+          {String? subject, String? eventId}) async {
+        await conversation(key, ago: ago, subject: subject);
+        await message('m-$key', key,
+            fromName: 'Dana Lopez', ago: ago, eventId: eventId);
+      }
+
+      /// A mail thread Dana is only ON: Kim wrote it, [pressing] or not.
+      Future<void> onlyOn(String key, Duration ago,
+          {bool pressing = false}) async {
+        await conversation(key,
+            people: const [dana, 'kim@contoso.com'], ago: ago);
+        await message('m-$key', key,
+            from: 'kim@contoso.com', fromName: 'Kim', ago: ago);
+        if (pressing) await decide('m-$key', urgency: 'high');
+      }
+
+      List<String> keys(BriefInput input) =>
+          [for (final t in input.threads) t.conversationKey];
+
+      test('a 1:1 whose only contact is a Teams chat Dana wrote in is '
+          'briefed from an excerpt of it, by time, with no query embedded',
+          () async {
+        await danaChat('t-dana', last: const Duration(hours: 2), count: 2);
+        await danaSays('d-1', 't-dana', const Duration(hours: 3),
+            body: 'Are the tiers final?');
+        await chatSays('o-1', 't-dana', const Duration(hours: 2),
+            outbound: true);
+
+        final g = await relating.gather(oneOnOne(), now: now, passages: false);
+        expect(g, isA<BriefEligible>(), reason: 'a chat is contact: no no_mail');
+        final input = (g as BriefEligible).input;
+        expect(input.path, BriefPath.people);
+        expect(input.search, 'recent');
+        final t = input.threads.single;
+        expect((t.source, t.conversationKey, t.excerpt),
+            ('teams', 't-dana', true));
+        expect(t.snippets.first, contains('Are the tiers final?'));
+        expect(server.inputs, isEmpty,
+            reason: 'a topicless meeting has nothing to search by');
+        expect([for (final c in related.senderCalls) c.ranked], [false]);
+        expect(related.threadLoads, isNot(contains('t-dana')));
+        expect(input.relatedBest, isNull);
+      });
+
+      test('nothing from them anywhere and no invite thread: no_mail; asked, '
+          'a brief with no threads', () async {
+        // Somebody else's chat and mail, with nobody from the meeting on
+        // them.
+        await chatRow('t-kim', last: const Duration(hours: 1), count: 1);
+        await chatSays('k-1', 't-kim', const Duration(hours: 1));
+        await topic('c-kim');
+
+        final g = await relating.gather(oneOnOne(), now: now);
+        expect((g as BriefIneligible).why, BriefIneligibility.noMail);
+        final asked =
+            await relating.gather(oneOnOne(), now: now, asked: true)
+                as BriefEligible;
+        expect(asked.input.threads, isEmpty);
+      });
+
+      test('a topical meeting is searched by meaning among what its people '
+          'wrote: addresses, the names the invite gives, three weeks', () async {
+        await danaMail('c-a', const Duration(hours: 5));
+        related.senderHits = [
+          hit('c-a', 0.71, ago: const Duration(hours: 5)),
+        ];
+        final e = small(attendees: const [
+          Attendee(name: 'Me', address: owner),
+          lopez,
+          // Named by address only: matched in mail alone.
+          Attendee(name: '', address: sam),
+        ]);
+
+        final full = await relatedInput(e);
+        await relatedInput(e, passages: false);
+        expect(full.path, BriefPath.people);
+        expect(full.search, 'ok');
+        expect(keys(full), ['c-a']);
+        expect(full.relatedBest, closeTo(0.71, 1e-9));
+        expect([for (final c in related.senderCalls) c.ranked], [true, true],
+            reason: 'ordered by meaning, so never asked by time');
+        final call = related.senderCalls.first;
+        expect(call.embedModel, EmbeddingsClient.documentModelTag);
+        expect(call.addresses, {dana, sam});
+        expect(call.names, {'Dana Lopez'});
+        expect(call.limit, BriefGatherer.relatedCandidateLimit);
+        expect(
+            DateTime.parse(call.sinceIso)
+                .difference(now.subtract(briefRelatedWindow))
+                .abs(),
+            lessThan(const Duration(seconds: 1)));
+        expect(server.inputs,
+            ['${EmbeddingsClient.searchQueryPrefix}Fabrikam renewal pricing'],
+            reason: 'embedded once across the two gathers');
+        expect(related.calls, isEmpty, reason: 'no related search');
+      });
+
+      test('ordered by meaning: what they wrote leads in score order, then '
+          'the mail they are only on, pressing first — it never jumps the '
+          'found ones', () async {
+        await danaChat('t-dana', last: const Duration(hours: 4));
+        await danaSays('d-1', 't-dana', const Duration(hours: 4));
+        await danaMail('c-a', const Duration(hours: 5));
+        await onlyOn('c-press', const Duration(hours: 2), pressing: true);
+        await onlyOn('c-plain', const Duration(minutes: 30));
+        related.senderHits = [
+          hit('t-dana', 0.8,
+              source: 'teams',
+              messageId: 'd-1',
+              ago: const Duration(hours: 4)),
+          hit('c-a', 0.6, ago: const Duration(hours: 5)),
+        ];
+
+        final input = await relatedInput(small());
+        expect(input.search, 'ok');
+        expect(keys(input), ['t-dana', 'c-a', 'c-press', 'c-plain']);
+        expect([for (final t in input.threads) t.excerpt],
+            [true, false, false, false]);
+        expect([for (final t in input.threads) t.ranked],
+            [false, false, true, false]);
+      });
+
+      test('ordered by time: a pressing thread they are on leads, then the '
+          'rest newest first, a chat placed by its newest SHOWN message',
+          () async {
+        // Dana wrote thirty hours ago; Kim's chatter half an hour ago is a
+        // day and more later, so outside her excerpt — and the room's own
+        // newest stamp.
+        await danaChat('t-dana', last: const Duration(minutes: 30), count: 2);
+        await danaSays('d-1', 't-dana', const Duration(hours: 30));
+        await chatSays('k-late', 't-dana', const Duration(minutes: 30));
+        await onlyOn('c-press', const Duration(hours: 48), pressing: true);
+        await onlyOn('c-mid', const Duration(hours: 10));
+        await onlyOn('c-older', const Duration(hours: 40));
+
+        final input = await relatedInput(oneOnOne());
+        expect(input.search, 'recent');
+        expect(keys(input), ['c-press', 'c-mid', 't-dana', 'c-older']);
+        expect(input.threads[2].lastAt, stampAgo(const Duration(hours: 30)));
+      });
+
+      test('at most four found, six in all, the invite threads leading',
+          () async {
+        for (var i = 0; i < 2; i++) {
+          await danaMail('inv-$i', Duration(hours: 10 + i), eventId: 'evt-1');
+        }
+        for (var i = 0; i < 6; i++) {
+          await danaMail('c-$i', Duration(hours: i + 1));
+        }
+        related.senderHits = [
+          for (var i = 0; i < 6; i++)
+            hit('c-$i', 0.9 - i / 100, ago: Duration(hours: i + 1)),
+        ];
+
+        final input = await relatedInput(small());
+        expect(keys(input), ['inv-0', 'inv-1', 'c-0', 'c-1', 'c-2', 'c-3']);
+        expect([for (final t in input.threads) t.invite],
+            [true, true, false, false, false, false]);
+        expect(related.threadLoads, isNot(contains('c-4')));
+        expect(related.threadLoads, isNot(contains('c-5')));
+      });
+
+      test('ordered by meaning with the list already full, the mail they are '
+          'only on is never read; with room left, it is', () async {
+        for (var i = 0; i < 3; i++) {
+          await danaMail('inv-$i', Duration(hours: 10 + i), eventId: 'evt-1');
+        }
+        for (var i = 0; i < 4; i++) {
+          await danaMail('c-$i', Duration(hours: i + 1));
+        }
+        await onlyOn('c-only', const Duration(minutes: 30), pressing: true);
+        related.senderHits = [
+          for (var i = 0; i < 4; i++)
+            hit('c-$i', 0.9 - i / 100, ago: Duration(hours: i + 1)),
+        ];
+
+        final full = await relatedInput(small());
+        expect(keys(full), ['inv-0', 'inv-1', 'inv-2', 'c-0', 'c-1', 'c-2']);
+        expect(related.threadLoads, isNot(contains('c-only')));
+
+        // One found thread: room for two more, so the address match is read.
+        related.senderHits = [hit('c-0', 0.9, ago: const Duration(hours: 1))];
+        final roomy = await relatedInput(small());
+        expect(related.threadLoads, contains('c-only'));
+        expect(keys(roomy).take(5),
+            ['inv-0', 'inv-1', 'inv-2', 'c-0', 'c-only']);
+      });
+
+      test("logistics and another meeting's invite are dropped and not "
+          'brought back by the address match; an invite key is not doubled',
+          () async {
+        await danaMail('inv', const Duration(hours: 6), eventId: 'evt-1');
+        await danaMail('c-acc', const Duration(hours: 3),
+            subject: 'Accepted: Fabrikam renewal pricing');
+        await danaMail('c-other', const Duration(hours: 4),
+            eventId: 'evt-other');
+        await danaMail('c-plain', const Duration(hours: 5));
+        related.senderHits = [
+          hit('inv', 0.95, ago: const Duration(hours: 6)),
+          hit('c-acc', 0.9, ago: const Duration(hours: 3)),
+          hit('c-other', 0.85, ago: const Duration(hours: 4)),
+          hit('c-plain', 0.8, ago: const Duration(hours: 5)),
+        ];
+
+        final input = await relatedInput(small());
+        expect(keys(input), ['inv', 'c-plain'],
+            reason: 'Dana is on both dropped threads, inside thirty days');
+        expect([for (final t in input.threads) t.invite], [true, false]);
+        expect(input.relatedBest, closeTo(0.8, 1e-9));
+        // The unranked order lands on the same rule.
+        related.senderHits = null;
+        final byTime = await BriefGatherer(related, calendar,
+                ownerAddress: () async => owner, zone: () => la)
+            .gather(small(), now: now) as BriefEligible;
+        expect(keys(byTime.input), ['inv', 'c-plain']);
+      });
+
+      test('a chat excerpt on the people path: stamped and counted by what is '
+          "shown, a bot's post left out, the room's later talk no input, never "
+          'an ask nor waiting', () async {
+        await danaChat('t-dana',
+            last: const Duration(hours: 8), count: 4, state: 'needs_reply');
+        await danaSays('match', 't-dana', const Duration(hours: 10),
+            body: 'The renewal pricing needs your sign-off.');
+        await chatSays('bot', 't-dana', const Duration(hours: 9, minutes: 30),
+            fromName: 'Build Bot',
+            fromAddress: 'teams:bot',
+            gateReason: teamsBotGate);
+        await chatSays('o-1', 't-dana', const Duration(hours: 9),
+            outbound: true);
+        await danaSays('d-2', 't-dana', const Duration(hours: 8),
+            body: 'Can you approve it today?');
+        await store.writeDecision(
+          'teams',
+          'd-2',
+          fakeDecision(fakeAnswers(needsYou: 0.9, intent: 'approval')),
+          qhash: DecisionHeads.expectedQhash,
+          ownerKnown: true,
+        );
+        related.senderHits = [
+          hit('t-dana', 0.8,
+              source: 'teams',
+              messageId: 'match',
+              ago: const Duration(hours: 10)),
+        ];
+
+        final before = await relatedInput(small());
+        final t = before.threads.single;
+        expect(t.excerpt, isTrue);
+        expect(t.snippets, hasLength(3));
+        expect(t.snippets.join(), isNot(contains('Chat says bot.')));
+        expect(t.lastAt, stampAgo(const Duration(hours: 8)));
+        expect(t.messageCount, 3);
+        expect(before.openAsks, isEmpty);
+        expect(before.waitingOn, isEmpty);
+
+        // The excerpt already shows three: a later line by the owner, inside
+        // the day, is not part of it, and moves nothing.
+        await chatSays('o-2', 't-dana', const Duration(hours: 7),
+            outbound: true);
+        await danaChat('t-dana',
+            last: const Duration(hours: 7), count: 5, state: 'needs_reply');
+        final later = await relatedInput(small());
+        expect(later.threads.single.messageCount, 3);
+        expect(later.inputsHash, before.inputsHash);
+      });
+
+      test('the people block reads a Teams-only writer by her name: her chat, '
+          'her words, its subject', () async {
+        await danaChat('t-dana', last: const Duration(hours: 2));
+        await danaSays('d-1', 't-dana', const Duration(hours: 2),
+            body: 'The 12k tier works for us.');
+
+        final input = await relatedInput(oneOnOne());
+        final d = input.people.single;
+        expect(d.name, 'Dana Lopez');
+        expect(d.threadCount, 1);
+        expect(d.lastWords,
+            wrapUntrusted('last_words', 'The 12k tier works for us.'));
+        expect(d.lastSubject, 'Renewal chat');
+        expect(d.lastInboundAgo, '2 hours ago');
+      });
+
+      group('how the search went', () {
+        test('no embeddings client: off, one read by time', () async {
+          await danaMail('c-a', const Duration(hours: 2));
+          final g = await BriefGatherer(related, calendar,
+                  ownerAddress: () async => owner, zone: () => la)
+              .gather(small(), now: now) as BriefEligible;
+          expect(g.input.search, 'off');
+          expect(keys(g.input), ['c-a']);
+          expect(related.senderCalls.single.ranked, isFalse);
+          expect(g.input.relatedBest, isNull);
+        });
+
+        test('embed down: unavailable and read by time; no second request '
+            'inside two minutes, one after', () async {
+          await danaMail('c-a', const Duration(hours: 2));
+          final down = FakeEmbedServer(status: 500);
+          final g = gathererOver(related, down);
+
+          final first = await g.gather(small(), now: now) as BriefEligible;
+          expect(first.input.search, 'unavailable');
+          expect(keys(first.input), ['c-a']);
+          expect([for (final c in related.senderCalls) c.ranked], [false]);
+          expect(down.calls, 1);
+
+          await g.gather(small(), now: now.add(const Duration(minutes: 1)));
+          expect(down.calls, 1, reason: 'inside embedRetryAfter');
+          await g.gather(small(), now: now.add(const Duration(minutes: 3)));
+          expect(down.calls, 2, reason: 'past embedRetryAfter');
+        });
+
+        test('the ranked read returns null: unavailable, read by time',
+            () async {
+          await danaMail('c-a', const Duration(hours: 2));
+          related.sendersIndexMissing = true;
+          final input = await relatedInput(small());
+          expect(input.search, 'unavailable');
+          expect([for (final c in related.senderCalls) c.ranked],
+              [true, false]);
+          expect(keys(input), ['c-a']);
+          expect(input.relatedBest, isNull);
+        });
+
+        test('the ranked read throws: unavailable, read by time, the threads '
+            'still there', () async {
+          await danaMail('c-a', const Duration(hours: 2));
+          related.sendersThrow = true;
+          final input = await relatedInput(small());
+          expect(input.search, 'unavailable');
+          expect([for (final c in related.senderCalls) c.ranked],
+              [true, false]);
+          expect(keys(input), ['c-a']);
+        });
+
+        test('both reads throw: briefed from the mail they are on alone',
+            () async {
+          await danaMail('c-a', const Duration(hours: 2));
+          related
+            ..sendersThrow = true
+            ..recentThrows = true;
+          final input = await relatedInput(small());
+          expect(input.search, 'unavailable');
+          expect(keys(input), ['c-a'], reason: 'the address match');
+          // Not found by her message, so quoted as before: its last two.
+          expect(input.threads.single.snippets, hasLength(1));
+        });
+      });
+
+      test('the light and full gathers hash alike with a chat excerpt and a '
+          'found mail thread', () async {
+        await danaChat('t-dana', last: const Duration(hours: 4));
+        await danaSays('d-1', 't-dana', const Duration(hours: 4));
+        await danaMail('c-a', const Duration(hours: 5));
+        related.senderHits = [
+          hit('t-dana', 0.8,
+              source: 'teams',
+              messageId: 'd-1',
+              ago: const Duration(hours: 4)),
+          hit('c-a', 0.6, ago: const Duration(hours: 5)),
+        ];
+        final full = await relatedInput(small());
+        final light = await relatedInput(small(), passages: false);
+        expect(keys(full), ['t-dana', 'c-a']);
+        expect(keys(light), keys(full));
+        expect(light.inputsHash, full.inputsHash);
+      });
     });
   });
 
@@ -2458,6 +2902,105 @@ void main() {
       expect(t.lastAt, stampAgo(const Duration(hours: 2)));
       expect(input.relatedBest, closeTo(1.0, 0.001));
     });
+
+    test('no scripted search on the people path: what Dana wrote, nearest '
+        "first, her chat before her mail; a stranger's nearer mail is never "
+        'found', () async {
+      if (!available) return;
+      final embed = FakeEmbedServer(
+        vectorFor: (input) =>
+            input.contains('Fabrikam') ? axes({0: 1.0}) : axes({3: 1.0}),
+      );
+      Future<void> said(String source, String key, String id,
+          {required String name,
+          required String address,
+          required Duration age,
+          required Map<int, double> vector}) async {
+        await vecStore.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': key,
+          'direction': 'inbound',
+          'subject': 'Thread $key',
+          'from_name': name,
+          'from_address': address,
+          'received_at': stampAgo(age),
+          'body_text': 'Message $id.',
+          'triage_status': 'done',
+        });
+        await vecStore.upsertMessageVector(
+          source: source,
+          sourceMessageId: id,
+          embedding: encodeEmbedding(axes(vector)),
+          dims: embedDims,
+          embeddedHash: 'h-$id',
+          embedModel: EmbeddingsClient.documentModelTag,
+        );
+      }
+
+      Future<void> row(String source, String key, List<Object> roster,
+              Duration last) =>
+          vecStore.upsertConversation({
+            'source': source,
+            'conversation_key': key,
+            'subject': 'Thread $key',
+            'participants_json': jsonEncode(roster),
+            'state': 'waiting',
+            'message_count': 1,
+            'last_message_at': stampAgo(last),
+          });
+
+      // Dana's chat message sits near the subject; her mail far from it.
+      await row('teams', 't-dana', [
+        {'name': 'Dana Lopez', 'email': 'teams:dana-id'},
+      ], const Duration(hours: 3));
+      await said('teams', 't-dana', 'dana-chat',
+          name: 'Dana Lopez',
+          address: 'teams:dana-id',
+          age: const Duration(hours: 3),
+          vector: {0: 0.9, 2: 0.4359});
+      await row('email', 'c-dana', [
+        {'name': 'Dana Lopez', 'email': dana},
+        {'name': 'Me', 'email': owner},
+      ], const Duration(hours: 1));
+      await said('email', 'c-dana', 'dana-mail',
+          name: 'Dana Lopez',
+          address: dana,
+          age: const Duration(hours: 1),
+          vector: {0: 0.2, 3: 0.9798});
+      // A stranger's mail, the nearest of all, with nobody from the
+      // meeting on it.
+      await row('email', 'c-kim', [
+        {'name': 'Kim', 'email': 'kim@contoso.com'},
+        {'name': 'Me', 'email': owner},
+      ], const Duration(hours: 2));
+      await said('email', 'c-kim', 'kim-mail',
+          name: 'Kim',
+          address: 'kim@contoso.com',
+          age: const Duration(hours: 2),
+          vector: {0: 1.0});
+
+      final g = await BriefGatherer(
+        vecStore,
+        CalendarStore(vecDb),
+        ownerAddress: () async => owner,
+        zone: () => la,
+        embeddings: embed.client,
+      ).gather(
+        meeting(subject: 'Fabrikam renewal pricing', attendees: const [
+          Attendee(name: 'Me', address: owner),
+          Attendee(name: 'Dana Lopez', address: dana),
+        ]),
+        now: now,
+      );
+      final input = (g as BriefEligible).input;
+      expect(input.path, BriefPath.people);
+      expect(input.search, 'ok');
+      expect([for (final t in input.threads) (t.source, t.conversationKey)],
+          [('teams', 't-dana'), ('email', 'c-dana')]);
+      expect(input.threads.first.excerpt, isTrue);
+      expect(input.relatedBest, closeTo(0.9, 0.001));
+    });
   });
 }
 
@@ -2518,12 +3061,70 @@ class _ChunkStore extends MessageStore {
 /// read): [hits] is what it answers, [indexMissing] answers null, and every
 /// call is recorded. [threadLoads] records every `loadThread` key, so a test
 /// can prove a chat's history was never read.
+///
+/// The people path's read by sender can be scripted too: [senderHits]
+/// answers the RANKED call (with a query) and [recentHits] the unranked one;
+/// either left null falls through to the real read, so a test that scripts
+/// nothing runs the real SQL. [sendersIndexMissing] answers the ranked call
+/// null, [sendersThrow] makes it throw and [recentThrows] the unranked one.
+/// Every call is recorded in [senderCalls].
 class _RelatedStore extends MessageStore {
   _RelatedStore(super.db);
 
   List<RelatedConversation> hits = const [];
   bool indexMissing = false;
   final List<String> threadLoads = [];
+
+  List<RelatedConversation>? senderHits;
+  List<RelatedConversation>? recentHits;
+  bool sendersIndexMissing = false;
+  bool sendersThrow = false;
+  bool recentThrows = false;
+  final List<
+      ({
+        bool ranked,
+        String embedModel,
+        Set<String> addresses,
+        Set<String> names,
+        String sinceIso,
+        int limit
+      })> senderCalls = [];
+
+  @override
+  Future<List<RelatedConversation>?> conversationsFromSenders({
+    Uint8List? queryEmbedding,
+    required String embedModel,
+    required Set<String> addresses,
+    required Set<String> names,
+    required String sinceIso,
+    int limit = 12,
+  }) async {
+    final ranked = queryEmbedding != null;
+    senderCalls.add((
+      ranked: ranked,
+      embedModel: embedModel,
+      addresses: addresses,
+      names: names,
+      sinceIso: sinceIso,
+      limit: limit,
+    ));
+    if (ranked) {
+      if (sendersThrow) throw StateError('the index broke');
+      if (sendersIndexMissing) return null;
+    } else if (recentThrows) {
+      throw StateError('the store broke');
+    }
+    final scripted = ranked ? senderHits : recentHits;
+    if (scripted != null) return scripted.take(limit).toList();
+    return super.conversationsFromSenders(
+      queryEmbedding: queryEmbedding,
+      embedModel: embedModel,
+      addresses: addresses,
+      names: names,
+      sinceIso: sinceIso,
+      limit: limit,
+    );
+  }
 
   @override
   Future<List<Message>> loadThread(

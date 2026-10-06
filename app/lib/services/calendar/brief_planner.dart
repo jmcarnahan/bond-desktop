@@ -2,7 +2,6 @@ import '../../data/calendar_store.dart';
 import '../../data/message_store.dart';
 import '../../models/calendar_models.dart';
 import 'brief_gatherer.dart';
-import 'brief_path.dart' show BriefPath;
 import 'calendar_zone.dart';
 import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 
@@ -13,16 +12,18 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// the caller pumps the draft lane when this queued anything. Nothing here
 /// calls a model: the eligibility check and the inputs hash are store reads
 /// (it gathers with `passages: false`, so no passage embedding). The one
-/// network call it can cost is the related search's query: a meeting on the
-/// related path (`briefPathOf`) has its subject and description embedded
-/// once per distinct text per app run — the gatherer caches the vector —
-/// because the threads that search finds are hashed, so new mail on the
-/// topic re-briefs.
+/// network call it can cost is the thread search's query: a meeting with
+/// something to search by has its subject and description embedded once per
+/// distinct text per app run — the gatherer caches the vector — because the
+/// threads that search finds are hashed, so new mail or chat on the topic
+/// re-briefs.
 ///
 /// **The regeneration rule.** A meeting with no brief is queued. A stored
-/// brief is queued again when its inputs hash moved — at any age, so a deck
-/// or its digest landing an hour after the first brief re-briefs on the
-/// next pass rather than waiting out [freshFor]. A failed brief is retried
+/// brief is queued again when its inputs hash moved — once it is older than
+/// [rewriteAfter], or [rewriteNearAfter] when its meeting is within
+/// [rewriteNear] — so a deck or its digest landing an hour after the first
+/// brief re-briefs on the next pass rather than waiting out [freshFor]. A
+/// failed brief is retried
 /// only once it is older than [freshFor] (unless its inputs moved). What
 /// keeps a thread that is busy the morning of a meeting from buying a model
 /// call per sync is [_queuedFor] and the "fresh AND unchanged" rule: one set
@@ -43,8 +44,8 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// that may never finish.
 ///
 /// **What it writes itself.** A meeting found ineligible for a reason that
-/// can change while it stays on the calendar ([recorded]: no recent mail,
-/// nobody else invited) gets a `skipped` row naming the
+/// can change while it stays on the calendar ([recorded]: no recent mail
+/// or chat, nobody else invited) gets a `skipped` row naming the
 /// reason, so the panel says why rather than promising a brief after the
 /// next sync. Written only when the stored row does not already say so, and
 /// never over a ready brief, which stands. When the reason goes away the
@@ -83,17 +84,24 @@ class BriefPlanner {
   static const Duration freshFor = Duration(hours: 2);
   static const Duration recheck = Duration(minutes: 15);
 
-  /// How young a READY brief on the related path is left alone when its
-  /// inputs move, while its meeting is more than [relatedRewriteNear] off.
-  /// The related threads follow the search vectors, which land one message
-  /// at a time behind the AI backlog: after a first sync or a Clear AI
-  /// results every pass would find a slightly different set and buy a
-  /// rewrite of every large meeting, every pass, on the one generative model
-  /// the backlog itself is waiting for. So a brief just written waits this
-  /// long before it is written again; the moved hash is still there when it
-  /// has, and a person's Regenerate never waits.
-  static const Duration relatedRewriteAfter = Duration(minutes: 30);
-  static const Duration relatedRewriteNear = Duration(hours: 1);
+  /// How young a READY brief is left alone when its inputs move, while its
+  /// meeting is more than [rewriteNear] off. The threads a brief is written
+  /// from follow the search vectors, which land one message at a time
+  /// behind the AI backlog, and a chat with the meeting's people moves with
+  /// every line: after a first sync or a Clear AI results every pass would
+  /// find a slightly different set and buy a rewrite of every meeting, every
+  /// pass, on the one generative model the backlog itself is waiting for.
+  /// So a brief just written waits this long before it is written again;
+  /// the moved hash is still there when it has, and a person's Regenerate
+  /// never waits.
+  static const Duration rewriteAfter = Duration(minutes: 30);
+  static const Duration rewriteNear = Duration(hours: 1);
+
+  /// The same wait once the meeting is within [rewriteNear] (or has no
+  /// readable start): short, because what was said in the last hour is what
+  /// the brief is for, and not nothing, because a chat going on with the
+  /// people in the meeting would otherwise buy a rewrite on every pass.
+  static const Duration rewriteNearAfter = Duration(minutes: 5);
   static const int maxPerPass = 6;
 
   static const String kind = 'meeting_brief';
@@ -233,15 +241,14 @@ class BriefPlanner {
               !input.materialsPending &&
               _endedFor[e.id] != stored?.generatedAt;
           if (waitEnded) _endedFor[e.id] = stored?.generatedAt ?? '';
-          // A young ready brief on the related path waits out its inputs
-          // settling ([relatedRewriteAfter]) unless its meeting is near.
-          final settling = input.path == BriefPath.related &&
-              stored != null &&
+          // A young ready brief waits out its inputs settling: longer
+          // while its meeting is far off, a few minutes once it is near.
+          final far = start != null && start.isAfter(nowUtc.add(rewriteNear));
+          final settling = stored != null &&
               stored.isReady &&
               generated != null &&
-              nowUtc.difference(generated) < relatedRewriteAfter &&
-              start != null &&
-              start.isAfter(nowUtc.add(relatedRewriteNear));
+              nowUtc.difference(generated) <
+                  (far ? rewriteAfter : rewriteNearAfter);
           final changed = (moved &&
                   !settling &&
                   !(fresh && _queuedFor[e.id] == hash)) ||

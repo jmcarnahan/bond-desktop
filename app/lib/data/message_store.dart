@@ -10854,6 +10854,118 @@ WHERE v.id IN (${_placeholders(near.length)}) AND v.embed_model = ?
     return out;
   }
 
+  /// The conversations a set of PEOPLE wrote in since [sinceIso], each with
+  /// the one message of theirs that stands for it: what a meeting brief
+  /// reads about the people in a small meeting. Mail and Teams, kept inbound
+  /// messages only. A mail is theirs by its sender's address ([addresses]);
+  /// a chat message by its sender's display name ([names]), because a chat
+  /// knows its people by id and name and never by address.
+  ///
+  /// With [queryEmbedding] it is [relatedConversations]' search with the
+  /// senders and the date as an extra constraint, and no floor: each
+  /// conversation is scored by the cosine of their message nearest the
+  /// query, nearest first. vec0 can only be asked for neighbours, not for
+  /// neighbours-matching-a-predicate, and these people's messages can sit
+  /// far outside the mailbox's nearest [_keywordCap]; so the stored vectors
+  /// of just their messages are compared in SQL (`vec_distance_cosine`), a
+  /// few hundred rows at most. Only a message with a vector under
+  /// [embedModel] can be scored. Null when the index's functions are not on
+  /// this connection, [semanticSearch]'s third answer.
+  ///
+  /// Without it nothing is compared and no vector is needed: each
+  /// conversation is stood for by their NEWEST message, newest first, and
+  /// the cosine reads 0.
+  ///
+  /// One row per conversation either way (SQLite hands a bare column the
+  /// value of the row its one `MIN` or `MAX` came from), so a chat busy
+  /// with one of them cannot crowd the other conversations out of [limit].
+  /// Both sides of the sender match are folded as SQLite's `lower` folds
+  /// (ASCII letters only), so a name's accented capital matches itself.
+  Future<List<RelatedConversation>?> conversationsFromSenders({
+    Uint8List? queryEmbedding,
+    required String embedModel,
+    required Set<String> addresses,
+    required Set<String> names,
+    required String sinceIso,
+    int limit = 12,
+  }) async {
+    List<String> folded(Set<String> values) => {
+          for (final v in values)
+            if (v.trim().isNotEmpty) _asciiLower(v.trim()),
+        }.toList();
+    final mail = folded(addresses);
+    final chat = folded(names);
+    if (mail.isEmpty && chat.isEmpty) return const [];
+    if (queryEmbedding != null && !await _vecIndex.ensureReady()) return null;
+
+    final sender = [
+      if (mail.isNotEmpty)
+        "(p.source = 'email' AND lower(trim(m.from_address)) "
+            'IN (${_placeholders(mail.length)}))',
+      if (chat.isNotEmpty)
+        "(p.source = 'teams' AND lower(trim(m.from_name)) "
+            'IN (${_placeholders(chat.length)}))',
+    ].join(' OR ');
+    const from = 'FROM message_progress p '
+        'JOIN messages m ON m.source = p.source '
+        '  AND m.source_message_id = p.source_message_id ';
+    final theirs = "p.dropped = 0 AND p.received_at >= ? "
+        "AND m.direction = 'inbound' AND ($sender) ";
+
+    final result = queryEmbedding == null
+        ? await db
+            .customSelect(
+              'SELECT p.source, p.conversation_key, p.source_message_id, '
+              'MAX(p.received_at) AS stamp, 1.0 AS distance '
+              '$from WHERE $theirs '
+              'GROUP BY p.source, p.conversation_key '
+              'ORDER BY stamp DESC, p.conversation_key ASC LIMIT ?',
+              variables: _args([sinceIso, ...mail, ...chat, limit]),
+            )
+            .get()
+        : await db
+            .customSelect(
+              'SELECT p.source, p.conversation_key, p.source_message_id, '
+              'p.received_at AS stamp, '
+              'MIN(vec_distance_cosine(v.embedding, ?)) AS distance '
+              '$from JOIN message_vectors v ON v.source = p.source '
+              '  AND v.source_message_id = p.source_message_id '
+              // The width with the tag: the distance function refuses two
+              // vectors of different widths, and that would fail the whole
+              // statement for one old row.
+              'WHERE v.embed_model = ? AND v.dims = ? AND $theirs '
+              'GROUP BY p.source, p.conversation_key '
+              'ORDER BY distance ASC, p.conversation_key ASC LIMIT ?',
+              variables: [
+                Variable<Uint8List>(queryEmbedding),
+                ..._args([
+                  embedModel,
+                  MessageVectorIndex.dims,
+                  sinceIso,
+                  ...mail,
+                  ...chat,
+                  limit,
+                ]),
+              ],
+            )
+            .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String,
+          conversationKey: row.data['conversation_key'] as String,
+          cosine: 1 - (row.data['distance'] as num).toDouble(),
+          messageId: row.data['source_message_id'] as String,
+          receivedAt: row.data['stamp'] as String,
+        ),
+    ];
+  }
+
+  /// [s] with its ASCII capitals lowered and nothing else touched: what
+  /// SQLite's `lower` does, for a value compared against a `lower(column)`.
+  static String _asciiLower(String s) => s.replaceAllMapped(
+      RegExp('[A-Z]'), (m) => m[0]!.toLowerCase());
+
   /// One conversation's messages received from [fromIso] to [toIso], both
   /// inclusive, oldest first: the part of a chat around one moment, for a
   /// caller that must not load a room's whole history to read one exchange.

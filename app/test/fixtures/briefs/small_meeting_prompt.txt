@@ -1,0 +1,74 @@
+Now: Wed 7 Oct 2026, 9:00 AM PDT
+Meeting: Wed 7 Oct 2026 · 3:00–3:30 PM PDT
+<untrusted_data source="meeting_subject">
+Fabrikam renewal terms
+</untrusted_data>
+With:
+<untrusted_data source="attendees">
+Sam Ortiz, Dana Lopez
+</untrusted_data>
+
+People, numbered, the organiser first:
+[1] <untrusted_data source="person">
+Dana Lopez · fabrikam
+</untrusted_data> · organiser · response not known
+in 3 of the threads
+last wrote 20 hours ago: <untrusted_data source="subject">
+Fabrikam renewal terms
+</untrusted_data>
+<untrusted_data source="last_words">
+Let us agree the renewal terms and the support tier.
+</untrusted_data>
+[2] <untrusted_data source="person">
+Sam Ortiz · contoso
+</untrusted_data> · attendee · response not known
+in 3 of the threads
+last wrote 1 day ago: <untrusted_data source="subject">
+Support tier for the renewal
+</untrusted_data>
+<untrusted_data source="last_words">
+Procurement confirmed the premium tier.
+</untrusted_data>
+
+Threads with these people (mail and Teams chats), numbered:
+[1] waiting on them · last message 20 hours ago · this meeting's own invite
+<untrusted_data source="subject">
+Fabrikam renewal terms
+</untrusted_data>
+<untrusted_data source="message">
+Dana Lopez: Let us agree the renewal terms and the support tier.
+</untrusted_data>
+[2] part of a Teams chat · the latest message shown is from 1 day ago
+<untrusted_data source="subject">
+Dana Lopez
+</untrusted_data>
+<untrusted_data source="message">
+Dana Lopez: The renewal draft caps the price rise at 4 percent.
+</untrusted_data>
+<untrusted_data source="message">
+You: Good. Send me the redline when legal is done.
+</untrusted_data>
+[3] waiting on them · last message 1 day ago
+<untrusted_data source="subject">
+Support tier for the renewal
+</untrusted_data>
+<untrusted_data source="message">
+Sam Ortiz: Support stays on the premium tier at the current rate.
+</untrusted_data>
+<untrusted_data source="message">
+Sam Ortiz: Procurement confirmed the premium tier.
+</untrusted_data>
+[4] waiting on them · last message 5 hours ago
+<untrusted_data source="subject">
+Renewal quote
+</untrusted_data>
+<untrusted_data source="message">
+You: The updated quote is attached.
+</untrusted_data>
+
+Waiting on them (the owner wrote last): [4]
+
+From the invite:
+<untrusted_data source="invite">
+Agree the renewal terms and the support tier.
+</untrusted_data>

@@ -15,6 +15,7 @@ import 'package:bond_inbox/services/attachments/attachment_policy.dart'
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/calendar/meeting_brief_handler.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -270,13 +271,14 @@ void main() {
           [('c-1', true), ('c-rel', false)]);
       expect(brief.relatedThreadCount, 1);
       expect(detail['path'], 'related');
+      expect(detail['search'], 'ok');
       expect(detail['related'], 1);
       expect(detail['related_best'], 78);
       expect(detail['threads'], 2);
     });
 
-    test('a people-path meeting stores people, related 0 and no best',
-        () async {
+    test('a people-path meeting stores people, related 0 and no best, and '
+        'notes how its search went', () async {
       await seedEvent();
       await seedThread();
 
@@ -287,6 +289,9 @@ void main() {
       expect(brief.threads.single.invite, isTrue,
           reason: "Dana's thread is the meeting's own invite");
       expect(detail['path'], 'people');
+      // A topical meeting and a gatherer with no embeddings client: ordered
+      // by time, and the note says why.
+      expect(detail['search'], 'off');
       expect(detail['related'], 0);
       expect(detail.containsKey('related_best'), isFalse);
     });
@@ -369,7 +374,13 @@ void main() {
       'meeting', () async {
     await seedEvent();
     // Another meeting's invite: address-matched, not this meeting's mail.
+    // The owner sent it to Dana: one Dana WROTE would be found by her
+    // message and dropped as another meeting's invite, never listed.
     await seedThread(eventId: 'evt-other');
+    await db.customStatement(
+        "UPDATE messages SET direction = 'outbound', from_address = ? "
+        "WHERE source_message_id = 'm-1'",
+        [owner]);
     await store.upsertAttachments('email', 'm-1', [
       {
         'attachment_id': 'a-deck',
@@ -801,7 +812,11 @@ void main() {
       await briefs.run(item('evt-1'));
 
       expect((await calendar.brief('evt-1'))!.skipReason, 'materials_pending');
-      expect(server.calls, 0);
+      // The light gather embeds only the people search's query, never the
+      // meeting as a document for the passages.
+      expect(server.inputs, hasLength(1));
+      expect(server.inputs.single,
+          startsWith(EmbeddingsClient.searchQueryPrefix));
       expect(counting.textReads, 0);
       expect(counting.chunkChecks, 0);
     });

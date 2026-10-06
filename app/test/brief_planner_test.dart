@@ -13,6 +13,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/brief_planner.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_embed_server.dart';
@@ -191,11 +192,13 @@ void main() {
   test('a fresh brief whose rewrite failed is not retried on the same '
       'inputs until it ages, and is when they move again', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    // Every stamp below is past `rewriteAfter`, so the young-brief guard
+    // holds nothing and each answer is the rule this test is about.
     await calendar.putBrief(
       eventId: 'evt-1',
       inputsHash: 'stale',
       status: EventBrief.ready,
-      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
+      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 31))),
     );
     expect(await plan(), 1);
 
@@ -205,7 +208,7 @@ void main() {
         status: 'done');
     await calendar.touchBrief('evt-1',
         generatedAt: calendarStamp(now.add(const Duration(minutes: 1))));
-    expect(await plan(after: const Duration(minutes: 20)), 0,
+    expect(await plan(after: const Duration(minutes: 35)), 0,
         reason: 'these inputs were already tried while the brief is fresh');
 
     // New mail moves the inputs again.
@@ -246,17 +249,19 @@ void main() {
   test('a ready brief whose rewrite failed IS retried on the same moved '
       'inputs once it is older than two hours', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    // Past `rewriteAfter` at every pass, so the young-brief guard is not
+    // what any answer below turns on.
     await calendar.putBrief(
       eventId: 'evt-1',
       inputsHash: 'stale',
       status: EventBrief.ready,
-      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
+      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 31))),
     );
     expect(await plan(), 1);
     await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
         status: 'done');
     await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now));
-    expect(await plan(after: const Duration(minutes: 20)), 0,
+    expect(await plan(after: const Duration(minutes: 35)), 0,
         reason: 'tried once while fresh');
 
     // Two hours and a bit after the failed rewrite's stamp: the same moved
@@ -265,8 +270,8 @@ void main() {
     expect(await status('evt-1'), 'pending');
   });
 
-  test('the planner makes no embedding call, even when the files have '
-      'passages', () async {
+  test('the planner embeds no passages, even when the files have them: '
+      "its one embedding is the people search's query", () async {
     final chunks = _ChunkStore(db);
     final server = FakeEmbedServer();
     final counting = _CountingGatherer(
@@ -307,14 +312,22 @@ void main() {
     expect(await planning.plan(now: now, zone: la), 2);
     expect(counting.gathers, 2);
     expect(counting.passageAsks, [false, false]);
-    expect(server.calls, 0);
+    // Two topical meetings, two query texts: one search query each, and
+    // nothing embedded as a document.
+    expect(server.inputs, [
+      '${EmbeddingsClient.searchQueryPrefix}Meeting evt-1',
+      '${EmbeddingsClient.searchQueryPrefix}Meeting evt-2',
+    ]);
     expect(chunks.knnCalls, 0);
 
-    // The handler's gather (the default) is the one that embeds — once.
+    // The handler's gather (the default) is the one that embeds the meeting
+    // for its passages — once; its query is cached.
     final asked = await counting.gather(meeting('evt-1'), now: now);
     expect((asked as BriefEligible).input.materials.single.passages,
         isNotEmpty);
-    expect(server.calls, 1);
+    expect(server.calls, 3);
+    expect(server.inputs.last,
+        isNot(startsWith(EmbeddingsClient.searchQueryPrefix)));
   });
 
   test('a related-path meeting costs one embedding call across two passes, '
@@ -362,7 +375,8 @@ void main() {
     expect(counting.hashes.last, counting.hashes.first);
   });
 
-  group('a young related brief waits out its inputs settling', () {
+  group('a young ready brief waits out its inputs settling, on either path',
+      () {
     late _CountingGatherer counting;
     late BriefPlanner planning;
 
@@ -410,7 +424,8 @@ void main() {
     Future<int> planAt([Duration after = Duration.zero]) =>
         planning.plan(now: now.add(after), zone: la);
 
-    test('ten minutes old, meeting three hours off: nothing queued', () async {
+    test('related, ten minutes old, meeting three hours off: nothing queued',
+        () async {
       await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
       await stored('evt-big', const Duration(minutes: 10));
       expect(await planAt(), 0);
@@ -419,43 +434,88 @@ void main() {
       expect(await status('evt-big'), isNull);
     });
 
-    test('thirty-one minutes old: queued', () async {
+    test('related, thirty-one minutes old: queued', () async {
       await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
       await stored('evt-big', const Duration(minutes: 31));
       expect(await planAt(), 1);
       expect(await status('evt-big'), 'pending');
     });
 
-    test('a meeting inside the hour never waits', () async {
-      await calendar.upsertEvents(
-          [big('evt-big', startsIn: const Duration(minutes: 40))],
-          syncRun: 'run-1');
-      await stored('evt-big', const Duration(minutes: 10));
-      expect(await planAt(), 1);
-      expect(await status('evt-big'), 'pending');
-    });
-
-    test('the people path is not held', () async {
+    test('people, ten minutes old, meeting three hours off: nothing queued',
+        () async {
       // Dana alone, with mail: the people path.
       await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
       await stored('evt-1', const Duration(minutes: 10));
+      expect(await planAt(), 0);
+      expect(counting.hashes.single, isNot('stale'),
+          reason: 'the inputs did move; the guard is what held it');
+      expect(await status('evt-1'), isNull);
+    });
+
+    test('people, thirty-one minutes old: queued', () async {
+      await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+      await stored('evt-1', const Duration(minutes: 31));
       expect(await planAt(), 1);
       expect(await status('evt-1'), 'pending');
     });
 
+    test('a meeting inside the hour waits only five minutes, on either path',
+        () async {
+      expect(BriefPlanner.rewriteAfter, const Duration(minutes: 30));
+      expect(BriefPlanner.rewriteNear, const Duration(hours: 1));
+      expect(BriefPlanner.rewriteNearAfter, const Duration(minutes: 5));
+      await calendar.upsertEvents([
+        big('evt-big', startsIn: const Duration(minutes: 40)),
+        meeting('evt-1', startsIn: const Duration(minutes: 45)),
+      ], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 2));
+      await stored('evt-1', const Duration(minutes: 2));
+      expect(await planAt(), 0);
+      expect(counting.hashes, hasLength(2));
+      expect(counting.hashes, everyElement(isNot('stale')),
+          reason: 'both moved; the near wait is what held them');
+      expect(await status('evt-big'), isNull);
+      expect(await status('evt-1'), isNull);
+    });
+
+    test('and is queued once past those five minutes, on either path',
+        () async {
+      await calendar.upsertEvents([
+        big('evt-big', startsIn: const Duration(minutes: 40)),
+        meeting('evt-1', startsIn: const Duration(minutes: 45)),
+      ], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 6));
+      await stored('evt-1', const Duration(minutes: 6));
+      expect(await planAt(), 2);
+      expect(await status('evt-big'), 'pending');
+      expect(await status('evt-1'), 'pending');
+    });
+
     test('only a READY row is held: none, failed and skipped are queued as '
-        'before', () async {
+        'before, on either path, far or near', () async {
       await calendar.upsertEvents([
         big('evt-none'),
         big('evt-failed', startsIn: const Duration(hours: 3, minutes: 5)),
         big('evt-skipped', startsIn: const Duration(hours: 3, minutes: 10)),
+        meeting('p-failed', startsIn: const Duration(minutes: 30)),
+        meeting('p-skipped', startsIn: const Duration(minutes: 35)),
       ], syncRun: 'run-1');
       await stored('evt-failed', const Duration(minutes: 10),
           status: EventBrief.failed);
       await stored('evt-skipped', const Duration(minutes: 10),
           status: EventBrief.skipped);
-      expect(await planAt(), 3);
-      for (final id in ['evt-none', 'evt-failed', 'evt-skipped']) {
+      await stored('p-failed', const Duration(minutes: 1),
+          status: EventBrief.failed);
+      await stored('p-skipped', const Duration(minutes: 1),
+          status: EventBrief.skipped);
+      expect(await planAt(), 5);
+      for (final id in [
+        'evt-none',
+        'evt-failed',
+        'evt-skipped',
+        'p-failed',
+        'p-skipped',
+      ]) {
         expect(await status(id), 'pending', reason: id);
       }
     });

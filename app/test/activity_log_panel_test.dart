@@ -672,7 +672,8 @@ void main() {
           status: 'skipped',
           detail: const {'reason': 'no_mail'},
         )),
-        'Meeting brief — skipped (no recent mail with these people)',
+        'Meeting brief — skipped (no recent mail or Teams chats with these '
+            'people)',
       );
       expect(
         ActivityLogPanel.describe(_event(
