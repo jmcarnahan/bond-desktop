@@ -10778,6 +10778,49 @@ $where
     return ranked;
   }
 
+  /// The conversations nearest [queryEmbedding], nearest first, each scored
+  /// by its BEST message's cosine (`1 - distance`): what a meeting brief's
+  /// related search reads. Mail and Teams, dropped messages excluded,
+  /// messages received since [sinceIso] only.
+  ///
+  /// Built on ONE [semanticSearch] at `limit: 100`, which is its full 400
+  /// neighbours — the KNN runs over the whole index and the window filters
+  /// after, so a scoped search would cost the same. The walk STOPS at the
+  /// first message below [floor] (every later one is farther still), keeps
+  /// the first, and so best, message per `(source, conversationKey)`, and
+  /// stops at [limit] conversations.
+  ///
+  /// Null when the index is unavailable, [semanticSearch]'s third answer.
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async {
+    final hits = await semanticSearch(
+      queryEmbedding,
+      embedModel: embedModel,
+      limit: 100,
+      sinceIso: sinceIso,
+    );
+    if (hits == null) return null;
+    final seen = <(String, String)>{};
+    final out = <RelatedConversation>[];
+    for (final hit in hits) {
+      if (out.length >= limit) break;
+      final cosine = 1 - hit.distance;
+      if (cosine < floor) break;
+      if (!seen.add((hit.row.source, hit.row.conversationKey))) continue;
+      out.add((
+        source: hit.row.source,
+        conversationKey: hit.row.conversationKey,
+        cosine: cosine,
+      ));
+    }
+    return out;
+  }
+
   /// The most rowids either word read will carry back into Dart.
   ///
   /// `semanticSearch` caps its `k` at the same number and for the same reason:

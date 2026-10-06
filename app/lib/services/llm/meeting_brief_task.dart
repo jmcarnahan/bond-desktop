@@ -1,6 +1,7 @@
 import '../../models/calendar_models.dart';
 import '../calendar/ask_words.dart' show capAtWord;
 import '../calendar/brief_gatherer.dart';
+import '../calendar/brief_path.dart' show BriefPath;
 import 'json_task.dart';
 import 'prompt_guard.dart';
 
@@ -20,7 +21,7 @@ import 'prompt_guard.dart';
 /// name, number, date, decision or claim is a sentence the prompt says not
 /// to write, and "the owner" in the brief would read as about someone else.
 const String _meetingBriefRules = '''
-You are writing a briefing for the inbox's owner, who is about to walk into a meeting and wants to be, and look, completely on top of it. You are given the meeting, the people in it and what is known of each, what the owner's recent mail with them says, and the text of the files sent ahead of the meeting, by those people or by the owner. Write only what those inputs say, and write it dense: every sentence carries something the owner can use — a name, a number, a date, a decision, a claim from a file. Speak to the owner as "you"; never write "the owner".
+You are writing a briefing for the inbox's owner, who is about to walk into a meeting and wants to be, and look, completely on top of it. You are given the meeting, the people in it and what is known of each, what the owner's recent mail says, with these people or about this meeting's subject (the thread list says which), and the text of the files sent ahead of the meeting, by those people or by the owner. Write only what those inputs say, and write it dense: every sentence carries something the owner can use — a name, a number, a date, a decision, a claim from a file. Speak to the owner as "you"; never write "the owner".
 
 Rules:
 - evidence: ONE sentence naming what this meeting is for and where things stand with these people. Write it first — everything below should follow from it.
@@ -28,7 +29,8 @@ Rules:
 - briefing: at most 6 sentences, one per entry — each at most about 40 words — that catch the owner up on the subject: what this is about, how it got here with these people, what changed most recently, what is at stake or must be decided, and what the files say about it. Each sentence stands on a fact from the inputs with its date or its source; none restates the headline. When the inputs are thin, write fewer, never vaguer.
 - people: one line for each person listed — one line, at most about 25 words — in the order given: who they are as the inputs show it (their organisation, their part in the threads), the last thing they wrote or asked and when, and anything open with them. A person the inputs say nothing about gets the line "no recent mail". Use only the names given.
 - materials: the numbered materials are files sent ahead; the text of a file is shown when it has been read, and a file whose line says "you" is one the owner sent. For each one that matters, up to 5 points, each a short line, of what it SAYS — the figures, names, dates, claims, decisions asked for, and gaps, as written in the file: the detail the owner would otherwise have to open it for. A material shown unread or not shown is named as arrived in one point, not summarised. Use only numbers in the materials list; leave this empty when there are none.
-- The meeting's PURPOSE comes from its own invite — the subject, the invite text, and the threads about THIS meeting — never from files or threads that merely involve the same people. A file listed under "Files on other threads with these people" was NOT sent for this meeting: do not describe this meeting as being about it, and name it only when the invite or a thread about this meeting refers to it. An invite that says little gets a brief that says so ("The invite gives no agenda.") and then what is open with these people.
+- The meeting's PURPOSE comes from its own invite — the subject, the invite text, and the threads about THIS meeting — never from files or threads that merely involve the same people. A file listed under "Files on the other threads" was NOT sent for this meeting: do not describe this meeting as being about it, and name it only when the invite or a thread about this meeting refers to it. An invite that says little gets a brief that says so ("The invite gives no agenda.") and then what is open with these people.
+- When the thread list is headed 'Threads related to this meeting', the threads after the invite's own were found because their text is close to this meeting's subject, not because these people are on them. Some are about something else: use a thread only when it is clearly about this meeting's topic, leave the rest out entirely, and never tie a thread to a person it does not name.
 - questions: at most 5 questions the owner could ask in the meeting, each grounded in one specific fact from a file or a thread and naming it. Never rhetorical, never generic.
 - open_asks: at most 4 things one of these people asked the owner that are still open. Name the person as the input names them. Take them from the "Open asks" section; leave this empty when that section is empty.
 - points: at most 5 short lines on where things stand in the threads, each naming the thread it comes from by its number in the list, or -1 when it comes from no one thread.
@@ -105,8 +107,8 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
   /// caps is about 1.7k, so one file's digest and whole text (6000,
   /// [BriefGatherer.materialTextCap]) fit, plus a second's digest, and the
   /// head of its text when the digests are short of their caps; a third is
-  /// named. Worst case, the whole prompt is about 37.0k characters (the
-  /// size guard in `meeting_brief_task_test` pins it): about 12.3k tokens
+  /// named. Worst case, the whole prompt is about 38.7k characters (the
+  /// size guard in `meeting_brief_task_test` pins it): about 12.9k tokens
   /// at three characters a token, plus the answer's [maxTokens], inside
   /// 16384.
   static const int materialsBudget = 10000;
@@ -341,7 +343,13 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
     if (input.threads.isEmpty) {
       buffer.writeln('Threads: none.');
     } else {
-      buffer.writeln('Threads with these people, numbered:');
+      // The related path's header says how the threads were found: by
+      // their text, so some are about something else (the prompt's rule).
+      buffer.writeln(switch (input.path) {
+        BriefPath.people => 'Threads with these people, numbered:',
+        BriefPath.related => 'Threads related to this meeting, numbered '
+            '(found by their text, not by their people):',
+      });
       for (var i = 0; i < input.threads.length; i++) {
         final t = input.threads[i];
         // Relative to the clock line, so the model never has to subtract
@@ -351,7 +359,10 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
         buffer
           ..writeln('[${i + 1}] ${_stateWords(t.state)} · last message '
               '${ago.isEmpty ? t.lastAt : ago}'
-              '${t.ranked ? ' · marked urgent or important' : ''}')
+              '${t.ranked ? ' · marked urgent or important' : ''}'
+              // The app's words, outside the fence like the state.
+              "${t.invite ? " · this meeting's own invite" : ''}"
+              '${t.source == 'teams' ? ' · Teams chat' : ''}')
           ..writeln(wrapUntrusted('subject', _label(t.subject)));
         for (final snippet in t.snippets) {
           buffer.writeln(snippet);
@@ -426,7 +437,7 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
     if (input.otherFiles.isNotEmpty) {
       buffer
         ..writeln()
-        ..writeln('Files on other threads with these people '
+        ..writeln('Files on the other threads '
             '(NOT sent for this meeting):');
       for (final f in input.otherFiles) {
         buffer.writeln(

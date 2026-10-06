@@ -289,7 +289,7 @@ void main() {
     expect(msg, isNot(contains('Materials sent ahead')));
     expect(msg, isNot(contains('Northwind pricing.')),
         reason: "another meeting's file is named, never read");
-    expect(msg, contains('Files on other threads with these people (NOT sent '
+    expect(msg, contains('Files on the other threads (NOT sent '
         'for this meeting):'));
     final rows = [
       for (final r in await store.recentActivity())

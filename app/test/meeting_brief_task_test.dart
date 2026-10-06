@@ -1,6 +1,7 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
+import 'package:bond_inbox/services/calendar/brief_path.dart';
 import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
 import 'package:bond_inbox/services/llm/prompt_guard.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,6 +22,7 @@ void main() {
     String? lastMet,
     String? invitePreview,
     DateTime? now,
+    BriefPath path = BriefPath.people,
   }) {
     final t = threads ??
         [
@@ -57,6 +59,7 @@ void main() {
       peopleMore: peopleMore,
       lastMet: lastMet,
       invitePreview: invitePreview,
+      path: path,
       inputsHash: 'h',
     );
   }
@@ -114,6 +117,18 @@ void main() {
       expect(prompt, contains('was NOT sent for this meeting: do not describe '
           'this meeting as being about it'));
       expect(prompt, contains('("The invite gives no agenda.")'));
+      expect(prompt, contains("what the owner's recent mail says, with these "
+          "people or about this meeting's subject (the thread list says "
+          'which)'));
+      expect(prompt, contains('A file listed under "Files on the other '
+          'threads" was NOT sent'));
+      expect(prompt, contains("- When the thread list is headed 'Threads "
+          "related to this meeting', the threads after the invite's own were "
+          "found because their text is close to this meeting's subject, not "
+          'because these people are on them. Some are about something else: '
+          "use a thread only when it is clearly about this meeting's topic, "
+          'leave the rest out entirely, and never tie a thread to a person it '
+          'does not name.'));
       const order = [
         '- evidence:',
         '- headline:',
@@ -121,6 +136,7 @@ void main() {
         '- people:',
         '- materials:',
         "- The meeting's PURPOSE",
+        "- When the thread list is headed 'Threads related",
         '- questions:',
         '- open_asks:',
         '- points:',
@@ -234,14 +250,16 @@ void main() {
       // JSON-ish text tokenise denser than prose): (16384 - 2700) * 3 =
       // 41052 characters of prompt. The guard sits under that with a margin
       // for the digits the materials budget weights but the rest does not,
-      // at the measured maximum plus about 1-2%. Measured at 38133 with every
+      // at the measured maximum plus about 1-2%. Measured at 38732 with every
       // cap full, every label 300 characters of `&<>` (which the fence
-      // escapes, so each costs its full escaped cap) and four other files
-      // whose names are fenced at 80 (`otherFileNameCap`); it was 37012
-      // before the other files and their rule. 38500 (about 12.8k tokens,
-      // 15.5k with the answer). A cap bump that moves it past this has to
-      // pay for itself elsewhere.
-      const promptCharBudget = 38500;
+      // escapes, so each costs its full escaped cap), four other files
+      // whose names are fenced at 80 (`otherFileNameCap`), and the related
+      // path's longer header, its rule, and a marker on every thread (three
+      // invite threads, three Teams chats); it was 38133 before the related
+      // path and 37012 before the other files and their rule. 39120 (about
+      // 13.0k tokens, 15.7k with the answer). A cap bump that moves it past
+      // this has to pay for itself elsewhere.
+      const promptCharBudget = 39120;
       expect(promptCharBudget,
           lessThanOrEqualTo((16384 - MeetingBriefTask.maxTokens) * 3));
       String words(int n) => List.filled(n ~/ 5, 'word').join(' ');
@@ -252,7 +270,7 @@ void main() {
       final threads = [
         for (var i = 0; i < BriefGatherer.maxThreads; i++)
           BriefThread(
-            source: 'email',
+            source: i < BriefGatherer.maxInviteThreads ? 'email' : 'teams',
             conversationKey: 'c-$i',
             subject: dense(300),
             state: 'needs_reply',
@@ -262,6 +280,9 @@ void main() {
                 wrapUntrusted('message', 'x' * BriefGatherer.snippetCap),
             ],
             ranked: true,
+            // The longest first line: the invite marker on the three invite
+            // threads, the Teams marker on the rest.
+            invite: i < BriefGatherer.maxInviteThreads,
           ),
       ];
       final big = BriefInput(
@@ -338,6 +359,7 @@ void main() {
         ],
         invitePreview:
             wrapUntrusted('invite', 'i' * BriefGatherer.invitePreviewCap),
+        path: BriefPath.related,
         inputsHash: 'h',
       );
       const task = MeetingBriefTask();
@@ -455,8 +477,7 @@ void main() {
         otherFiles: const ['northwind-deck.pdf', 'a&b <notes>.docx'],
         invitePreview: wrapUntrusted('invite', 'Agenda: renewal.'),
       ));
-      const heading =
-          'Files on other threads with these people (NOT sent for this '
+      const heading = 'Files on the other threads (NOT sent for this '
           'meeting):';
       expect(msg, contains(heading));
       expect(msg, contains('- ${wrapUntrusted('file', 'northwind-deck.pdf')}'));
@@ -466,7 +487,57 @@ void main() {
       expect(msg.indexOf(heading), lessThan(msg.indexOf('From the invite')));
 
       final bare = const MeetingBriefTask().buildUserMessage(input());
-      expect(bare, isNot(contains('Files on other threads')));
+      expect(bare, isNot(contains('Files on the other threads')));
+    });
+
+    test('the thread list is headed by its path', () {
+      final people = const MeetingBriefTask().buildUserMessage(input());
+      expect(people, contains('Threads with these people, numbered:'));
+      expect(people, isNot(contains('Threads related to this meeting')));
+      final related = const MeetingBriefTask()
+          .buildUserMessage(input(path: BriefPath.related));
+      expect(
+          related,
+          contains('Threads related to this meeting, numbered (found by '
+              'their text, not by their people):'));
+      expect(related, isNot(contains('Threads with these people')));
+    });
+
+    test("an invite thread and a Teams chat say so on their first line, "
+        'outside the fence', () {
+      final msg = const MeetingBriefTask().buildUserMessage(input(
+        path: BriefPath.related,
+        threads: const [
+          BriefThread(
+            source: 'email',
+            conversationKey: 'c-inv',
+            subject: 'Falcon launch plan',
+            state: 'waiting',
+            lastAt: '2026-09-28T10:00:00.000000Z',
+            invite: true,
+          ),
+          BriefThread(
+            source: 'teams',
+            conversationKey: 't-1',
+            subject: 'Falcon launch chat',
+            state: 'done',
+            lastAt: '2026-09-28T10:00:00.000000Z',
+          ),
+        ],
+      ));
+      expect(
+          msg,
+          contains('[1] waiting on them · last message '
+              "2026-09-28T10:00:00.000000Z · this meeting's own invite\n"
+              '${wrapUntrusted('subject', 'Falcon launch plan')}'));
+      expect(
+          msg,
+          contains('[2] settled · last message 2026-09-28T10:00:00.000000Z '
+              '· Teams chat\n'
+              '${wrapUntrusted('subject', 'Falcon launch chat')}'));
+      final plain = const MeetingBriefTask().buildUserMessage(input());
+      expect(plain, isNot(contains("this meeting's own invite")));
+      expect(plain, isNot(contains('Teams chat')));
     });
 
     test('materials are numbered, fenced, with the digest, the text and '

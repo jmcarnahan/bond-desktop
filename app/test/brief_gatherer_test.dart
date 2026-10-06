@@ -6,14 +6,17 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/models/home_models.dart' show RelatedConversation;
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
+import 'package:bond_inbox/services/calendar/brief_path.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
 import 'package:bond_inbox/services/decision/decision_heads.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
 import 'package:bond_inbox/services/llm/prompt_guard.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_decision_client.dart';
@@ -70,11 +73,12 @@ void main() {
     String bodyPreview = '',
     String changeKey = 'ck-1',
     String seriesMasterId = '',
+    String subject = 'Fabrikam sync',
   }) {
     final start = now.add(startsIn);
     return CalendarEvent(
       id: id,
-      subject: 'Fabrikam sync',
+      subject: subject,
       startUtc: start,
       endUtc: start.add(const Duration(minutes: 30)),
       isCancelled: isCancelled,
@@ -805,7 +809,7 @@ void main() {
       expect(input.otherFiles, ['northwind-deck.pdf']);
       final msg = const MeetingBriefTask().buildUserMessage(input);
       expect(msg, isNot(contains('Materials sent ahead')));
-      expect(msg, contains('Files on other threads with these people (NOT '
+      expect(msg, contains('Files on the other threads (NOT '
           'sent for this meeting):\n- '
           '${wrapUntrusted('file', 'northwind-deck.pdf')}'));
     });
@@ -1469,6 +1473,299 @@ void main() {
     final input = await eligible(meeting());
     expect(input.lastMet, startsWith('Last met'));
   });
+
+  group('the related path', () {
+    late _RelatedStore related;
+    late FakeEmbedServer server;
+    late BriefGatherer relating;
+
+    BriefGatherer gathererOver(_RelatedStore s, FakeEmbedServer embed) =>
+        BriefGatherer(
+          s,
+          calendar,
+          ownerAddress: () async => owner,
+          zone: () => la,
+          embeddings: embed.client,
+        );
+
+    setUp(() {
+      related = _RelatedStore(db);
+      server = FakeEmbedServer();
+      relating = gathererOver(related, server);
+    });
+
+    /// Six other people, none of whom is on any thread below.
+    const six = [
+      Attendee(name: 'Me', address: owner),
+      Attendee(name: 'Ana Ruiz', address: 'ana@northwind.com'),
+      Attendee(name: 'Ben Okafor', address: 'ben@northwind.com'),
+      Attendee(name: 'Cy Park', address: 'cy@northwind.com'),
+      Attendee(name: 'Di Moss', address: 'di@northwind.com'),
+      Attendee(name: 'Ed Vance', address: 'ed@northwind.com'),
+      Attendee(name: 'Flo Hart', address: 'flo@northwind.com'),
+    ];
+
+    CalendarEvent big({
+      String id = 'evt-1',
+      String subject = 'Falcon launch plan',
+      String bodyPreview = '',
+      String seriesMasterId = '',
+      List<Attendee> attendees = six,
+    }) =>
+        meeting(
+          id: id,
+          subject: subject,
+          bodyPreview: bodyPreview,
+          seriesMasterId: seriesMasterId,
+          attendees: attendees,
+        );
+
+    /// A thread with someone who is not in the meeting.
+    Future<void> topic(String key,
+        {String? subject, Duration ago = const Duration(hours: 2), String? eventId}) async {
+      await conversation(key,
+          people: const ['kim@contoso.com'], ago: ago, subject: subject);
+      await message('m-$key', key,
+          from: 'kim@contoso.com', fromName: 'Kim', ago: ago, eventId: eventId);
+    }
+
+    Future<void> teamsChat(String key) async {
+      await store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': key,
+        'subject': 'Falcon launch chat',
+        'participants_json': jsonEncode([
+          {'name': 'Kim', 'email': 'teams:kim'},
+        ]),
+        'state': 'waiting',
+        'message_count': 1,
+        'last_message_at': stampAgo(const Duration(hours: 1)),
+      });
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'm-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Falcon launch chat',
+        'from_name': 'Kim',
+        'from_address': 'teams:kim',
+        'received_at': stampAgo(const Duration(hours: 1)),
+        'body_text': 'The launch moved a week.',
+        'triage_status': 'done',
+      });
+    }
+
+    RelatedConversation hit(String key, double cosine,
+            {String source = 'email'}) =>
+        (source: source, conversationKey: key, cosine: cosine);
+
+    Future<BriefInput> relatedInput(CalendarEvent e,
+        {bool passages = true}) async {
+      final g = await relating.gather(e, now: now, passages: passages);
+      expect(g, isA<BriefEligible>());
+      return (g as BriefEligible).input;
+    }
+
+    test('six topical others: the nearest threads in score order, no '
+        'attendee on them, a Teams chat among them', () async {
+      await topic('c-a');
+      await topic('c-b');
+      await teamsChat('t-1');
+      related.hits = [
+        hit('c-b', 0.82),
+        hit('t-1', 0.74, source: 'teams'),
+        hit('c-a', 0.66),
+      ];
+
+      final input = await relatedInput(big());
+      expect(input.path, BriefPath.related);
+      expect([for (final t in input.threads) t.conversationKey],
+          ['c-b', 't-1', 'c-a']);
+      expect(input.threads[1].source, 'teams');
+      expect(input.threads.every((t) => !t.invite), isTrue);
+      expect(input.relatedBest, closeTo(0.82, 1e-9));
+      final call = related.calls.single;
+      expect(call.embedModel, EmbeddingsClient.documentModelTag);
+      expect(call.floor, BriefGatherer.relatedFloor);
+      expect(call.limit, BriefGatherer.relatedCandidateLimit);
+      expect(call.sinceIso,
+          MessageStore.isoStamp(now.subtract(briefMailWindow)));
+      expect(server.inputs.single,
+          '${EmbeddingsClient.searchQueryPrefix}Falcon launch plan');
+    });
+
+    test('at most four related threads', () async {
+      for (var i = 0; i < 6; i++) {
+        await topic('c-$i');
+      }
+      related.hits = [for (var i = 0; i < 6; i++) hit('c-$i', 0.9 - i / 100)];
+      final input = await relatedInput(big());
+      expect([for (final t in input.threads) t.conversationKey],
+          ['c-0', 'c-1', 'c-2', 'c-3']);
+    });
+
+    test('invite threads lead and are flagged; three of them leave room for '
+        'three related; an invite key among the hits is not doubled',
+        () async {
+      for (var i = 0; i < 3; i++) {
+        await topic('inv-$i', eventId: 'evt-1', ago: Duration(hours: i + 1));
+      }
+      for (var i = 0; i < 4; i++) {
+        await topic('c-$i');
+      }
+      related.hits = [
+        hit('inv-0', 0.95),
+        for (var i = 0; i < 4; i++) hit('c-$i', 0.9 - i / 100),
+      ];
+      final input = await relatedInput(big());
+      expect(input.threads, hasLength(BriefGatherer.maxThreads));
+      expect([for (final t in input.threads.take(3)) t.conversationKey]..sort(),
+          ['inv-0', 'inv-1', 'inv-2']);
+      expect([for (final t in input.threads) t.invite],
+          [true, true, true, false, false, false]);
+      expect([for (final t in input.threads.skip(3)) t.conversationKey],
+          ['c-0', 'c-1', 'c-2']);
+      expect(input.relatedBest, closeTo(0.9, 1e-9),
+          reason: 'the invite hit was not kept as a related thread');
+    });
+
+    test("another meeting's invite and an Accepted: thread are dropped; the "
+        "series master's thread leads as an invite thread, not doubled",
+        () async {
+      await topic('c-other', eventId: 'evt-other');
+      await topic('c-accepted', subject: 'RE: Accepted: Falcon launch plan');
+      await topic('c-master', eventId: 'master-1');
+      await topic('c-plain');
+      related.hits = [
+        hit('c-other', 0.9),
+        hit('c-accepted', 0.88),
+        hit('c-master', 0.8),
+        hit('c-plain', 0.7),
+      ];
+      // c-master's message names the series master: the occurrence's own
+      // invite lookup finds it, so it is kept and leads as an invite thread
+      // rather than being dropped as another meeting's.
+      final input = await relatedInput(big(seriesMasterId: 'master-1'));
+      expect([for (final t in input.threads) t.conversationKey],
+          ['c-master', 'c-plain']);
+      expect([for (final t in input.threads) t.invite], [true, false]);
+      expect(input.relatedBest, closeTo(0.7, 1e-9));
+    });
+
+    test('nothing found is still eligible, never no_mail', () async {
+      related.hits = const [];
+      final input = await relatedInput(big());
+      expect(input.threads, isEmpty);
+      expect(input.path, BriefPath.related);
+      expect(input.relatedBest, isNull);
+      expect(input.inputsHash, isNotEmpty);
+    });
+
+    test('the query is embedded once across gathers, and the light and full '
+        'gathers hash alike', () async {
+      await topic('c-a');
+      related.hits = [hit('c-a', 0.8)];
+      final full = await relatedInput(big());
+      final light = await relatedInput(big(), passages: false);
+      expect(server.calls, 1);
+      expect(server.inputs.single,
+          startsWith(EmbeddingsClient.searchQueryPrefix));
+      expect(related.calls, hasLength(2), reason: 'the KNN runs each time');
+      expect(light.inputsHash, full.inputsHash);
+      expect([for (final t in light.threads) t.conversationKey], ['c-a']);
+    });
+
+    test('the agenda rides the query; the join block does not', () async {
+      await relatedInput(big(
+          bodyPreview: 'Agree the launch checklist.\n__________\n'
+              'Microsoft Teams meeting Join on your computer'));
+      expect(server.inputs.single,
+          '${EmbeddingsClient.searchQueryPrefix}Falcon launch plan\n'
+          'Agree the launch checklist.');
+    });
+
+    test('embed down: unavailable, no second request inside two minutes, '
+        'one after; the hash moves when the search comes back', () async {
+      await topic('c-a');
+      related.hits = [hit('c-a', 0.8)];
+      final down = FakeEmbedServer(status: 500);
+      final g = gathererOver(related, down);
+
+      final first = await g.gather(big(), now: now) as BriefEligible;
+      expect(first.input.threads, isEmpty);
+      expect(down.calls, 1);
+      expect(related.calls, isEmpty);
+
+      final soon = await g.gather(big(),
+          now: now.add(const Duration(minutes: 1))) as BriefEligible;
+      expect(down.calls, 1, reason: 'inside embedRetryAfter');
+      expect(soon.input.inputsHash, first.input.inputsHash);
+
+      await g.gather(big(), now: now.add(const Duration(minutes: 3)));
+      expect(down.calls, 2, reason: 'past embedRetryAfter');
+
+      // The same meeting and mail with a working server: `ok`, and a thread.
+      final back = await relatedInput(big());
+      expect(back.threads, hasLength(1));
+      expect(back.inputsHash, isNot(first.input.inputsHash));
+    });
+
+    test('the related state alone moves the hash', () async {
+      related.hits = const [];
+      final ok = await relatedInput(big());
+      final off = await BriefGatherer(related, calendar,
+              ownerAddress: () async => owner, zone: () => la)
+          .gather(big(), now: now) as BriefEligible;
+      expect(off.input.threads, isEmpty);
+      expect(off.input.inputsHash, isNot(ok.inputsHash));
+      related.indexMissing = true;
+      final noIndex = await relatedInput(big());
+      expect(noIndex.inputsHash, isNot(ok.inputsHash));
+      expect(noIndex.inputsHash, isNot(off.input.inputsHash));
+    });
+
+    test("a five-person meeting's hash is the pre-change formula, byte for "
+        'byte', () async {
+      await thread('c-1');
+      final e = meeting(attendees: const [
+        Attendee(name: 'Dana Lee', address: dana),
+        Attendee(name: 'Sam', address: sam),
+        Attendee(name: 'Kim', address: 'kim@northwind.com'),
+        Attendee(name: 'Lu', address: 'lu@northwind.com'),
+        Attendee(name: 'Mo', address: 'mo@northwind.com'),
+      ]);
+      final input = await relatedInput(e);
+      expect(input.path, BriefPath.people);
+      expect(server.calls, 0, reason: 'the people path embeds no query');
+      final row = (await store.getConversationRow('email', 'c-1'))!;
+      final lines = [
+        'event|${e.id}|${e.changeKey}',
+        'start|${e.startUtc!.toIso8601String()}',
+        'end|${e.endUtc!.toIso8601String()}',
+        'owner|$owner',
+        'thread|email|c-1|${row['last_message_at']}|1',
+      ];
+      expect(input.inputsHash,
+          sha256.convert(utf8.encode(lines.join('\n'))).toString());
+    });
+
+    test('a topicless meeting of eight others takes the people path, with '
+        'the address threads', () async {
+      await thread('c-1');
+      final input = await relatedInput(big(
+        subject: 'Weekly sync',
+        attendees: [
+          const Attendee(name: 'Dana Lee', address: dana),
+          for (var i = 0; i < 7; i++)
+            Attendee(name: 'P$i', address: 'p$i@northwind.com'),
+        ],
+      ));
+      expect(input.path, BriefPath.people);
+      expect([for (final t in input.threads) t.conversationKey], ['c-1']);
+      expect(related.calls, isEmpty);
+      expect(server.calls, 0);
+    });
+  });
 }
 
 /// A store whose chunk reads are scripted, so the passage step is tested
@@ -1520,5 +1817,43 @@ class _ChunkStore extends MessageStore {
       for (final h in hits)
         if (attachmentIds.contains(h.ref.attachmentId)) h,
     ].take(limit).toList();
+  }
+}
+
+/// A store whose related search is scripted, so the related path is tested
+/// without seeding the vec0 index (`message_search_test.dart` tests the real
+/// read): [hits] is what it answers, [indexMissing] answers null, and every
+/// call is recorded.
+class _RelatedStore extends MessageStore {
+  _RelatedStore(super.db);
+
+  List<RelatedConversation> hits = const [];
+  bool indexMissing = false;
+  final List<
+      ({
+        Uint8List query,
+        String embedModel,
+        String sinceIso,
+        double floor,
+        int limit
+      })> calls = [];
+
+  @override
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async {
+    calls.add((
+      query: queryEmbedding,
+      embedModel: embedModel,
+      sinceIso: sinceIso,
+      floor: floor,
+      limit: limit,
+    ));
+    if (indexMissing) return null;
+    return hits.take(limit).toList();
   }
 }

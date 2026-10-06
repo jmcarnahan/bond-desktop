@@ -378,6 +378,99 @@ void main() {
       expect(result.notice, isNull, reason: 'both passes ran');
     });
 
+    group('relatedConversations', () {
+      final now = DateTime.now().toUtc();
+      String ago(Duration d) => MessageStore.isoStamp(now.subtract(d));
+
+      /// One embedded inbound message in conversation [key].
+      Future<void> message(String id, String key, String subject,
+          {Duration age = const Duration(hours: 2),
+          String source = 'email'}) async {
+        await store.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': key,
+          'direction': 'inbound',
+          'subject': subject,
+          'from_name': 'Dana',
+          'from_address': 'dana@fabrikam.com',
+          'received_at': ago(age),
+          'body_text': subject,
+        });
+        await writeTriaged(store, source, id,
+            status: 'triaged',
+            urgency: 'normal',
+            category: 'work',
+            summary: subject,
+            needsAction: false,
+            actionItems: const []);
+        await embed(id, source: source);
+      }
+
+      Future<List<RelatedConversation>?> related({
+        double floor = 0.6,
+        int limit = 12,
+        Duration window = const Duration(days: 30),
+      }) async {
+        // The invoice axis: cosine 1 to an invoice, 0.9 to parking, 0.5 to
+        // a launch, 0 to anything else.
+        final q = (await server.client.embedResult('invoice',
+                prefix: EmbeddingsClient.searchQueryPrefix))
+            .vector!;
+        return store.relatedConversations(
+          encodeEmbedding(q),
+          embedModel: EmbeddingsClient.documentModelTag,
+          sinceIso: ago(window),
+          floor: floor,
+          limit: limit,
+        );
+      }
+
+      test('one entry per conversation, scored by its best message, '
+          'nearest first; a Teams chat is one too', () async {
+        if (!available) return;
+        await message('inv-1', 'c-inv', 'Invoice 4471 is overdue');
+        // A second, farther message in the same conversation: it adds no
+        // entry, and the conversation keeps the 1.0 of its best.
+        await message('park-in-inv', 'c-inv', 'Parking for the audit call');
+        await message('park', 'c-park', 'Parking permit renewal',
+            source: 'teams');
+
+        final hits = (await related())!;
+        expect([for (final h in hits) (h.source, h.conversationKey)],
+            [('email', 'c-inv'), ('teams', 'c-park')]);
+        expect(hits.first.cosine, closeTo(1.0, 0.001));
+        expect(hits[1].cosine, closeTo(0.9, 0.001));
+      });
+
+      test('stops at the floor, and at the limit', () async {
+        if (!available) return;
+        await message('inv', 'c-inv', 'Invoice 4471 is overdue');
+        await message('park', 'c-park', 'Parking permit renewal');
+        await message('launch', 'c-launch', 'Launch date moved to Friday');
+
+        final atSixty = (await related())!;
+        expect([for (final h in atSixty) h.conversationKey],
+            ['c-inv', 'c-park'],
+            reason: 'the launch sits at 0.5, under the floor');
+        final atFortyFive = (await related(floor: 0.45))!;
+        expect([for (final h in atFortyFive) h.conversationKey],
+            ['c-inv', 'c-park', 'c-launch']);
+        final one = (await related(floor: 0.45, limit: 1))!;
+        expect([for (final h in one) h.conversationKey], ['c-inv']);
+      });
+
+      test('respects sinceIso', () async {
+        if (!available) return;
+        await message('inv-old', 'c-old', 'Invoice 4470 is overdue',
+            age: const Duration(days: 40));
+        await message('park', 'c-park', 'Parking permit renewal');
+
+        final hits = (await related())!;
+        expect([for (final h in hits) h.conversationKey], ['c-park']);
+      });
+    });
+
     group('dropped rows', () {
       Future<void> dropPark() => store.writeSettledProgress(
             'email',

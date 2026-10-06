@@ -11,7 +11,12 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// Runs only while processing is on and only after a sync that completed;
 /// the caller pumps the draft lane when this queued anything. Nothing here
 /// calls a model: the eligibility check and the inputs hash are store reads
-/// (it gathers with `passages: false`, so not even an embedding call).
+/// (it gathers with `passages: false`, so no passage embedding). The one
+/// network call it can cost is the related search's query: a meeting on the
+/// related path (`briefPathOf`) has its subject and description embedded
+/// once per distinct text per app run — the gatherer caches the vector —
+/// because the threads that search finds are hashed, so new mail on the
+/// topic re-briefs.
 ///
 /// **The regeneration rule.** A meeting with no brief is queued. A stored
 /// brief is queued again when its inputs hash moved — at any age, so a deck
@@ -182,7 +187,8 @@ class BriefPlanner {
       }
 
       // Without passages: they are not hashed, and finding them costs an
-      // embedding call per meeting — the handler's gather finds them.
+      // embedding call per meeting — the handler's gather finds them. (The
+      // related search's query is hashed, and cached in the gatherer.)
       final gathered =
           await _gatherer.gather(e, now: nowUtc, passages: false);
       _lastChecked[e.id] = (at: nowUtc, generatedAt: stored?.generatedAt ?? '');

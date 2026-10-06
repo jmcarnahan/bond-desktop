@@ -20,6 +20,7 @@ import '../html_text.dart' show stripLinkTargets;
 import '../llm/embeddings_client.dart';
 import '../llm/prompt_guard.dart';
 import 'ask_words.dart' show askOwnWords, capAtWord;
+import 'brief_path.dart';
 import 'calendar_zone.dart';
 import 'day_items.dart' show formatEventRange;
 import 'event_view.dart' show EventStanding, lastMetLabel, standingOf;
@@ -77,6 +78,12 @@ class BriefThread {
   /// important — what put the thread at the front of the list.
   final bool ranked;
 
+  /// Whether this is one of the meeting's own invite threads, which lead
+  /// the list on either path. The task says so on the thread's line, so the
+  /// model can tell the meeting's own mail from mail found by its people or
+  /// its text.
+  final bool invite;
+
   const BriefThread({
     required this.source,
     required this.conversationKey,
@@ -86,6 +93,7 @@ class BriefThread {
     this.messageCount = 0,
     this.snippets = const [],
     this.ranked = false,
+    this.invite = false,
   });
 }
 
@@ -346,8 +354,8 @@ class BriefInput {
   /// involves the same people: that is in [otherFiles].
   final List<BriefMaterial> materials;
 
-  /// The names of the files on the address-matched threads in [threads] —
-  /// mail with these people that is not about this meeting — newest first,
+  /// The names of the files on the other threads in [threads] — the
+  /// address-matched or related mail, not this meeting's own — newest first,
   /// one per name, at most [BriefGatherer.maxOtherFiles]. Raw, like every
   /// label; the task lists them as NOT sent for this meeting, so a resume
   /// sent for another interview cannot become this meeting's purpose.
@@ -382,6 +390,16 @@ class BriefInput {
   /// The invite's `body_preview`, fenced and capped; null when it has none.
   final String? invitePreview;
 
+  /// Which way [threads] were found ([briefPathOf]). Hashed only when it is
+  /// [BriefPath.related], so every people-path hash is the one it was
+  /// before there were two paths.
+  final BriefPath path;
+
+  /// The cosine of the nearest related thread kept, on the
+  /// [BriefPath.related] path; null on the people path or when none was
+  /// kept. For the activity row; never hashed, since the threads are.
+  final double? relatedBest;
+
   final String inputsHash;
 
   const BriefInput({
@@ -401,6 +419,8 @@ class BriefInput {
     this.peopleMore = 0,
     this.lastMet,
     this.invitePreview,
+    this.path = BriefPath.people,
+    this.relatedBest,
     required this.inputsHash,
   });
 }
@@ -559,7 +579,8 @@ final RegExp _dnsLabel = RegExp(r'^[a-z0-9-]+$');
 DateTime briefHorizonEnd(DateTime nowUtc, CalendarZone zone) =>
     zone.localDateTime(zone.dateOf(nowUtc.toUtc()).addDays(2), 0, 0).toUtc();
 
-/// How far back the mail with its people is read (D6).
+/// How far back the mail with its people is read (D6), and how far back the
+/// related search looks ([BriefPath.related]).
 const Duration briefMailWindow = Duration(days: 30);
 
 /// The most other people a briefed meeting may have. Past it the meeting is
@@ -717,19 +738,34 @@ BriefIneligibility? briefQuickCheck(
 /// mirror's rows) and never a master, and the handler turns a master it is
 /// given into its `displayOccurrence` before it gets here.
 ///
-/// Mail only for now. The people are matched by ADDRESS against a
-/// conversation's `participants_json`, and a Teams chat stores its people as
-/// `teams:<id>`, not addresses, so no chat is ever matched; mapping them
-/// through the people directory is a follow-up. `participants_json` also
-/// holds at most eight people per conversation, so an attendee beyond the
-/// eighth in a busy thread is not matched by that thread. The meeting's own
-/// invite mails (`messagesForEvent`) are read first whoever sent them, so a
+/// Two paths ([briefPathOf]). The meeting's own invite mails
+/// (`messagesForEvent`) are read first on both, whoever sent them, so a
 /// meeting whose only mail is its invite is still briefed.
+///
+/// The PEOPLE path (at most [briefPeopleMax] others, or a topicless meeting
+/// of at most [briefTopiclessPeopleMax]) is mail only. The people are
+/// matched by ADDRESS against a conversation's `participants_json`, and a
+/// Teams chat stores its people as `teams:<id>`, not addresses, so no chat
+/// is ever matched; mapping them through the people directory is a
+/// follow-up. `participants_json` also holds at most eight people per
+/// conversation, so an attendee beyond the eighth in a busy thread is not
+/// matched by that thread.
+///
+/// The RELATED path (everything bigger, or with a list in the room) reads
+/// mail AND Teams by meaning: the conversations whose messages sit nearest
+/// the meeting's subject and description ([briefQueryText]) in the message
+/// index, at most [maxRelated] at cosine [relatedFloor] or better, from the
+/// last [briefMailWindow], logistics left out, whoever is on them. It never
+/// answers `no_mail`: a meeting it finds nothing for is briefed from its
+/// invite and its people. The query is embedded once per text per run
+/// ([_queryVectors]), in the light gather too, because the threads it finds
+/// are hashed like any other.
 ///
 /// With [embeddings] given, the materials carry the passages of their text
 /// nearest the meeting; without it (tests, or no embedding server wired)
-/// they carry the digest only. That one step makes a network call, only when
-/// `gather` is asked for passages, and it can never fail the brief.
+/// they carry the digest only, and the related path finds nothing (`off`).
+/// The passage step makes a network call only when `gather` is asked for
+/// passages; neither step can ever fail the brief.
 class BriefGatherer {
   BriefGatherer(
     this._store,
@@ -795,6 +831,41 @@ class BriefGatherer {
   /// How much of a person's newest message the people block quotes.
   static const int lastWordsCap = 240;
 
+  /// The most related threads ([BriefPath.related]) a brief is written
+  /// from, after the invite threads and inside [maxThreads]: about half of
+  /// what the search finds is about something else, so a few of the
+  /// nearest beat many.
+  static const int maxRelated = 4;
+
+  /// The least cosine a related thread's best message may have. Calibrated
+  /// on subject-and-description queries ([briefQueryText]); a longer query
+  /// moves the scale and needs this measured again.
+  static const double relatedFloor = 0.60;
+
+  /// How many conversations the related search hands back to be read and
+  /// filtered (invite threads, logistics) down to [maxRelated].
+  static const int relatedCandidateLimit = 12;
+
+  /// How long after a failed query embedding the gatherer does not ask
+  /// again, judged on the caller's `now`: a hung server costs one timeout,
+  /// not one per meeting in the window.
+  static const Duration embedRetryAfter = Duration(minutes: 2);
+
+  /// How many query vectors [_queryVectors] holds; past it the oldest is
+  /// dropped. A day's meetings are a few dozen texts.
+  static const int queryCacheMax = 64;
+
+  /// The related search's query vectors, by sha256 of the query text, for
+  /// the life of the gatherer (the app run): the planner gathers every
+  /// meeting in the window on every sync, and an embedding call per meeting
+  /// per sync would be the one network cost of a pass that is otherwise
+  /// store reads.
+  final Map<String, Uint8List> _queryVectors = {};
+
+  /// Until when a failed query embedding keeps the gatherer from asking
+  /// again ([embedRetryAfter]).
+  DateTime? _embedDownUntil;
+
   /// The intents that make an inbound message an ASK. `scheduling` is left
   /// out on purpose: the meeting being briefed is usually its answer.
   static const Set<String> askIntents = {'question', 'request', 'approval'};
@@ -815,14 +886,16 @@ class BriefGatherer {
   }
 
   /// [passages] false is the light gather, which only needs the hash and
-  /// the wait: no embedding call, no file text read, no people block. The
-  /// inputs hash is the same either way, and so are [BriefInput.
-  /// materialsPending] and [BriefEligible.unqueued], which read only the
-  /// stored states and the work rows.
+  /// the wait: no passage embedding, no file text read, no people block. On
+  /// the [BriefPath.related] path it still finds the related threads, which
+  /// costs one embedding call per distinct meeting text per run (cached),
+  /// because they are hashed. The inputs hash is the same either way, and
+  /// so are [BriefInput.materialsPending] and [BriefEligible.unqueued],
+  /// which read only the stored states and the work rows.
   ///
   /// [asked] — a person pressed Write a brief: neither the horizon nor the
   /// mail rule applies, and a meeting with no mail is briefed from the
-  /// invite and its people alone.
+  /// invite and its people alone. (The related path has no mail rule.)
   Future<BriefGather> gather(
     CalendarEvent event, {
     required DateTime now,
@@ -841,6 +914,8 @@ class BriefGatherer {
     if (quick != null) return BriefIneligible(quick);
 
     final others = briefOthers(event, owner: owner);
+    final path = briefPathOf(event,
+        otherAddresses: [for (final p in others) p.address]);
     final addresses = {for (final p in others) p.address};
     final nameOf = {
       for (final p in others)
@@ -861,12 +936,6 @@ class BriefGatherer {
         if (!inviteKeys.contains(key)) inviteKeys.add(key);
       }
     }
-
-    final conversations = await _store.conversationsWithAddresses(
-      addresses,
-      sinceIso: MessageStore.isoStamp(nowUtc.subtract(briefMailWindow)),
-      limit: candidateLimit,
-    );
 
     // One read per candidate: its messages, and the decision on its newest
     // inbound message, which is what the ranking turns on.
@@ -890,26 +959,46 @@ class BriefGatherer {
       if (row == null) continue;
       invites.add(await candidateOf(Conversation.fromRow(row)));
     }
-    // An invite thread alone is mail about this meeting: the rule is "no
-    // threads at all", not "no address match". A person who asked gets a
-    // brief anyway: every step below takes an empty thread list.
-    if (!asked && invites.isEmpty && conversations.isEmpty) {
-      return const BriefIneligible(BriefIneligibility.noMail);
-    }
 
     final candidates = <_Candidate>[];
-    for (final c in conversations) {
-      if (inviteKeys.contains((c.source, c.id))) continue;
-      candidates.add(await candidateOf(c));
+    String? relatedState;
+    double? relatedBest;
+    switch (path) {
+      case BriefPath.people:
+        final conversations = await _store.conversationsWithAddresses(
+          addresses,
+          sinceIso: MessageStore.isoStamp(nowUtc.subtract(briefMailWindow)),
+          limit: candidateLimit,
+        );
+        // An invite thread alone is mail about this meeting: the rule is "no
+        // threads at all", not "no address match". A person who asked gets a
+        // brief anyway: every step below takes an empty thread list.
+        if (!asked && invites.isEmpty && conversations.isEmpty) {
+          return const BriefIneligible(BriefIneligibility.noMail);
+        }
+        for (final c in conversations) {
+          if (inviteKeys.contains((c.source, c.id))) continue;
+          candidates.add(await candidateOf(c));
+        }
+        // Urgent or important first, then the most recently active; the
+        // conversation key breaks a tie so the same mail always ranks one
+        // way.
+        candidates.sort((a, b) {
+          if (a.ranked != b.ranked) return a.ranked ? -1 : 1;
+          final byTime =
+              (b.c.lastMessageAt ?? '').compareTo(a.c.lastMessageAt ?? '');
+          return byTime != 0 ? byTime : a.c.id.compareTo(b.c.id);
+        });
+      case BriefPath.related:
+        // No mail rule: with nothing found the brief is written from the
+        // invite and its people. The threads stay in score order — nearest
+        // first is the ranking here, and a pressing thread about something
+        // else must not jump it.
+        final found = await _relatedOf(event, inviteKeys, nowUtc, candidateOf);
+        candidates.addAll(found.threads);
+        relatedState = found.state;
+        relatedBest = found.best;
     }
-    // Urgent or important first, then the most recently active; the
-    // conversation key breaks a tie so the same mail always ranks one way.
-    candidates.sort((a, b) {
-      if (a.ranked != b.ranked) return a.ranked ? -1 : 1;
-      final byTime =
-          (b.c.lastMessageAt ?? '').compareTo(a.c.lastMessageAt ?? '');
-      return byTime != 0 ? byTime : a.c.id.compareTo(b.c.id);
-    });
     // The invite threads lead, newest first as the store returns them, and
     // count toward the six.
     final inviteChosen = invites.take(maxInviteThreads).toList();
@@ -917,7 +1006,7 @@ class BriefGatherer {
         [...inviteChosen, ...candidates].take(maxThreads).toList();
 
     final threads = [
-      for (final k in chosen)
+      for (final (i, k) in chosen.indexed)
         BriefThread(
           source: k.c.source,
           conversationKey: k.c.id,
@@ -934,6 +1023,7 @@ class BriefGatherer {
                 ),
           ],
           ranked: k.ranked,
+          invite: i < inviteChosen.length,
         ),
     ];
 
@@ -1043,6 +1133,8 @@ class BriefGatherer {
     final inputsHash = _hash(
       event: event,
       owner: owner,
+      path: path,
+      relatedState: relatedState,
       threads: threads,
       asks: asks,
       storylines: storylines,
@@ -1072,8 +1164,104 @@ class BriefGatherer {
       invitePreview: preview.isEmpty
           ? null
           : wrapUntrusted('invite', _cap(preview, invitePreviewCap)),
+      path: path,
+      relatedBest: relatedBest,
       inputsHash: inputsHash,
     ));
+  }
+
+  /// The [BriefPath.related] threads for [event]: the conversations nearest
+  /// its [briefQueryText], best first, read through [candidateOf], at most
+  /// [maxRelated]. A conversation in [inviteKeys] is left out (it already
+  /// leads the list), and so is calendar logistics: a thread whose subject
+  /// is an answer, an invitation or a cancellation
+  /// ([briefIsLogisticsSubject]), or one carrying ANOTHER meeting's invite
+  /// (a message whose `meetingEventId` is neither this occurrence nor its
+  /// series master) — it sits near the subject because it repeats it, and
+  /// says nothing about this meeting.
+  ///
+  /// [state] says how the search went, for the hash: `ok`; `off` with no
+  /// embedding client; `no_query` with nothing to search by; `unavailable`
+  /// when the query could not be embedded (and for [embedRetryAfter] after),
+  /// the index is not there, or anything threw. A failure is never a reason
+  /// for there to be no brief, and the hash moves when the search returns.
+  /// [best] is the first kept thread's cosine.
+  Future<({List<_Candidate> threads, String state, double? best})> _relatedOf(
+    CalendarEvent event,
+    List<(String, String)> inviteKeys,
+    DateTime nowUtc,
+    Future<_Candidate> Function(Conversation) candidateOf,
+  ) async {
+    const none = <_Candidate>[];
+    final embeddings = _embeddings;
+    if (embeddings == null) return (threads: none, state: 'off', best: null);
+    final text = briefQueryText(event);
+    if (text.isEmpty) return (threads: none, state: 'no_query', best: null);
+    try {
+      final key = sha256.convert(utf8.encode(text)).toString();
+      var query = _queryVectors[key];
+      if (query == null) {
+        final downUntil = _embedDownUntil;
+        if (downUntil != null && downUntil.isAfter(nowUtc)) {
+          return (threads: none, state: 'unavailable', best: null);
+        }
+        final vector = (await embeddings.embedResult(
+          text,
+          prefix: EmbeddingsClient.searchQueryPrefix,
+        ))
+            .vector;
+        if (vector == null) {
+          _embedDownUntil = nowUtc.add(embedRetryAfter);
+          return (threads: none, state: 'unavailable', best: null);
+        }
+        query = encodeEmbedding(vector);
+        // The oldest goes, not the lot: the map keeps insertion order, and
+        // clearing it would drop the vectors of meetings still in the window.
+        if (_queryVectors.length >= queryCacheMax) {
+          _queryVectors.remove(_queryVectors.keys.first);
+        }
+        _queryVectors[key] = query;
+      }
+      final hits = await _store.relatedConversations(
+        query,
+        embedModel: EmbeddingsClient.documentModelTag,
+        sinceIso: MessageStore.isoStamp(nowUtc.subtract(briefMailWindow)),
+        floor: relatedFloor,
+        limit: relatedCandidateLimit,
+      );
+      if (hits == null) {
+        return (threads: none, state: 'unavailable', best: null);
+      }
+      final threads = <_Candidate>[];
+      double? best;
+      for (final hit in hits) {
+        if (threads.length >= maxRelated) break;
+        if (inviteKeys.contains((hit.source, hit.conversationKey))) continue;
+        final row =
+            await _store.getConversationRow(hit.source, hit.conversationKey);
+        if (row == null) continue;
+        final conversation = Conversation.fromRow(row);
+        // Judged on the row, before the thread read it would cost.
+        if (briefIsLogisticsSubject(conversation.subject ?? '')) continue;
+        final k = await candidateOf(conversation);
+        // Another meeting's invite thread: neither this occurrence nor its
+        // series master. The exemption is a belt — a thread carrying either
+        // id is already an invite key and was skipped above.
+        final otherInvite = k.messages.any((m) {
+          final id = m.meetingEventId;
+          return id != null &&
+              id != event.id &&
+              !(event.seriesMasterId.isNotEmpty && id == event.seriesMasterId);
+        });
+        if (otherInvite) continue;
+        threads.add(k);
+        best ??= hit.cosine;
+      }
+      return (threads: threads, state: 'ok', best: best);
+    } on Object catch (e) {
+      debugPrint('BriefGatherer: no related threads (${e.runtimeType})');
+      return (threads: none, state: 'unavailable', best: null);
+    }
   }
 
   /// Whether the decision model read [d] as pressing: urgency high or
@@ -1458,9 +1646,18 @@ class BriefGatherer {
   /// new. Passages are not: they follow from the text, which is hashed. An
   /// other file's lower-cased name is: a new file with these people changes
   /// what the brief is told.
+  ///
+  /// On the [BriefPath.related] path ONLY, two lines follow the owner's:
+  /// `path|related` and `related|<state>` (`_relatedOf`'s `ok`, `off`,
+  /// `no_query` or `unavailable`), so a search that comes back moves the
+  /// hash. The people path adds nothing: its hash is byte for byte the one
+  /// it was before there were two paths, and no small meeting's brief is
+  /// rewritten by the upgrade.
   static String _hash({
     required CalendarEvent event,
     required String? owner,
+    required BriefPath path,
+    required String? relatedState,
     required List<BriefThread> threads,
     required List<BriefAsk> asks,
     required List<BriefStoryline> storylines,
@@ -1472,6 +1669,10 @@ class BriefGatherer {
       'start|${event.startUtc?.toIso8601String() ?? event.startDate?.toIso() ?? ''}',
       'end|${event.endUtc?.toIso8601String() ?? event.endDate?.toIso() ?? ''}',
       'owner|${owner ?? ''}',
+      if (path == BriefPath.related) ...[
+        'path|${path.wire}',
+        'related|${relatedState ?? ''}',
+      ],
       for (final t in threads)
         'thread|${t.source}|${t.conversationKey}|${t.lastAt}|${t.messageCount}',
       for (final a in asks) 'ask|${a.messageId}',

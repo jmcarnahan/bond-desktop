@@ -1242,17 +1242,35 @@ that bite.
     must PROVE the claim (the LLM double was called);
     `meeting_brief_handler_test` is the model.
 - **Briefs:**
-  - Briefs read MAIL only. Teams participants are `teams:<id>` and carry no
-    address to match an attendee.
+  - Two paths (`briefPathOf`, `brief_path.dart`, pure): `people` for ≤ 5
+    others (`briefPeopleMax`) with no list address (`briefLooksLikeList`), or
+    a topicless meeting (`briefIsTopicless`) of ≤ 15; else `related`. The
+    people path reads MAIL only (Teams participants are `teams:<id>`, no
+    address to match); the related path reads mail AND Teams by meaning. The
+    four heuristics (list, `briefAgendaOf`'s boilerplate strip, topicless,
+    `briefIsLogisticsSubject`) are unmeasured and English only.
   - Threads: the event's own invite threads first (`messagesForEvent` for the
-    occurrence, then its series master; ≤ 3), then the 30-day address match;
-    `noMail` means no threads at all. Materials (`BriefMaterial`) are the
+    occurrence, then its series master; ≤ 3, `BriefThread.invite`), then on
+    the people path the 30-day address match (`noMail` means no threads at
+    all), on the related path ≤ 4 (`maxRelated`) from ONE
+    `MessageStore.relatedConversations` (one `semanticSearch` at limit 100;
+    best message per conversation, cosine = `1 − distance`, stop below 0.60
+    `relatedFloor`, 30 days, no attendee filter), invite keys and logistics
+    (subject, or another event's `meetingEventId`) dropped, in score order;
+    the related path never answers `noMail`. The query (`briefQueryText`) is
+    embedded under `searchQueryPrefix`, cached per text in the gatherer, and
+    a failed embed is not retried for 2 min (`embedRetryAfter`). Its hash
+    adds `path|related` + `related|<ok|off|no_query|unavailable>` after the
+    owner line; the people path's hash is byte-identical to before. Tests
+    script the search by overriding `relatedConversations`
+    (`_RelatedStore`). Materials (`BriefMaterial`) are the
     files on THIS MEETING'S OWN invite threads only (the occurrence's, then
     its series master's) — inbound and outbound, non-inline `file|reference`
     attachments that are not images (the owner's own: sender `you`). Files on
-    the address-matched threads are `BriefInput.otherFiles`: names only
-    (≤ 4, 80 chars as fenced), written under "Files on other threads with
-    these people (NOT sent for this meeting)", and the prompt forbids reading
+    the other chosen threads (address-matched or related) are
+    `BriefInput.otherFiles`: names only
+    (≤ 4, 80 chars as fenced), written under "Files on the other threads
+    (NOT sent for this meeting)", and the prompt forbids reading
     the meeting's purpose from them (live lesson 2026-10-04: a test meeting
     with no attachment was briefed as a candidate review because the same
     person's earlier invites carried a resume). Materials are
@@ -1262,9 +1280,11 @@ that bite.
     was cut) and ≤ 2 passages
     from ONE scoped `chunkKnn` (attachment ids, then the exact
     `(messageId, attachmentId)` pair). The planner gathers with
-    `passages: false`, the LIGHT gather: no text, no people, no embedding
-    (none of them hashed, so the hash is the same); only the handler reads
-    them and embeds the meeting, once, lazily. The hash carries
+    `passages: false`, the LIGHT gather: no text, no people, no passage
+    embedding (none of them hashed, so the hash is the same); only the
+    handler reads them and embeds the meeting, once, lazily. The related
+    search runs in both gathers (it is hashed): one cached query embed per
+    meeting text per run. The hash carries
     `material|msg|att|textStatus|digestStatus`, so a deck whose text or
     digest lands later re-briefs on the next pass.
   - People (`BriefPerson`, handler's gather only): the organiser first,
@@ -1332,9 +1352,10 @@ that bite.
     `materialTextCharsWritten` runs the same spend for the activity row's
     `text_chars`. The size guard in `meeting_brief_task_test` holds a
     maximal prompt (every label 300 characters of `&<>`, four other files
-    fenced at `otherFileNameCap` 80) at ≤ 38500 characters (38133 measured,
-    plus ~1%; 37012/37800 before the other-files block; the ceiling is
-    (16384 − 2700) × 3.0 ≈ 41052). A material line
+    fenced at `otherFileNameCap` 80, the related header, three invite and
+    three Teams markers) at ≤ 39120 characters (38732 measured, plus ~1%;
+    38133/38500 before the related path, 37012/37800 before the other-files
+    block; the ceiling is (16384 − 2700) × 3.0 ≈ 41052). A material line
     puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
     block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the

@@ -8,6 +8,7 @@ import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/models/home_models.dart' show RelatedConversation;
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/brief_planner.dart';
@@ -314,6 +315,42 @@ void main() {
     expect((asked as BriefEligible).input.materials.single.passages,
         isNotEmpty);
     expect(server.calls, 1);
+  });
+
+  test('a related-path meeting costs one embedding call across two passes, '
+      'and an unchanged related set is not queued twice', () async {
+    final related = _RelatedStore(db)
+      ..hits = [(source: 'email', conversationKey: 'c-1', cosine: 0.8)];
+    final server = FakeEmbedServer();
+    final counting = _CountingGatherer(
+      related,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: () => la,
+      embeddings: server.client,
+    );
+    final planning = BriefPlanner(related, calendar, counting);
+    // Six others: the related path, whoever the threads are with.
+    await calendar.upsertEvents([
+      meeting('evt-big', attendees: [
+        for (var i = 0; i < 6; i++)
+          Attendee(name: 'Guest $i', address: 'guest$i@northwind.com'),
+      ]),
+    ], syncRun: 'run-1');
+
+    expect(await planning.plan(now: now, zone: la), 1);
+    expect(await status('evt-big'), 'pending');
+    expect(server.calls, 1);
+    expect(related.calls, 1);
+
+    expect(await planning.plan(now: now.add(const Duration(minutes: 1)), zone: la),
+        0, reason: 'the same related set, already queued');
+    expect(server.calls, 1, reason: 'the query vector is cached');
+    expect(related.calls, 2, reason: 'the search itself runs every pass');
+    // The pending work row alone would also answer 0, so the hash is read
+    // directly: the same related set hashes the same on both passes.
+    expect(counting.hashes, hasLength(2));
+    expect(counting.hashes.last, counting.hashes.first);
   });
 
   test('an old brief is requeued only when its inputs moved', () async {
@@ -801,11 +838,17 @@ class _CountingGatherer extends BriefGatherer {
     required DateTime now,
     bool passages = true,
     bool asked = false,
-  }) {
+  }) async {
     gathers++;
     passageAsks.add(passages);
-    return super.gather(event, now: now, passages: passages, asked: asked);
+    final gathered =
+        await super.gather(event, now: now, passages: passages, asked: asked);
+    if (gathered is BriefEligible) hashes.add(gathered.input.inputsHash);
+    return gathered;
   }
+
+  /// The inputs hash of every eligible gather, in order.
+  final List<String> hashes = [];
 }
 
 /// [MessageStore] whose files always have chunks and whose KNN answers one
@@ -844,5 +887,25 @@ class _ChunkStore extends MessageStore {
           outbound: false,
         ),
     ];
+  }
+}
+
+/// [MessageStore] whose related search answers [hits] and counts its calls.
+class _RelatedStore extends MessageStore {
+  _RelatedStore(super.db);
+
+  List<RelatedConversation> hits = const [];
+  int calls = 0;
+
+  @override
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async {
+    calls++;
+    return hits;
   }
 }

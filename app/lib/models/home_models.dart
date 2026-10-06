@@ -425,6 +425,16 @@ class SemanticHit {
   const SemanticHit(this.row, this.distance);
 }
 
+/// One conversation the semantic search found near a query
+/// (`MessageStore.relatedConversations`): its identity and the COSINE of its
+/// nearest message — a similarity, `1 - SemanticHit.distance`, so bigger is
+/// better.
+typedef RelatedConversation = ({
+  String source,
+  String conversationKey,
+  double cosine,
+});
+
 /// One keyword-search result: a feed row, how well the words scored, and how
 /// much of the query it actually contained.
 ///
