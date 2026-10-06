@@ -99,7 +99,12 @@ void main() {
           'line, at most about 25 words — in the order given'));
       expect(prompt, contains('one per entry — each at most about 40 words — '
           'that catch'));
-      expect(prompt, contains('gets the line "no recent mail"'));
+      expect(prompt, contains('gets the line "nothing from them in these '
+          'threads"'));
+      expect(prompt, contains('the threads are all you were shown, mail and '
+          'Teams chats alike, so never say what someone has or has not '
+          'written elsewhere.'));
+      expect(prompt, isNot(contains('no recent mail')));
       expect(prompt, contains('- materials: the numbered materials are files '
           'sent ahead; the text of a file is shown when it has been read'));
       expect(prompt, contains('up to 5 points, each a short line, of what it '
@@ -118,9 +123,9 @@ void main() {
       expect(prompt, contains('was NOT sent for this meeting: do not describe '
           'this meeting as being about it'));
       expect(prompt, contains('("The invite gives no agenda.")'));
-      expect(prompt, contains("what the owner's recent mail says, with these "
-          "people or about this meeting's subject (the thread list says "
-          'which)'));
+      expect(prompt, contains("what the owner's recent mail and Teams chats "
+          "say, with these people or about this meeting's subject (the thread "
+          'list says which)'));
       expect(prompt, contains('A file listed under "Files on the other '
           'threads" was NOT sent'));
       expect(prompt, contains("- When the thread list is headed 'Threads "
@@ -251,7 +256,7 @@ void main() {
       // JSON-ish text tokenise denser than prose): (16384 - 2700) * 3 =
       // 41052 characters of prompt. The guard sits under that with a margin
       // for the digits the materials budget weights but the rest does not,
-      // at the measured maximum plus about 1-2%. Measured at 39120 with every
+      // at the measured maximum plus about 1-2%. Measured at 39363 with every
       // cap full, every label 300 characters of `&<>` (which the fence
       // escapes, so each costs its full escaped cap), four other files
       // whose names are fenced at 80 (`otherFileNameCap`), the related
@@ -260,15 +265,18 @@ void main() {
       // under the longest first line, three related threads quoting three at
       // 400 (`relatedSnippetCap`: the same characters, one more fence each)
       // under a mail thread's line, which is longer than an excerpt's, and
-      // 300 attendees: the With: line's `withCap` names and its "+285 more";
-      // it was 38742 before the chat excerpt (two quoted at 600 and a
+      // 300 attendees: the With: line's `withCap` names and its "+285 more",
+      // and the related path's people header and its "+292 more in the
+      // meeting who wrote nothing in these threads" tail; it was 39120
+      // before the people block listed only who wrote (the old header and
+      // "+7 more", and a shorter people rule), 38742 before the chat excerpt (two quoted at 600 and a
       // ` · Teams chat` marker on the three related threads), 38732 before
       // the With: cap (fifteen names, the old people cap), 38133 before the
       // related path and 37012 before the other files and their rule. A
       // thousand attendees would add one digit to the count, inside the
-      // margin. 39510 (about 13.2k tokens, 15.9k with the answer). A cap
+      // margin. 39760 (about 13.3k tokens, 16.0k with the answer). A cap
       // bump that moves it past this has to pay for itself elsewhere.
-      const promptCharBudget = 39510;
+      const promptCharBudget = 39760;
       expect(promptCharBudget,
           lessThanOrEqualTo((16384 - MeetingBriefTask.maxTokens) * 3));
       String words(int n) => List.filled(n ~/ 5, 'word').join(' ');
@@ -361,7 +369,9 @@ void main() {
               openAsk: wrapUntrusted('ask', 'a' * BriefGatherer.askCap),
             ),
         ],
-        peopleMore: 7,
+        // Everyone else in the 300-person room: the related path's longer
+        // tail, with three digits.
+        peopleMore: 292,
         lastMet: 'Last met 2 days ago',
         materials: [
           for (var i = 0; i < BriefGatherer.maxMaterials; i++)
@@ -1011,6 +1021,35 @@ void main() {
 
       final bare = const MeetingBriefTask().buildUserMessage(input());
       expect(bare, isNot(contains('People,')));
+    });
+
+    test('on the related path the block names who it lists: the people '
+        'who wrote, and a tail for the rest', () {
+      const dana = BriefPerson(
+          name: 'Dana Lee', address: 'dana@fabrikam.com', org: 'fabrikam');
+      final people = const MeetingBriefTask().buildUserMessage(
+          input(people: const [dana], peopleMore: 4));
+      expect(people, contains('People, numbered, the organiser first:'));
+      expect(people, contains('\n+4 more\n'));
+      expect(people, isNot(contains('wrote nothing')));
+
+      final related = const MeetingBriefTask().buildUserMessage(input(
+          path: BriefPath.related, people: const [dana], peopleMore: 4));
+      expect(
+          related,
+          contains('People who wrote in the threads below (mail or Teams '
+              'chat), numbered:\n'));
+      expect(related, isNot(contains('People, numbered')));
+      expect(
+          related,
+          contains('\n+4 more in the meeting who wrote nothing in these '
+              'threads\n'));
+
+      // Nobody wrote: no block at all, not a header over nothing.
+      final empty = const MeetingBriefTask().buildUserMessage(
+          input(path: BriefPath.related, peopleMore: 12));
+      expect(empty, isNot(contains('People')));
+      expect(empty, isNot(contains('more in the meeting')));
     });
 
     test("a domain's label that reads as an instruction stays inside the "

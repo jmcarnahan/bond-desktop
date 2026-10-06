@@ -1380,6 +1380,9 @@ void main() {
           reason: 'her newest message, the quoted history cut off');
       expect(d.openAsk, input.openAsks.single.ask);
       final k = input.people.last;
+      expect(input.path, BriefPath.people,
+          reason: 'the people path lists Kim, whom the threads show nothing '
+              'from');
       expect(k.org, '', reason: 'a consumer mailbox names no organisation');
       expect(k.isOrganizer, isFalse);
       expect(k.threadCount, 0);
@@ -1408,11 +1411,14 @@ void main() {
 
     test('eight people at most, the rest counted', () async {
       await thread('c-1');
-      final input = await eligible(meeting(attendees: [
+      // Topicless, so the people path lists the whole room up to the cap
+      // (the related path lists only who wrote; tested with it).
+      final input = await eligible(meeting(subject: 'Weekly sync', attendees: [
         const Attendee(name: 'Dana Lee', address: dana),
         for (var i = 0; i < 10; i++)
           Attendee(name: 'P$i', address: 'p$i@northwind.com'),
       ]));
+      expect(input.path, BriefPath.people);
       expect(input.people, hasLength(BriefGatherer.maxPeople));
       expect(input.people.first.name, 'Dana Lee');
       expect(input.peopleMore, 3);
@@ -1423,6 +1429,7 @@ void main() {
       // A Graph attendee copy: the organiser is not among the attendees,
       // so `briefOthers` lists them last.
       final input = await eligible(meeting(
+        subject: 'Weekly sync',
         organizerAddress: 'olu@northwind.com',
         attendees: [
           const Attendee(name: 'Me', address: owner),
@@ -1431,6 +1438,7 @@ void main() {
             Attendee(name: 'P$i', address: 'p$i@northwind.com'),
         ],
       ));
+      expect(input.path, BriefPath.people);
       expect(input.people, hasLength(BriefGatherer.maxPeople));
       expect(input.people.first.address, 'olu@northwind.com');
       expect(input.people.first.isOrganizer, isTrue);
@@ -1509,17 +1517,23 @@ void main() {
       ], syncRun: 'run-1');
     }
 
+    // Guest 3 wrote on the meeting's own invite thread; nobody else wrote.
+    await conversation('inv-1', people: const ['guest3@fabrikam.com']);
+    await message('m-inv-1', 'inv-1',
+        from: 'guest3@fabrikam.com', fromName: 'Guest 3', eventId: 'evt-1');
+
     // Five hundred others: the lookup must not bind an address each.
     final e = meeting(attendees: room(500));
     await metWith('evt-far', 'guest400@fabrikam.com');
     var input = await eligible(e);
     expect(input.path, BriefPath.related);
     expect(input.lastMet, isNull,
-        reason: 'guest 400 is not among the ${BriefGatherer.maxPeople} listed');
+        reason: 'guest 400 wrote nothing, so is not listed');
 
     await metWith('evt-near', 'guest3@fabrikam.com');
     input = await eligible(e);
-    expect(input.lastMet, startsWith('Last met'));
+    expect(input.lastMet, startsWith('Last met'),
+        reason: 'guest 3 wrote, so is listed');
   });
 
   group('the related path', () {
@@ -2001,49 +2015,103 @@ void main() {
       });
     });
 
-    test('people on the related path: the organiser, then who is IN the '
-        'chosen threads (by address, or in a chat by name), then the rest',
-        () async {
+    group('people on the related path are only who WROTE in the threads',
+        () {
+      /// Me, Guest 1–10, then Lee Mapp, Pat Quill and Rae Roster.
       final attendees = [
         const Attendee(name: 'Me', address: owner),
         for (var i = 1; i <= 10; i++)
           Attendee(name: 'Guest $i', address: 'g$i@northwind.com'),
         const Attendee(name: 'Lee Mapp', address: 'g11@northwind.com'),
         const Attendee(name: 'Pat Quill', address: 'g12@northwind.com'),
+        const Attendee(name: 'Rae Roster', address: 'g13@northwind.com'),
       ];
-      // The eleventh wrote in a related mail thread, by address.
-      await conversation('c-m', people: const ['kim@contoso.com']);
-      await message('m-c-m', 'c-m',
-          from: 'g11@northwind.com', fromName: 'Lee Mapp');
-      // The twelfth wrote in the chat excerpt, under a chat id: matched by
-      // the invite's name, whatever its case.
-      await chatRow('t-1', last: const Duration(hours: 1), count: 1);
-      await chatSays('m-t-1', 't-1', const Duration(hours: 1),
-          fromName: 'PAT QUILL',
-          fromAddress: 'teams:pat',
-          body: 'The Falcon vendor signed today.');
-      related.hits = [hit('c-m', 0.8), hit('t-1', 0.75, source: 'teams')];
 
-      final input = await relatedInput(meeting(
-        subject: 'Falcon launch plan',
-        organizerAddress: 'g3@northwind.com',
-        attendees: attendees,
-      ));
-      expect(input.path, BriefPath.related);
-      expect([for (final p in input.people) p.name], [
-        'Guest 3',
-        'Lee Mapp',
-        'Pat Quill',
-        'Guest 1',
-        'Guest 2',
-        'Guest 4',
-        'Guest 5',
-        'Guest 6',
-      ]);
-      expect(input.people, hasLength(BriefGatherer.maxPeople));
-      final pat = input.people[2];
-      expect(pat.threadCount, 1);
-      expect(pat.lastWords, contains('The Falcon vendor signed today.'));
+      /// A related mail thread Lee wrote in, with Rae on its roster only;
+      /// and a chat excerpt Pat wrote in, under a chat id and another case.
+      Future<void> seedWriters() async {
+        await conversation('c-m',
+            people: const ['kim@contoso.com', 'g13@northwind.com']);
+        await message('m-c-m', 'c-m',
+            from: 'g11@northwind.com',
+            fromName: 'Lee Mapp',
+            body: 'The Falcon pricing is agreed.');
+        await chatRow('t-1', last: const Duration(hours: 1), count: 1);
+        await chatSays('m-t-1', 't-1', const Duration(hours: 1),
+            fromName: 'PAT QUILL',
+            fromAddress: 'teams:pat',
+            body: 'The Falcon vendor signed today.');
+        related.hits = [hit('c-m', 0.8), hit('t-1', 0.75, source: 'teams')];
+      }
+
+      CalendarEvent falcon() => meeting(
+            subject: 'Falcon launch plan',
+            organizerAddress: 'g3@northwind.com',
+            attendees: attendees,
+          );
+
+      test('mail by address and Teams by name count alike; the organiser '
+          'leads when they wrote; a roster alone is not writing', () async {
+        await seedWriters();
+        // The organiser sent the invite: they wrote, on the invite thread.
+        await conversation('inv-1', people: const ['g3@northwind.com']);
+        await message('m-inv-1', 'inv-1',
+            from: 'g3@northwind.com',
+            fromName: 'Guest 3',
+            body: 'Agenda: the Falcon go or no-go.',
+            eventId: 'evt-1');
+
+        final input = await relatedInput(falcon());
+        expect(input.path, BriefPath.related);
+        expect([for (final p in input.people) p.name],
+            ['Guest 3', 'Lee Mapp', 'Pat Quill'],
+            reason: 'Rae is only on a roster; the other guests wrote nothing');
+        expect(input.people.first.isOrganizer, isTrue);
+        expect(input.peopleMore, 13 - input.people.length);
+        final lee = input.people[1];
+        expect(lee.threadCount, 1);
+        expect(lee.lastWords, contains('The Falcon pricing is agreed.'));
+        final pat = input.people[2];
+        expect(pat.threadCount, 1);
+        expect(pat.lastWords, contains('The Falcon vendor signed today.'));
+      });
+
+      test('an organiser who wrote nothing is not listed', () async {
+        await seedWriters();
+        final input = await relatedInput(falcon());
+        expect([for (final p in input.people) p.name], ['Lee Mapp', 'Pat Quill']);
+        expect(input.people.any((p) => p.isOrganizer), isFalse);
+        expect(input.peopleMore, 13 - 2);
+      });
+
+      test('nobody in the meeting wrote: no people, all of them counted',
+          () async {
+        await topic('c-a');
+        related.hits = [hit('c-a', 0.8)];
+        final input = await relatedInput(big());
+        expect(input.threads, hasLength(1));
+        expect(input.people, isEmpty);
+        expect(input.peopleMore, 6);
+      });
+
+      test('ten who wrote: eight listed, the rest counted', () async {
+        await conversation('c-m', people: const ['kim@contoso.com']);
+        for (var i = 1; i <= 10; i++) {
+          await message('m-$i', 'c-m',
+              from: 'g$i@northwind.com',
+              fromName: 'Guest $i',
+              ago: Duration(hours: 12 - i));
+        }
+        related.hits = [hit('c-m', 0.8, messageId: 'm-1')];
+        final input = await relatedInput(big(attendees: [
+          const Attendee(name: 'Me', address: owner),
+          for (var i = 1; i <= 10; i++)
+            Attendee(name: 'Guest $i', address: 'g$i@northwind.com'),
+        ]));
+        expect([for (final p in input.people) p.name],
+            [for (var i = 1; i <= 8; i++) 'Guest $i']);
+        expect(input.peopleMore, 2);
+      });
     });
 
     test('With: on the related path leads with the organiser, who '

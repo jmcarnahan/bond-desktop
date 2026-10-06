@@ -1340,20 +1340,27 @@ BOTH gathers, because the threads it finds are hashed:
   (below), so the brief names the file; its text and digest arrive through
   the attachment lane and move the hash, which re-briefs the meeting.
 - **Last met** — `lastMetWith` → `lastMetLabel`: with any of the others on
-  the people path; on the related path with the people the block lists (in
-  the people block's order, below, at most 8), because having met one of
-  three hundred people says nothing and the lookup binds two variables per
-  address.
+  the people path; on the related path with the people the block lists
+  (only who wrote in the kept threads, below, at most 8), because having
+  met one of three hundred people says nothing and the lookup binds two
+  variables per address.
 - **People** (`BriefPerson`, handler's gather only) — the other people,
   the organiser first and then the attendees in the invite's order, at most
   8 (`BriefGatherer.maxPeople`, applied after the ordering; the rest are
-  counted in `peopleMore`). On the RELATED path the room is too big to list,
-  so after the organiser come the attendees who are IN the kept threads —
-  on a mail thread's roster or its sender, by address; in a chat excerpt,
-  whose people are `teams:<id>`, the sender whose name matches the invite's
-  name, case-insensitive (being in the room is not being in the exchange)
-  — then the rest, and the cap after: who is involved in the subject before
-  who merely got the invite. The people path's order is unchanged. The
+  counted in `peopleMore`). On the RELATED path the block lists ONLY the
+  others who WROTE a message in the kept threads — a mail by their
+  address, a Teams message by the name the invite gives them,
+  case-insensitive (a chat's people are `teams:<id>` and a name, never an
+  address), so a chat counts as much as a mail — the organiser first when
+  they are one of them, then the invite's order, at most 8. Being on a mail
+  thread's roster without writing is not enough, and whoever wrote nothing
+  is not listed but counted (`peopleMore` is everyone the block does not
+  list, on both paths): in a large room most people have said nothing on
+  the subject, and a person listed with nothing known would only be told
+  "nothing from them", eight times over. Nobody wrote → no block. The
+  people path's block is unchanged (everyone, organiser first, cap 8) and
+  still matches MAIL only, because a chat's roster carries `teams:<id>`
+  and a name, never an address. The
   organiser first is a deliberate departure
   from D14's literal "attendee order": `briefOthers` appends the organiser
   last (a Graph attendee copy does not list them among the attendees), and
@@ -1420,8 +1427,13 @@ status), nor the people block. The hash never reads the clock.
 
 **The task** (`MeetingBriefTask`, `lib/services/llm/meeting_brief_task.dart`):
 a const system prompt ending in `untrustedDataClause`. Its opening says the
-inputs are the owner's recent mail "with these people or about this meeting's
-subject (the thread list says which)". v3 is written for an
+inputs are "what the owner's recent mail and Teams chats say, with these
+people or about this meeting's subject (the thread list says which)". The
+people rule gives a person the threads show nothing from the line "nothing
+from them in these threads", because the threads are all the model was
+shown, mail and Teams chats alike, and it must never say what someone has
+or has not written elsewhere — the brief prompt no longer says "no recent
+mail" anywhere. v3 is written for an
 owner who wants to walk in completely on top of the meeting: it speaks to them
 as "you" and never "the owner", asks for DENSITY — every sentence carries a
 name, a number, a date, a decision or a claim from a file; thin inputs mean
@@ -1438,14 +1450,18 @@ meeting must not be among "+N more"; the people path's order is as it
 was), then `+N more` on its own line OUTSIDE the
 fence, since with no people cap a 300-person invite would otherwise put about
 36k characters of names in the prompt — and the last-met line, then
-**People, numbered, the organiser first:** — per person `[n]` and the fenced
+the people block, headed **People, numbered, the organiser first:** on the
+people path and **People who wrote in the threads below (mail or Teams
+chat), numbered:** on the related path — per person `[n]` and the fenced
 `name · organisation` (the organisation is a DNS label whoever owns the
 domain chose, so it is untrusted text like the name), then the app's words
 outside the fence: "no organisation known" when there is none,
 `organiser|attendee` and the answer; then, only when present, their "Last
 met …" line, "in N of the threads", "last wrote <ago>:" with the fenced
 subject and the fenced last words, and "open ask: yes (see Open asks)" — the ask itself is said once, in
-"Open asks", not repeated here; "+N more" past eight. Then the numbered threads, each with its
+"Open asks", not repeated here; then the tail, `+N more` on the people
+path and `+N more in the meeting who wrote nothing in these threads` on the
+related path. Then the numbered threads, each with its
 last message as an age from `now` (`briefAgo`: "3 hours ago", "2 days ago"),
 and each section. The thread list is headed by the path: "Threads with
 these people, numbered:" on the people path, "Threads related to this
@@ -1509,18 +1525,22 @@ holds the caps' sum / 4 within 1.2 × `maxTokens`. Worst case in, measured by
 the size guard in `meeting_brief_task_test` (every cap full, every label 300
 characters of `&<>`, so each costs its full escaped 120, on the related
 path with three invite threads and three related threads, and 300
-attendees): about 39.1k characters (39120) with the 5.1k system prompt —
+attendees): about 39.4k characters (39363) with the 5.2k system prompt —
 three invite threads with their two 600-character snippets under the
 longest first line, three related threads with three 400-character snippets
 each (the same characters, one more fence) under a mail thread's line,
 which is longer than an excerpt's, four asks, two storylines, the materials' 10k plus
 six name lines, four other files (each name fenced at 80,
-`otherFileNameCap`), eight people, fifteen attendee names and "+285 more",
+`otherFileNameCap`), eight people under the related header and its
+"+292 more in the meeting who wrote nothing in these threads" tail,
+fifteen attendee names and "+285 more",
 the invite 0.7k
-and the headers — about 13.0k tokens at three characters a token, plus the
-2.7k answer: about 15.7k, inside the 16384 context. The ceiling is (16384 −
-2700) × 3 = 41052 characters of prompt; the guard holds it at 39510 (the
-measurement plus about 1%; 39120 over 38742 before the chat excerpt, its
+and the headers — about 13.1k tokens at three characters a token, plus the
+2.7k answer: about 15.8k, inside the 16384 context. The ceiling is (16384 −
+2700) × 3 = 41052 characters of prompt; the guard holds it at 39760 (the
+measurement plus about 1%; 39510 over 39120 before the people block listed
+only who wrote, with its longer header, tail and people rule; 39120 over
+38742 before the chat excerpt, its
 three-snippet related threads and the two rule sentences, and unchanged by
 the With: cap, which measured 10 characters over the old fifteen names;
 38500 before the related path, 37800 before the other files and their

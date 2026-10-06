@@ -256,10 +256,33 @@ void main() {
     expect(actual, contains("this meeting's own invite"));
     expect(actual, contains('part of a Teams chat · the latest message shown '
         'is from'));
-    expect(
-        actual,
-        contains('People, numbered, the organiser first:\n'
-            '[1] <untrusted_data source="person">\nOrla Grant · northwind\n'));
+    const header = 'People who wrote in the threads below (mail or Teams '
+        'chat), numbered:\n';
+    const tail = '+9 more in the meeting who wrote nothing in these threads\n';
+    expect(actual,
+        contains('$header[1] <untrusted_data source="person">\nOrla Grant · northwind\n'));
+    expect(actual, contains(tail));
+    // The block lists only who wrote: the organiser (the invite), Ben (the
+    // mail thread) and Ivy (the chat). The rest are on the With: line only.
+    final block = actual.substring(
+        actual.indexOf(header), actual.indexOf(tail) + tail.length);
+    for (final name in ['Orla Grant', 'Ben Okafor', 'Ivy Chen']) {
+      expect(block, contains('$name · '), reason: name);
+    }
+    for (final name in [
+      'Ana Ruiz',
+      'Cy Park',
+      'Di Moss',
+      'Ed Vance',
+      'Flo Hart',
+      'Gus Hale',
+      'Hal Moro',
+      'Jo Tate',
+      'Lu Vega',
+    ]) {
+      expect(block, isNot(contains(name)), reason: '$name wrote nothing');
+      expect(actual, contains(name), reason: '$name is still on With:');
+    }
     expect(actual, contains('<untrusted_data source="attendees">\nOrla Grant, '));
     expect(actual, isNot(contains('Build 412 passed.')));
     expect(actual, isNot(contains('spare charger')));

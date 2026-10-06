@@ -382,12 +382,15 @@ class BriefInput {
   final bool materialsPending;
 
   /// The people in the meeting, the organiser first and then the attendees'
-  /// order, at most
-  /// [BriefGatherer.maxPeople]; empty from the planner's gather, which
-  /// needs only the hash.
+  /// order, at most [BriefGatherer.maxPeople]. On the related path only
+  /// those who WROTE in [threads] — a mail by their address, a Teams message
+  /// by the name the invite gives them — so nobody is listed with nothing
+  /// to say of them. Empty from the planner's gather, which needs only the
+  /// hash.
   final List<BriefPerson> people;
 
-  /// How many people there are beyond [people].
+  /// How many people are in the meeting beyond the ones [people] lists (on
+  /// the related path: everyone who wrote nothing in the threads).
   final int peopleMore;
 
   /// "Last met 3 days ago", or null when the mirror holds no earlier meeting
@@ -1152,20 +1155,16 @@ class BriefGatherer {
       ...others.where((p) => p.address == organiser),
       ...others.where((p) => p.address != organiser),
     ];
-    // On the related path the room is too big to list, so after the
-    // organiser come the people who are IN the chosen threads, then the
-    // rest: who is involved in the subject, before who merely got the
-    // invite.
+    // On the related path the room is too big to list, and most of it has
+    // said nothing on the subject: the block lists only the people who
+    // WROTE in the chosen threads — a mail by their address, a Teams message
+    // by their name — the organiser first when they are one of them. Who
+    // merely got the invite is on the With: line and in the count. A person
+    // listed with nothing to say of them would only be told "nothing from
+    // them", eight times over.
     final listed = (path == BriefPath.related
-            ? [
-                ...organiserFirst.where((p) => p.address == organiser),
-                ...organiserFirst.where((p) =>
-                    p.address != organiser &&
-                    chosen.any((k) => _inThread(k, p))),
-                ...organiserFirst.where((p) =>
-                    p.address != organiser &&
-                    !chosen.any((k) => _inThread(k, p))),
-              ]
+            ? organiserFirst.where(
+                (p) => chosen.any((k) => k.messages.any((m) => _wrote(m, p))))
             : organiserFirst)
         .take(maxPeople)
         .toList();
@@ -1225,7 +1224,8 @@ class BriefGatherer {
       otherFiles: otherFiles,
       materialsPending: pending,
       people: people,
-      peopleMore: math.max(0, others.length - maxPeople),
+      // Everyone in the meeting the block does not list.
+      peopleMore: math.max(0, others.length - listed.length),
       lastMet: met == null ? null : lastMetLabel(met, zone: zone, today: today),
       invitePreview: preview.isEmpty
           ? null

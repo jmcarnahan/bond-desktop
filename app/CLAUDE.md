@@ -1308,11 +1308,14 @@ that bite.
     `material|msg|att|textStatus|digestStatus`, so a deck whose text or
     digest lands later re-briefs on the next pass.
   - People (`BriefPerson`, handler's gather only): the organiser first,
-    then the attendees' order (a deliberate departure from D14) — on the
-    related path the attendees IN the kept threads first (roster or sender
-    by address; a chat excerpt's sender by the invite's name,
-    case-insensitive, `_wrote`/`_inThread`), then the rest — the cap
-    ≤ `maxPeople` 8 after (+`peopleMore`); the With: line on the related
+    then the attendees' order (a deliberate departure from D14), the cap
+    ≤ `maxPeople` 8 after; on the RELATED path ONLY the others who WROTE a
+    message in a kept thread (`_wrote`: a mail by address, a Teams message
+    by the invite's name, case-insensitive — a roster alone is not
+    writing), so nobody is listed to be told "nothing from them"; nobody
+    wrote → no block. `peopleMore` = others − listed on both paths. The
+    PEOPLE path still lists everyone and matches MAIL only: a chat's roster
+    carries `teams:<id>` and a name, never an address; the With: line on the related
     path is organiser first too (`briefOthers` puts an attendee copy's
     organiser LAST), `briefOrgOf` (the label before
     the public suffix; the tenant for `*.onmicrosoft.com`, past a
@@ -1376,7 +1379,14 @@ that bite.
     lists at most `MeetingBriefTask.withCap` 15 names, then `+N more` outside
     it. The user message has a People
     block after `With:` (the fenced `name · org`, the org being a domain
-    owner's words; "open ask: yes (see Open asks)", never the ask again);
+    owner's words; "open ask: yes (see Open asks)", never the ask again;
+    headed `People, numbered, the organiser first:` / tail `+N more` on the
+    people path, `People who wrote in the threads below (mail or Teams
+    chat), numbered:` / `+N more in the meeting who wrote nothing in these
+    threads` on the related path); the prompt's opening says "recent mail
+    and Teams chats", and a person the threads show nothing from gets
+    "nothing from them in these threads" — never "no recent mail" (that
+    phrase is only the `no_mail` skip's, a different thing);
     every label (file names, thread and last subjects, the meeting's
     subject, storyline titles, attendee and people names) is capped at 120
     AS ESCAPED (`labelCap`, `_label`: the fence writes `&` as five). A
@@ -1394,8 +1404,9 @@ that bite.
     maximal prompt (every label 300 characters of `&<>`, four other files
     fenced at `otherFileNameCap` 80, the related header and rule, three
     invite threads of two 600s, three related threads of three 400s, 300
-    attendees) at ≤ 39510 characters (39120 measured, plus ~1%; 38742/39120
-    before the chat excerpt, 38732 before the With: cap, 38133/38500 before
+    attendees, the related people header and its three-digit tail) at ≤
+    39760 characters (39363 measured, plus ~1%; 39120/39510 before the
+    people block listed only who wrote, 38742/39120 before the chat excerpt, 38732 before the With: cap, 38133/38500 before
     the related path, 37012/37800 before the other-files
     block; the ceiling is (16384 − 2700) × 3.0 ≈ 41052). What the model
     is shown for a large meeting is readable in one file,

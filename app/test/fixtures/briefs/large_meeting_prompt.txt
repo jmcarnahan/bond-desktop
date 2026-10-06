@@ -8,7 +8,7 @@ With:
 Orla Grant, Ana Ruiz, Cy Park, Ben Okafor, Di Moss, Ed Vance, Flo Hart, Gus Hale, Hal Moro, Jo Tate, Lu Vega, Ivy Chen
 </untrusted_data>
 
-People, numbered, the organiser first:
+People who wrote in the threads below (mail or Teams chat), numbered:
 [1] <untrusted_data source="person">
 Orla Grant · northwind
 </untrusted_data> · organiser · response not known
@@ -39,22 +39,7 @@ Ops room
 <untrusted_data source="last_words">
 Support has the launch-day rota.
 </untrusted_data>
-[4] <untrusted_data source="person">
-Ana Ruiz · northwind
-</untrusted_data> · attendee · response not known
-[5] <untrusted_data source="person">
-Cy Park · northwind
-</untrusted_data> · attendee · response not known
-[6] <untrusted_data source="person">
-Di Moss · northwind
-</untrusted_data> · attendee · response not known
-[7] <untrusted_data source="person">
-Ed Vance · northwind
-</untrusted_data> · attendee · response not known
-[8] <untrusted_data source="person">
-Flo Hart · northwind
-</untrusted_data> · attendee · response not known
-+4 more
++9 more in the meeting who wrote nothing in these threads
 
 Threads related to this meeting, numbered (found by their text, not by their people):
 [1] waiting on them · last message 20 hours ago · this meeting's own invite
