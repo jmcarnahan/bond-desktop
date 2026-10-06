@@ -79,8 +79,9 @@ class SettingsModelsPage extends StatefulWidget {
   final ServerState serverState;
 
   /// Whether this build runs its own llama-server. False under
-  /// `BOND_DEV_HAND_SERVERS`, where `make embed` serves embeddings and
-  /// nothing downloads them, so the Embeddings block offers no Download.
+  /// `BOND_DEV_HAND_SERVERS`, where `make embed` serves embeddings from the
+  /// models folder: the model ensurer still fills that folder at launch, and
+  /// the Embeddings block says whose server it is and offers no Download.
   final bool managedServer;
 
   /// The decision remote's effective address and model, and whether its key
@@ -364,7 +365,7 @@ class SettingsModelsPage extends StatefulWidget {
   static const String notDownloadedText = notDownloadedYetText;
 
   /// The Embeddings row on a build with no managed server: `make embed`
-  /// serves the model, and nothing here downloads it.
+  /// serves the model, so the row names that server rather than a download.
   static const String embedHandServedText =
       'Served by your own embedding server.';
   static const String onDiskLoadedText = 'On disk · loaded';

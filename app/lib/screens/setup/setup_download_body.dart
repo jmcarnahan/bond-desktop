@@ -13,12 +13,14 @@ import 'setup_controls.dart';
 /// top rather than somewhere in the middle.
 ///
 /// Continue is enabled only when every GATING file is done ([complete]: the
-/// Hugging Face files), not at the "usable" pair. Finishing early would leave
-/// a non-engineer looking at an idle inbox with no progress bar left to
-/// explain it. A model REGISTRY file never holds Continue (decision D7): its
-/// address lives in Settings, which the wizard cannot reach, so a failed
-/// registry row says why and [registryLaterText], and Bond keeps trying
-/// after setup.
+/// Hugging Face files and the embedding model, [ModelFile.gatesSetup]), not
+/// at the "usable" pair. Finishing early would leave a non-engineer looking
+/// at an idle inbox with no progress bar left to explain it. The embedding
+/// model holds Continue wherever it is downloaded from, because every stage
+/// needs it and the local model server cannot start without it. The other
+/// model REGISTRY files, the decision model's, never hold Continue (decision
+/// D7): a failed one of those says why and [registryLaterText], and Bond
+/// keeps trying after setup.
 class SetupDownloadBody extends StatelessWidget {
   final List<ModelFile> files;
 
@@ -72,8 +74,10 @@ class SetupDownloadBody extends StatelessWidget {
   static const String orderText =
       'The models arrive one at a time, smallest first.';
 
-  /// Under a model registry row that failed: it does not hold Continue, and
-  /// the app retries it after setup.
+  /// Under a failed model registry row that does not gate setup (the
+  /// decision model's): it does not hold Continue, and the app retries it
+  /// after setup. Never under the embedding model's row, which does hold
+  /// Continue, so "You can continue" would be false there.
   static const String registryLaterText =
       'Bond tries again after setup, and under Settings, Models. You can '
       'continue.';
@@ -258,7 +262,9 @@ class SetupDownloadBody extends StatelessWidget {
       LinearProgressIndicator(value: entry?.fraction ?? (_allHere ? 1 : 0)),
       const SizedBox(height: BondSpacing.s4),
       Text('$detail', style: BondType.caption),
-      if (file.isRegistry && entry?.status == DownloadStatus.failed) ...[
+      if (file.isRegistry &&
+          !file.gatesSetup &&
+          entry?.status == DownloadStatus.failed) ...[
         const SizedBox(height: BondSpacing.s4),
         Text(registryLaterText, style: BondType.caption),
       ],

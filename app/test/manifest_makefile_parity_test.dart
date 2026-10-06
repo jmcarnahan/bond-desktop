@@ -7,13 +7,15 @@ import 'package:flutter_test/flutter_test.dart';
 /// The Makefile and the manifest name the same checkpoints, and nothing joins
 /// them but this test.
 ///
-/// Two worlds fetch weights on this project. `make model | fast | embed` hands
-/// llama-server a `-hf` repo and the files land in the Hugging Face cache; the
-/// shipped app hands `ModelDownloader` the manifest and they land in the app's
-/// models folder. Neither reads the other, so a bump on one side is invisible
-/// on the other — and the Makefile's own comment above `EMBED_HF` records what
-/// that costs: an embedding model left behind produces vectors of the wrong
-/// width, silently, and search finds nothing new.
+/// Two worlds fetch weights on this project. `make model | fast` hands
+/// llama-server a `-hf` repo and the files land in the Hugging Face cache;
+/// `make embed | decide` serve the app's own files, which `make embed-fetch |
+/// decide-fetch` download from the model registry; the shipped app hands
+/// `ModelDownloader` the manifest and they land in the app's models folder.
+/// Neither world reads the other's pins, so a bump on one side is invisible
+/// on the other — and the Makefile's own comment above `EMBED_PORT` records
+/// what that costs: an embedding model left behind produces vectors of the
+/// wrong width, silently, and search finds nothing new.
 ///
 /// So this pins the overlap: the repos, the quantisation, the context and the
 /// slot counts. A plain `test()` rather than a `testWidgets` one, because it
@@ -97,10 +99,9 @@ void main() {
       );
     }
 
-    test('the three repos and quants are the same files', () {
+    test('the two repos and quants are the same files', () {
       namesTheSameCheckpoint('MODEL_HF', routerProseId);
       namesTheSameCheckpoint('FAST_HF', routerBulkId);
-      namesTheSameCheckpoint('EMBED_HF', routerEmbedId);
     });
 
     test('the context and the slots are the same numbers', () {
@@ -119,7 +120,7 @@ void main() {
     });
 
     test('the embed pooling is the same word', () {
-      // The Makefile's own comment above `EMBED_HF` says what a mismatch here
+      // The Makefile's own comment above `EMBED_PORT` says what a mismatch here
       // costs: pooling is not a taste, it is what the checkpoint was trained
       // for, and the wrong one produces vectors of the wrong shape silently
       // while search quietly finds nothing. Two worlds set it — a launch flag
@@ -196,6 +197,44 @@ void main() {
       expect(defaults['DECIDE_HEADS_SHA'], decide.heads!.sha256,
           reason: 'DECIDE_HEADS_SHA in ../Makefile and the manifest\'s '
               'heads.sha256 pin different bytes');
+    });
+
+    test('the embedding model is the bundle `make embed-fetch` downloads', () {
+      // No `-hf` here either since the embed-registry round: the embedding
+      // model comes from the model registry like the decision model, so the
+      // join is the folder, the file, the bundle, the remote name and the
+      // digest, which is what the app's downloader and `make embed-fetch`
+      // both fetch and `make embed` serves with -m.
+      final embed = manifest.byId(routerEmbedId);
+      final dir = defaults['EMBED_DIR'];
+      expect(dir, isNotNull, reason: '../Makefile has no `EMBED_DIR ?=`');
+      expect(
+        dir!.split('/').last,
+        embed.relativePath.split('/').first,
+        reason: 'EMBED_DIR in ../Makefile installs into ${dir.split('/').last}; '
+            'the manifest\'s repo ${embed.repo} is served from '
+            '${embed.relativePath.split('/').first}',
+      );
+      expect(defaults['EMBED_FILE'], embed.file,
+          reason: 'EMBED_FILE in ../Makefile is ${defaults['EMBED_FILE']}; '
+              'the manifest ships ${embed.file}');
+      expect(defaults['EMBED_BUNDLE'], embed.bundle,
+          reason: 'EMBED_BUNDLE in ../Makefile is ${defaults['EMBED_BUNDLE']}; '
+              'the manifest fetches bundle ${embed.bundle}');
+      // What `make embed` serves is that folder's file, written as the two
+      // variables above so an override of either moves it.
+      expect(defaults['EMBED_GGUF'], r'$(EMBED_DIR)/$(EMBED_FILE)');
+      expect(defaults['EMBED_REMOTE_GGUF'], embed.remoteFile);
+      expect(defaults['EMBED_GGUF_SHA'], embed.sha256,
+          reason: 'EMBED_GGUF_SHA in ../Makefile and the manifest\'s sha256 '
+              'pin different bytes');
+      // The hand server must not default back to Hugging Face: EMBED_HF is
+      // an opt-in for a bake-off candidate, and `_makeDefaults` skips an
+      // empty default, so absent here means `EMBED_HF ?=` with nothing set.
+      expect(defaults['EMBED_HF'], isNull,
+          reason: 'EMBED_HF in ../Makefile defaults to '
+              '${defaults['EMBED_HF']}; `make embed` would serve that repo '
+              'instead of the file the app downloads');
     });
 
     test('the decision server args are the same set', () {

@@ -122,6 +122,27 @@ void main() {
     expect([for (final row in rows) row.inUse], [true, true, true]);
   });
 
+  test('the registry embedding model is on disk on its file and its current '
+      'row, the one row an install from Hugging Face already has', () async {
+    final manifest = testManifest(embed: testEmbedFile(), withDecide: true);
+    final embed = manifest.byRole(ModelRole.embed);
+    expect(embed.isRegistry, isTrue);
+
+    // The file alone is not enough for a registry entry.
+    await write(embed);
+    var rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    expect(rows.singleWhere((r) => r.roleId == 'embed').onDisk, isFalse);
+
+    await setup.recordDownload(DownloadLedger({embed.id: done(embed)}));
+    rows =
+        await containerFor(manifest).read(managedModelsStatusProvider.future);
+    final row = rows.singleWhere((r) => r.roleId == 'embed');
+    expect(row.onDisk, isTrue);
+    expect(row.headsOnDisk, isTrue);
+    expect(row.bytes, embed.sizeBytes);
+  });
+
   test('the registry decision model is on disk only when the ledger is current '
       'for both files AND both are there', () async {
     final manifest = testManifest(withDecide: true);

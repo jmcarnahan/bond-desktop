@@ -58,7 +58,8 @@ enforce the ones that are commands.
   not inherit them, and so does every recipe that uses neither (the
   hand-started servers, `app-test`, the `dist-*` scripts): the Makefile's
   `export` is global because GNU Make 3.81 has no target-specific `export
-  VAR`, and only `decide-fetch`, `app-doctor`, `app-run`, `app-build` and the
+  VAR`, and only `decide-fetch`, `embed-fetch`, `app-doctor`,
+  `registry-verify` (from its environment), `app-run`, `app-build` and the
   `BENCH_DEFINES` benches read them.
 - The Makefile resolves `BENCH_BEARER` into the `flutter test` command line,
   so never list a running bench's process WITH its arguments — `pgrep -f …
@@ -459,7 +460,14 @@ enforce the ones that are commands.
   puts a sentence on `LlmTarget.unavailable` for a managed target the router
   does not serve, and `LlmClient` and `DecisionClient` throw on it before any
   HTTP, so only that role parks (`not_installed`). `machineTierProvider` still
-  answers what this Mac could hold. The decide entry is a REGISTRY entry
+  answers what this Mac could hold. The embed entry is a registry entry too
+  (bundle `bond-embed-qwen3-0.6b`, remote `model-q8_0.gguf`, no heads), kept
+  in `Qwen_Qwen3-Embedding-0.6B-GGUF/`: a registry entry's repo is its folder,
+  not necessarily `artifactory/<bundle>` (only `local/` is refused, and the
+  parser refuses two entries stored at one path, so a JSON fixture gives each
+  entry its own file), so an install that fetched it from Hugging Face
+  re-downloads nothing. The decide
+  entry is a REGISTRY entry
   (`source: artifactory`, repo `artifactory/bond-decide-mbl-v3swap`, bundle
   `bond-decide-mbl-v3swap`): downloaded with its heads file, ledgered as
   `bond-decide` and `bond-decide.heads`, and USABLE only when both rows are
@@ -623,9 +631,13 @@ enforce the ones that are commands.
   never refuses.
 - The manifest and the Makefile are two worlds joined by
   `manifest_makefile_parity_test.dart`, so a change to any of them edits both
-  or fails the test: the four entries, three by `-hf` repo (`MODEL_HF`,
-  `FAST_HF`, `EMBED_HF`, the quant either from a `:quant` suffix or from the
-  repo name having to carry the manifest file's own quant token) and the
+  or fails the test: the four entries, two by `-hf` repo (`MODEL_HF`,
+  `FAST_HF`, the quant either from a `:quant` suffix or from the
+  repo name having to carry the manifest file's own quant token), the
+  registry embed entry by folder, file, bundle, remote name and digest
+  (`EMBED_DIR`, `EMBED_FILE`, `EMBED_BUNDLE`, `EMBED_REMOTE_GGUF`,
+  `EMBED_GGUF_SHA`, and `EMBED_HF` must have NO default: it is only a
+  bake-off candidate's override) and the
   registry decide entry by folder, file, heads, bundle, remote names and
   digests (`DECIDE_DIR`, `DECIDE_FILE`, `DECIDE_QUANT` f16, `DECIDE_HEADS`,
   `DECIDE_BUNDLE`, `DECIDE_REMOTE_GGUF`, `DECIDE_REMOTE_HEADS`,
@@ -639,7 +651,8 @@ enforce the ones that are commands.
   downloads what the placements need and the disk lacks, outside the wizard:
   the set is `modelEnsureSetProvider` (`managedManifestProvider` plus the
   decide entry when absent, i.e. under Your server, D10, `.downloadable`;
-  no embed entry under `BOND_DEV_HAND_SERVERS`, where `make embed` serves it).
+  under `BOND_DEV_HAND_SERVERS` too, because `make embed` and `make decide`
+  serve the same models-folder files).
   ONE ownership rule for the ONE downloader: nothing starts while
   `setupShowingProvider` is up (the gate writes it from its decision's
   callback, never in a build); another owner's run is WAITED for
@@ -672,8 +685,9 @@ enforce the ones that are commands.
   `HttpOverrides.global` briefly null: the test binding answers every
   `HttpClient` with a 400, and the real ensurer path under the gate is
   driven that way with `tester.runAsync` (`setup_gate_test.dart`). The wizard's Continue
-  waits on `downloadsComplete` (the GATING entries only, D7); a registry row
-  that failed shows `registryLaterText` and never holds it, and
+  waits on `downloadsComplete` (the GATING entries only, D7: the Hugging Face
+  entries and the embedding model); a failed registry row that does not gate
+  (the decision model's) shows `registryLaterText` and never holds it, and
   `allDownloaded` decides whether arriving at the step starts a run.
 - Registry downloads (`ModelDownloader` with `registryBase` and
   `registryToken`, both LOOKUPS read per registry entry: the provider's
@@ -698,8 +712,8 @@ enforce the ones that are commands.
   entry's LAST leg, ledger id `DownloadLedger.headsId(id)` = `<id>.heads`,
   counted in `downloadBytes`, required by `isCurrent`, `verify`,
   `_allFilesPresent` and the disk preflight. `ModelManifest.gating` (the
-  Hugging Face entries, `gatesSetup`) is what the wizard gate and the
-  resume's ledger check read (D7); `downloadable` (everything not local) is
+  Hugging Face entries and the embedding model, `gatesSetup`) is what the
+  wizard gate and the resume's ledger check read (D7); `downloadable` (everything not local) is
   what the wizard downloads. Tests serve a registry from
   `FakeHubServer.registryContents` (`registryBase`, `registryBearer`,
   `registryRedirect` + `startStorage()` for a second origin; `registryAuth`

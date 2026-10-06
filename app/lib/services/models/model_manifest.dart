@@ -286,18 +286,24 @@ class ModelFile {
   final ModelRole role;
   final String displayName;
 
-  /// The Hugging Face repo, `owner/name`; `local/<name>` for a hand-installed
-  /// entry and `artifactory/<bundle>` for a registry one, whose prefixes keep
-  /// their folders apart from every downloaded repo's.
+  /// The folder's identity, and nothing else on a registry entry: the
+  /// upstream Hugging Face repo, `owner/name`, for a public model wherever it
+  /// is downloaded from (the embedding model comes from the registry and
+  /// keeps `Qwen/Qwen3-Embedding-0.6B-GGUF`, so an install that fetched it
+  /// from the hub finds its file where it always was), `artifactory/<bundle>`
+  /// for a model that exists only in the registry, and `local/<name>` for a
+  /// hand-installed entry, whose prefix keeps its folder apart from every
+  /// downloaded one's.
   final String repo;
 
   /// The artefact inside it. Kept apart from [repo] because the resolve URL
   /// wants both halves and so does the on-disk layout.
   final String file;
 
-  /// The repo revision as a COMMIT SHA, never `main`. EMPTY for a
-  /// `source: local` entry, which has no repo to pin, and optional for a
-  /// registry entry, whose bytes [sha256] pins on its own.
+  /// The repo revision as a COMMIT SHA, never `main`, for a Hugging Face
+  /// entry. EMPTY for a `source: local` entry, which has no repo to pin, and
+  /// optional for a registry entry, whose bytes [sha256] pins on its own and
+  /// whose [repo] names a folder rather than a place to download from.
   ///
   /// A branch name is a moving target: the file behind `main` can be replaced
   /// upstream, and a download that resolved through it would fetch bytes that
@@ -308,7 +314,8 @@ class ModelFile {
 
   final int sizeBytes;
 
-  /// Lower-case hex sha256 of the finished file, from the hub's LFS oid.
+  /// Lower-case hex sha256 of the finished file, from the hub's LFS oid or
+  /// the registry bundle's own sums.
   final String sha256;
 
   /// What the machine needs to have to run it at all — 0 when it always
@@ -382,10 +389,13 @@ class ModelFile {
   bool get isRegistry => source == sourceArtifactory;
 
   /// Whether a missing or stale copy of this entry sends a finished install
-  /// back through the wizard: Hugging Face entries only. Decision D7: a
-  /// registry file is best-effort, because its address is set in Settings,
-  /// which the wizard cannot reach, so it never reopens or blocks the wizard.
-  bool get gatesSetup => source == sourceHf;
+  /// back through the wizard: every Hugging Face entry, and the embedding
+  /// model wherever it is downloaded from, because every stage needs it and
+  /// the local model server cannot start without it. The other registry
+  /// entries, the decision model today, stay best-effort (decision D7 of the
+  /// default-setup round): a missing or failed one never reopens or blocks
+  /// the wizard, and its role parks on its own reason instead.
+  bool get gatesSetup => source == sourceHf || role == ModelRole.embed;
 
   static String _string(Map<String, Object?> json, String field) {
     final value = json[field];
@@ -431,11 +441,13 @@ class ModelFile {
         '"local/<name>", not "$repo"',
       );
     }
-    // The same rule for a registry entry's folder (`artifactory_<bundle>`).
-    if (registry && !repo.startsWith('artifactory/')) {
+    // A registry entry's repo is only its folder: the upstream repo for a
+    // public model, `artifactory/<bundle>` for one that exists only in the
+    // registry. Never `local/`, which is the hand-installed entries' folder.
+    if (registry && repo.startsWith('local/')) {
       throw FormatException(
-        'manifest: a "source": "artifactory" entry must have a "repo" of '
-        '"artifactory/<bundle>", not "$repo"',
+        'manifest: a "source": "artifactory" entry cannot have a "repo" under '
+        '"local/" ("$repo")',
       );
     }
     final String revision;
@@ -514,12 +526,6 @@ class ModelFile {
     // the way every key this parser does not know is ignored.
     final bundle = registry ? _pathSegment(json, 'bundle') : null;
     final remoteFile = registry ? _pathSegment(json, 'remoteFile') : null;
-    if (registry && repo != 'artifactory/$bundle') {
-      throw FormatException(
-        'manifest: a "source": "artifactory" entry must have the "repo" '
-        '"artifactory/$bundle", not "$repo"',
-      );
-    }
     return ModelFile(
       id: id,
       role: role,
@@ -1034,6 +1040,24 @@ class ModelManifest {
         );
       }
     }
+    // And no two files at one path. A registry entry's repo is only its
+    // folder, free to be its upstream repo's name, so nothing but this keeps
+    // two entries (or a `local/x` and a flattened `local_x`) off one file.
+    final paths = <String>{};
+    for (final model in models) {
+      for (final path in [
+        model.relativePath,
+        model.sidecarRelativePath,
+        model.headsRelativePath,
+      ]) {
+        if (path != null && !paths.add(path)) {
+          throw FormatException(
+            'manifest: "${model.id}" would be stored at "$path", which '
+            'another file already uses',
+          );
+        }
+      }
+    }
     final tiers = _tiersFromJson(json['tiers'], models);
     return ModelManifest(
       version: version.toInt(),
@@ -1263,9 +1287,10 @@ class ModelManifest {
       );
 
   /// The entries that GATE setup, [ModelFile.gatesSetup]: the Hugging Face
-  /// ones. What the wizard gate's ledger check reads. Decision D7: a
-  /// registry file is best-effort, so a missing or failed one never reopens
-  /// or blocks the wizard; its role parks on its own reason instead.
+  /// ones and the embedding model wherever it comes from. What the wizard
+  /// gate's ledger check reads. Decision D7: the decision model's registry
+  /// files are best-effort, so a missing or failed one never reopens or
+  /// blocks the wizard; its role parks on its own reason instead.
   ModelManifest get gating => ModelManifest(
         version: version,
         models: List.unmodifiable([

@@ -106,7 +106,8 @@ class _SetupGateState extends ConsumerState<SetupGate> {
   /// and fetches what has moved.
   ///
   /// The comparison is against [managedManifestProvider]'s GATING view: the
-  /// Hugging Face files this Mac serves under the role placements, on the
+  /// Hugging Face files and the embedding model (`ModelFile.gatesSetup`)
+  /// this Mac serves under the role placements, on the
   /// memory of the Mac this launch is on. A models folder carried to a
   /// smaller Mac holds a writing model that machine will not start, and a
   /// gate demanding it would send a finished setup back through the wizard
@@ -153,7 +154,8 @@ class _SetupGateState extends ConsumerState<SetupGate> {
                   : null,
             );
       }
-      // The GATING entries only (decision D7): a registry file is
+      // The GATING entries only (decision D7): the embedding model and the
+      // Hugging Face files. The decision model's registry file is
       // best-effort, and a missing or failed one parks its role rather than
       // sending a finished install back through the wizard.
       return (await store.downloadLedger()).matches(served.gating);

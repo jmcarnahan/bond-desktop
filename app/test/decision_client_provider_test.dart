@@ -156,16 +156,17 @@ void main() {
     expect(noAddress, {routerEmbedId, routerDecideId});
   });
 
-  test('under hand-started servers the ensure set is the decision model '
-      'alone: no embedding download', () async {
-    // `make embed` serves embeddings from the Homebrew/HF cache; the heads
-    // file is still read from the models folder, which `make decide` reads.
+  test('under hand-started servers the ensure set is the embedding model and '
+      'the decision model, both served from the models folder', () async {
+    // `make embed` and `make decide` serve their files from the app's models
+    // folder (the embedding model no longer comes from the Hugging Face
+    // cache), and the heads file is read there too, so the app fills it. No
+    // generative model: the hand-started 27B is `make model`'s own.
     final ids = await ensureIds(const AppPrefs(
       managedServer: false,
       modelPlacement: ModelPlacement.local,
     ));
-    expect(ids, {routerDecideId});
-    expect(ids, isNot(contains(routerEmbedId)));
+    expect(ids, {routerEmbedId, routerDecideId});
   });
 
   test('the heads file is read from the registry entry\'s folder', () async {

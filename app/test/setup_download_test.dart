@@ -421,6 +421,58 @@ void main() {
     }
   });
 
+  testWidgets('a failed registry row for the embedding model says why but '
+      'never that you can continue, because it holds Continue',
+      (tester) async {
+    final both = testManifest(embed: testEmbedFile(), withDecide: true);
+    expect(both.byRole(ModelRole.embed).isRegistry, isTrue);
+    expect(both.byRole(ModelRole.embed).gatesSetup, isTrue);
+    await open(
+      tester,
+      files: both.bySize,
+      complete: false,
+      allDownloaded: false,
+      progress: {
+        for (final model in both.models)
+          model.id: model.id == routerEmbedId
+              ? entry(model.id,
+                  status: DownloadStatus.failed,
+                  error: DownloadError.unauthorized)
+              : entry(model.id, status: DownloadStatus.done),
+      },
+    );
+
+    expect(
+      find.text(
+          SetupDownloadBody.describeDownloadError(DownloadError.unauthorized)),
+      findsOneWidget,
+    );
+    expect(find.text(SetupDownloadBody.registryLaterText), findsNothing);
+    expect(canContinue(tester), isFalse);
+  });
+
+  testWidgets('with both registry rows failed, only the decision model\'s '
+      'says Bond keeps trying', (tester) async {
+    final both = testManifest(embed: testEmbedFile(), withDecide: true);
+    await open(
+      tester,
+      files: both.bySize,
+      complete: false,
+      allDownloaded: false,
+      progress: {
+        for (final model in both.models)
+          model.id: model.isRegistry
+              ? entry(model.id,
+                  status: DownloadStatus.failed,
+                  error: DownloadError.registryNotConfigured)
+              : entry(model.id, status: DownloadStatus.done),
+      },
+    );
+
+    expect(find.text(SetupDownloadBody.registryLaterText), findsOneWidget);
+    expect(canContinue(tester), isFalse);
+  });
+
   testWidgets('a failed hub row gets no registry line', (tester) async {
     await open(tester, progress: {
       routerEmbedId: entry(routerEmbedId,

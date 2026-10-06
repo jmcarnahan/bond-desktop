@@ -68,8 +68,8 @@ class SetupModelsBody extends StatelessWidget {
 
   /// The opening sentence, which has to agree with itself about number: a
   /// sentence reading "one models" would be the first thing a person saw. It
-  /// names no source, because the set mixes two: the embedding and writing
-  /// models come from Hugging Face, the decision model from the model
+  /// names no source, because the set mixes two: the writing models come
+  /// from Hugging Face, the embedding and decision models from the model
   /// registry.
   static String downloadsSentence(int count) => count == 1
       ? 'Bond downloads one model. It runs on this Mac and never sends your '

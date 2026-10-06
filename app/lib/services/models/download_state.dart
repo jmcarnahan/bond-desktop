@@ -330,8 +330,9 @@ class DownloadLedger {
   /// A `source: local` entry is SKIPPED: it is installed by hand and never
   /// has a row, and a decision model that is not installed must not send a
   /// finished setup back through the wizard. The wizard gate hands this the
-  /// manifest's `gating` view, which leaves the registry entries out on the
-  /// same reasoning (decision D7).
+  /// manifest's `gating` view, which leaves the decision model's registry
+  /// entry out on the same reasoning (decision D7) and keeps the embedding
+  /// model wherever it is downloaded from ([ModelFile.gatesSetup]).
   bool matches(ModelManifest manifest) {
     for (final file in manifest.models) {
       if (file.isLocal) continue;
