@@ -2,6 +2,7 @@ import '../../data/calendar_store.dart';
 import '../../data/message_store.dart';
 import '../../models/calendar_models.dart';
 import 'brief_gatherer.dart';
+import 'brief_path.dart' show BriefPath;
 import 'calendar_zone.dart';
 import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 
@@ -81,6 +82,18 @@ class BriefPlanner {
 
   static const Duration freshFor = Duration(hours: 2);
   static const Duration recheck = Duration(minutes: 15);
+
+  /// How young a READY brief on the related path is left alone when its
+  /// inputs move, while its meeting is more than [relatedRewriteNear] off.
+  /// The related threads follow the search vectors, which land one message
+  /// at a time behind the AI backlog: after a first sync or a Clear AI
+  /// results every pass would find a slightly different set and buy a
+  /// rewrite of every large meeting, every pass, on the one generative model
+  /// the backlog itself is waiting for. So a brief just written waits this
+  /// long before it is written again; the moved hash is still there when it
+  /// has, and a person's Regenerate never waits.
+  static const Duration relatedRewriteAfter = Duration(minutes: 30);
+  static const Duration relatedRewriteNear = Duration(hours: 1);
   static const int maxPerPass = 6;
 
   static const String kind = 'meeting_brief';
@@ -220,7 +233,18 @@ class BriefPlanner {
               !input.materialsPending &&
               _endedFor[e.id] != stored?.generatedAt;
           if (waitEnded) _endedFor[e.id] = stored?.generatedAt ?? '';
-          final changed = (moved && !(fresh && _queuedFor[e.id] == hash)) ||
+          // A young ready brief on the related path waits out its inputs
+          // settling ([relatedRewriteAfter]) unless its meeting is near.
+          final settling = input.path == BriefPath.related &&
+              stored != null &&
+              stored.isReady &&
+              generated != null &&
+              nowUtc.difference(generated) < relatedRewriteAfter &&
+              start != null &&
+              start.isAfter(nowUtc.add(relatedRewriteNear));
+          final changed = (moved &&
+                  !settling &&
+                  !(fresh && _queuedFor[e.id] == hash)) ||
               (!fresh && stored?.status == EventBrief.failed) ||
               waitedEnough ||
               waitEnded;

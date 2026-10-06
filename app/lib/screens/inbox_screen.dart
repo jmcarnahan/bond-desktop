@@ -1525,6 +1525,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return pass.whenComplete(() => _tending = null);
   }
 
+  /// How long a brief plan may take before [_planBriefs] says so.
+  static const int _slowBriefPlanMs = 100;
+
   /// Queues the briefs the calendar now makes due and wakes the draft lane
   /// when it queued any. Fire-and-forget off [_syncCalendar]; a failure is a
   /// trace and never reaches the mail.
@@ -1534,9 +1537,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // is not the owner's.
       final zone = ref.read(calendarZoneProvider).valueOrNull;
       if (zone == null) return;
+      final watch = Stopwatch()..start();
       final queued = await ref
           .read(briefPlannerProvider)
           .plan(now: DateTime.now(), zone: zone);
+      // The plan's gathers are store reads on this isolate, one search per
+      // large meeting: a slow pass is said, in counts only, so its cost can
+      // be read off a real mailbox.
+      if (watch.elapsedMilliseconds >= _slowBriefPlanMs) {
+        debugPrint('briefs planned: $queued queued in '
+            '${watch.elapsedMilliseconds} ms');
+      }
       if (!mounted || queued == 0) return;
       ref.read(briefRevisionProvider.notifier).state++;
       unawaited(ref.read(draftWorkerProvider).pump());

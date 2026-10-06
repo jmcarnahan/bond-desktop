@@ -170,6 +170,11 @@ void main() {
           isTrue);
     });
 
+    test('a forwarded subject is judged without its FW:', () {
+      expect(briefIsTopicless(event(subject: 'FW: Weekly sync')), isTrue);
+      expect(briefIsTopicless(event(subject: 'FW: Falcon weekly')), isFalse);
+    });
+
     test('status and update are generic meeting words', () {
       expect(briefIsTopicless(event(subject: 'Weekly status update')), isTrue);
       expect(briefIsTopicless(event(subject: 'Falcon status update')), isFalse);
@@ -222,6 +227,18 @@ void main() {
           'Falcon budget\nAgree the Q3 numbers.');
     });
 
+    test("Re: and Fw: come off the subject, as they do the message cards'",
+        () {
+      expect(briefQueryText(event(subject: 'FW: Falcon review')),
+          'Falcon review');
+      expect(briefQueryText(event(subject: 'RE: Fwd: Falcon review')),
+          'Falcon review');
+      expect(
+          briefQueryText(event(
+              subject: 'Re:', bodyPreview: 'Agree the Q3 launch numbers.')),
+          'Agree the Q3 launch numbers.');
+    });
+
     test('no agenda is the subject alone; nothing at all is empty', () {
       expect(briefQueryText(event(subject: 'Falcon budget')), 'Falcon budget');
       expect(briefQueryText(event(subject: '  ', bodyPreview: '')), '');
@@ -242,6 +259,8 @@ void main() {
         'Updated invitation with note: Falcon budget review',
         'New Time Proposed: Falcon budget review',
         'Automatic reply: out until Monday',
+        // The message cards' own stripReFw, numbered replies included.
+        'RE[2]: Accepted: Falcon review',
       ]) {
         expect(briefIsLogisticsSubject(s), isTrue, reason: s);
       }

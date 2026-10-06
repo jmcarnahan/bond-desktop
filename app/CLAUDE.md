@@ -1253,6 +1253,9 @@ that bite.
     only: a `type: resource` room or a list-address attendee is named after
     the subject ("Conf Room Falcon" keeps `Falcon weekly` topical); `status`,
     `update(s)`, `discussion`, `session`, `meet`, `follow(up)` are generic.
+    The topicless test, `briefQueryText` and `briefIsLogisticsSubject` strip
+    Re:/Fw: with the message card's own `stripReFw`
+    (`conversation_state.dart`), never a regex of their own.
   - Threads: the event's own invite threads first (`messagesForEvent` for the
     occurrence, then its series master; ≤ 3, `BriefThread.invite`), then on
     the people path the 30-day address match (`noMail` means no threads at
@@ -1267,7 +1270,9 @@ that bite.
     related Teams chat is an EXCERPT (`BriefThread.excerpt`; a chat is one
     conversation whatever passes through it): `messagesBetween` ±24 h
     (`excerptSpan`) of the matched message, never `loadThread` — the match,
-    then what followed, then to fill three (`relatedShown`) what came before;
+    then what followed (≤ 24 h), then to fill three (`relatedShown`) what
+    came before (≤ 3 h, `excerptLead`); a bot post (`teamsBotGate`) is never
+    quoted and takes no slot unless it IS the match;
     `lastAt`/`messageCount` are what is SHOWN, so later chatter moves no
     hash; never an open ask or waiting; a gone match skips the chat. A
     related mail thread quotes the match + its newest two (≤ 3, oldest
@@ -1307,7 +1312,9 @@ that bite.
     related path the attendees IN the kept threads first (roster or sender
     by address; a chat excerpt's sender by the invite's name,
     case-insensitive, `_wrote`/`_inThread`), then the rest — the cap
-    ≤ `maxPeople` 8 after (+`peopleMore`), `briefOrgOf` (the label before
+    ≤ `maxPeople` 8 after (+`peopleMore`); the With: line on the related
+    path is organiser first too (`briefOthers` puts an attendee copy's
+    organiser LAST), `briefOrgOf` (the label before
     the public suffix; the tenant for `*.onmicrosoft.com`, past a
     routing `mail` label; '' for a
     consumer domain or an IP), the answer only on the
@@ -1390,11 +1397,23 @@ that bite.
     attendees) at ≤ 39510 characters (39120 measured, plus ~1%; 38742/39120
     before the chat excerpt, 38732 before the With: cap, 38133/38500 before
     the related path, 37012/37800 before the other-files
-    block; the ceiling is (16384 − 2700) × 3.0 ≈ 41052). A material line
+    block; the ceiling is (16384 − 2700) × 3.0 ≈ 41052). What the model
+    is shown for a large meeting is readable in one file,
+    `test/fixtures/briefs/large_meeting_prompt.txt`, pinned whole by
+    `brief_prompt_fixture_test` (fixed `now`, every stamp derived from it);
+    a deliberate prompt change regenerates it by hand from the text the
+    failing test prints between its BEGIN/END lines. A material line
     puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
     block was really written).
   - `BriefPlanner` runs after each `synced` tick the inbox ran (never the
-    forced sync after a write). It skips an event only when its brief is
+    forced sync after a write); `_planBriefs` prints a pass of ≥ 100 ms as
+    counts only. A READY related-path brief younger than
+    `relatedRewriteAfter` (30 min) is not rewritten when its hash moves
+    unless the meeting is within `relatedRewriteNear` (1 h): the related set
+    follows vectors landing behind the AI backlog. Only delays; no brief,
+    failed, skipped and the people path are untouched. A planner test of it
+    stores a ready brief under an OLD hash with no pending work row, or a 0
+    proves nothing. It skips an event only when its brief is
     fresh (< 2 h) AND the inputs hash is unchanged; `_queuedFor` (event id →
     last queued hash) stops a retry storm; it rechecks a `failed` row at
     most every 15 minutes in memory (a back-off). `ready` rows, rows with no

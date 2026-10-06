@@ -20,6 +20,7 @@ import '../attachments/attachment_policy.dart' show attachmentEntityId;
 import '../html_text.dart' show stripLinkTargets;
 import '../llm/embeddings_client.dart';
 import '../llm/prompt_guard.dart';
+import '../teams_sync.dart' show teamsBotGate;
 import 'ask_words.dart' show askOwnWords, capAtWord;
 import 'brief_path.dart';
 import 'calendar_zone.dart';
@@ -859,9 +860,15 @@ class BriefGatherer {
   static const int relatedShown = 3;
   static const int relatedSnippetCap = 400;
 
-  /// How far either side of the matched message a chat's excerpt may reach:
-  /// a reply the next morning is the same exchange, one a week on is not.
+  /// How far AFTER the matched message a chat's excerpt may reach: a reply
+  /// the next morning is the same exchange, one a week on is not.
   static const Duration excerptSpan = Duration(hours: 24);
+
+  /// How far BEFORE it: what led up to the match is context only while it
+  /// is the same sitting. Shorter than [excerptSpan] because the fill runs
+  /// backward only when nothing followed, and yesterday's talk in a room is
+  /// as likely another subject as not.
+  static const Duration excerptLead = Duration(hours: 3);
 
   /// How long after a failed query embedding the gatherer does not ask
   /// again, judged on the caller's `now`: a hung server costs one timeout,
@@ -1202,8 +1209,13 @@ class BriefGatherer {
       whenLocal: briefWhenLine(event, zone),
       nowLocal: briefNowLine(nowUtc, zone),
       now: nowUtc,
+      // On the related path the task lists only the first of a long room
+      // ([MeetingBriefTask.withCap]), and `briefOthers` appends the organiser
+      // LAST: there the organiser leads, so who called the meeting is never
+      // among "+N more". The people path's line is as it always was.
       attendees: [
-        for (final p in others) p.name.isNotEmpty ? p.name : p.address,
+        for (final p in path == BriefPath.related ? organiserFirst : others)
+          p.name.isNotEmpty ? p.name : p.address,
       ],
       threads: threads,
       openAsks: asks,
@@ -1331,21 +1343,26 @@ class BriefGatherer {
 
   /// The part of a chat around the message the related search matched, as a
   /// candidate whose messages ARE that part: the match, then what followed
-  /// it, then (only to fill [relatedShown]) what came just before — all
-  /// within [excerptSpan] of the match. Null when the matched message is no
-  /// longer in the store or carries no readable stamp.
+  /// it within [excerptSpan], then (only to fill [relatedShown]) what came
+  /// just before within [excerptLead]. A bot's post is never part of it: an
+  /// app's card between two people's messages is not what was said. Null
+  /// when the matched message is no longer in the store or carries no
+  /// readable stamp.
   Future<_Candidate?> _excerptOf(
     Conversation conversation,
     RelatedConversation hit,
   ) async {
     final at = DateTime.tryParse(hit.receivedAt);
     if (at == null) return null;
-    final window = await _store.messagesBetween(
-      hit.source,
-      hit.conversationKey,
-      fromIso: MessageStore.isoStamp(at.toUtc().subtract(excerptSpan)),
-      toIso: MessageStore.isoStamp(at.toUtc().add(excerptSpan)),
-    );
+    final window = [
+      for (final m in await _store.messagesBetween(
+        hit.source,
+        hit.conversationKey,
+        fromIso: MessageStore.isoStamp(at.toUtc().subtract(excerptLead)),
+        toIso: MessageStore.isoStamp(at.toUtc().add(excerptSpan)),
+      ))
+        if (m.id == hit.messageId || m.gateReason != teamsBotGate) m,
+    ];
     final match = window.indexWhere((m) => m.id == hit.messageId);
     if (match < 0) return null;
     var from = match;

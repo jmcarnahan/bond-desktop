@@ -1679,6 +1679,7 @@ void main() {
             {String fromName = 'Kim',
             String fromAddress = 'teams:kim',
             bool outbound = false,
+            String? gateReason,
             String? body}) =>
         store.upsertMessage({
           'source': 'teams',
@@ -1690,7 +1691,9 @@ void main() {
           'from_address': outbound ? owner : fromAddress,
           'received_at': stampAgo(ago),
           'body_text': body ?? 'Chat says $id.',
-          'triage_status': 'done',
+          // A bot's post is gated at ingest: skipped, with the reason.
+          'triage_status': gateReason == null ? 'done' : 'skipped',
+          'gate_reason': ?gateReason,
         });
 
     group('a related Teams chat is an excerpt', () {
@@ -1752,6 +1755,78 @@ void main() {
         expect(t.snippets[2], contains('Chat says f2.'));
         expect(t.lastAt, stampAgo(const Duration(hours: 8)));
         expect(t.messageCount, 3);
+      });
+
+      test('the excerpt reaches three hours back and a day forward', () async {
+        await chatRow('t-1', last: const Duration(hours: 30), count: 3);
+        await chatSays('b5', 't-1', const Duration(hours: 35));
+        await chatSays('b2', 't-1', const Duration(hours: 32));
+        await chatSays('match', 't-1', const Duration(hours: 30));
+        related.hits = [
+          hit('t-1', 0.8,
+              source: 'teams',
+              messageId: 'match',
+              ago: const Duration(hours: 30)),
+        ];
+
+        // Nothing followed: the fill runs backward, and only inside the
+        // lead, so the excerpt is shorter than three.
+        var t = (await relatedInput(big())).threads.single;
+        expect(BriefGatherer.excerptLead, const Duration(hours: 3));
+        expect(t.snippets, hasLength(2));
+        expect(t.snippets[0], contains('Chat says b2.'));
+        expect(t.snippets[1], contains('Chat says match.'));
+        expect(t.snippets.join(), isNot(contains('Chat says b5.')));
+        expect(t.messageCount, 2);
+
+        // A reply 23 hours on joins; one 25 hours on does not.
+        await chatSays('f23', 't-1', const Duration(hours: 7));
+        await chatSays('f25', 't-1', const Duration(hours: 5));
+        t = (await relatedInput(big())).threads.single;
+        expect([
+          for (final s in t.snippets) RegExp(r'Chat says (\w+)\.').firstMatch(s)![1]
+        ], ['b2', 'match', 'f23']);
+      });
+
+      test("a bot's post is never quoted and takes no slot; a matched one "
+          'still is', () async {
+        await chatRow('t-1', last: const Duration(hours: 7), count: 4);
+        await chatSays('match', 't-1', const Duration(hours: 10));
+        await chatSays('bot', 't-1', const Duration(hours: 9),
+            fromName: 'Build Bot',
+            fromAddress: 'teams:bot',
+            gateReason: 'auto_generated');
+        await chatSays('reply', 't-1', const Duration(hours: 8));
+        await chatSays('reply2', 't-1', const Duration(hours: 7));
+        await chatRow('t-2', last: const Duration(hours: 4), count: 2);
+        await chatSays('card', 't-2', const Duration(hours: 5),
+            fromName: 'Build Bot',
+            fromAddress: 'teams:bot',
+            gateReason: 'auto_generated',
+            body: 'Falcon build 412 is green.');
+        await chatSays('ok', 't-2', const Duration(hours: 4));
+        related.hits = [
+          hit('t-1', 0.8,
+              source: 'teams',
+              messageId: 'match',
+              ago: const Duration(hours: 10)),
+          hit('t-2', 0.7,
+              source: 'teams',
+              messageId: 'card',
+              ago: const Duration(hours: 5)),
+        ];
+
+        final threads = (await relatedInput(big())).threads;
+        final room = threads[0];
+        expect(room.snippets, hasLength(3));
+        expect(room.snippets[0], contains('Chat says match.'));
+        expect(room.snippets[1], contains('Chat says reply.'));
+        expect(room.snippets[2], contains('Chat says reply2.'));
+        expect(room.snippets.join(), isNot(contains('Chat says bot.')));
+        expect(room.messageCount, 3);
+        final card = threads[1];
+        expect(card.snippets[0], contains('Falcon build 412 is green.'));
+        expect(card.snippets[1], contains('Chat says ok.'));
       });
 
       test('a hit whose message is gone skips that chat and keeps the '
@@ -1969,6 +2044,47 @@ void main() {
       final pat = input.people[2];
       expect(pat.threadCount, 1);
       expect(pat.lastWords, contains('The Falcon vendor signed today.'));
+    });
+
+    test('With: on the related path leads with the organiser, who '
+        '`briefOthers` lists last; the people path keeps its order', () async {
+      CalendarEvent attendeeCopy(int n) {
+        final start = now.add(const Duration(hours: 3));
+        return CalendarEvent(
+          id: 'evt-1',
+          subject: 'Falcon launch plan',
+          startUtc: start,
+          endUtc: start.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          organizerName: 'Orla Grant',
+          organizerAddress: 'orla@northwind.com',
+          changeKey: 'ck-1',
+          attendees: [
+            const Attendee(name: 'Me', address: owner),
+            for (var i = 1; i <= n; i++)
+              Attendee(name: 'Guest $i', address: 'g$i@northwind.com'),
+          ],
+        );
+      }
+
+      // Nineteen attendees and the organiser: twenty others.
+      final large = await relatedInput(attendeeCopy(19));
+      expect(large.path, BriefPath.related);
+      expect(large.attendees, hasLength(20));
+      expect(large.attendees.first, 'Orla Grant');
+      final msg = const MeetingBriefTask().buildUserMessage(large);
+      expect(
+          msg,
+          contains(wrapUntrusted('attendees',
+              large.attendees.take(MeetingBriefTask.withCap).join(', '))));
+      expect(msg, contains('Orla Grant'));
+
+      // Four others: the people path, the organiser still last.
+      await conversation('c-g', people: const ['g1@northwind.com']);
+      await message('m-c-g', 'c-g', from: 'g1@northwind.com', fromName: 'Guest 1');
+      final small = await relatedInput(attendeeCopy(3));
+      expect(small.path, BriefPath.people);
+      expect(small.attendees, ['Guest 1', 'Guest 2', 'Guest 3', 'Orla Grant']);
     });
 
     test('the people path still reads thirty days of mail', () async {

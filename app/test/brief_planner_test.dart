@@ -362,6 +362,117 @@ void main() {
     expect(counting.hashes.last, counting.hashes.first);
   });
 
+  group('a young related brief waits out its inputs settling', () {
+    late _CountingGatherer counting;
+    late BriefPlanner planning;
+
+    setUp(() {
+      final related = _RelatedStore(db)
+        ..hits = [
+          (
+            source: 'email',
+            conversationKey: 'c-1',
+            cosine: 0.8,
+            messageId: 'm-c-1',
+            receivedAt:
+                MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+          ),
+        ];
+      counting = _CountingGatherer(
+        related,
+        calendar,
+        ownerAddress: () async => owner,
+        zone: () => la,
+        embeddings: FakeEmbedServer().client,
+      );
+      planning = BriefPlanner(related, calendar, counting);
+    });
+
+    /// Six others: the related path.
+    CalendarEvent big(String id, {Duration startsIn = const Duration(hours: 3)}) =>
+        meeting(id, startsIn: startsIn, attendees: [
+          for (var i = 0; i < 6; i++)
+            Attendee(name: 'Guest $i', address: 'guest$i@northwind.com'),
+        ]);
+
+    /// A stored row under an OLD hash, written [age] ago. No work row is
+    /// left pending, so a 0 below is the guard and never a queued row.
+    Future<void> stored(String id, Duration age,
+            {String status = EventBrief.ready}) =>
+        calendar.putBrief(
+          eventId: id,
+          inputsHash: 'stale',
+          status: status,
+          briefJson: status == EventBrief.ready ? '{"headline":"Old."}' : null,
+          generatedAt: calendarStamp(now.subtract(age)),
+        );
+
+    Future<int> planAt([Duration after = Duration.zero]) =>
+        planning.plan(now: now.add(after), zone: la);
+
+    test('ten minutes old, meeting three hours off: nothing queued', () async {
+      await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 10));
+      expect(await planAt(), 0);
+      expect(counting.hashes.single, isNot('stale'),
+          reason: 'the inputs did move; the guard is what held it');
+      expect(await status('evt-big'), isNull);
+    });
+
+    test('thirty-one minutes old: queued', () async {
+      await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 31));
+      expect(await planAt(), 1);
+      expect(await status('evt-big'), 'pending');
+    });
+
+    test('a meeting inside the hour never waits', () async {
+      await calendar.upsertEvents(
+          [big('evt-big', startsIn: const Duration(minutes: 40))],
+          syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 10));
+      expect(await planAt(), 1);
+      expect(await status('evt-big'), 'pending');
+    });
+
+    test('the people path is not held', () async {
+      // Dana alone, with mail: the people path.
+      await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+      await stored('evt-1', const Duration(minutes: 10));
+      expect(await planAt(), 1);
+      expect(await status('evt-1'), 'pending');
+    });
+
+    test('only a READY row is held: none, failed and skipped are queued as '
+        'before', () async {
+      await calendar.upsertEvents([
+        big('evt-none'),
+        big('evt-failed', startsIn: const Duration(hours: 3, minutes: 5)),
+        big('evt-skipped', startsIn: const Duration(hours: 3, minutes: 10)),
+      ], syncRun: 'run-1');
+      await stored('evt-failed', const Duration(minutes: 10),
+          status: EventBrief.failed);
+      await stored('evt-skipped', const Duration(minutes: 10),
+          status: EventBrief.skipped);
+      expect(await planAt(), 3);
+      for (final id in ['evt-none', 'evt-failed', 'evt-skipped']) {
+        expect(await status(id), 'pending', reason: id);
+      }
+    });
+
+    test('the guard only delays: the same moved inputs are queued once the '
+        'brief is past thirty minutes', () async {
+      await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 10));
+      expect(await planAt(), 0);
+      expect(await status('evt-big'), isNull);
+      expect(await planAt(const Duration(minutes: 25)), 1);
+      expect(await status('evt-big'), 'pending');
+      expect(counting.hashes.last, counting.hashes.first,
+          reason: 'the same moved inputs on both passes');
+    });
+  });
+
   test('an old brief is requeued only when its inputs moved', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
     final current = await gatherer.gather(meeting('evt-1'), now: now);

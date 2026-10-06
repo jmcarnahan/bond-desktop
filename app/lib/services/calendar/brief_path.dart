@@ -1,4 +1,5 @@
 import '../../models/calendar_models.dart';
+import '../conversation_state.dart' show stripReFw;
 
 /// Which way a brief's threads are found. [wire] is the word the hash (and,
 /// later, the stored brief) carries — an enum word, never anything about the
@@ -159,7 +160,9 @@ bool briefIsTopicless(CalendarEvent e) {
           !briefLooksLikeList(a.address))
         ..._wordsOf(a.name),
   };
-  for (final t in _wordsOf(e.subject)) {
+  // Without its Re:/Fw: markers, as the query is ([briefQueryText]): a
+  // forwarded invite's "FW:" is not a topic.
+  for (final t in _wordsOf(stripReFw(e.subject))) {
     if (t.length <= 1 || _allDigits.hasMatch(t)) continue;
     if (names.contains(t) || _genericSubjectWords.contains(t)) continue;
     return false;
@@ -191,16 +194,17 @@ BriefPath briefPathOf(CalendarEvent e, {required List<String> otherAddresses}) {
 /// calibrated on: a longer one (the invite mail's body, a file's digest)
 /// moves the whole cosine scale.
 String briefQueryText(CalendarEvent e) {
-  final subject = e.subject.replaceAll(_whitespace, ' ').trim();
+  // Re:/Fw: come off the way they do on the documents this is compared
+  // with: a message's search card is built from `stripReFw(subject)`, and a
+  // forwarded invite's "FW:" would otherwise sit in the query and nowhere
+  // in the corpus.
+  final subject = stripReFw(e.subject).replaceAll(_whitespace, ' ').trim();
   final agenda = briefAgendaOf(e.bodyPreview);
   return [
     if (subject.isNotEmpty) subject,
     if (agenda.isNotEmpty) agenda,
   ].join('\n');
 }
-
-final RegExp _replyPrefixes =
-    RegExp(r'^\s*((re|fw|fwd)\s*:\s*)+', caseSensitive: false);
 
 /// The subject openings calendar logistics mail carries: an answer, a
 /// cancellation, an invitation or its update, a proposal, an auto-reply.
@@ -227,6 +231,6 @@ const List<String> _logisticsOpenings = [
 /// A heuristic chosen a priori and unmeasured, tested on fictional fixtures
 /// only, and English only.
 bool briefIsLogisticsSubject(String subject) {
-  final s = subject.replaceFirst(_replyPrefixes, '').trimLeft().toLowerCase();
+  final s = stripReFw(subject).toLowerCase();
   return _logisticsOpenings.any(s.startsWith);
 }

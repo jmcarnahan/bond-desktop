@@ -1,0 +1,115 @@
+Now: Wed 7 Oct 2026, 9:00 AM PDT
+Meeting: Wed 7 Oct 2026 · 1:00–1:45 PM PDT
+<untrusted_data source="meeting_subject">
+Falcon launch readiness
+</untrusted_data>
+With:
+<untrusted_data source="attendees">
+Orla Grant, Ana Ruiz, Cy Park, Ben Okafor, Di Moss, Ed Vance, Flo Hart, Gus Hale, Hal Moro, Jo Tate, Lu Vega, Ivy Chen
+</untrusted_data>
+
+People, numbered, the organiser first:
+[1] <untrusted_data source="person">
+Orla Grant · northwind
+</untrusted_data> · organiser · response not known
+in 1 of the threads
+last wrote 20 hours ago: <untrusted_data source="subject">
+Falcon launch readiness
+</untrusted_data>
+<untrusted_data source="last_words">
+Go or no-go for the Falcon launch on 14 October. Please read the readiness plan before we meet.
+</untrusted_data>
+[2] <untrusted_data source="person">
+Ben Okafor · northwind
+</untrusted_data> · attendee · response not known
+in 1 of the threads
+last wrote 9 hours ago: <untrusted_data source="subject">
+Falcon checkout pricing
+</untrusted_data>
+<untrusted_data source="last_words">
+Finance approved the two-week price hold.
+</untrusted_data>
+[3] <untrusted_data source="person">
+Ivy Chen · fabrikam
+</untrusted_data> · attendee · response not known
+in 1 of the threads
+last wrote 1 day ago: <untrusted_data source="subject">
+Ops room
+</untrusted_data>
+<untrusted_data source="last_words">
+Support has the launch-day rota.
+</untrusted_data>
+[4] <untrusted_data source="person">
+Ana Ruiz · northwind
+</untrusted_data> · attendee · response not known
+[5] <untrusted_data source="person">
+Cy Park · northwind
+</untrusted_data> · attendee · response not known
+[6] <untrusted_data source="person">
+Di Moss · northwind
+</untrusted_data> · attendee · response not known
+[7] <untrusted_data source="person">
+Ed Vance · northwind
+</untrusted_data> · attendee · response not known
+[8] <untrusted_data source="person">
+Flo Hart · northwind
+</untrusted_data> · attendee · response not known
++4 more
+
+Threads related to this meeting, numbered (found by their text, not by their people):
+[1] waiting on them · last message 20 hours ago · this meeting's own invite
+<untrusted_data source="subject">
+Falcon launch readiness
+</untrusted_data>
+<untrusted_data source="message">
+Orla Grant: Go or no-go for the Falcon launch on 14 October. Please read the readiness plan before we meet.
+</untrusted_data>
+[2] waiting on them · last message 3 hours ago
+<untrusted_data source="subject">
+Falcon checkout pricing
+</untrusted_data>
+<untrusted_data source="message">
+Kim Park: Proposal: the Falcon checkout launches at the old price for two weeks.
+</untrusted_data>
+<untrusted_data source="message">
+Ben Okafor: Finance approved the two-week price hold.
+</untrusted_data>
+<untrusted_data source="message">
+Kim Park: Then pricing is ready for launch.
+</untrusted_data>
+[3] part of a Teams chat · the latest message shown is from 1 day ago
+<untrusted_data source="subject">
+Ops room
+</untrusted_data>
+<untrusted_data source="message">
+Kai Lund: The Falcon status page is ready for launch day.
+</untrusted_data>
+<untrusted_data source="message">
+Ivy Chen: Support has the launch-day rota.
+</untrusted_data>
+
+Storylines these threads belong to:
+<untrusted_data source="storyline_title">
+Falcon checkout
+</untrusted_data>
+<untrusted_data source="storyline">
+Pricing held for two weeks; payment sign-off outstanding.
+</untrusted_data>
+
+Materials sent ahead, numbered ("you" is the owner):
+[1] (read) <untrusted_data source="material">
+Falcon readiness plan.pdf · Orla Grant · 2026-10-06
+</untrusted_data>
+<untrusted_data source="digest">
+The plan for a go or no-go on the Falcon launch.
+Support staffing is at 80 percent.
+Payment sign-off is still open.
+</untrusted_data>
+<untrusted_data source="material_text">
+Readiness: support staffing at 80 percent. Open risk: the payment provider has not signed off on the new checkout.
+</untrusted_data>
+
+From the invite:
+<untrusted_data source="invite">
+Go or no-go for the Falcon launch on 14 October.
+</untrusted_data>

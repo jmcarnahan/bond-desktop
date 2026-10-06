@@ -1168,7 +1168,10 @@ BOTH gathers, because the threads it finds are hashed:
   PERSON's: an attendee of `type: resource` (a room) or with a list address
   (`briefLooksLikeList`) is named after the very thing a subject is about,
   so "Falcon weekly" with "Conf Room Falcon" or "Falcon Team" in it keeps
-  its topic, where with a person called "Falcon Lee" it is topicless.
+  its topic, where with a person called "Falcon Lee" it is topicless. The
+  subject is judged without its `Re:`/`Fw:` markers (`stripReFw`, the
+  message card's own), so a forwarded "FW: Weekly sync" is topicless and
+  "FW: Falcon weekly" is not.
   Everything else takes the **related** path. From 6 others up the address
   match is the newest mail with anyone in the room, and the nearest threads by
   meaning did better on precision and recall in the study that set the 5/6
@@ -1184,8 +1187,12 @@ BOTH gathers, because the threads it finds are hashed:
   the rest) lead the list, count toward the 6, and are flagged
   (`BriefThread.invite`). On the **related** path, up to 4 (`maxRelated`)
   conversations whose text is nearest the meeting fill the rest, in score
-  order: the query is `briefQueryText` — the subject, then on its own line
-  the invite's own words (`briefAgendaOf`) — embedded under
+  order: the query is `briefQueryText` — the subject without its
+  `Re:`/`Fw:` markers (`stripReFw` from `conversation_state.dart`, the same
+  strip a message's search card is built with, so a forwarded invite's "FW:"
+  is not in the query when it is nowhere in the corpus; a subject that is
+  only "Re:" leaves the agenda alone), then on its own line the invite's own
+  words (`briefAgendaOf`) — embedded under
   `EmbeddingsClient.searchQueryPrefix`, and searched with ONE
   `MessageStore.relatedConversations` — `semanticSearch`'s KNN, model, dropped,
   date and source filters, but a lean read of its own: ALL 400 neighbours
@@ -1203,7 +1210,8 @@ BOTH gathers, because the threads it finds are hashed:
   `.receivedAt`), at most 12 conversations (`relatedCandidateLimit`).
   There is NO attendee filter. A conversation
   already among the invite threads is not listed twice, and calendar
-  logistics is dropped: a subject that opens (after any `Re:`/`Fw:`/`Fwd:`)
+  logistics is dropped: a subject that opens (after its reply and forward
+  markers, `stripReFw` again, so `RE[2]:` too)
   with `Accepted:`, `Tentative:`, `Tentatively accepted:`, `Declined:`,
   `Canceled:`/`Cancelled:`, `Invitation:`, `Updated invitation`, `New time
   proposed` or `Automatic reply` (`briefIsLogisticsSubject`), or a thread
@@ -1226,8 +1234,13 @@ BOTH gathers, because the threads it finds are hashed:
   (`BriefThread.excerpt`), read with `MessageStore.messagesBetween` (one
   conversation's messages in a window, both ends inclusive, oldest first,
   no attachments hydrated) and never with `loadThread` — the match, then
-  what followed it, then, only to fill three (`relatedShown`), what came
-  just before, all within 24 hours of the match (`excerptSpan`). A hit
+  what followed it within 24 hours (`excerptSpan`), then, only to fill three
+  (`relatedShown`), what came just before within 3 hours (`excerptLead`:
+  yesterday's talk in a room is as likely another subject as not, and the
+  backward fill only runs when nothing followed). A bot's post (a message
+  gated `auto_generated`, `teamsBotGate`) is never part of an excerpt and
+  takes no slot — an app's card between two people is not what was said —
+  unless it is the matched message itself, which is always quoted. A hit
   whose message is no longer in the store skips that chat. An excerpt's
   `lastAt` is the newest message SHOWN and its `messageCount` how many are
   shown, so the room's later chatter moves neither (nor the hash), while a
@@ -1419,7 +1432,10 @@ number, a name, a date or a claim that is not in the inputs does not go in."
 The user message opens with `Now: <absolute local time>` and the meeting line,
 both absolute (`briefWhenLine`: "Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All
 day · Wed 7 Oct 2026"), the fenced attendees — at most 15 names
-(`MeetingBriefTask.withCap`), then `+N more` on its own line OUTSIDE the
+(`MeetingBriefTask.withCap`; on the related path the organiser first, since
+`briefOthers` appends an attendee copy's organiser LAST and who called the
+meeting must not be among "+N more"; the people path's order is as it
+was), then `+N more` on its own line OUTSIDE the
 fence, since with no people cap a 300-person invite would otherwise put about
 36k characters of names in the prompt — and the last-met line, then
 **People, numbered, the organiser first:** — per person `[n]` and the fenced
@@ -1508,7 +1524,12 @@ measurement plus about 1%; 39120 over 38742 before the chat excerpt, its
 three-snippet related threads and the two rule sentences, and unchanged by
 the With: cap, which measured 10 characters over the old fifteen names;
 38500 before the related path, 37800 before the other files and their
-rule).
+rule). The whole user message for a fictional twelve-person related-path
+meeting — an invite with a read file, a related mail thread, a chat excerpt
+with a skipped bot post, a storyline — is kept readable in
+`app/test/fixtures/briefs/large_meeting_prompt.txt`, pinned byte for byte by
+`brief_prompt_fixture_test` on a fixed clock; on a deliberate change the
+test prints the new text between BEGIN/END marker lines to copy over.
 
 The schema (v3) is flat and in THIS order, which is the order the grammar
 makes the model write: `evidence` (one sentence — what the meeting is for and
@@ -1619,7 +1640,9 @@ arriving on the Day stop — whose outcome is `synced`, and only while
 processing is on, it fires the planner. The forced syncs `CalendarWrites`
 starts after a write call `syncNow` directly and plan no briefs. The planner
 runs (never awaited by the mail load; every failure a trace) and pumps
-the draft lane when it queued anything. It returns 0 at once while the
+the draft lane when it queued anything. A pass that takes 100 ms or more
+prints its duration and how many it queued (`briefs planned: N queued in M
+ms`, counts only), so its cost can be read off a real mailbox. It returns 0 at once while the
 owner's address is unknown (the keychain has not answered): without it the
 owner counts among every meeting's people. The host skips the pass while the
 display zone has not resolved (UTC's tomorrow is not the owner's). Otherwise
@@ -1671,6 +1694,17 @@ and walks the meetings soonest first, timed before all-day:
   queue every pass); and once more on the same hash when the meeting comes
   inside the 20-minute grace, so it is briefed with what is read rather than
   waiting on a file that may never finish;
+- on the RELATED path, leaves a READY brief younger than **30 minutes**
+  (`relatedRewriteAfter`) alone when its hash moved, unless the meeting
+  starts within the hour (`relatedRewriteNear`); a person's Regenerate never
+  waits (it does not go through the planner). The related threads follow
+  the search vectors, which land a message at a time behind the AI backlog:
+  after a first sync or a Clear AI results every pass would find a slightly
+  different set and buy a rewrite of every large meeting, every pass, on
+  the one generative model the backlog is itself waiting for. The guard only
+  delays — the moved hash is still there once the brief is 30 minutes old —
+  and it touches no other row: no brief, a `failed` row and a `skipped` row
+  are planned as before, and so is every people-path meeting;
 - when the gather says `no_mail` or `no_others` (`recorded`), writes
   `skipped` with `inputs_hash = ineligible:<word>` (no model call) unless the
   row already says so or holds a ready brief, which stands; once the reason
