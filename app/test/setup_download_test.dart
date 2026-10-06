@@ -54,6 +54,7 @@ void main() {
     VoidCallback? onResume,
     VoidCallback? onCancel,
     VoidCallback? onContinue,
+    Widget? registryFix,
   }) async {
     await tester.binding.setSurfaceSize(const Size(760, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -72,6 +73,7 @@ void main() {
             onResume: onResume ?? () {},
             onCancel: onCancel ?? () {},
             onContinue: onContinue ?? () {},
+            registryFix: registryFix,
           ),
         ),
       ),
@@ -491,5 +493,156 @@ void main() {
     await tester.pump();
 
     expect(continues, 1);
+  });
+
+  group('a registry problem fixed on this step', () {
+    // A stand-in for the host's form: this body is prop-only, so what is
+    // pinned here is WHEN the slot is drawn and what the rows say beside it.
+    const fix = Text('FIX-FORM');
+    final both = testManifest(embed: testEmbedFile(), withDecide: true);
+
+    Map<String, DownloadProgress> failing(String id, String error) => {
+          for (final model in both.models)
+            model.id: model.id == id
+                ? entry(model.id,
+                    status: DownloadStatus.failed, error: error)
+                : entry(model.id, status: DownloadStatus.done),
+        };
+
+    test('the here-sentences point below, and anything else falls back', () {
+      expect(
+        SetupDownloadBody.describeRegistryFixHere(
+            DownloadError.registryNotConfigured),
+        'The model registry has no address. Add it below.',
+      );
+      expect(
+        SetupDownloadBody.describeRegistryFixHere(DownloadError.unauthorized),
+        'The model registry refused the access token. Check it below.',
+      );
+      expect(
+        SetupDownloadBody.describeRegistryFixHere(
+            DownloadError.registryNotFound),
+        'The model registry does not have this model. Check its address '
+        'below.',
+      );
+      expect(
+        SetupDownloadBody.describeRegistryFixHere(
+            DownloadError.registryNotAModel),
+        'The model registry answered with a web page, not a model. Check its '
+        'address below.',
+      );
+      expect(
+        SetupDownloadBody.describeRegistryFixHere(DownloadError.network),
+        SetupDownloadBody.describeDownloadError(DownloadError.network),
+      );
+      expect(
+        SetupDownloadBody.describeRegistryFixHere(null),
+        SetupDownloadBody.describeDownloadError(null),
+      );
+    });
+
+    for (final word in DownloadError.registryFixes) {
+      testWidgets('a failed embedding row ($word) draws the form and the '
+          'here-sentence, and still holds Continue', (tester) async {
+        await open(
+          tester,
+          files: both.bySize,
+          complete: false,
+          allDownloaded: false,
+          progress: failing(routerEmbedId, word),
+          registryFix: fix,
+        );
+
+        expect(find.text('FIX-FORM'), findsOneWidget);
+        expect(
+          find.text(SetupDownloadBody.describeRegistryFixHere(word)),
+          findsOneWidget,
+        );
+        expect(
+          find.text(SetupDownloadBody.describeDownloadError(word)),
+          findsNothing,
+        );
+        expect(find.text(SetupDownloadBody.registryLaterText), findsNothing);
+        expect(canContinue(tester), isFalse);
+      });
+
+      testWidgets('with no form from the host, a failed embedding row '
+          '($word) keeps today\'s sentence and draws nothing more',
+          (tester) async {
+        await open(
+          tester,
+          files: both.bySize,
+          complete: false,
+          allDownloaded: false,
+          progress: failing(routerEmbedId, word),
+        );
+
+        expect(find.text('FIX-FORM'), findsNothing);
+        expect(
+          find.text(SetupDownloadBody.describeDownloadError(word)),
+          findsOneWidget,
+        );
+        expect(
+          find.text(SetupDownloadBody.describeRegistryFixHere(word)),
+          findsNothing,
+        );
+      });
+    }
+
+    testWidgets('a registry row that failed for another reason draws no form',
+        (tester) async {
+      await open(
+        tester,
+        files: both.bySize,
+        complete: false,
+        allDownloaded: false,
+        progress: failing(routerEmbedId, DownloadError.network),
+        registryFix: fix,
+      );
+
+      expect(find.text('FIX-FORM'), findsNothing);
+      expect(
+        find.text(
+            SetupDownloadBody.describeDownloadError(DownloadError.network)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a failed decision row draws the form beside its "you can '
+        'continue" line, and never holds Continue', (tester) async {
+      await open(
+        tester,
+        files: both.bySize,
+        complete: true,
+        allDownloaded: false,
+        progress: failing(routerDecideId, DownloadError.unauthorized),
+        registryFix: fix,
+      );
+
+      expect(find.text('FIX-FORM'), findsOneWidget);
+      expect(
+        find.text(SetupDownloadBody.describeRegistryFixHere(
+            DownloadError.unauthorized)),
+        findsOneWidget,
+      );
+      expect(find.text(SetupDownloadBody.registryLaterText), findsOneWidget);
+      expect(canContinue(tester), isTrue);
+    });
+
+    testWidgets('no failed row draws no form', (tester) async {
+      await open(
+        tester,
+        files: both.bySize,
+        complete: false,
+        allDownloaded: false,
+        progress: {
+          for (final model in both.models)
+            model.id: entry(model.id, status: DownloadStatus.downloading),
+        },
+        registryFix: fix,
+      );
+
+      expect(find.text('FIX-FORM'), findsNothing);
+    });
   });
 }

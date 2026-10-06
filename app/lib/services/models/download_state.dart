@@ -43,6 +43,15 @@ abstract final class DownloadError {
   /// because a retry budget spent on a login page is minutes of nothing.
   static const String registryNotAModel = 'registry_not_a_model';
 
+  /// The failures whose fix is the registry's address or token: the
+  /// sentence names it, and a Save of the registry form retries the download.
+  static const Set<String> registryFixes = {
+    registryNotConfigured,
+    unauthorized,
+    registryNotFound,
+    registryNotAModel,
+  };
+
   /// Everything the hub or the CDN answered that has no word of its own.
   static String http(int code) => 'http_$code';
 }

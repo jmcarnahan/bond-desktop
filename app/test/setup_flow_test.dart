@@ -12,14 +12,17 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/setup_provider.dart';
 import 'package:bond_inbox/services/llm/model_probe.dart';
 import 'package:bond_inbox/services/llm/model_slots.dart';
+import 'package:bond_inbox/screens/setup/setup_download_body.dart';
 import 'package:bond_inbox/screens/setup/setup_flow.dart';
 import 'package:bond_inbox/screens/setup/setup_where_body.dart';
 import 'package:bond_inbox/services/models/download_state.dart';
+import 'package:bond_inbox/services/models/model_downloader.dart';
 import 'package:bond_inbox/services/models/model_manifest.dart';
 import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:bond_inbox/services/server/model_server_supervisor.dart';
 import 'package:bond_inbox/services/system/system_info.dart';
+import 'package:bond_inbox/widgets/model_registry_form.dart';
 import 'package:bond_inbox/widgets/model_servers_form.dart';
 import 'package:bond_inbox/widgets/pane_surface.dart';
 import 'package:flutter/material.dart';
@@ -42,6 +45,115 @@ class _UnwritableStore extends SetupStore {
   @override
   Future<void> set(String key, String value) async =>
       throw StateError('disk is read-only');
+}
+
+/// A downloader that touches no network and no disk, built with the SAME two
+/// registry lookups the real provider passes, so each run records what the
+/// address and the token were when it began ([seen]: the base, and whether a
+/// token answered for it; never the token itself).
+///
+/// Each run emits `pending` for every file first, as the real run does, then
+/// the final statuses: the embedding model with [embedError] on the first run
+/// and [laterEmbedError] after it (a null error reads as a transfer under
+/// way), every other file done. A real run's `pending` reaches a frame long
+/// before its failure does, so the form unmounts and its "Saved." never
+/// shows; here both arrive inside one frame, so the field-clearing
+/// assertions read the State the press ran on.
+///
+/// With [hold] set a run stays open after its events and reads as [running]
+/// until [cancel], counted in [cancels]: a run still going when a Save lands.
+/// [runs] is how a test sees a download start.
+class _ScriptedDownloader extends ModelDownloader {
+  _ScriptedDownloader({
+    required super.manifest,
+    super.registryBase,
+    super.registryToken,
+    this.laterEmbedError,
+    this.hold = false,
+  }) : super(
+          modelsFolder: () => '',
+          readLedger: () async => DownloadLedger.empty,
+          writeLedger: (_) async {},
+        );
+
+  final String? embedError = DownloadError.registryNotConfigured;
+  final String? laterEmbedError;
+  final bool hold;
+  int runs = 0;
+  int cancels = 0;
+  final List<({String base, bool token})> seen = [];
+  StreamController<DownloadProgress>? _held;
+
+  @override
+  bool get running => _held != null;
+
+  @override
+  bool get paused => false;
+
+  @override
+  Future<void> get idle => Future<void>.value();
+
+  @override
+  Future<void> cancel() async {
+    final held = _held;
+    if (held == null) return;
+    cancels++;
+    _held = null;
+    await held.close();
+  }
+
+  @override
+  Stream<DownloadProgress> run([
+    Iterable<ModelFile>? files,
+    Set<String> rehash = const {},
+  ]) {
+    runs++;
+    final base = registryBase?.call() ?? '';
+    final token = registryToken?.call(base);
+    seen.add((base: base, token: token != null && token.isNotEmpty));
+    final error = runs == 1 ? embedError : laterEmbedError;
+    final list = List<ModelFile>.of(files ?? manifest.models);
+    final out = StreamController<DownloadProgress>();
+    for (final file in list) {
+      out.add(DownloadProgress(
+        id: file.id,
+        status: DownloadStatus.pending,
+        receivedBytes: 0,
+        totalBytes: file.downloadBytes,
+      ));
+    }
+    for (final file in list) {
+      out.add(DownloadProgress(
+        id: file.id,
+        status: file.role != ModelRole.embed
+            ? DownloadStatus.done
+            : (error == null
+                ? DownloadStatus.downloading
+                : DownloadStatus.failed),
+        receivedBytes: 0,
+        totalBytes: file.downloadBytes,
+        error: file.role == ModelRole.embed ? error : null,
+      ));
+    }
+    if (hold) {
+      _held = out;
+    } else {
+      unawaited(out.close());
+    }
+    return out.stream;
+  }
+}
+
+/// A preferences store whose registry address cannot be written: the Save
+/// the form accepted and the write refused past it.
+class _RegistryRefusingStore extends MessageStore {
+  _RegistryRefusingStore(super.db);
+
+  @override
+  Future<void> setPref(String key, String value) async {
+    if (key == registryUrlKey) throw StateError('disk is read-only');
+    return super.setPref(key, value);
+  }
 }
 
 /// The whole wizard, walked end to end.
@@ -874,5 +986,236 @@ void main() {
     // and the step is what changes inside it.
     expect(find.byType(PaneSurface), findsOneWidget);
     expect(find.text(SetupStep.welcome.title), findsOneWidget);
+  });
+
+  group('a registry problem on the download step', () {
+    /// The wizard reopened on the download step of a set whose embedding
+    /// model comes from the registry and is not on disk, with a REAL prefs
+    /// notifier over an in-memory keychain and [_ScriptedDownloader] in the
+    /// downloader's place, so the failed row needs no network and the Save
+    /// can be followed to the address and the token it writes.
+    late MemoryTokenStore tokens;
+    late AppPrefsNotifier prefs;
+    late _ScriptedDownloader downloader;
+
+    const registry = 'https://artifactory.example.com/artifactory/bond-models';
+    const fakeToken = 'test-token-123';
+    const formKey = ValueKey('setup-registry-form');
+
+    setUp(() async {
+      manifest = testManifest(embed: testEmbedFile());
+      final embed = File(
+          p.join(folder(), manifest.byRole(ModelRole.embed).relativePath));
+      if (embed.existsSync()) await embed.delete();
+      await store.set(SetupStore.setupKey, SetupStep.download.name);
+    });
+
+    /// Built inside the test body, as the Where group builds its own: the
+    /// notifier's load must run in the test's zone. The downloader is built
+    /// in the provider override with the two registry lookups the real
+    /// `modelDownloaderProvider` passes, copied from `app_providers.dart`.
+    void makeWorld({
+      String? laterEmbedError,
+      bool hold = false,
+      MessageStore? prefStore,
+    }) {
+      tokens = MemoryTokenStore();
+      // Disposed by the container that owns the override, not here.
+      prefs = AppPrefsNotifier(prefStore ?? MessageStore(db), tokens: tokens);
+      container = ProviderContainer(overrides: [
+        dbProvider.overrideWithValue(db),
+        appPathsProvider.overrideWithValue(AppPaths(support)),
+        modelManifestProvider.overrideWithValue(manifest),
+        systemInfoProvider.overrideWithValue(system),
+        modelServerSupervisorProvider.overrideWithValue(supervisor),
+        authSessionProvider.overrideWithValue(auth),
+        desktopNotifierProvider.overrideWithValue(notifier),
+        desktopNotificationServiceProvider.overrideWithValue(notifications),
+        appPrefsProvider.overrideWith((_) => prefs),
+        modelDownloaderProvider.overrideWith((ref) {
+          final made = _ScriptedDownloader(
+            manifest: manifest,
+            registryBase: () => ref.read(appPrefsProvider).effectiveRegistryUrl,
+            registryToken: (base) =>
+                sameOrigin(base, ref.read(appPrefsProvider).effectiveRegistryUrl)
+                    ? ref.read(appPrefsProvider.notifier).bearerFor(registryId)
+                    : null,
+            laterEmbedError: laterEmbedError,
+            hold: hold,
+          );
+          ref.onDispose(made.dispose);
+          downloader = made;
+          return made;
+        }),
+      ]);
+      addTearDown(container.dispose);
+    }
+
+    List<String> rendered(WidgetTester tester) => [
+          for (final t in tester.widgetList<Text>(find.byType(Text)))
+            t.data ?? '',
+        ];
+
+    /// A press, then one turn of the REAL event loop between pumps: a new
+    /// run first cancels the finished run's subscription, and that cancel
+    /// answers with a future the root zone completes, which fake time never
+    /// reaches. No filesystem or socket future is awaited here.
+    Future<void> press(WidgetTester tester, Key key) async {
+      await tester.ensureVisible(find.byKey(key));
+      await tester.tap(find.byKey(key));
+      await settle(tester);
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await settle(tester);
+    }
+
+    testWidgets('a registry row with no address draws the registry form, '
+        'with no Check and no Remove token', (tester) async {
+      makeWorld();
+      await mount(tester);
+      await settle(tester);
+
+      expect(downloader.runs, 1);
+      final form = find.byKey(formKey);
+      expect(form, findsOneWidget);
+      for (final key in [
+        ModelRegistryForm.urlKey,
+        ModelRegistryForm.tokenKey,
+        ModelRegistryForm.saveKey,
+      ]) {
+        expect(find.descendant(of: form, matching: find.byKey(key)),
+            findsOneWidget);
+      }
+      expect(find.byKey(ModelRegistryForm.checkKey), findsNothing);
+      expect(find.byKey(ModelRegistryForm.removeTokenKey), findsNothing);
+      expect(
+        find.text(SetupDownloadBody.describeRegistryFixHere(
+            DownloadError.registryNotConfigured)),
+        findsOneWidget,
+      );
+      expect(continueEnabled(tester), isFalse);
+    });
+
+    testWidgets('Save writes the address and the token, and starts the '
+        'download again', (tester) async {
+      makeWorld();
+      await mount(tester);
+      await settle(tester);
+
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), registry);
+      await tester.enterText(find.byKey(ModelRegistryForm.tokenKey), fakeToken);
+      await settle(tester);
+      await press(tester, ModelRegistryForm.saveKey);
+
+      expect(prefs.state.effectiveRegistryUrl, registry);
+      expect(prefs.state.registryTokenStored, isTrue);
+      expect(await MessageStore(db).getPref(registryUrlKey), registry);
+      expect(downloader.runs, 2);
+      // The first run had no address and no token; the second asked the
+      // typed address, with a token for it.
+      expect(downloader.seen.first, (base: '', token: false));
+      expect(downloader.seen.last.base, registry);
+      expect(downloader.seen.last.token, isTrue);
+      expect(downloader.cancels, 0);
+      // The new run cleared the failed row, and the form went with it.
+      expect(find.byKey(formKey), findsNothing);
+    });
+
+    testWidgets('a Save while this step\'s run is still going cancels it and '
+        'starts again', (tester) async {
+      makeWorld(hold: true);
+      await mount(tester);
+      await settle(tester);
+
+      // The embedding row failed, and the run has not ended.
+      expect(downloader.runs, 1);
+      expect(downloader.running, isTrue);
+      expect(find.byKey(formKey), findsOneWidget);
+
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), registry);
+      await tester.enterText(find.byKey(ModelRegistryForm.tokenKey), fakeToken);
+      await settle(tester);
+      await press(tester, ModelRegistryForm.saveKey);
+
+      expect(downloader.cancels, 1);
+      expect(downloader.runs, 2);
+      expect(downloader.seen.last.base, registry);
+      expect(downloader.seen.last.token, isTrue);
+    });
+
+    testWidgets('a write refused past the form draws the failure under the '
+        'field, and nothing is started or cancelled', (tester) async {
+      // The form accepts the address and the token, and the address's write
+      // then throws. `useRegistry` lets a throw that is not an ArgumentError
+      // through `saveRegistry`, so the form's own catch draws
+      // `ModelServersForm.saveFailedText`, and the host never reaches its
+      // restart.
+      makeWorld(hold: true, prefStore: _RegistryRefusingStore(db));
+      await mount(tester);
+      await settle(tester);
+
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), registry);
+      await tester.enterText(find.byKey(ModelRegistryForm.tokenKey), fakeToken);
+      await settle(tester);
+      await press(tester, ModelRegistryForm.saveKey);
+
+      expect(find.byKey(ModelRegistryForm.refusalKey), findsOneWidget);
+      expect(find.text(ModelServersForm.saveFailedText), findsOneWidget);
+      expect(await MessageStore(db).getPref(registryUrlKey), isNull);
+      expect(downloader.runs, 1);
+      expect(downloader.cancels, 0);
+    });
+
+    testWidgets('an address that is not one is refused by the FORM itself, '
+        'before any write, and nothing is written or started',
+        (tester) async {
+      makeWorld();
+      await mount(tester);
+      await settle(tester);
+
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), 'not a url');
+      await settle(tester);
+      await press(tester, ModelRegistryForm.saveKey);
+
+      expect(find.byKey(ModelRegistryForm.refusalKey), findsOneWidget);
+      expect(find.text(ModelRegistryForm.addressRefusalText), findsOneWidget);
+      expect(await MessageStore(db).getPref(registryUrlKey), isNull);
+      expect(prefs.state.effectiveRegistryUrl, isEmpty);
+      expect(tokens.values, isEmpty);
+      expect(downloader.runs, 1);
+      expect(find.byKey(formKey), findsOneWidget);
+    });
+
+    testWidgets('the token field is obscured, and after a Save no rendered '
+        'Text carries the token', (tester) async {
+      // The registry refuses the token on the next run too, so the form is
+      // still there to be read after the Save.
+      makeWorld(laterEmbedError: DownloadError.unauthorized);
+      await mount(tester);
+      await settle(tester);
+
+      expect(
+        tester
+            .widget<TextField>(find.byKey(ModelRegistryForm.tokenKey))
+            .obscureText,
+        isTrue,
+      );
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), registry);
+      await tester.enterText(find.byKey(ModelRegistryForm.tokenKey), fakeToken);
+      await settle(tester);
+      await press(tester, ModelRegistryForm.saveKey);
+
+      expect(downloader.runs, 2);
+      expect(find.byKey(formKey), findsOneWidget);
+      expect(
+        find.text(SetupDownloadBody.describeRegistryFixHere(
+            DownloadError.unauthorized)),
+        findsOneWidget,
+      );
+      final token =
+          tester.widget<TextField>(find.byKey(ModelRegistryForm.tokenKey));
+      expect(token.obscureText, isTrue);
+      expect(token.controller!.text, isEmpty);
+      expect(rendered(tester).where((t) => t.contains(fakeToken)), isEmpty);
+    });
   });
 }

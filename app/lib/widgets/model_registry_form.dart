@@ -20,8 +20,11 @@ typedef RegistrySave = Future<String?> Function({
   required bool clearToken,
 });
 
-/// Where Bond downloads the decision model from: the model registry's
-/// address and its read token.
+/// Where Bond downloads the decision and embedding models from: the model
+/// registry's address and its read token. Settings draws it on the Models
+/// page, and the setup wizard's download step draws it, with no Check and no
+/// Remove token, while a registry download has failed for a reason the
+/// address or token fixes.
 ///
 /// [ModelServersForm]'s discipline without its probe-and-discover press: the
 /// registry serves files, not a model list, so **Save** writes what was
@@ -78,7 +81,8 @@ class ModelRegistryForm extends StatefulWidget {
   static const Key statusKey = ValueKey('settings-registry-status');
 
   static const String title = 'Model registry';
-  static const String caption = 'Where Bond downloads the decision model from.';
+  static const String caption =
+      'Where Bond downloads the decision and embedding models from.';
   static const String urlLabel = 'Registry address';
   static const String urlHint =
       'https://artifactory.example.com/artifactory/bond-models';

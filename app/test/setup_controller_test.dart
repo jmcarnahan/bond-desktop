@@ -1050,6 +1050,107 @@ void main() {
     expect(controller.state.downloadsComplete, isTrue);
   });
 
+  /// Whether a run is still moving bytes for a file other than the
+  /// embedding model: the case where a registry Save lands behind the run.
+  bool otherRowMoving(SetupController controller) =>
+      controller.state.downloads.values.any((d) =>
+          d.id != routerEmbedId &&
+          d.status == DownloadStatus.downloading &&
+          d.receivedBytes > 0);
+
+  test('restartDownload cancels this step\'s run in flight and runs again '
+      'with the address it now has', () async {
+    manifest = publish(bulk: 512 * 1024, prose: 512 * 1024);
+    final embed = publishRegistryEmbed();
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    // Read per registry entry, so the run after the Save sees the new one.
+    var base = '';
+    final controller =
+        build(downloader: buildDownloader(registryBase: () => base));
+
+    await controller.init();
+    await waitUntil(
+      () =>
+          controller.state.downloads[routerEmbedId]?.error ==
+              DownloadError.registryNotConfigured &&
+          otherRowMoving(controller),
+      reason: 'the embedding row to fail while a hub file still downloads',
+    );
+    expect(hub.registryCount, 0);
+
+    base = hub.registryBase;
+    hub.chunkDelay = null;
+    await controller.restartDownload();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the restarted run to finish',
+    );
+
+    expect(controller.state.downloads[routerEmbedId]?.status,
+        DownloadStatus.done);
+    expect(File(destOf(embed)).existsSync(), isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
+    expect(hub.registryCount, greaterThan(0));
+  });
+
+  test('restartDownload from a PAUSED run cancels it and runs again', () async {
+    manifest = publish(bulk: 512 * 1024, prose: 512 * 1024);
+    final embed = publishRegistryEmbed();
+    hub.chunkDelay = const Duration(milliseconds: 5);
+    await store.set(SetupStore.setupKey, SetupStep.download.name);
+    var base = '';
+    final downloader = buildDownloader(registryBase: () => base);
+    final controller = build(downloader: downloader);
+
+    await controller.init();
+    await waitUntil(
+      () =>
+          controller.state.downloads[routerEmbedId]?.error ==
+              DownloadError.registryNotConfigured &&
+          otherRowMoving(controller),
+      reason: 'the embedding row to fail while a hub file still downloads',
+    );
+    await controller.pauseDownload();
+    await waitUntil(
+      () => controller.state.downloads.values
+          .any((d) => d.status == DownloadStatus.paused),
+      reason: 'the paused event',
+    );
+    expect(downloader.paused, isTrue);
+
+    base = hub.registryBase;
+    hub.chunkDelay = null;
+    await controller.restartDownload();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the restarted run to finish',
+    );
+
+    expect(controller.state.downloadPaused, isFalse);
+    expect(controller.state.downloads[routerEmbedId]?.status,
+        DownloadStatus.done);
+    expect(File(destOf(embed)).existsSync(), isTrue);
+    expect(controller.state.downloadsComplete, isTrue);
+    expect(hub.registryCount, greaterThan(0));
+  });
+
+  test('restartDownload with nothing running simply runs', () async {
+    final controller = build();
+    await controller.init();
+    expect(controller.state.downloadRunning, isFalse);
+    expect(controller.state.downloadsComplete, isFalse);
+
+    await controller.restartDownload();
+    await waitUntil(
+      () => !controller.state.downloadRunning,
+      reason: 'the run to finish',
+    );
+
+    expect(controller.state.downloadsComplete, isTrue);
+    expect(hub.requests, isNotEmpty);
+  });
+
   test('the sign-in step probes the session, and a throw reads as signed out',
       () async {
     auth = FakeAuthSession(signedIn: true);

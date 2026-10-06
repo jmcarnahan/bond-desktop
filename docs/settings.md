@@ -566,19 +566,20 @@ Mac.`), the name-and-size line and a status keyed `settings-embed-status`,
 which uses the same download words as the other two roles (`Not downloaded
 yet.`, `Downloading NN%`, a failure sentence) and, while the model is missing
 and nothing is running, a **Download** button keyed
-`settings-embed-download`. On a `BOND_DEV_HAND_SERVERS` build the model
-ensurer does not download it (`modelEnsureSetProvider` leaves it out): `make
-embed` serves it from the Homebrew/Hugging Face cache, so the block shows no
-**Download** and its status reads `Served by your own embedding server.`
-(the host passes `managedServer` to the page). The decision model is
-still ensured there, because the app reads its heads file from the models
-folder and `make decide` reads the same folder.
+`settings-embed-download`. On a `BOND_DEV_HAND_SERVERS` build the block
+shows no **Download** and its status reads `Served by your own embedding
+server.` (the host passes `managedServer` to the page). The model ensurer
+still downloads it there, from the model registry like the decision model,
+because `make embed` serves the same models-folder file (`make embed-fetch`
+fills it), and the decision model is ensured there too, because the app
+reads its heads file from the models folder and `make decide` reads the
+same folder.
 
 **Model registry** follows Embeddings and sits above **Set up again**:
 `ModelRegistryForm` (`widgets/model_registry_form.dart`), prop-only, shown
 while the host wires `onSaveRegistry`. Its title is `Model registry`, its
-caption `Where Bond downloads the decision model from.` Two fields: `Registry
-address` (`settings-registry-url`, opening on the effective address, hint
+caption `Where Bond downloads the decision and embedding models from.` Two
+fields: `Registry address` (`settings-registry-url`, opening on the effective address, hint
 `https://artifactory.example.com/artifactory/bond-models`) and `Access token`
 (`settings-registry-token`, obscured, EMPTY whatever is stored and emptied
 again after a Save). The token field's hint is `Stored. Type to replace` for
@@ -1344,9 +1345,9 @@ a machine serving the previous weights for ever, since nothing downstream
 compares digests. A bumped digest
 sends the wizard back to its **download** step, where `_onEnter` fetches what
 has moved. Only the GATING entries decide it (`ModelManifest.gating`, the
-Hugging Face files, decision D7): a model registry file that is missing or
-failed never reopens the wizard, it parks its role and the model ensurer
-fetches it. The gate answers ONCE, on `AuthGate`'s pattern, and re-decides
+Hugging Face files and the embedding model, decision D7): the decision
+model's registry file, missing or failed, never reopens the wizard, it parks
+its role and the model ensurer fetches it. The gate answers ONCE, on `AuthGate`'s pattern, and re-decides
 only when the flow reports itself finished or when **Set up again** bumps the
 counter. Once its answer arrives it writes `setupShowingProvider` (true while
 it shows the wizard, false once it shows the app; written in the callback the
@@ -1373,7 +1374,7 @@ One `PaneSurface`, whose title is the step's and whose trailing slot reads
 | 3 | Where the models run | the generative form's `Continue`, or the step's `Continue` under This Mac | The same two questions the Models page asks, answered by the same form. `SetupWhereBody` is two roles of two cards each: **Decision model** with **This Mac · recommended** (`setup-where-decision-managed`) and **Your server** (`setup-where-decision-custom`), then **Generative model** with **This Mac** (`setup-where-managed`) and **Your server · recommended** (`setup-where-custom`), and a note that the embedding model always runs on this Mac. The DEFAULTS are the stored answers: the decision model on this Mac, the generative model on Your server whatever the build (`defaultModelPlacement`, decision D9 of the default-setup round), its form prefilled with `…/prose/v1/chat/completions` when the build carries `BOND_BOX_URL` and empty otherwise, with the hint `Using the key from this build. Type to replace` when the build carries `BOND_BOX_KEY` too. Generative This Mac shows `SettingsSegments<String>` keyed `setup-where-generative-model` with **Qwen3.8 27B** | **Qwen3 4B** (the 27B disabled on the inbox tier with `This Mac has too little memory for the 27B.`); the pick is `SetupState.generativeManaged` and decides what the download step fetches. Decision Your server renders the decision form with **Connect**: it writes `useDecision(box, …)` at once (`SetupController.connectDecision`) and stays, then says `Connected · <model> at <host>` (`setup-where-decision-connected`); until then the way forward is disabled and says `Connect the decision server first, or choose This Mac for it.` Generative Your server renders the generative form with `connectLabel: 'Continue'` and `onThirdParty: null`, so its press IS the way forward: it probes with the typed key (or the stored one by id, same host only), takes the listed name, refuses a vendor with `Cloud services are connected under Settings after setup.` (the decision form refuses one with its own role sentence), and calls `continueFromWhere(generative:)`, which checks the decision role, writes `useGenerative(box, url, model, key, clearKey, hardwareTier)`, writes `useDecision(local)` when the decision model stays here, and moves to Models. Under This Mac the step's own Continue calls `continueFromWhere()`, which writes `useGenerative(local, managedModel:, hardwareTier:)` with this Mac's HARDWARE tier. Both KEEP the stored addresses and keys: changing where the work runs is not forgetting how to reach the servers |
 | 4 | Models | `Continue` | The RESOLVED manifest's downloadable rows — name, role sentence (`Finds related messages`; both chat models `Writes summaries, drafts and storylines`), size, licence button, and any `notice` verbatim — and the total. With the decision model on this Mac it is an ordinary download row from the model registry (its size counts the heads file, and it is in the sentence and the total). The first sentence names no source, because the set mixes the hub and the registry: `Bond downloads N models. They run on this Mac and never send your mail anywhere.` (`one model. It runs …` for one). Only a hand-installed (`source: local`) decide entry is listed apart (`setup-models-decision`) with `Installed` or `Not installed. Copy the model files into the models folder.` in place of a size, counting toward neither. Three rows on a full Mac that chose the 27B with the decision model here (the 27B's row says `+ MTP head, 1.6 GB` under its size), two when the generative model runs on your server (embed + decide), one when both roles do |
 | 5 | Storage | `Continue` | The effective folder, **Change folder…**, and `checkDisk`. Dead until the preflight answers and passes; free space that could not be asked counts as passing, a folder that cannot be WRITTEN does not — `Bond can't write to this folder. Choose another one.` |
-| 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first, under the caption `The models arrive one at a time, smallest first.` — the writing model's MTP head and the decision model's heads file ride on their model's bar rather than taking one of their own, so the bar counts both files and finishes once. Enabled when every GATING (Hugging Face) file is done — see below. A model registry row never holds Continue (decision D7): a failed one shows its `describeDownloadError` sentence and under it `Bond tries again after setup, and under Settings, Models. You can continue.` (`SetupDownloadBody.registryLaterText`), the button offers `Try again`, and `All models are on this Mac.` waits for every row. When another owner's run holds the downloader as the step is entered (the model ensurer's, cancelled as the wizard opened), the step reads as in progress with `Finishing the download already running, then starting.` and no buttons, waits for `ModelDownloader.idle`, then starts its own run, resuming from the kept parts. A PAUSED run is never waited for: one found on arrival is cancelled at once, and leaving the step with this step's run paused (Continue, Back, Finish, Back to the inbox) cancels it, parts kept, so the model ensurer resumes it after setup |
+| 6 | Download | `Continue` | One bar per MODEL this Mac's tier wants, smallest first, under the caption `The models arrive one at a time, smallest first.` — the writing model's MTP head and the decision model's heads file ride on their model's bar rather than taking one of their own, so the bar counts both files and finishes once. Enabled when every GATING file is done, the Hugging Face files and the embedding model, which comes from the model registry — see below. The decision model's registry row never holds Continue (decision D7): a failed one shows its sentence and under it `Bond tries again after setup, and under Settings, Models. You can continue.` (`SetupDownloadBody.registryLaterText`), the button offers `Try again`, and `All models are on this Mac.` waits for every row. When another owner's run holds the downloader as the step is entered (the model ensurer's, cancelled as the wizard opened), the step reads as in progress with `Finishing the download already running, then starting.` and no buttons, waits for `ModelDownloader.idle`, then starts its own run, resuming from the kept parts. A PAUSED run is never waited for: one found on arrival is cancelled at once, and leaving the step with this step's run paused (Continue, Back, Finish, Back to the inbox) cancels it, parts kept, so the model ensurer resumes it after setup |
 | 7 | Sign in | `Continue` | `SignInBody(showTitle: false)` when signed out (signing in advances, and there is no Continue); `You're signed in.` and a Continue when already signed in |
 | 8 | Notifications | `Continue` | The press IS the ask. Exactly one button, and the word `Allow` appears nowhere — macOS is about to put its own Allow up |
 | 9 | All set | `Finish` | Folder, port, account, notifications, then this Mac's tier defaults on the local placement only and `setup = 'done'`, and only then the server. Nothing writes `managedServer`: it is a build define since Round H. It does not touch processing either: that is a remembered preference and it starts off, so a finished wizard leaves the models idle until **AI processing** is turned on |
@@ -1406,13 +1407,33 @@ Cancel leaves them.
 
 **Continue on the download step waits for every GATING file this Mac's tier
 asked for** (`SetupState.downloadsComplete`, over `resolvedManifest.gating`:
-the Hugging Face entries, the writing model's MTP head included) and not for
+the Hugging Face entries, the writing model's MTP head included, and the
+embedding model, which comes from the model registry) and not for
 `ModelManifest.usableIds` (embed + bulk, informational and gating nothing):
 finishing early would leave a non-engineer looking at an idle inbox with no
 progress bar left to explain it. The model registry's decision model is
-best-effort (decision D7): its address is fixed in Settings, which the wizard
-cannot reach, so a registry file that failed or is still missing does not
-hold Continue, and the model ensurer retries it once the app shows. A
+best-effort (decision D7): its registry file, failed or still missing, does
+not hold Continue, and the model ensurer retries it once the app shows.
+
+**A registry problem is fixed on the download step.** When a registry row
+fails for a reason the address or token fixes (`DownloadError.registryFixes`:
+no address, a refused token, a missing bundle, a web page instead of a
+model), the step draws the Model registry fields under the rows
+(`ModelRegistryForm`, outer key `setup-registry-form`, through
+`SetupDownloadBody.registryFix`): `Registry address`, `Access token` and
+**Save**, with no **Check** and no **Remove token**. That row's sentence
+points at the fields rather than at Settings: `The model registry has no
+address. Add it below.`, `The model registry refused the access token. Check
+it below.`, `The model registry does not have this model. Check its address
+below.` or `The model registry answered with a web page, not a model. Check
+its address below.` (`SetupDownloadBody.describeRegistryFixHere`). **Save**
+makes the same write as Settings (`saveRegistry`,
+`screens/registry_save.dart`), draws a refusal under the field the same way,
+and once the write lands cancels a run still going, paused or not, with its
+parts kept, and starts the download again
+(`SetupController.restartDownload`). A failed decision model
+row keeps its `registryLaterText` line beside the fields and still never
+holds Continue; the embedding model's row holds it until its file is here. A
 separate `SetupState.allDownloaded` (every row, registry included) decides
 whether arriving at the step starts a run, and whether the step says every
 model is here. `SetupController.startDownload` awaits the prefs notifier's

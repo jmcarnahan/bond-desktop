@@ -770,10 +770,13 @@ because every stage needs it and the local model server cannot start without
 it; under the default placements (generative on Your server, decision here) it
 is the whole gating set, and a gating rule by source alone would leave that set
 empty, which `DownloadLedger.matches` answers true for nothing at all. The
-decision model's registry file stays best-effort (decision D7), because its
-address is set under Settings, which the wizard cannot reach, so a missing or
-failed one never reopens the wizard; its role parks on its own reason
-instead. The supervisor serves
+decision model's registry file stays best-effort (decision D7): a missing or
+failed one never reopens the wizard and never holds its Continue; its role
+parks on its own reason instead. The download step does show the Model
+registry fields when a registry row fails for an address or token reason
+(`DownloadError.registryFixes`), and their Save cancels a run still going,
+parts kept, and starts the download again, which is how a fresh install fixes
+the embedding model's address there. The supervisor serves
 `forRoles(…).withPresentFiles(folder, ledger)`: any entry whose files (weights,
 sidecar, heads, whichever it has) are not all in the folder is left out of the
 preset, and so is a REGISTRY entry whose ledger rows are not current

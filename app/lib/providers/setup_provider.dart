@@ -844,6 +844,32 @@ class SetupController extends StateNotifier<SetupState> {
     }
   }
 
+  /// The download again from the top, whatever this step's run is doing: a
+  /// registry address or token just changed, and a run already past its
+  /// registry entries, paused, or winding down would never ask it. A run in
+  /// flight is cancelled the way Cancel does it, so its parts stay and the new
+  /// run carries on from the byte. While another start is between its first
+  /// line and its run this does nothing: that run reads the address per entry
+  /// when it gets there.
+  ///
+  /// [ModelDownloader.running] is true for a PAUSED run too, so one check
+  /// covers both.
+  Future<void> restartDownload() async {
+    if (_starting) return;
+    _starting = true;
+    try {
+      if (downloader.running) {
+        await downloader.cancel();
+        await downloader.idle;
+        if (!mounted) return;
+        state = state.copyWith(downloadRunning: false, downloadPaused: false);
+      }
+      await _startDownload();
+    } finally {
+      _starting = false;
+    }
+  }
+
   Future<void> _startDownload() async {
     // A PAUSED run inherited from an earlier visit is never waited for:
     // nothing would resume it. Cancelled, its parts kept, so the run below

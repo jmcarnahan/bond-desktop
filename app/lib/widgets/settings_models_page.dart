@@ -53,8 +53,8 @@ typedef RoleWrite = Future<void> Function({
 /// status block (and, for the generative model, the choice of the 27B or the
 /// 4B); Your server is the one-address [ModelServersForm]. **Embeddings**
 /// always run on this Mac and are a status line only. **Model registry**
-/// under them is where the decision model is downloaded from
-/// ([ModelRegistryForm]).
+/// under them is where the decision and embedding models are downloaded
+/// from ([ModelRegistryForm]).
 ///
 /// PROP-ONLY, like every other body here: nothing reaches for a provider, the
 /// host resolves every fact and takes every write back as a closure. The
@@ -727,24 +727,16 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         child: const Text(SettingsModelsPage.downloadLabel),
       );
 
-  /// The failures whose fix is the registry's address or token: the
-  /// sentence names it, and the registry block's Save retries the download,
-  /// so a Download button would only repeat the same refusal.
-  static const Set<String> _registryFixes = {
-    DownloadError.registryNotConfigured,
-    DownloadError.unauthorized,
-    DownloadError.registryNotFound,
-    DownloadError.registryNotAModel,
-  };
-
   /// Whether a missing downloaded model's row offers **Download**: not
   /// while any run is in flight, and not after a failure whose fix is in
-  /// the registry block.
+  /// the registry block ([DownloadError.registryFixes]): the registry
+  /// block's Save retries the download, so a Download button would only
+  /// repeat the same refusal.
   bool _offersDownload(String routerId) {
     if (widget.onDownloadModels == null || _downloading) return false;
     final ensure = widget.ensureState;
     if (ensure != null && ensure.failedIds.contains(routerId)) {
-      return !_registryFixes.contains(ensure.errorFor(routerId));
+      return !DownloadError.registryFixes.contains(ensure.errorFor(routerId));
     }
     return true;
   }

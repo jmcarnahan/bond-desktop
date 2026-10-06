@@ -90,12 +90,15 @@ first, because there is nothing behind it.
 6. **Download** — one progress bar per model, smallest first, with a rate and
    an estimate. **You can quit.** Closing Bond mid-download is safe: the next
    launch comes back to this screen and picks up the same file where it
-   stopped. **Continue** waits for the models from Hugging Face. The decision
-   model comes from your model registry, and an installer build has no
-   registry address yet, so its bar says `The model registry has no address.
-   Add one under Settings, Models.` and `Bond tries again after setup, and
-   under Settings, Models. You can continue.` It does not hold you here: you
-   add the address after setup.
+   stopped. **Continue** waits for the embedding model and any model being
+   downloaded from Hugging Face. The embedding model, and the decision model
+   when it runs on this Mac, come from your model registry, and an installer
+   build has no registry address yet, so their bars say `The model registry has no address. Add it below.` and
+   the step shows the **Model registry** fields: type the address and the
+   access token and press **Save**, and the download starts again. The
+   decision model's bar also says `Bond tries again after setup, and under
+   Settings, Models. You can continue.` It does not hold you here; the
+   embedding model does, until it is downloaded.
 7. **Sign in** — your browser opens on the Bond login. Sign in there and come
    back; Bond picks the session up on its own. If your workspace has never
    connected a Microsoft account, there is one more step in the browser and a

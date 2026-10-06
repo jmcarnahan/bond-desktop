@@ -21,6 +21,13 @@ import 'setup_controls.dart';
 /// model REGISTRY files, the decision model's, never hold Continue (decision
 /// D7): a failed one of those says why and [registryLaterText], and Bond
 /// keeps trying after setup.
+///
+/// A registry problem is fixable on this step: while a registry row has
+/// failed for a reason the address or token fixes
+/// ([DownloadError.registryFixes]), the host's [registryFix], the same
+/// Model registry form Settings draws, sits under the rows, and that row's
+/// sentence points at it rather than at Settings, which the wizard cannot
+/// reach.
 class SetupDownloadBody extends StatelessWidget {
   final List<ModelFile> files;
 
@@ -48,6 +55,11 @@ class SetupDownloadBody extends StatelessWidget {
   final VoidCallback onCancel;
   final VoidCallback onContinue;
 
+  /// The host's registry form, drawn under the rows while a registry row has
+  /// failed for a reason the address or token fixes. Null, the default,
+  /// draws nothing and leaves every sentence as it is.
+  final Widget? registryFix;
+
   const SetupDownloadBody({
     super.key,
     required this.files,
@@ -62,6 +74,7 @@ class SetupDownloadBody extends StatelessWidget {
     required this.onResume,
     required this.onCancel,
     required this.onContinue,
+    this.registryFix,
   });
 
   static const Key startKey = ValueKey('setup-download-start');
@@ -141,6 +154,24 @@ class SetupDownloadBody extends StatelessWidget {
         _ => _httpOrGeneric(error),
       };
 
+  /// The wizard's sentence for a registry failure whose fix is the form
+  /// under the rows: the same failures as [describeDownloadError]'s, pointing
+  /// below rather than at Settings. Anything else is
+  /// [describeDownloadError]'s.
+  static String describeRegistryFixHere(String? error) => switch (error) {
+        DownloadError.registryNotConfigured =>
+          'The model registry has no address. Add it below.',
+        DownloadError.unauthorized =>
+          'The model registry refused the access token. Check it below.',
+        DownloadError.registryNotFound =>
+          'The model registry does not have this model. Check its address '
+              'below.',
+        DownloadError.registryNotAModel =>
+          'The model registry answered with a web page, not a model. Check '
+              'its address below.',
+        _ => describeDownloadError(error),
+      };
+
   /// Digits and nothing else — not `int.tryParse`, which would take a sign.
   static final RegExp _digits = RegExp(r'^[0-9]+$');
 
@@ -179,6 +210,16 @@ class SetupDownloadBody extends StatelessWidget {
   bool get _anyFailed =>
       progress.values.any((p) => p.status == DownloadStatus.failed);
 
+  /// Whether [file] failed for a reason the registry form fixes.
+  bool _registryFixable(ModelFile file) {
+    final entry = progress[file.id];
+    return file.isRegistry &&
+        entry?.status == DownloadStatus.failed &&
+        DownloadError.registryFixes.contains(entry?.error);
+  }
+
+  bool get _registryNeedsFix => files.any(_registryFixable);
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -188,6 +229,10 @@ class SetupDownloadBody extends StatelessWidget {
         Text(orderText, style: BondType.caption),
         const SizedBox(height: BondSpacing.s16),
         for (final file in files) ..._row(file),
+        if (registryFix != null && _registryNeedsFix) ...[
+          registryFix!,
+          const SizedBox(height: BondSpacing.s16),
+        ],
         ..._buttons(),
         const SizedBox(height: BondSpacing.s8),
         // Always, whatever the state: it is the one thing about this screen
@@ -251,7 +296,9 @@ class SetupDownloadBody extends StatelessWidget {
           Expanded(
             flex: 2,
             child: Text(
-              _status(entry, complete: _allHere),
+              registryFix != null && _registryFixable(file)
+                  ? describeRegistryFixHere(entry?.error)
+                  : _status(entry, complete: _allHere),
               style: BondType.caption,
               textAlign: TextAlign.right,
             ),

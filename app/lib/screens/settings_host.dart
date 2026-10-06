@@ -32,9 +32,8 @@ import '../services/llm/model_slots.dart'
 import '../services/models/model_manifest.dart' show ModelRole;
 import '../services/models/registry_probe.dart' show RegistryCheck;
 import '../services/reminders/tasks_availability.dart';
-import '../widgets/model_registry_form.dart' show ModelRegistryForm;
-import '../widgets/model_servers_form.dart' show ModelServersForm;
 import '../widgets/settings_screen.dart';
+import 'registry_save.dart';
 
 /// Whether an older build left Needs You rules text in `needs_you_rules`. The
 /// pref is inert — the slider is the one control — so Settings only says so,
@@ -727,19 +726,13 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     if (!mounted) return null;
     final notifier = ref.read(appPrefsProvider.notifier);
     final ensurer = ref.read(modelEnsurerProvider);
-    try {
-      await notifier.useRegistry(
-        url: url,
-        token: token,
-        clearToken: clearToken,
-      );
-    } on ArgumentError catch (e) {
-      // The address's own sentence for a refused address; the writer's for a
-      // token no header can carry, which never quotes it.
-      if (e.name == 'url') return ModelRegistryForm.addressRefusalText;
-      final message = e.message;
-      return message is String ? message : ModelServersForm.saveFailedText;
-    }
+    final refusal = await saveRegistry(
+      notifier,
+      url: url,
+      token: token,
+      clearToken: clearToken,
+    );
+    if (refusal != null) return refusal;
     unawaited(ensurer.ensure());
     return null;
   }
