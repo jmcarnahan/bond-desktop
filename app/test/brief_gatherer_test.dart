@@ -343,12 +343,6 @@ void main() {
           BriefIneligibility.declined);
       expect(asked(meeting(attendees: const [], isOrganizer: true)),
           BriefIneligibility.noOthers);
-      expect(
-          asked(meeting(attendees: [
-            for (var i = 0; i <= briefMaxOthers; i++)
-              Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
-          ])),
-          BriefIneligibility.tooMany);
     });
 
     test('asked: too far off and no mail are gathered anyway; started, '
@@ -396,17 +390,21 @@ void main() {
           BriefIneligibility.noOthers);
     });
 
-    test('more than fifteen other people is too many; fifteen is not',
-        () async {
+    test('no meeting is refused for its size: 16, 40 and 300 other people '
+        'are eligible, on the related path', () async {
       List<Attendee> people(int n) => [
             const Attendee(name: 'Dana Lee', address: dana),
             for (var i = 1; i < n; i++)
               Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
           ];
-      await eligible(meeting(attendees: people(briefMaxOthers)));
-      expect(await ineligible(meeting(attendees: people(briefMaxOthers + 1))),
-          BriefIneligibility.tooMany);
-      expect(BriefIneligibility.tooMany.wire, 'too_many');
+      for (final n in [16, 40, 300]) {
+        final e = meeting(attendees: people(n));
+        expect(briefQuickCheck(e, owner: owner, now: now, zone: la), isNull,
+            reason: '$n others');
+        final input = await eligible(e);
+        expect(input.path, BriefPath.related, reason: '$n others');
+        expect(input.attendees, hasLength(n));
+      }
     });
 
     test('an all-day event tomorrow with Dana and mail is eligible, and its '
@@ -642,6 +640,20 @@ void main() {
       final both = await eligible(withSam);
       expect([for (final t in both.threads) t.conversationKey],
           ['c-invite', 'c-sam']);
+    });
+
+    test('on the people path the invite thread is flagged and the address '
+        'match is not', () async {
+      await conversation('c-invite', people: const [assistant],
+          ago: const Duration(days: 3));
+      await message('m-invite', 'c-invite',
+          from: assistant, ago: const Duration(days: 3), eventId: 'evt-1');
+      await thread('c-dana', ago: const Duration(hours: 1));
+      final input = await eligible(meeting());
+      expect(input.path, BriefPath.people);
+      expect([for (final t in input.threads) t.conversationKey],
+          ['c-invite', 'c-dana']);
+      expect([for (final t in input.threads) t.invite], [true, false]);
     });
 
     test("an occurrence reads its series' invite too, after its own, and a "
@@ -1474,6 +1486,39 @@ void main() {
     expect(input.lastMet, startsWith('Last met'));
   });
 
+  test('last met on the related path reads the people the block lists, not '
+      'the whole room, however big it is', () async {
+    List<Attendee> room(int n) => [
+          for (var i = 0; i < n; i++)
+            Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
+        ];
+    Future<void> metWith(String id, String address) {
+      final past = now.subtract(const Duration(days: 3));
+      return calendar.upsertEvents([
+        CalendarEvent(
+          id: id,
+          subject: 'Earlier',
+          startUtc: past,
+          endUtc: past.add(const Duration(minutes: 30)),
+          responseStatus: 'accepted',
+          attendees: [Attendee(name: 'Someone', address: address)],
+        ),
+      ], syncRun: 'run-1');
+    }
+
+    // Five hundred others: the lookup must not bind an address each.
+    final e = meeting(attendees: room(500));
+    await metWith('evt-far', 'guest400@fabrikam.com');
+    var input = await eligible(e);
+    expect(input.path, BriefPath.related);
+    expect(input.lastMet, isNull,
+        reason: 'guest 400 is not among the ${BriefGatherer.maxPeople} listed');
+
+    await metWith('evt-near', 'guest3@fabrikam.com');
+    input = await eligible(e);
+    expect(input.lastMet, startsWith('Last met'));
+  });
+
   group('the related path', () {
     late _RelatedStore related;
     late FakeEmbedServer server;
@@ -1650,6 +1695,26 @@ void main() {
           ['c-master', 'c-plain']);
       expect([for (final t in input.threads) t.invite], [true, false]);
       expect(input.relatedBest, closeTo(0.7, 1e-9));
+    });
+
+    test('a big meeting with nothing to search by sends no query: still '
+        'eligible, and no_query hashes apart from off', () async {
+      final many = [
+        for (var i = 0; i < 16; i++)
+          Attendee(name: 'Guest $i', address: 'guest$i@northwind.com'),
+      ];
+      final e = big(subject: '', attendees: many);
+      final input = await relatedInput(e);
+      expect(server.calls, 0);
+      expect(related.calls, isEmpty);
+      expect(input.path, BriefPath.related);
+      expect(input.threads, isEmpty);
+      final off = await BriefGatherer(related, calendar,
+              ownerAddress: () async => owner, zone: () => la)
+          .gather(e, now: now) as BriefEligible;
+      expect(off.input.path, BriefPath.related);
+      expect(off.input.inputsHash, isNot(input.inputsHash),
+          reason: 'related|no_query against related|off');
     });
 
     test('nothing found is still eligible, never no_mail', () async {

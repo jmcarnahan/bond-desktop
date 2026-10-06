@@ -1297,7 +1297,9 @@ that bite.
     last met, threads they are in, their newest inbound's `askOwnWords` cut
     at 240 and fenced `last_words`, their open ask. NOT hashed (`lastMet`
     moving alone never re-briefs). The typedef `briefOthers` returns is
-    `BriefOther`.
+    `BriefOther`. The meeting's own `lastMet` reads every other person on
+    the people path and only the listed people on the related path (a
+    500-person room must not bind an address each in `lastMetWith`).
   - Waiting for the files: `BriefInput.materialsPending` — a material
     `text_status == 'pending'` AND its `attachment_text` work row
     (`workRowOf`, entity `attachmentEntityId(msg, att)`) `pending` or
@@ -1338,7 +1340,10 @@ that bite.
     material index outside the list is dropped, never -1. `MeetingBrief`
     writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,
     and `BriefMaterialOut.takeaway` (the points joined) is kept for old
-    readers; the faces draw the points. The user message has a People
+    readers; the faces draw the points. There is NO people cap (no
+    `too_many`; a big meeting takes the related path), so the `With:` fence
+    lists at most `MeetingBriefTask.withCap` 15 names, then `+N more` outside
+    it. The user message has a People
     block after `With:` (the fenced `name · org`, the org being a domain
     owner's words; "open ask: yes (see Open asks)", never the ask again);
     every label (file names, thread and last subjects, the meeting's
@@ -1353,8 +1358,9 @@ that bite.
     `text_chars`. The size guard in `meeting_brief_task_test` holds a
     maximal prompt (every label 300 characters of `&<>`, four other files
     fenced at `otherFileNameCap` 80, the related header, three invite and
-    three Teams markers) at ≤ 39120 characters (38732 measured, plus ~1%;
-    38133/38500 before the related path, 37012/37800 before the other-files
+    three Teams markers, 300 attendees) at ≤ 39120 characters (38742
+    measured, plus ~1%; 38732 before the With: cap, 38133/38500 before the
+    related path, 37012/37800 before the other-files
     block; the ceiling is (16384 − 2700) × 3.0 ≈ 41052). A material line
     puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
     block was really written).
@@ -1366,6 +1372,9 @@ that bite.
     brief (after Clear AI results) and `skipped` rows (any `ineligible:*`)
     are gathered on EVERY pass: a Gmail invite's event syncs seconds before
     its mail, and a deck's text landing should reach the brief at once.
+    It writes skipped rows itself only for `recorded` = `no_mail`,
+    `no_others`; a stale `ineligible:too_many` row is simply gathered and
+    queued (its hash differs).
   - A failed or skipped run over a ready brief calls `touchBrief` (it moves
     only `generated_at`) — except a skip for `gone`, `declined` or
     `cancelled`, which replaces the brief with a skipped row.
@@ -1380,7 +1389,7 @@ that bite.
     (`BriefRequest`, Regenerate and **Write a brief** `brief-write`) lifts
     the files wait, the unchanged hash, `too_far` and `no_mail` (the brief
     is then written from the invite and its people, "Threads: none.") —
-    never `past`, `cancelled`, `declined`, `no_others` or `too_many`; the
+    never `past`, `cancelled`, `declined` or `no_others`; the
     panel offers the button only where the quick check with `asked: true`
     is clear.
   - The agenda: `dayBriefsProvider(day)` watches the day's events and

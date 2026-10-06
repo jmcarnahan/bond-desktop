@@ -123,6 +123,13 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
   /// six is budget the materials could use.
   static const int labelCap = 120;
 
+  /// The most names the With: line lists; the rest are counted in a
+  /// `+N more` line outside the fence. There is no people cap, so a
+  /// 300-person invite would otherwise put about 36k characters of names in
+  /// the prompt — the whole budget — for nothing the people block does not
+  /// already say about the ones who matter.
+  static const int withCap = 15;
+
   /// An other file's name ([BriefInput.otherFiles]) as the fence writes it:
   /// a file named, never read, needs less than a label's 120.
   static const int otherFileNameCap = 80;
@@ -300,8 +307,11 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
       ..writeln('Meeting: ${input.whenLocal}')
       ..writeln(wrapUntrusted('meeting_subject', subject))
       ..writeln('With:')
-      ..writeln(wrapUntrusted(
-          'attendees', [for (final a in input.attendees) _label(a)].join(', ')));
+      ..writeln(wrapUntrusted('attendees',
+          [for (final a in input.attendees.take(withCap)) _label(a)].join(', ')));
+    if (input.attendees.length > withCap) {
+      buffer.writeln('+${input.attendees.length - withCap} more');
+    }
     if (input.lastMet != null) buffer.writeln('${input.lastMet}.');
 
     if (input.people.isNotEmpty) {

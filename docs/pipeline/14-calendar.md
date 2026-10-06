@@ -1105,10 +1105,19 @@ the mail rule in `BriefGatherer.gather`; each failure is an enum word
 | starts after now (an all-day event at its local midnight) | `past` |
 | starts today or tomorrow in the display zone (`briefHorizonEnd(nowUtc, zone)`: the local midnight that ends tomorrow; 23:59 tomorrow is in, 00:00 the day after is not) — lifted when a person asked (`asked`) | `too_far` |
 | at least one other person: an attendee whose address is not the owner's (case-insensitive) and whose type is not `resource`, or an organiser who is not the owner — an attendee's copy with a hidden guest list names only the organiser, and is still a meeting with someone | `no_others` |
-| at most 15 other people (`briefMaxOthers`): past that the meeting is a broadcast — a narrowing of D6, which set no ceiling | `too_many` |
 | (people path only — the related path never refuses for it, below) at least one thread (lifted when a person asked: the brief is written from the invite and its people alone): the meeting's own invite mail (`CalendarStore.messagesForEvent` of the occurrence, then of its series master — any sender, any age), or a conversation with any of those addresses in the last 30 days (`MessageStore.conversationsWithAddresses`, matched on `participants_json.email`) | `no_mail` |
 | (handler only) the event is no longer in the mirror | `gone` |
 | (handler only) a file sent ahead is still being read, no ready brief is stored, and the meeting starts more than 20 minutes from now (`MeetingBriefHandler.pendingGrace`) — not a rule about the meeting but a wait, below | `materials_pending` |
+
+No meeting is refused for its size: there is no people cap. A meeting of six
+or more others takes the related path (below; a topicless one of up to 15
+stays on the people path) and is briefed from its invite
+and the threads about its subject — a useless brief for a meeting with no
+conversations, no files and no agenda is rare and accepted. Older builds
+refused more than 15 others as `too_many`; no build writes the word now, a
+stale stored row reads "No brief for this meeting." until the planner's next
+pass gathers it again (its hash differs, so it is queued), and the activity
+log still words old rows that carry it.
 
 **The people path is mail only.** Teams participants are stored as
 `teams:<id>`, not addresses, so the address match never finds a chat; mapping
@@ -1281,7 +1290,10 @@ BOTH gathers, because the threads it finds are hashed:
   rows. The handler fetches those details once before the first brief
   (below), so the brief names the file; its text and digest arrive through
   the attachment lane and move the hash, which re-briefs the meeting.
-- **Last met** — `lastMetWith` → `lastMetLabel`.
+- **Last met** — `lastMetWith` → `lastMetLabel`: with any of the others on
+  the people path; on the related path with the people the block lists (the
+  organiser first, at most 8), because having met one of three hundred people
+  says nothing and the lookup binds two variables per address.
 - **People** (`BriefPerson`, handler's gather only) — the other people,
   the organiser first and then the attendees in the invite's order, at most
   8 (`BriefGatherer.maxPeople`, applied after the ordering; the rest are
@@ -1359,7 +1371,10 @@ is read for up to a day and a half after it is written) and "Never invent: a
 number, a name, a date or a claim that is not in the inputs does not go in."
 The user message opens with `Now: <absolute local time>` and the meeting line,
 both absolute (`briefWhenLine`: "Wed 7 Oct 2026 · 10:00–11:00 AM PDT", "All
-day · Wed 7 Oct 2026"), the fenced attendees and the last-met line, then
+day · Wed 7 Oct 2026"), the fenced attendees — at most 15 names
+(`MeetingBriefTask.withCap`), then `+N more` on its own line OUTSIDE the
+fence, since with no people cap a 300-person invite would otherwise put about
+36k characters of names in the prompt — and the last-met line, then
 **People, numbered, the organiser first:** — per person `[n]` and the fenced
 `name · organisation` (the organisation is a DNS label whoever owns the
 domain chose, so it is untrusted text like the name), then the app's words
@@ -1425,16 +1440,18 @@ the same inputs — so the budget sits over the realistic answer, and a test
 holds the caps' sum / 4 within 1.2 × `maxTokens`. Worst case in, measured by
 the size guard in `meeting_brief_task_test` (every cap full, every label 300
 characters of `&<>`, so each costs its full escaped 120, on the related
-path with three invite threads and three Teams chats): about 38.7k characters
-(38732) with the 4.9k system prompt — six threads with their two
+path with three invite threads and three Teams chats, and 300 attendees):
+about 38.7k characters (38742) with the 4.9k system prompt — six threads with their two
 600-character snippets and markers, four asks, two storylines, the materials' 10k plus
 six name lines, four other files (each name fenced at 80,
-`otherFileNameCap`), eight people, fifteen attendee names, the invite 0.7k
+`otherFileNameCap`), eight people, fifteen attendee names and "+285 more",
+the invite 0.7k
 and the headers — about 12.9k tokens at three characters a token, plus the
 2.7k answer: about 15.6k, inside the 16384 context. The ceiling is (16384 −
 2700) × 3 = 41052 characters of prompt; the guard holds it at 39120 (the
-measurement plus about 1%; 38500 before the related path, 37800 before the
-other files and their rule).
+measurement plus about 1%, unchanged by the With: cap, which measured 10
+characters over the old fifteen names; 38500 before the related path, 37800
+before the other files and their rule).
 
 The schema (v3) is flat and in THIS order, which is the order the grammar
 makes the model write: `evidence` (one sentence — what the meeting is for and
@@ -1555,8 +1572,7 @@ and walks the meetings soonest first, timed before all-day:
   call" rule on purpose, because a related set that is not hashed would never
   re-brief when mail on the topic lands;
 - on `briefQuickCheck`, skips it — writing a `skipped` row for `no_others`
-  or `too_many` (below; `no_mail`, the gather's word, is recorded from the
-  gather path);
+  (below; `no_mail`, the gather's word, is recorded from the gather path);
 - does not gather again an event it gathered less than **15 minutes** ago
   (`BriefPlanner.recheck`, in memory) whose stored row is `failed` and has
   not moved since — a back-off for a brief that could not be written, and
@@ -1589,7 +1605,7 @@ and walks the meetings soonest first, timed before all-day:
   queue every pass); and once more on the same hash when the meeting comes
   inside the 20-minute grace, so it is briefed with what is read rather than
   waiting on a file that may never finish;
-- when the gather says `no_mail`, `no_others` or `too_many`, writes
+- when the gather says `no_mail` or `no_others` (`recorded`), writes
   `skipped` with `inputs_hash = ineligible:<word>` (no model call) unless the
   row already says so or holds a ready brief, which stands; once the reason
   goes away the hash differs and the meeting is queued like any other on the
@@ -1616,7 +1632,7 @@ a request does not lift (a stored `no_mail` row over a meeting that has since
 started draws its sentence alone). An asked request also bypasses `too_far` and
 `no_mail` in the quick check and the gather (`briefQuickCheck(asked:)`,
 `gather(asked:)`, which the handler passes from the row's payload), never
-`past`, `cancelled`, `declined`, `no_others` or `too_many`; with no thread
+`past`, `cancelled`, `declined` or `no_others`; with no thread
 the brief is written from the invite and its people ("Threads: none."). The
 handler notes `asked` on every activity row.
 
@@ -1642,14 +1658,17 @@ asks**, then the points with a chip naming the thread under **References**
 "Rewriting…" while a new one is queued; the old brief stands until the new
 one lands; "Writing the brief…"; "Briefs are paused while processing is off.";
 a skipped row's reason ("No brief — no recent mail with these people.",
-"No brief — nobody else is invited.", "No brief — too many people for a
-brief.", "No brief — this meeting has started.", "Reading the files sent
+"No brief — nobody else is invited.", "No brief — this meeting has started.", "Reading the files sent
 ahead — brief coming." for `materials_pending`, else "No brief for this
 meeting." — a `materials_pending` row gives way to the quick check's
 sentence when it says no, so a meeting that has started says "No brief —
 this meeting has started.", not "brief coming"); "The brief couldn't be
 written." with Regenerate; when the
-no-read rules already say no, the same sentence for their word ("Briefs are
+no-read rules already say no (`briefQuickCheck` with the owner's address —
+`mail`, then the UPN — once the account has answered, so the owner's own
+attendee row never counts as somebody else and a meeting with nobody else
+says so at once; unknown, a pass is left for the planner to settle), the
+same sentence for their word ("Briefs are
 written for today and tomorrow." for `too_far`, with **Write a brief**); else
 "Brief coming after the next calendar sync." with **Write a brief**. A
 skipped `no_mail` or `too_far` row draws **Write a brief** beside its
@@ -1703,7 +1722,9 @@ meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks, materials,
 other_files, questions, people, text_chars}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word,
-`materials_pending` — "reading the files sent ahead" — or `unchanged`) →
+`materials_pending` — "reading the files sent ahead" — or `unchanged`;
+`too_many` — "too many people" — only on rows older builds stored, since no
+build writes it now) →
 "Meeting brief — skipped (no recent mail with these people)";
 `error` → "Meeting brief — failed"; either over a ready brief (`kept: ready`)
 adds "; the last brief stands"; a park keeps the general sentence. Counts

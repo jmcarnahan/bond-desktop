@@ -43,7 +43,7 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 ///
 /// **What it writes itself.** A meeting found ineligible for a reason that
 /// can change while it stays on the calendar ([recorded]: no recent mail,
-/// nobody else invited, too many people) gets a `skipped` row naming the
+/// nobody else invited) gets a `skipped` row naming the
 /// reason, so the panel says why rather than promising a brief after the
 /// next sync. Written only when the stored row does not already say so, and
 /// never over a ready brief, which stands. When the reason goes away the
@@ -92,7 +92,6 @@ class BriefPlanner {
   static const Set<BriefIneligibility> recorded = {
     BriefIneligibility.noMail,
     BriefIneligibility.noOthers,
-    BriefIneligibility.tooMany,
   };
 
   /// When each event was last gathered, and its stored row's `generated_at`

@@ -23,6 +23,7 @@ void main() {
     String? invitePreview,
     DateTime? now,
     BriefPath path = BriefPath.people,
+    List<String> attendees = const ['Dana Lee', 'sam@fabrikam.com'],
   }) {
     final t = threads ??
         [
@@ -48,7 +49,7 @@ void main() {
       whenLocal: 'Wed 30 Sep 2026 · 10:00–10:30 AM PDT',
       nowLocal: 'Tue 29 Sep 2026, 3:05 PM PDT',
       now: now,
-      attendees: const ['Dana Lee', 'sam@fabrikam.com'],
+      attendees: attendees,
       threads: t,
       openAsks: asks,
       waitingOn: waiting,
@@ -250,15 +251,18 @@ void main() {
       // JSON-ish text tokenise denser than prose): (16384 - 2700) * 3 =
       // 41052 characters of prompt. The guard sits under that with a margin
       // for the digits the materials budget weights but the rest does not,
-      // at the measured maximum plus about 1-2%. Measured at 38732 with every
+      // at the measured maximum plus about 1-2%. Measured at 38742 with every
       // cap full, every label 300 characters of `&<>` (which the fence
       // escapes, so each costs its full escaped cap), four other files
-      // whose names are fenced at 80 (`otherFileNameCap`), and the related
+      // whose names are fenced at 80 (`otherFileNameCap`), the related
       // path's longer header, its rule, and a marker on every thread (three
-      // invite threads, three Teams chats); it was 38133 before the related
-      // path and 37012 before the other files and their rule. 39120 (about
-      // 13.0k tokens, 15.7k with the answer). A cap bump that moves it past
-      // this has to pay for itself elsewhere.
+      // invite threads, three Teams chats), and 300 attendees: the With:
+      // line's `withCap` names and its "+285 more"; it was 38732 before the
+      // With: cap (fifteen names, the old people cap), 38133 before the
+      // related path and 37012 before the other files and their rule. A
+      // thousand attendees would add one digit to the count, inside the
+      // margin. 39120 (about 13.0k tokens, 15.7k with the answer). A cap
+      // bump that moves it past this has to pay for itself elsewhere.
       const promptCharBudget = 39120;
       expect(promptCharBudget,
           lessThanOrEqualTo((16384 - MeetingBriefTask.maxTokens) * 3));
@@ -290,8 +294,10 @@ void main() {
         whenLocal: 'Wed 30 Sep 2026 · 10:00–10:30 AM PDT',
         nowLocal: 'Tue 29 Sep 2026, 3:05 PM PDT',
         now: DateTime.utc(2026, 9, 29, 22, 5),
+        // Past the With: cap, so its `+N more` line (three digits) is in
+        // the measure too.
         attendees: [
-          for (var i = 0; i < briefMaxOthers; i++) dense(300),
+          for (var i = 0; i < 300; i++) dense(300),
         ],
         threads: threads,
         openAsks: [
@@ -488,6 +494,27 @@ void main() {
 
       final bare = const MeetingBriefTask().buildUserMessage(input());
       expect(bare, isNot(contains('Files on the other threads')));
+    });
+
+    test('the With: line lists at most withCap names; the rest are a '
+        '"+N more" line outside the fence', () {
+      expect(MeetingBriefTask.withCap, 15);
+      for (final (n, more) in [(16, '+1 more'), (40, '+25 more')]) {
+        final names = [for (var i = 0; i < n; i++) 'Guest $i'];
+        final msg =
+            const MeetingBriefTask().buildUserMessage(input(attendees: names));
+        expect(
+            msg,
+            contains('With:\n${wrapUntrusted('attendees', names.take(15).join(', '))}'
+                '\n$more\n'),
+            reason: '$n attendees');
+        expect(msg, isNot(contains('Guest 15')), reason: '$n attendees');
+      }
+      final fifteen = [for (var i = 0; i < 15; i++) 'Guest $i'];
+      final exact =
+          const MeetingBriefTask().buildUserMessage(input(attendees: fifteen));
+      expect(exact, contains(wrapUntrusted('attendees', fifteen.join(', '))));
+      expect(exact, isNot(contains(' more\n')));
     });
 
     test('the thread list is headed by its path', () {

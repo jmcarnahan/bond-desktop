@@ -45,9 +45,9 @@ import 'time_format.dart';
 ///    brief to have it now.
 ///
 /// Write a brief ([onWrite]) is offered only with processing on, and never
-/// for a meeting that has started, was cancelled or declined, has nobody
-/// else or too many people: a person's request lifts the horizon and the
-/// mail rule, nothing else.
+/// for a meeting that has started, was cancelled or declined, or has nobody
+/// else: a person's request lifts the horizon and the mail rule, nothing
+/// else.
 class BriefSection extends StatelessWidget {
   const BriefSection({
     super.key,
@@ -90,7 +90,6 @@ class BriefSection extends StatelessWidget {
   static const String noMailText =
       'No brief — no recent mail with these people.';
   static const String noOthersText = 'No brief — nobody else is invited.';
-  static const String tooManyText = 'No brief — too many people for a brief.';
   static const String tooFarText = 'Briefs are written for today and tomorrow.';
   static const String startedText = 'No brief — this meeting has started.';
   static const String ineligibleText = 'No brief for this meeting.';
@@ -232,7 +231,6 @@ class BriefSection extends StatelessWidget {
   static String reasonText(String? reason) => switch (reason) {
         'no_mail' => noMailText,
         'no_others' => noOthersText,
-        'too_many' => tooManyText,
         'too_far' => tooFarText,
         'past' => startedText,
         'materials_pending' => materialsPendingText,

@@ -460,8 +460,10 @@ void main() {
       EventBriefView(
           brief: row(EventBrief.skipped, hash: 'ineligible:too_many')),
     );
-    expect(status(tester), BriefSection.tooManyText);
-    expect(BriefSection.tooManyText, 'No brief — too many people for a brief.');
+    // No build writes too_many any more (there is no people cap): an older
+    // build's stored row reads the generic sentence until the planner's next
+    // pass replaces it.
+    expect(status(tester), BriefSection.ineligibleText);
 
     await pump(tester, const EventBriefView(), eligible: false);
     expect(status(tester), BriefSection.ineligibleText);
@@ -475,7 +477,7 @@ void main() {
     expect(status(tester), 'No brief — nobody else is invited.');
     await pump(tester, const EventBriefView(),
         eligible: false, reason: 'too_many');
-    expect(status(tester), BriefSection.tooManyText);
+    expect(status(tester), BriefSection.ineligibleText);
     await pump(tester, const EventBriefView(),
         eligible: false, reason: 'cancelled');
     expect(status(tester), BriefSection.ineligibleText);

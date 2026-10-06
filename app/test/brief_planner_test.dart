@@ -705,27 +705,57 @@ void main() {
   });
 
   group('the ineligible reasons it records', () {
-    test('no mail, nobody else and too many people each get a skipped row, '
-        'with no work queued', () async {
+    test('no mail and nobody else each get a skipped row, with no work '
+        'queued; a town hall is briefed', () async {
       await calendar.upsertEvents([
         meeting('evt-ed', attendees: const [Attendee(name: 'Ed', address: ed)]),
         meeting('solo',
             attendees: const [Attendee(name: 'Me', address: owner)]),
         meeting('town-hall', attendees: [
           const Attendee(name: 'Dana Lee', address: dana),
-          for (var i = 0; i < briefMaxOthers; i++)
+          for (var i = 0; i < 15; i++)
             Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
         ]),
       ], syncRun: 'run-1');
 
-      expect(await plan(), 0);
+      expect(await plan(), 1);
       final rows = await calendar.briefsFor(['evt-ed', 'solo', 'town-hall']);
       expect(rows['evt-ed']?.skipReason, 'no_mail');
       expect(rows['solo']?.skipReason, 'no_others');
-      expect(rows['town-hall']?.skipReason, 'too_many');
-      for (final id in ['evt-ed', 'solo', 'town-hall']) {
+      expect(rows['town-hall'], isNull);
+      for (final id in ['evt-ed', 'solo']) {
         expect(await status(id), isNull, reason: id);
       }
+      expect(await status('town-hall'), 'pending',
+          reason: 'sixteen others: the related path, no people cap');
+    });
+
+    test('a stored too_many row from an older build is queued on the next '
+        'pass', () async {
+      await calendar.upsertEvents([
+        meeting('town-hall', attendees: [
+          for (var i = 0; i < 16; i++)
+            Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
+        ]),
+      ], syncRun: 'run-1');
+      await calendar.putBrief(
+        eventId: 'town-hall',
+        inputsHash: '${EventBrief.ineligiblePrefix}too_many',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now.subtract(const Duration(minutes: 5))),
+      );
+      // No work row before the pass, so a queued row can only be this
+      // pass's doing.
+      expect(await status('town-hall'), isNull);
+
+      expect(await plan(), 1);
+      expect(await status('town-hall'), 'pending');
+      expect(gatherer.hashes, hasLength(1));
+      expect(gatherer.hashes.single,
+          isNot(startsWith(EventBrief.ineligiblePrefix)));
+      expect(gatherer.hashes.single,
+          isNot((await calendar.brief('town-hall'))!.inputsHash),
+          reason: 'the stored row still says too_many; the gathered hash moved');
     });
 
     test('a row that already says so is not rewritten', () async {

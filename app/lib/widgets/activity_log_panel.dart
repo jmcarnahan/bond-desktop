@@ -140,6 +140,8 @@ class ActivityLogPanel extends StatefulWidget {
     'cancelled': 'cancelled',
     'declined': 'declined',
     'no_mail': 'no recent mail with these people',
+    // No build writes this word any more (there is no people cap); it
+    // words the activity rows older builds stored.
     'too_many': 'too many people',
     'gone': 'no longer on the calendar',
     'materials_pending': 'reading the files sent ahead',

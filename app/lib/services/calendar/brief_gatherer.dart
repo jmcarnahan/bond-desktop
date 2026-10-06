@@ -35,10 +35,6 @@ enum BriefIneligibility {
   declined('declined'),
   noMail('no_mail'),
 
-  /// More than [briefMaxOthers] other people: a town hall or an all-hands,
-  /// where the mail with any one of them says nothing about the meeting.
-  tooMany('too_many'),
-
   /// The event is no longer in the mirror. Only the handler says this: the
   /// gatherer is always handed an event.
   gone('gone'),
@@ -384,7 +380,8 @@ class BriefInput {
   final int peopleMore;
 
   /// "Last met 3 days ago", or null when the mirror holds no earlier meeting
-  /// with any of them.
+  /// with any of them — on the related path, with any of the people the
+  /// block lists ([BriefGatherer.maxPeople], the organiser first).
   final String? lastMet;
 
   /// The invite's `body_preview`, fenced and capped; null when it has none.
@@ -583,11 +580,6 @@ DateTime briefHorizonEnd(DateTime nowUtc, CalendarZone zone) =>
 /// related search looks ([BriefPath.related]).
 const Duration briefMailWindow = Duration(days: 30);
 
-/// The most other people a briefed meeting may have. Past it the meeting is
-/// a broadcast, and a brief built from whoever the owner last wrote to among
-/// forty people would misdescribe it.
-const int briefMaxOthers = 15;
-
 /// "Wed 7 Oct 2026 · 10:00–11:00 AM PDT" for a timed event in [zone] (the
 /// zone's abbreviation, else its IANA name); "All day · Wed 7 Oct 2026" for a
 /// one-day all-day event, "All day · Wed 7 Oct 2026 – Fri 9 Oct 2026" for a
@@ -692,8 +684,9 @@ List<BriefOther> briefOthers(CalendarEvent e, {required String? owner}) {
 }
 
 /// The eligibility rules that need no store read (D6), in the order a person
-/// would give them: cancelled, declined, started, too far off, nobody else,
-/// too many people.
+/// would give them: cancelled, declined, started, too far off, nobody else.
+/// No meeting is refused for its size: a big one takes the related path
+/// ([briefPathOf]) and is briefed from the threads about its subject.
 /// Null when the meeting passes them all — the mail rule is the gatherer's.
 ///
 /// [asked] — a person pressed Write a brief: the horizon does not apply (the
@@ -721,7 +714,6 @@ BriefIneligibility? briefQuickCheck(
   final ownerKey = owner?.trim().toLowerCase();
   final others = briefOthers(e, owner: ownerKey);
   if (others.isEmpty) return BriefIneligibility.noOthers;
-  if (others.length > briefMaxOthers) return BriefIneligibility.tooMany;
   return null;
 }
 
@@ -1106,7 +1098,6 @@ class BriefGatherer {
         : found;
 
     final today = zone.dateOf(nowUtc);
-    final met = await _calendar.lastMetWith(addresses, nowUtc: nowUtc);
     final preview = event.bodyPreview.trim();
     // The organiser first, then the attendees in the invite's order, and
     // the cap after: who called the meeting is the one person the people
@@ -1118,6 +1109,16 @@ class BriefGatherer {
       ...others.where((p) => p.address == organiser),
       ...others.where((p) => p.address != organiser),
     ];
+    // On the related path "last met" is read for the people the block
+    // lists, not the whole room: having met any one of three hundred people
+    // says nothing about this meeting, and the lookup binds two variables
+    // per address.
+    final met = await _calendar.lastMetWith(
+      path == BriefPath.related
+          ? [for (final p in organiserFirst.take(maxPeople)) p.address]
+          : addresses,
+      nowUtc: nowUtc,
+    );
     final people = passages
         ? await _peopleOf(
             event,
