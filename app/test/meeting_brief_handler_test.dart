@@ -238,9 +238,21 @@ void main() {
         'triage_status': 'done',
       });
       final related = _RelatedStore(db)
-        ..hits = const [
-          (source: 'email', conversationKey: 'c-1', cosine: 0.9),
-          (source: 'email', conversationKey: 'c-rel', cosine: 0.784),
+        ..hits = [
+          (
+            source: 'email',
+            conversationKey: 'c-1',
+            cosine: 0.9,
+            messageId: 'm-1',
+            receivedAt: at,
+          ),
+          (
+            source: 'email',
+            conversationKey: 'c-rel',
+            cosine: 0.784,
+            messageId: 'm-rel',
+            receivedAt: at,
+          ),
         ];
       final relating = BriefGatherer(
         related,

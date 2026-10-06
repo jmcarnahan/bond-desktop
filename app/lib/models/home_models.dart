@@ -426,13 +426,18 @@ class SemanticHit {
 }
 
 /// One conversation the semantic search found near a query
-/// (`MessageStore.relatedConversations`): its identity and the COSINE of its
+/// (`MessageStore.relatedConversations`): its identity, the COSINE of its
 /// nearest message — a similarity, `1 - SemanticHit.distance`, so bigger is
-/// better.
+/// better — and WHICH message that was ([messageId], [receivedAt] as
+/// stored). The message matters as much as the score: a Teams chat is one
+/// conversation however many subjects pass through it, so "this chat is
+/// related" only means something beside the message that made it so.
 typedef RelatedConversation = ({
   String source,
   String conversationKey,
   double cosine,
+  String messageId,
+  String receivedAt,
 });
 
 /// One keyword-search result: a feed row, how well the words scored, and how

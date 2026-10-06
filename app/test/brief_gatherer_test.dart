@@ -7,6 +7,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
 import 'package:bond_inbox/models/home_models.dart' show RelatedConversation;
+import 'package:bond_inbox/models/message_models.dart' show Message;
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
@@ -18,10 +19,12 @@ import 'package:bond_inbox/services/llm/meeting_brief_task.dart';
 import 'package:bond_inbox/services/llm/prompt_guard.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/fake_embed_server.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/vec_test_db.dart';
 
 /// The brief's inputs, gathered over a real in-memory store: who counts as
 /// someone else, which meetings are eligible (D6), how threads rank, what an
@@ -1600,9 +1603,21 @@ void main() {
       });
     }
 
+    /// A scripted hit on [key], matched on [messageId] (the `m-<key>` that
+    /// [topic] and [teamsChat] write) received [ago] (theirs: two hours for
+    /// a [topic], one for a [teamsChat]).
     RelatedConversation hit(String key, double cosine,
-            {String source = 'email'}) =>
-        (source: source, conversationKey: key, cosine: cosine);
+            {String source = 'email', String? messageId, Duration? ago}) =>
+        (
+          source: source,
+          conversationKey: key,
+          cosine: cosine,
+          messageId: messageId ?? 'm-$key',
+          receivedAt: stampAgo(ago ??
+              (source == 'teams'
+                  ? const Duration(hours: 1)
+                  : const Duration(hours: 2))),
+        );
 
     Future<BriefInput> relatedInput(CalendarEvent e,
         {bool passages = true}) async {
@@ -1627,6 +1642,9 @@ void main() {
       expect([for (final t in input.threads) t.conversationKey],
           ['c-b', 't-1', 'c-a']);
       expect(input.threads[1].source, 'teams');
+      expect([for (final t in input.threads) t.excerpt], [false, true, false]);
+      expect(related.threadLoads, isNot(contains('t-1')),
+          reason: "a chat's history is never read");
       expect(input.threads.every((t) => !t.invite), isTrue);
       expect(input.relatedBest, closeTo(0.82, 1e-9));
       final call = related.calls.single;
@@ -1634,9 +1652,333 @@ void main() {
       expect(call.floor, BriefGatherer.relatedFloor);
       expect(call.limit, BriefGatherer.relatedCandidateLimit);
       expect(call.sinceIso,
-          MessageStore.isoStamp(now.subtract(briefMailWindow)));
+          MessageStore.isoStamp(now.subtract(briefRelatedWindow)));
       expect(server.inputs.single,
           '${EmbeddingsClient.searchQueryPrefix}Falcon launch plan');
+    });
+
+    /// A Teams chat row for [key]: [count] messages, the newest [last] ago.
+    Future<void> chatRow(String key,
+            {required Duration last,
+            required int count,
+            String state = 'waiting'}) =>
+        store.upsertConversation({
+          'source': 'teams',
+          'conversation_key': key,
+          'subject': 'Falcon room',
+          'participants_json': jsonEncode([
+            {'name': 'Kim', 'email': 'teams:kim'},
+          ]),
+          'state': state,
+          'message_count': count,
+          'last_message_at': stampAgo(last),
+        });
+
+    /// One chat message [id] in [key], [ago] old.
+    Future<void> chatSays(String id, String key, Duration ago,
+            {String fromName = 'Kim',
+            String fromAddress = 'teams:kim',
+            bool outbound = false,
+            String? body}) =>
+        store.upsertMessage({
+          'source': 'teams',
+          'source_message_id': id,
+          'conversation_key': key,
+          'direction': outbound ? 'outbound' : 'inbound',
+          'subject': 'Falcon room',
+          'from_name': outbound ? 'Me' : fromName,
+          'from_address': outbound ? owner : fromAddress,
+          'received_at': stampAgo(ago),
+          'body_text': body ?? 'Chat says $id.',
+          'triage_status': 'done',
+        });
+
+    group('a related Teams chat is an excerpt', () {
+      test('the match, what followed, then what came just before, all '
+          "within a day; never the chat's newest, never its history",
+          () async {
+        await chatRow('t-1', last: const Duration(hours: 1), count: 5);
+        await chatSays('b2', 't-1', const Duration(hours: 32));
+        await chatSays('b1', 't-1', const Duration(hours: 31));
+        await chatSays('match', 't-1', const Duration(hours: 30),
+            body: 'Falcon launch slips ${'x' * 1000}');
+        await chatSays('f1', 't-1', const Duration(hours: 29));
+        // The chat's newest, a day and more after the match: another subject.
+        await chatSays('late', 't-1', const Duration(hours: 1));
+        related.hits = [
+          hit('t-1', 0.8,
+              source: 'teams',
+              messageId: 'match',
+              ago: const Duration(hours: 30)),
+        ];
+
+        final t = (await relatedInput(big())).threads.single;
+        expect(t.source, 'teams');
+        expect(t.excerpt, isTrue);
+        expect(t.snippets, hasLength(3));
+        expect(t.snippets[0], contains('Chat says b1.'));
+        expect(t.snippets[1], contains('Falcon launch slips'));
+        expect(t.snippets[2], contains('Chat says f1.'));
+        expect(t.snippets.join(), isNot(contains('Chat says late.')));
+        expect(t.snippets.join(), isNot(contains('Chat says b2.')));
+        // Three quoted: each at the related cap, not the full one.
+        expect(t.snippets[1], contains('x' * 300));
+        expect(t.snippets[1], isNot(contains('x' * BriefGatherer.relatedSnippetCap)));
+        // Stamped and counted by what is SHOWN, not by the room.
+        expect(t.lastAt, stampAgo(const Duration(hours: 29)));
+        expect(t.messageCount, 3);
+        expect(related.threadLoads, isNot(contains('t-1')));
+      });
+
+      test('followers fill the excerpt before anything earlier does',
+          () async {
+        await chatRow('t-1', last: const Duration(hours: 6), count: 5);
+        await chatSays('b1', 't-1', const Duration(hours: 11));
+        await chatSays('match', 't-1', const Duration(hours: 10));
+        await chatSays('f1', 't-1', const Duration(hours: 9));
+        await chatSays('f2', 't-1', const Duration(hours: 8));
+        await chatSays('f3', 't-1', const Duration(hours: 6));
+        related.hits = [
+          hit('t-1', 0.8,
+              source: 'teams',
+              messageId: 'match',
+              ago: const Duration(hours: 10)),
+        ];
+
+        final t = (await relatedInput(big())).threads.single;
+        expect(t.snippets, hasLength(3));
+        expect(t.snippets[0], contains('Chat says match.'));
+        expect(t.snippets[1], contains('Chat says f1.'));
+        expect(t.snippets[2], contains('Chat says f2.'));
+        expect(t.lastAt, stampAgo(const Duration(hours: 8)));
+        expect(t.messageCount, 3);
+      });
+
+      test('a hit whose message is gone skips that chat and keeps the '
+          'others', () async {
+        await chatRow('t-1', last: const Duration(hours: 1), count: 1);
+        await chatSays('other', 't-1', const Duration(hours: 1));
+        await topic('c-a');
+        related.hits = [
+          hit('t-1', 0.9, source: 'teams', messageId: 'gone'),
+          hit('c-a', 0.8),
+        ];
+
+        final input = await relatedInput(big());
+        expect([for (final t in input.threads) t.conversationKey], ['c-a']);
+        expect(input.relatedBest, closeTo(0.8, 1e-9));
+      });
+
+      test("the room's later chatter leaves the hash alone; a reply that "
+          'joins the excerpt moves it', () async {
+        await chatRow('t-1', last: const Duration(hours: 29), count: 2);
+        await chatSays('match', 't-1', const Duration(hours: 30));
+        await chatSays('f1', 't-1', const Duration(hours: 29));
+        related.hits = [
+          hit('t-1', 0.8,
+              source: 'teams',
+              messageId: 'match',
+              ago: const Duration(hours: 30)),
+        ];
+        final before = await relatedInput(big());
+        expect(before.threads.single.messageCount, 2);
+
+        // A new message a day on, and the conversation row bumped with it.
+        await chatSays('late', 't-1', const Duration(hours: 1));
+        await chatRow('t-1', last: const Duration(hours: 1), count: 3);
+        final later = await relatedInput(big());
+        expect(later.threads.single.messageCount, 2);
+        expect(later.inputsHash, before.inputsHash);
+
+        // A follow-up inside the span joins the two shown.
+        await chatSays('f2', 't-1', const Duration(hours: 28));
+        final joined = await relatedInput(big());
+        expect(joined.threads.single.messageCount, 3);
+        expect(joined.threads.single.lastAt, stampAgo(const Duration(hours: 28)));
+        expect(joined.inputsHash, isNot(before.inputsHash));
+      });
+
+      test('an excerpt is never an open ask nor waiting on them; the same '
+          'shape in mail is', () async {
+        // A chat whose state says the owner owes an answer to an attendee's
+        // request, and one whose last shown message is the owner's.
+        await chatRow('t-ask',
+            last: const Duration(hours: 3), count: 1, state: 'needs_reply');
+        await chatSays('m-t-ask', 't-ask', const Duration(hours: 3),
+            fromName: 'Ana Ruiz', fromAddress: 'ana@northwind.com');
+        await store.writeDecision(
+          'teams',
+          'm-t-ask',
+          fakeDecision(fakeAnswers(needsYou: 0.9, intent: 'request')),
+          qhash: DecisionHeads.expectedQhash,
+          ownerKnown: true,
+        );
+        await chatRow('t-wait', last: const Duration(hours: 3), count: 1);
+        await chatSays('m-t-wait', 't-wait', const Duration(hours: 3),
+            outbound: true);
+        // The controls, as mail.
+        await conversation('c-ask',
+            state: 'needs_reply', people: const ['ana@northwind.com']);
+        await message('m-c-ask', 'c-ask',
+            from: 'ana@northwind.com', fromName: 'Ana Ruiz');
+        await decide('m-c-ask', needsYou: 0.9, intent: 'request');
+        await conversation('c-wait', people: const ['kim@contoso.com']);
+        await message('m-c-wait', 'c-wait', outbound: true);
+        related.hits = [
+          hit('t-ask', 0.9,
+              source: 'teams', ago: const Duration(hours: 3)),
+          hit('t-wait', 0.88,
+              source: 'teams', ago: const Duration(hours: 3)),
+          hit('c-ask', 0.8),
+          hit('c-wait', 0.78),
+        ];
+
+        final input = await relatedInput(big());
+        expect([for (final t in input.threads) t.conversationKey],
+            ['t-ask', 't-wait', 'c-ask', 'c-wait']);
+        expect([for (final a in input.openAsks) a.threadIndex], [2]);
+        expect([for (final t in input.waitingOn) t.conversationKey],
+            ['c-wait']);
+      });
+    });
+
+    group('a related mail thread', () {
+      /// A thread [key] with Kim of [n] messages, the oldest [n] hours ago.
+      Future<void> mailThread(String key, int n) async {
+        await conversation(key,
+            people: const ['kim@contoso.com'],
+            count: n,
+            ago: const Duration(hours: 1));
+        for (var i = 1; i <= n; i++) {
+          await message('$key-$i', key,
+              from: 'kim@contoso.com',
+              fromName: 'Kim',
+              ago: Duration(hours: n - i + 1),
+              body: 'Note $i ${'y' * 1000}');
+        }
+      }
+
+      test('quotes the match and the newest two, oldest first, each at the '
+          'related cap', () async {
+        await mailThread('c-m', 5);
+        related.hits = [
+          hit('c-m', 0.8, messageId: 'c-m-1', ago: const Duration(hours: 5)),
+        ];
+        final t = (await relatedInput(big())).threads.single;
+        expect(t.excerpt, isFalse);
+        expect(t.snippets, hasLength(3));
+        expect(t.snippets[0], contains('Note 1 '));
+        expect(t.snippets[1], contains('Note 4 '));
+        expect(t.snippets[2], contains('Note 5 '));
+        for (final snippet in t.snippets) {
+          expect(snippet, contains('y' * 300));
+          expect(snippet, isNot(contains('y' * BriefGatherer.relatedSnippetCap)));
+        }
+        // A mail thread is whole: its stamp and count are the thread's.
+        expect(t.messageCount, 5);
+      });
+
+      test('a match already among the newest quotes the last three', () async {
+        await mailThread('c-m', 5);
+        related.hits = [
+          hit('c-m', 0.8, messageId: 'c-m-4', ago: const Duration(hours: 2)),
+        ];
+        final t = (await relatedInput(big())).threads.single;
+        expect([for (final s in t.snippets) RegExp(r'Note \d').firstMatch(s)![0]],
+            ['Note 3', 'Note 4', 'Note 5']);
+      });
+
+      test('a two-message thread quotes both at the full cap', () async {
+        await mailThread('c-m', 2);
+        related.hits = [
+          hit('c-m', 0.8, messageId: 'c-m-1', ago: const Duration(hours: 2)),
+        ];
+        final t = (await relatedInput(big())).threads.single;
+        expect(t.snippets, hasLength(2));
+        for (final snippet in t.snippets) {
+          expect(snippet, contains('y' * 500));
+        }
+      });
+
+      test('an invite thread still quotes its last two at the full cap',
+          () async {
+        await conversation('inv-0',
+            people: const ['kim@contoso.com'],
+            count: 3,
+            ago: const Duration(hours: 1));
+        for (var i = 1; i <= 3; i++) {
+          await message('inv-0-$i', 'inv-0',
+              from: 'kim@contoso.com',
+              fromName: 'Kim',
+              ago: Duration(hours: 4 - i),
+              body: 'Note $i ${'y' * 1000}',
+              eventId: 'evt-1');
+        }
+        related.hits = const [];
+        final t = (await relatedInput(big())).threads.single;
+        expect(t.invite, isTrue);
+        expect(t.snippets, hasLength(2));
+        expect(t.snippets[0], contains('Note 2 '));
+        expect(t.snippets[1], contains('Note 3 '));
+        for (final snippet in t.snippets) {
+          expect(snippet, contains('y' * 500));
+        }
+      });
+    });
+
+    test('people on the related path: the organiser, then who is IN the '
+        'chosen threads (by address, or in a chat by name), then the rest',
+        () async {
+      final attendees = [
+        const Attendee(name: 'Me', address: owner),
+        for (var i = 1; i <= 10; i++)
+          Attendee(name: 'Guest $i', address: 'g$i@northwind.com'),
+        const Attendee(name: 'Lee Mapp', address: 'g11@northwind.com'),
+        const Attendee(name: 'Pat Quill', address: 'g12@northwind.com'),
+      ];
+      // The eleventh wrote in a related mail thread, by address.
+      await conversation('c-m', people: const ['kim@contoso.com']);
+      await message('m-c-m', 'c-m',
+          from: 'g11@northwind.com', fromName: 'Lee Mapp');
+      // The twelfth wrote in the chat excerpt, under a chat id: matched by
+      // the invite's name, whatever its case.
+      await chatRow('t-1', last: const Duration(hours: 1), count: 1);
+      await chatSays('m-t-1', 't-1', const Duration(hours: 1),
+          fromName: 'PAT QUILL',
+          fromAddress: 'teams:pat',
+          body: 'The Falcon vendor signed today.');
+      related.hits = [hit('c-m', 0.8), hit('t-1', 0.75, source: 'teams')];
+
+      final input = await relatedInput(meeting(
+        subject: 'Falcon launch plan',
+        organizerAddress: 'g3@northwind.com',
+        attendees: attendees,
+      ));
+      expect(input.path, BriefPath.related);
+      expect([for (final p in input.people) p.name], [
+        'Guest 3',
+        'Lee Mapp',
+        'Pat Quill',
+        'Guest 1',
+        'Guest 2',
+        'Guest 4',
+        'Guest 5',
+        'Guest 6',
+      ]);
+      expect(input.people, hasLength(BriefGatherer.maxPeople));
+      final pat = input.people[2];
+      expect(pat.threadCount, 1);
+      expect(pat.lastWords, contains('The Falcon vendor signed today.'));
+    });
+
+    test('the people path still reads thirty days of mail', () async {
+      // Older than the related search's 21 days, inside the people path's 30.
+      await thread('c-old', ago: const Duration(days: 25));
+      final input = await eligible(meeting());
+      expect(input.path, BriefPath.people);
+      expect([for (final t in input.threads) t.conversationKey], ['c-old']);
+      expect(briefRelatedWindow, const Duration(days: 21));
+      expect(briefMailWindow, const Duration(days: 30));
     });
 
     test('at most four related threads', () async {
@@ -1831,6 +2173,108 @@ void main() {
       expect(server.calls, 0);
     });
   });
+
+  group('the related path over the real search', () {
+    late bool available;
+    late BondDatabase vecDb;
+    late MessageStore vecStore;
+
+    setUpAll(() {
+      available = ensureSqliteVecLoaded();
+    });
+
+    setUp(() {
+      vecDb = vecTestDb();
+      vecStore = MessageStore(vecDb);
+    });
+
+    tearDown(() async => vecDb.close());
+
+    test('no scripted search: the store finds a chat message near the '
+        'subject and the gatherer quotes it as an excerpt', () async {
+      if (!available) return;
+      // The query and the one message share an axis; everything else is
+      // orthogonal to it.
+      final embed = FakeEmbedServer(
+        vectorFor: (input) =>
+            input.contains('Falcon') ? axes({0: 1.0}) : axes({3: 1.0}),
+      );
+      await vecStore.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 't-room',
+        'subject': 'Ops room',
+        'participants_json': jsonEncode([
+          {'name': 'Kim', 'email': 'teams:kim'},
+        ]),
+        'state': 'waiting',
+        'message_count': 2,
+        'last_message_at': stampAgo(const Duration(hours: 2)),
+      });
+      for (final (id, age, body) in [
+        ('t-lunch', const Duration(hours: 4), 'Lunch at noon?'),
+        ('t-falcon', const Duration(hours: 2), 'The Falcon launch moves a week.'),
+      ]) {
+        await vecStore.upsertMessage({
+          'source': 'teams',
+          'source_message_id': id,
+          'conversation_key': 't-room',
+          'direction': 'inbound',
+          'subject': 'Ops room',
+          'from_name': 'Kim',
+          'from_address': 'teams:kim',
+          'received_at': stampAgo(age),
+          'body_text': body,
+          'triage_status': 'done',
+        });
+      }
+      await vecStore.upsertMessageVector(
+        source: 'teams',
+        sourceMessageId: 't-falcon',
+        embedding: encodeEmbedding(axes({0: 1.0})),
+        dims: embedDims,
+        embeddedHash: 'h-falcon',
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+      await vecStore.upsertMessageVector(
+        source: 'teams',
+        sourceMessageId: 't-lunch',
+        embedding: encodeEmbedding(axes({3: 1.0})),
+        dims: embedDims,
+        embeddedHash: 'h-lunch',
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+
+      final g = await BriefGatherer(
+        vecStore,
+        CalendarStore(vecDb),
+        ownerAddress: () async => owner,
+        zone: () => la,
+        embeddings: embed.client,
+      ).gather(
+        meeting(
+          subject: 'Falcon launch plan',
+          attendees: const [
+            Attendee(name: 'Me', address: owner),
+            Attendee(name: 'Ana Ruiz', address: 'ana@northwind.com'),
+            Attendee(name: 'Ben Okafor', address: 'ben@northwind.com'),
+            Attendee(name: 'Cy Park', address: 'cy@northwind.com'),
+            Attendee(name: 'Di Moss', address: 'di@northwind.com'),
+            Attendee(name: 'Ed Vance', address: 'ed@northwind.com'),
+            Attendee(name: 'Flo Hart', address: 'flo@northwind.com'),
+          ],
+        ),
+        now: now,
+      );
+      final input = (g as BriefEligible).input;
+      expect(input.path, BriefPath.related);
+      final t = input.threads.single;
+      expect((t.source, t.conversationKey), ('teams', 't-room'));
+      expect(t.excerpt, isTrue);
+      expect(t.snippets.join(), contains('The Falcon launch moves a week.'));
+      expect(t.lastAt, stampAgo(const Duration(hours: 2)));
+      expect(input.relatedBest, closeTo(1.0, 0.001));
+    });
+  });
 }
 
 /// A store whose chunk reads are scripted, so the passage step is tested
@@ -1888,12 +2332,25 @@ class _ChunkStore extends MessageStore {
 /// A store whose related search is scripted, so the related path is tested
 /// without seeding the vec0 index (`message_search_test.dart` tests the real
 /// read): [hits] is what it answers, [indexMissing] answers null, and every
-/// call is recorded.
+/// call is recorded. [threadLoads] records every `loadThread` key, so a test
+/// can prove a chat's history was never read.
 class _RelatedStore extends MessageStore {
   _RelatedStore(super.db);
 
   List<RelatedConversation> hits = const [];
   bool indexMissing = false;
+  final List<String> threadLoads = [];
+
+  @override
+  Future<List<Message>> loadThread(
+    String conversationKey, {
+    List<String> sources = const ['email'],
+    String? untilIso,
+  }) {
+    threadLoads.add(conversationKey);
+    return super.loadThread(conversationKey,
+        sources: sources, untilIso: untilIso);
+  }
   final List<
       ({
         Uint8List query,

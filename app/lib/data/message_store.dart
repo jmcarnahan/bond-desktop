@@ -10783,12 +10783,16 @@ $where
   /// related search reads. Mail and Teams, dropped messages excluded,
   /// messages received since [sinceIso] only.
   ///
-  /// Built on ONE [semanticSearch] at `limit: 100`, which is its full 400
-  /// neighbours — the KNN runs over the whole index and the window filters
-  /// after, so a scoped search would cost the same. The walk STOPS at the
-  /// first message below [floor] (every later one is farther still), keeps
-  /// the first, and so best, message per `(source, conversationKey)`, and
-  /// stops at [limit] conversations.
+  /// [semanticSearch]'s KNN and its model, dropped, date and source filters,
+  /// but a read of its own: that one hydrates a feed row per hit (five joins
+  /// and four subqueries) and keeps only the nearest [semanticSearch] `limit`
+  /// messages, where this is asked once per meeting on every brief plan and
+  /// must not let one busy chat's hundred near messages crowd every other
+  /// conversation out. So it takes ALL of the [_keywordCap] neighbours, keeps
+  /// those at or above [floor] (the list is nearest first, so it stops at the
+  /// first below), and reads three columns for them. The first, and so best,
+  /// message per `(source, conversationKey)` is the conversation's; it stops
+  /// at [limit] conversations.
   ///
   /// Null when the index is unavailable, [semanticSearch]'s third answer.
   Future<List<RelatedConversation>?> relatedConversations(
@@ -10798,27 +10802,84 @@ $where
     required double floor,
     int limit = 12,
   }) async {
-    final hits = await semanticSearch(
-      queryEmbedding,
-      embedModel: embedModel,
-      limit: 100,
-      sinceIso: sinceIso,
-    );
-    if (hits == null) return null;
+    if (!await _vecIndex.ensureReady()) return null;
+    // Heal before asking, as [semanticSearch] does and for its reason.
+    await _vecIndex.backfill();
+    final near = [
+      for (final hit in await _vecIndex.knn(queryEmbedding, k: _keywordCap))
+        if (1 - hit.distance >= floor) hit,
+    ];
+    if (near.isEmpty) return const [];
+
+    final result = await db
+        .customSelect(
+          '''
+SELECT v.id AS vector_id, p.source, p.conversation_key,
+       p.source_message_id, p.received_at
+FROM message_vectors v
+JOIN message_progress p
+  ON p.source = v.source AND p.source_message_id = v.source_message_id
+WHERE v.id IN (${_placeholders(near.length)}) AND v.embed_model = ?
+  AND p.dropped = 0 AND p.received_at >= ?
+  AND p.source IN ('email', 'teams')
+''',
+          variables: _args([
+            for (final hit in near) hit.id,
+            embedModel,
+            sinceIso,
+          ]),
+        )
+        .get();
+    final byVector = {
+      for (final row in result) row.data['vector_id'] as int: row.data,
+    };
+
     final seen = <(String, String)>{};
     final out = <RelatedConversation>[];
-    for (final hit in hits) {
+    for (final hit in near) {
       if (out.length >= limit) break;
-      final cosine = 1 - hit.distance;
-      if (cosine < floor) break;
-      if (!seen.add((hit.row.source, hit.row.conversationKey))) continue;
+      final row = byVector[hit.id];
+      if (row == null) continue;
+      final source = row['source'] as String;
+      final key = row['conversation_key'] as String;
+      if (!seen.add((source, key))) continue;
       out.add((
-        source: hit.row.source,
-        conversationKey: hit.row.conversationKey,
-        cosine: cosine,
+        source: source,
+        conversationKey: key,
+        cosine: 1 - hit.distance,
+        messageId: row['source_message_id'] as String,
+        receivedAt: row['received_at'] as String,
       ));
     }
     return out;
+  }
+
+  /// One conversation's messages received from [fromIso] to [toIso], both
+  /// inclusive, oldest first: the part of a chat around one moment, for a
+  /// caller that must not load a room's whole history to read one exchange.
+  /// No attachments are hydrated ([loadThread] is the read that draws a
+  /// thread), and nothing is filtered: the owner's own messages and a
+  /// dropped one are part of what was said. A message with no `received_at`
+  /// is placed by when it was stored, [loadThread]'s rule and the stamp
+  /// `message_progress` (and so [relatedConversations]) carries for it.
+  Future<List<Message>> messagesBetween(
+    String source,
+    String conversationKey, {
+    required String fromIso,
+    required String toIso,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          'WHERE source = ? AND conversation_key = ? '
+          'AND COALESCE(received_at, created_at) >= ? '
+          'AND COALESCE(received_at, created_at) <= ? '
+          'ORDER BY COALESCE(received_at, created_at) ASC, '
+          'source_message_id ASC',
+          variables: _args([source, conversationKey, fromIso, toIso]),
+        )
+        .get();
+    return [for (final row in result) Message.fromRow(row.data)];
   }
 
   /// The most rowids either word read will carry back into Dart.

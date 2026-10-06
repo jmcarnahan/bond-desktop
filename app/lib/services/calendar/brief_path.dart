@@ -88,6 +88,7 @@ final RegExp _joinBoilerplate = RegExp(
   r'|Join with Google Meet'
   r'|Join Webex meeting'
   r'|Meeting ID:'
+  r'|Join:\s*https?://'
   r'|Click here to join'
   r'|Do not delete or change any of the following text',
   caseSensitive: false,
@@ -98,8 +99,8 @@ final RegExp _whitespace = RegExp(r'\s+');
 
 /// The invite's own words: [bodyPreview] cut at the first join-boilerplate
 /// marker (a rule of eight or more `_`, `-` or `=`; the Teams, Zoom, Meet
-/// and Webex join lines; "Meeting ID:"), its links taken out and its
-/// whitespace closed up. A join block is the same few hundred characters on
+/// and Webex join lines; "Meeting ID:"; a bare "Join: <link>"), its links
+/// taken out and its whitespace closed up. A join block is the same few hundred characters on
 /// every invite, so left in it would make every meeting look like it has an
 /// agenda and pull every query toward every other meeting.
 ///
@@ -122,7 +123,8 @@ const Set<String> _genericSubjectWords = {
   'coffee', 'lunch', 'office', 'hours', 'hold', 'placeholder', 'intro',
   'quick', 'time', 'block', 'and', 'with', 'the', 'an', 'of', 'for', 'to',
   'vs', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
-  'sunday',
+  'sunday', 'update', 'updates', 'status', 'discussion', 'session', 'meet',
+  'follow', 'followup',
 };
 
 final RegExp _nonWord = RegExp(r'[^\p{L}\p{N}]+', unicode: true);
@@ -136,9 +138,10 @@ List<String> _wordsOf(String s) => [
 /// Whether [e] gives nothing to search by: its own words ([briefAgendaOf])
 /// are shorter than [briefAgendaMin] AND its subject has no content word. A
 /// word is not content when it is one character, all digits, part of a
-/// name in the meeting (the organiser's or any attendee's, the owner's row
-/// included), or one of the generic meeting words ("weekly", "sync", "1:1",
-/// "catch up", a weekday). So `1:1 | Dana & Sam | Weekly` with Dana and Sam
+/// PERSON's name in the meeting (the organiser's or any attendee's, the
+/// owner's row included — never a room's or a list's), or one of the
+/// generic meeting words ("weekly", "sync", "1:1", "catch up", "status
+/// update", a weekday). So `1:1 | Dana & Sam | Weekly` with Dana and Sam
 /// in it, `Daily sync` and `TGIF` are topicless; `Budget` and `Falcon
 /// weekly` are not. An empty subject is topicless.
 ///
@@ -146,9 +149,15 @@ List<String> _wordsOf(String s) => [
 /// only, and English only.
 bool briefIsTopicless(CalendarEvent e) {
   if (briefAgendaOf(e.bodyPreview).length >= briefAgendaMin) return false;
+  // People's names only. A room ("Conf Room Falcon") or a list ("Falcon
+  // Team") is named after the very thing a subject is about, and counting
+  // its words as names would read "Falcon weekly" as topicless.
   final names = {
     ..._wordsOf(e.organizerName),
-    for (final a in e.attendees) ..._wordsOf(a.name),
+    for (final a in e.attendees)
+      if (a.type.trim().toLowerCase() != 'resource' &&
+          !briefLooksLikeList(a.address))
+        ..._wordsOf(a.name),
   };
   for (final t in _wordsOf(e.subject)) {
     if (t.length <= 1 || _allDigits.hasMatch(t)) continue;

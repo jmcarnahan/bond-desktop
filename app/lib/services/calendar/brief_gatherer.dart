@@ -10,6 +10,7 @@ import '../../data/calendar_store.dart';
 import '../../data/message_store.dart';
 import '../../models/attachment_models.dart';
 import '../../models/calendar_models.dart';
+import '../../models/home_models.dart' show RelatedConversation;
 import '../../models/message_models.dart';
 import '../decision/decision_policy.dart';
 import '../decision/needs_you_predicate.dart' show needsYouAt;
@@ -80,6 +81,14 @@ class BriefThread {
   /// its text.
   final bool invite;
 
+  /// Whether this is a PART of a Teams chat rather than a whole thread: the
+  /// message the related search matched and the few around it. A chat is
+  /// one conversation however many subjects pass through it, so its newest
+  /// messages say nothing about why it was found. For such a thread [lastAt]
+  /// is the newest message SHOWN and [messageCount] how many are shown, so
+  /// the room's later chatter moves neither.
+  final bool excerpt;
+
   const BriefThread({
     required this.source,
     required this.conversationKey,
@@ -90,6 +99,7 @@ class BriefThread {
     this.snippets = const [],
     this.ranked = false,
     this.invite = false,
+    this.excerpt = false,
   });
 }
 
@@ -580,6 +590,11 @@ DateTime briefHorizonEnd(DateTime nowUtc, CalendarZone zone) =>
 /// related search looks ([BriefPath.related]).
 const Duration briefMailWindow = Duration(days: 30);
 
+/// How far back the related search looks ([BriefPath.related]). Shorter than
+/// the people path's window on purpose: a brief is a catch-up on what is
+/// being said about the subject now, and three weeks of it is plenty.
+const Duration briefRelatedWindow = Duration(days: 21);
+
 /// "Wed 7 Oct 2026 · 10:00–11:00 AM PDT" for a timed event in [zone] (the
 /// zone's abbreviation, else its IANA name); "All day · Wed 7 Oct 2026" for a
 /// one-day all-day event, "All day · Wed 7 Oct 2026 – Fri 9 Oct 2026" for a
@@ -838,6 +853,16 @@ class BriefGatherer {
   /// filtered (invite threads, logistics) down to [maxRelated].
   static const int relatedCandidateLimit = 12;
 
+  /// How many messages of a RELATED thread the brief quotes: the one that
+  /// matched and what was said around it. Three at [relatedSnippetCap] cost
+  /// what an invite or people thread's two at [snippetCap] do.
+  static const int relatedShown = 3;
+  static const int relatedSnippetCap = 400;
+
+  /// How far either side of the matched message a chat's excerpt may reach:
+  /// a reply the next morning is the same exchange, one a week on is not.
+  static const Duration excerptSpan = Duration(hours: 24);
+
   /// How long after a failed query embedding the gatherer does not ask
   /// again, judged on the caller's `now`: a hung server costs one timeout,
   /// not one per meeting in the window.
@@ -1004,18 +1029,27 @@ class BriefGatherer {
           conversationKey: k.c.id,
           subject: (k.c.subject ?? '').trim(),
           state: k.c.state.wire,
-          lastAt: k.c.lastMessageAt ?? '',
-          messageCount: k.c.messageCount,
+          // An excerpt is stamped and counted by what is SHOWN, so the rest
+          // of the chat moving does not move the hash (see [BriefThread.
+          // excerpt]).
+          lastAt: k.excerpt
+              ? (k.quoted.lastOrNull?.receivedAt ?? '')
+              : (k.c.lastMessageAt ?? ''),
+          messageCount: k.excerpt ? k.quoted.length : k.c.messageCount,
           snippets: [
-            for (final m in k.messages.sublist(math.max(0, k.messages.length - 2)))
+            for (final m in k.quoted)
               if (_plain(m).isNotEmpty)
                 wrapUntrusted(
                   'message',
-                  _cap('${_who(m, nameOf)}: ${_plain(m)}', snippetCap),
+                  _cap(
+                    '${_who(m, nameOf)}: ${_plain(m)}',
+                    k.quoted.length > 2 ? relatedSnippetCap : snippetCap,
+                  ),
                 ),
           ],
           ranked: k.ranked,
           invite: i < inviteChosen.length,
+          excerpt: k.excerpt,
         ),
     ];
 
@@ -1031,7 +1065,8 @@ class BriefGatherer {
     final needsYouThreshold = await _store.needsYouThreshold();
     for (var i = 0; i < chosen.length && asks.length < maxAsks; i++) {
       final k = chosen[i];
-      if (k.c.state != ConversationState.needsReply) continue;
+      // An excerpt is a few messages of a chat, not a thread with a state.
+      if (k.excerpt || k.c.state != ConversationState.needsReply) continue;
       final lastOut = k.messages.lastIndexWhere((m) => m.outbound);
       for (var j = k.messages.length - 1; j > lastOut; j--) {
         final m = k.messages[j];
@@ -1059,7 +1094,8 @@ class BriefGatherer {
 
     final waitingOn = [
       for (var i = 0; i < chosen.length; i++)
-        if (chosen[i].c.state == ConversationState.waiting &&
+        if (!chosen[i].excerpt &&
+            chosen[i].c.state == ConversationState.waiting &&
             chosen[i].messages.isNotEmpty &&
             chosen[i].messages.last.outbound)
           threads[i],
@@ -1109,20 +1145,37 @@ class BriefGatherer {
       ...others.where((p) => p.address == organiser),
       ...others.where((p) => p.address != organiser),
     ];
+    // On the related path the room is too big to list, so after the
+    // organiser come the people who are IN the chosen threads, then the
+    // rest: who is involved in the subject, before who merely got the
+    // invite.
+    final listed = (path == BriefPath.related
+            ? [
+                ...organiserFirst.where((p) => p.address == organiser),
+                ...organiserFirst.where((p) =>
+                    p.address != organiser &&
+                    chosen.any((k) => _inThread(k, p))),
+                ...organiserFirst.where((p) =>
+                    p.address != organiser &&
+                    !chosen.any((k) => _inThread(k, p))),
+              ]
+            : organiserFirst)
+        .take(maxPeople)
+        .toList();
     // On the related path "last met" is read for the people the block
     // lists, not the whole room: having met any one of three hundred people
     // says nothing about this meeting, and the lookup binds two variables
     // per address.
     final met = await _calendar.lastMetWith(
       path == BriefPath.related
-          ? [for (final p in organiserFirst.take(maxPeople)) p.address]
+          ? [for (final p in listed) p.address]
           : addresses,
       nowUtc: nowUtc,
     );
     final people = passages
         ? await _peopleOf(
             event,
-            organiserFirst.take(maxPeople).toList(),
+            listed,
             chosen,
             askOf,
             nowUtc: nowUtc,
@@ -1226,7 +1279,7 @@ class BriefGatherer {
       final hits = await _store.relatedConversations(
         query,
         embedModel: EmbeddingsClient.documentModelTag,
-        sinceIso: MessageStore.isoStamp(nowUtc.subtract(briefMailWindow)),
+        sinceIso: MessageStore.isoStamp(nowUtc.subtract(briefRelatedWindow)),
         floor: relatedFloor,
         limit: relatedCandidateLimit,
       );
@@ -1244,17 +1297,28 @@ class BriefGatherer {
         final conversation = Conversation.fromRow(row);
         // Judged on the row, before the thread read it would cost.
         if (briefIsLogisticsSubject(conversation.subject ?? '')) continue;
-        final k = await candidateOf(conversation);
-        // Another meeting's invite thread: neither this occurrence nor its
-        // series master. The exemption is a belt — a thread carrying either
-        // id is already an invite key and was skipped above.
-        final otherInvite = k.messages.any((m) {
-          final id = m.meetingEventId;
-          return id != null &&
-              id != event.id &&
-              !(event.seriesMasterId.isNotEmpty && id == event.seriesMasterId);
-        });
-        if (otherInvite) continue;
+        final _Candidate k;
+        if (hit.source == 'teams') {
+          // A chat is a room, not a thread: only the exchange around the
+          // matched message is read, never the room's history.
+          final part = await _excerptOf(conversation, hit);
+          if (part == null) continue;
+          k = part;
+        } else {
+          final whole = await candidateOf(conversation);
+          // Another meeting's invite thread: neither this occurrence nor its
+          // series master. The exemption is a belt — a thread carrying
+          // either id is already an invite key and was skipped above.
+          final otherInvite = whole.messages.any((m) {
+            final id = m.meetingEventId;
+            return id != null &&
+                id != event.id &&
+                !(event.seriesMasterId.isNotEmpty &&
+                    id == event.seriesMasterId);
+          });
+          if (otherInvite) continue;
+          k = whole.showing(_aroundMatch(whole.messages, hit.messageId));
+        }
         threads.add(k);
         best ??= hit.cosine;
       }
@@ -1264,6 +1328,76 @@ class BriefGatherer {
       return (threads: none, state: 'unavailable', best: null);
     }
   }
+
+  /// The part of a chat around the message the related search matched, as a
+  /// candidate whose messages ARE that part: the match, then what followed
+  /// it, then (only to fill [relatedShown]) what came just before — all
+  /// within [excerptSpan] of the match. Null when the matched message is no
+  /// longer in the store or carries no readable stamp.
+  Future<_Candidate?> _excerptOf(
+    Conversation conversation,
+    RelatedConversation hit,
+  ) async {
+    final at = DateTime.tryParse(hit.receivedAt);
+    if (at == null) return null;
+    final window = await _store.messagesBetween(
+      hit.source,
+      hit.conversationKey,
+      fromIso: MessageStore.isoStamp(at.toUtc().subtract(excerptSpan)),
+      toIso: MessageStore.isoStamp(at.toUtc().add(excerptSpan)),
+    );
+    final match = window.indexWhere((m) => m.id == hit.messageId);
+    if (match < 0) return null;
+    var from = match;
+    var to = match;
+    while (to - from + 1 < relatedShown && to + 1 < window.length) {
+      to++;
+    }
+    while (to - from + 1 < relatedShown && from > 0) {
+      from--;
+    }
+    final part = window.sublist(from, to + 1);
+    return _Candidate(conversation, part, false, shown: part, excerpt: true);
+  }
+
+  /// What a related MAIL thread quotes, oldest first, at most
+  /// [relatedShown]: the message that matched and the thread's newest —
+  /// what was said on the subject, and where it stands now. A mail thread is
+  /// one subject, so its tail is the follow-up. Filled from the newest
+  /// backward when the match is already among them; the last
+  /// [relatedShown] when the match is not in the thread as read.
+  static List<Message> _aroundMatch(List<Message> messages, String matchId) {
+    final n = messages.length;
+    final picked = <int>{
+      for (var i = math.max(0, n - 2); i < n; i++) i,
+    };
+    final match = messages.indexWhere((m) => m.id == matchId);
+    if (match >= 0) picked.add(match);
+    for (var i = n - 1; i >= 0 && picked.length < relatedShown; i--) {
+      picked.add(i);
+    }
+    return [for (final i in picked.toList()..sort()) messages[i]];
+  }
+
+  /// Whether [m] was written by [p]. By address; and in a chat, which names
+  /// its people by id and never by address, by the name the invite gives
+  /// them — the one thing a chat message and an attendee have in common.
+  static bool _wrote(Message m, BriefOther p) {
+    if (m.outbound) return false;
+    if ((m.fromAddress ?? '').trim().toLowerCase() == p.address) return true;
+    return m.source == 'teams' &&
+        p.name.isNotEmpty &&
+        (m.fromName ?? '').trim().toLowerCase() == p.name.toLowerCase();
+  }
+
+  /// Whether [p] is in thread [k]: on its roster, or the writer of one of
+  /// its messages. An excerpt has no roster of its own — being in the room
+  /// is not being in the exchange.
+  static bool _inThread(_Candidate k, BriefOther p) =>
+      (!k.excerpt &&
+          k.c.participants
+              .any((x) => (x.email ?? '').trim().toLowerCase() == p.address)) ||
+      k.messages.any((m) => _wrote(m, p));
 
   /// Whether the decision model read [d] as pressing: urgency high or
   /// urgent, or importance high — the Phase 3 invite-pinning rule.
@@ -1445,17 +1579,10 @@ class BriefGatherer {
       Message? newest;
       String newestSubject = '';
       for (final k in chosen) {
-        final inThread = k.c.participants
-                .any((x) => (x.email ?? '').trim().toLowerCase() == p.address) ||
-            k.messages.any(
-                (m) => (m.fromAddress ?? '').trim().toLowerCase() == p.address);
-        if (!inThread) continue;
+        if (!_inThread(k, p)) continue;
         threadCount++;
         for (final m in k.messages) {
-          if (m.outbound ||
-              (m.fromAddress ?? '').trim().toLowerCase() != p.address) {
-            continue;
-          }
+          if (!_wrote(m, p)) continue;
           if (newest == null ||
               (m.receivedAt ?? '').compareTo(newest.receivedAt ?? '') > 0) {
             newest = m;
@@ -1689,10 +1816,29 @@ class BriefGatherer {
 }
 
 class _Candidate {
-  _Candidate(this.c, this.messages, this.ranked);
+  _Candidate(
+    this.c,
+    this.messages,
+    this.ranked, {
+    this.shown,
+    this.excerpt = false,
+  });
   final Conversation c;
   final List<Message> messages;
   final bool ranked;
+
+  /// The messages the brief quotes, oldest first; null for the thread's
+  /// last two (an invite thread, a people-path thread).
+  final List<Message>? shown;
+
+  /// Whether [messages] is a part of a chat ([BriefThread.excerpt]).
+  final bool excerpt;
+
+  List<Message> get quoted =>
+      shown ?? messages.sublist(math.max(0, messages.length - 2));
+
+  _Candidate showing(List<Message> shown) =>
+      _Candidate(c, messages, ranked, shown: shown, excerpt: excerpt);
 }
 
 extension<T> on List<T> {

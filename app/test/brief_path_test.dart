@@ -54,6 +54,17 @@ void main() {
   });
 
   group('briefAgendaOf', () {
+    test('a bare "Join: <link>" line is join boilerplate', () {
+      expect(
+          briefAgendaOf(
+              'Join: https://teams.example.com/l/abc Meeting ID: 221 756 307'),
+          '');
+      expect(
+          briefAgendaOf(
+              'Agenda: budget review. Join: https://teams.example.com/l/abc'),
+          'Agenda: budget review.');
+    });
+
     test('the old Teams block is cut at its rule', () {
       const preview = 'Walk through the Q3 pipeline numbers.\n'
           '________________________________________________________________\n'
@@ -119,6 +130,49 @@ void main() {
                   'Join on your computer or mobile app, a long block')),
           isTrue,
           reason: 'the join block is not an agenda');
+    });
+  });
+
+  group('briefIsTopicless: whose names count', () {
+    test("a room's or a list's name is not a person's: the subject keeps "
+        'its topic', () {
+      expect(
+          briefIsTopicless(event(
+            subject: 'Falcon weekly',
+            attendees: const [
+              Attendee(
+                  name: 'Conf Room Falcon',
+                  address: 'room-falcon@contoso.com',
+                  type: 'resource'),
+            ],
+          )),
+          isFalse,
+          reason: 'a room is named after the thing, not a person');
+      expect(
+          briefIsTopicless(event(
+            subject: 'Falcon weekly',
+            attendees: const [
+              Attendee(name: 'Falcon Team', address: 'falcon-team@contoso.com'),
+            ],
+          )),
+          isFalse,
+          reason: 'a list is named after the thing, not a person');
+    });
+
+    test("a person's name is still a name (the documented rule)", () {
+      expect(
+          briefIsTopicless(event(
+            subject: 'Falcon weekly',
+            attendees: const [
+              Attendee(name: 'Falcon Lee', address: 'falcon.lee@fabrikam.com'),
+            ],
+          )),
+          isTrue);
+    });
+
+    test('status and update are generic meeting words', () {
+      expect(briefIsTopicless(event(subject: 'Weekly status update')), isTrue);
+      expect(briefIsTopicless(event(subject: 'Falcon status update')), isFalse);
     });
   });
 

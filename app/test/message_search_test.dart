@@ -216,6 +216,87 @@ void main() {
     });
   });
 
+  group('messagesBetween', () {
+    late BondDatabase db;
+    late MessageStore store;
+    final now = DateTime.now().toUtc();
+    String ago(Duration d) => MessageStore.isoStamp(now.subtract(d));
+
+    setUp(() {
+      db = testDb();
+      store = MessageStore(db);
+    });
+
+    tearDown(() async => db.close());
+
+    Future<void> chat(String id, Duration age,
+        {String key = 't-1', String source = 'teams'}) async {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Falcon room',
+        'from_name': 'Dana',
+        'from_address': 'teams:dana',
+        'received_at': ago(age),
+        'body_text': 'Message $id',
+      });
+    }
+
+    test('inclusive at both ends, oldest first, one source and one '
+        'conversation, no attachments', () async {
+      await chat('before', const Duration(hours: 10));
+      await chat('from', const Duration(hours: 8));
+      await chat('mid-b', const Duration(hours: 6));
+      await chat('mid-a', const Duration(hours: 7));
+      await chat('to', const Duration(hours: 4));
+      await chat('after', const Duration(hours: 2));
+      // The same key in another source, and another chat, inside the window.
+      await chat('mail', const Duration(hours: 6), source: 'email');
+      await chat('other', const Duration(hours: 6), key: 't-2');
+      await store.upsertAttachments('teams', 'mid-a', [
+        {
+          'attachment_id': 'a-1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'plan.pdf',
+          'content_type': 'application/pdf',
+          'size': 4096,
+        },
+      ]);
+
+      final between = await store.messagesBetween('teams', 't-1',
+          fromIso: ago(const Duration(hours: 8)),
+          toIso: ago(const Duration(hours: 4)));
+      expect([for (final m in between) m.id], ['from', 'mid-a', 'mid-b', 'to']);
+      expect(between.every((m) => m.attachments.isEmpty), isTrue,
+          reason: 'loadThread is the read that draws attachments');
+      // The thread read does hydrate it, so the fixture is real.
+      final whole = await store.loadThread('t-1', sources: const ['teams']);
+      expect(whole.firstWhere((m) => m.id == 'mid-a').attachments,
+          hasLength(1));
+    });
+
+    test('a message with no received_at is placed by when it was stored, '
+        'the stamp its progress row carries', () async {
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'unstamped',
+        'conversation_key': 't-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': 'teams:dana',
+        'received_at': null,
+        'body_text': 'No stamp of its own.',
+      });
+      final between = await store.messagesBetween('teams', 't-1',
+          fromIso: ago(const Duration(hours: 1)),
+          toIso: MessageStore.isoStamp(now.add(const Duration(hours: 1))));
+      expect([for (final m in between) m.id], ['unstamped']);
+    });
+  });
+
   group('end to end', () {
     late bool available;
     late BondDatabase db;
@@ -440,6 +521,80 @@ void main() {
         expect([for (final h in hits) (h.source, h.conversationKey)],
             [('email', 'c-inv'), ('teams', 'c-park')]);
         expect(hits.first.cosine, closeTo(1.0, 0.001));
+        expect(hits[1].cosine, closeTo(0.9, 0.001));
+      });
+
+      test('each entry names its best message and that message\'s stamp',
+          () async {
+        if (!available) return;
+        await message('park-in-inv', 'c-inv', 'Parking for the audit call',
+            age: const Duration(hours: 1));
+        await message('inv-1', 'c-inv', 'Invoice 4471 is overdue',
+            age: const Duration(hours: 5));
+        await message('park', 'c-park', 'Parking permit renewal',
+            age: const Duration(hours: 3), source: 'teams');
+
+        final hits = (await related())!;
+        expect(
+            [for (final h in hits) (h.conversationKey, h.messageId, h.receivedAt)],
+            [
+              // The older message is the nearer one, so it is the entry's,
+              // not the conversation's newest.
+              ('c-inv', 'inv-1', ago(const Duration(hours: 5))),
+              ('c-park', 'park', ago(const Duration(hours: 3))),
+            ]);
+      });
+
+      test('a dropped message is not a hit, and its conversation falls back '
+          'to its next best', () async {
+        if (!available) return;
+        await message('inv-1', 'c-inv', 'Invoice 4471 is overdue');
+        await message('park-in-inv', 'c-inv', 'Parking for the audit call');
+        await message('inv-gone', 'c-gone', 'Invoice 4470 is overdue');
+        for (final id in ['inv-1', 'inv-gone']) {
+          await store.writeSettledProgress('email', id,
+              needsYou: false, reason: 'not_worthy', dropped: true);
+        }
+
+        final hits = (await related())!;
+        expect([for (final h in hits) (h.conversationKey, h.messageId)],
+            [('c-inv', 'park-in-inv')]);
+        expect(hits.single.cosine, closeTo(0.9, 0.001));
+      });
+
+      test('one busy chat with more than a hundred near messages does not '
+          'crowd out a second conversation', () async {
+        if (!available) return;
+        // 120 messages in one chat, every one on the query's axis: nearer
+        // than anything else. A read that kept the nearest hundred messages
+        // would see this chat alone.
+        for (var i = 0; i < 120; i++) {
+          final id = 'busy-$i';
+          await store.upsertMessage({
+            'source': 'teams',
+            'source_message_id': id,
+            'conversation_key': 't-busy',
+            'direction': 'inbound',
+            'subject': 'Invoice chatter',
+            'from_name': 'Dana',
+            'from_address': 'teams:dana',
+            'received_at': ago(Duration(minutes: 10 + i)),
+            'body_text': 'Invoice chatter $i',
+          });
+          await store.upsertMessageVector(
+            source: 'teams',
+            sourceMessageId: id,
+            embedding: encodeEmbedding(axes({0: 1.0})),
+            dims: embedDims,
+            embeddedHash: 'h-$id',
+            embedModel: EmbeddingsClient.documentModelTag,
+          );
+        }
+        await message('park', 'c-park', 'Parking permit renewal');
+
+        final hits = (await related())!;
+        expect([for (final h in hits) (h.source, h.conversationKey)],
+            [('teams', 't-busy'), ('email', 'c-park')]);
         expect(hits[1].cosine, closeTo(0.9, 0.001));
       });
 

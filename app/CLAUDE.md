@@ -1247,17 +1247,32 @@ that bite.
     a topicless meeting (`briefIsTopicless`) of ≤ 15; else `related`. The
     people path reads MAIL only (Teams participants are `teams:<id>`, no
     address to match); the related path reads mail AND Teams by meaning. The
-    four heuristics (list, `briefAgendaOf`'s boilerplate strip, topicless,
-    `briefIsLogisticsSubject`) are unmeasured and English only.
+    four heuristics (list, `briefAgendaOf`'s boilerplate strip — a bare
+    `Join: <link>` included — topicless, `briefIsLogisticsSubject`) are
+    unmeasured and English only. Topicless sets aside PERSONS' name words
+    only: a `type: resource` room or a list-address attendee is named after
+    the subject ("Conf Room Falcon" keeps `Falcon weekly` topical); `status`,
+    `update(s)`, `discussion`, `session`, `meet`, `follow(up)` are generic.
   - Threads: the event's own invite threads first (`messagesForEvent` for the
     occurrence, then its series master; ≤ 3, `BriefThread.invite`), then on
     the people path the 30-day address match (`noMail` means no threads at
     all), on the related path ≤ 4 (`maxRelated`) from ONE
-    `MessageStore.relatedConversations` (one `semanticSearch` at limit 100;
-    best message per conversation, cosine = `1 − distance`, stop below 0.60
-    `relatedFloor`, 30 days, no attendee filter), invite keys and logistics
-    (subject, or another event's `meetingEventId`) dropped, in score order;
-    the related path never answers `noMail`. The query (`briefQueryText`) is
+    `MessageStore.relatedConversations` (a lean read of its own over ALL 400
+    KNN neighbours at/above 0.60 `relatedFloor`, never `semanticSearch`'s
+    nearest 100, so one busy chat cannot crowd the rest out; best message
+    per conversation with its `messageId` and `receivedAt`, cosine = `1 −
+    distance`, 21 days `briefRelatedWindow`, no attendee filter), invite
+    keys and logistics (subject, or another event's `meetingEventId`)
+    dropped, in score order; the related path never answers `noMail`. A
+    related Teams chat is an EXCERPT (`BriefThread.excerpt`; a chat is one
+    conversation whatever passes through it): `messagesBetween` ±24 h
+    (`excerptSpan`) of the matched message, never `loadThread` — the match,
+    then what followed, then to fill three (`relatedShown`) what came before;
+    `lastAt`/`messageCount` are what is SHOWN, so later chatter moves no
+    hash; never an open ask or waiting; a gone match skips the chat. A
+    related mail thread quotes the match + its newest two (≤ 3, oldest
+    first); three quoted cap at 400 (`relatedSnippetCap`), else 600 as
+    invite and people-path threads. The query (`briefQueryText`) is
     embedded under `searchQueryPrefix`, cached per text in the gatherer, and
     a failed embed is not retried for 2 min (`embedRetryAfter`). Its hash
     adds `path|related` + `related|<ok|off|no_query|unavailable>` after the
@@ -1288,7 +1303,10 @@ that bite.
     `material|msg|att|textStatus|digestStatus`, so a deck whose text or
     digest lands later re-briefs on the next pass.
   - People (`BriefPerson`, handler's gather only): the organiser first,
-    then the attendees' order (a deliberate departure from D14), the cap
+    then the attendees' order (a deliberate departure from D14) — on the
+    related path the attendees IN the kept threads first (roster or sender
+    by address; a chat excerpt's sender by the invite's name,
+    case-insensitive, `_wrote`/`_inThread`), then the rest — the cap
     ≤ `maxPeople` 8 after (+`peopleMore`), `briefOrgOf` (the label before
     the public suffix; the tenant for `*.onmicrosoft.com`, past a
     routing `mail` label; '' for a
@@ -1354,7 +1372,11 @@ that bite.
     owner's words; "open ask: yes (see Open asks)", never the ask again);
     every label (file names, thread and last subjects, the meeting's
     subject, storyline titles, attendee and people names) is capped at 120
-    AS ESCAPED (`labelCap`, `_label`: the fence writes `&` as five). The
+    AS ESCAPED (`labelCap`, `_label`: the fence writes `&` as five). A
+    chat excerpt's thread line is `[n] part of a Teams chat · the latest
+    message shown is from <ago>` (no state, no urgent marker; there is no
+    ` · Teams chat` marker), and the related rule ends with the excerpt
+    sentence and "Trust the inputs in this order: …". The
     materials' digest + `material_text` + passages share `materialsBudget`
     10000, a block costing its length PLUS its digit count, in two rounds
     (`_spend`): digest then text (whole, else a word-cut head while > 1000
@@ -1363,10 +1385,11 @@ that bite.
     `materialTextCharsWritten` runs the same spend for the activity row's
     `text_chars`. The size guard in `meeting_brief_task_test` holds a
     maximal prompt (every label 300 characters of `&<>`, four other files
-    fenced at `otherFileNameCap` 80, the related header, three invite and
-    three Teams markers, 300 attendees) at ≤ 39120 characters (38742
-    measured, plus ~1%; 38732 before the With: cap, 38133/38500 before the
-    related path, 37012/37800 before the other-files
+    fenced at `otherFileNameCap` 80, the related header and rule, three
+    invite threads of two 600s, three related threads of three 400s, 300
+    attendees) at ≤ 39510 characters (39120 measured, plus ~1%; 38742/39120
+    before the chat excerpt, 38732 before the With: cap, 38133/38500 before
+    the related path, 37012/37800 before the other-files
     block; the ceiling is (16384 − 2700) × 3.0 ≈ 41052). A material line
     puts `read|unread|not shown` OUTSIDE the fence (`read` only when a
     block was really written).

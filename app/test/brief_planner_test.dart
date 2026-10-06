@@ -320,7 +320,16 @@ void main() {
   test('a related-path meeting costs one embedding call across two passes, '
       'and an unchanged related set is not queued twice', () async {
     final related = _RelatedStore(db)
-      ..hits = [(source: 'email', conversationKey: 'c-1', cosine: 0.8)];
+      ..hits = [
+        (
+          source: 'email',
+          conversationKey: 'c-1',
+          cosine: 0.8,
+          messageId: 'm-c-1',
+          receivedAt:
+              MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+        ),
+      ];
     final server = FakeEmbedServer();
     final counting = _CountingGatherer(
       related,

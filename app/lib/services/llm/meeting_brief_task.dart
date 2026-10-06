@@ -30,7 +30,7 @@ Rules:
 - people: one line for each person listed — one line, at most about 25 words — in the order given: who they are as the inputs show it (their organisation, their part in the threads), the last thing they wrote or asked and when, and anything open with them. A person the inputs say nothing about gets the line "no recent mail". Use only the names given.
 - materials: the numbered materials are files sent ahead; the text of a file is shown when it has been read, and a file whose line says "you" is one the owner sent. For each one that matters, up to 5 points, each a short line, of what it SAYS — the figures, names, dates, claims, decisions asked for, and gaps, as written in the file: the detail the owner would otherwise have to open it for. A material shown unread or not shown is named as arrived in one point, not summarised. Use only numbers in the materials list; leave this empty when there are none.
 - The meeting's PURPOSE comes from its own invite — the subject, the invite text, and the threads about THIS meeting — never from files or threads that merely involve the same people. A file listed under "Files on the other threads" was NOT sent for this meeting: do not describe this meeting as being about it, and name it only when the invite or a thread about this meeting refers to it. An invite that says little gets a brief that says so ("The invite gives no agenda.") and then what is open with these people.
-- When the thread list is headed 'Threads related to this meeting', the threads after the invite's own were found because their text is close to this meeting's subject, not because these people are on them. Some are about something else: use a thread only when it is clearly about this meeting's topic, leave the rest out entirely, and never tie a thread to a person it does not name.
+- When the thread list is headed 'Threads related to this meeting', the threads after the invite's own were found because their text is close to this meeting's subject, not because these people are on them. Some are about something else: use a thread only when it is clearly about this meeting's topic, leave the rest out entirely, and never tie a thread to a person it does not name. A thread shown as part of a Teams chat is only the few messages around the one that was found; say nothing about the rest of that chat. Trust the inputs in this order: the meeting's own subject and invite text, then the files sent ahead, then these threads.
 - questions: at most 5 questions the owner could ask in the meeting, each grounded in one specific fact from a file or a thread and naming it. Never rhetorical, never generic.
 - open_asks: at most 4 things one of these people asked the owner that are still open. Name the person as the input names them. Take them from the "Open asks" section; leave this empty when that section is empty.
 - points: at most 5 short lines on where things stand in the threads, each naming the thread it comes from by its number in the list, or -1 when it comes from no one thread.
@@ -107,8 +107,8 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
   /// caps is about 1.7k, so one file's digest and whole text (6000,
   /// [BriefGatherer.materialTextCap]) fit, plus a second's digest, and the
   /// head of its text when the digests are short of their caps; a third is
-  /// named. Worst case, the whole prompt is about 38.7k characters (the
-  /// size guard in `meeting_brief_task_test` pins it): about 12.9k tokens
+  /// named. Worst case, the whole prompt is about 39.1k characters (the
+  /// size guard in `meeting_brief_task_test` pins it): about 13.0k tokens
   /// at three characters a token, plus the answer's [maxTokens], inside
   /// 16384.
   static const int materialsBudget = 10000;
@@ -366,13 +366,16 @@ class MeetingBriefTask implements JsonTask<MeetingBrief> {
         // two stamps; a hand-built input with no clock shows the stamp.
         final now = input.now;
         final ago = now == null ? '' : briefAgo(t.lastAt, now);
+        final when = ago.isEmpty ? t.lastAt : ago;
         buffer
-          ..writeln('[${i + 1}] ${_stateWords(t.state)} · last message '
-              '${ago.isEmpty ? t.lastAt : ago}'
-              '${t.ranked ? ' · marked urgent or important' : ''}'
-              // The app's words, outside the fence like the state.
-              "${t.invite ? " · this meeting's own invite" : ''}"
-              '${t.source == 'teams' ? ' · Teams chat' : ''}')
+          // The app's words, outside the fence. A part of a chat has no
+          // state of its own, and its age is the newest message SHOWN.
+          ..writeln(t.excerpt
+              ? '[${i + 1}] part of a Teams chat · the latest message shown '
+                  'is from $when'
+              : '[${i + 1}] ${_stateWords(t.state)} · last message $when'
+                  '${t.ranked ? ' · marked urgent or important' : ''}'
+                  "${t.invite ? " · this meeting's own invite" : ''}")
           ..writeln(wrapUntrusted('subject', _label(t.subject)));
         for (final snippet in t.snippets) {
           buffer.writeln(snippet);
