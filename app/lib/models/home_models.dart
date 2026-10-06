@@ -425,6 +425,23 @@ class SemanticHit {
   const SemanticHit(this.row, this.distance);
 }
 
+/// One conversation a brief's search found
+/// (`MessageStore.relatedConversations`, near a query; or
+/// `MessageStore.conversationsFromSenders`, written in by a set of people):
+/// its identity, the COSINE of its nearest message — a similarity,
+/// `1 - SemanticHit.distance`, so bigger is better; 0 when the people's
+/// conversations were asked for by time and nothing was compared — and
+/// WHICH message that was ([messageId], [receivedAt] as stored). The message matters as much as the score: a Teams chat is one
+/// conversation however many subjects pass through it, so "this chat is
+/// related" only means something beside the message that made it so.
+typedef RelatedConversation = ({
+  String source,
+  String conversationKey,
+  double cosine,
+  String messageId,
+  String receivedAt,
+});
+
 /// One keyword-search result: a feed row, how well the words scored, and how
 /// much of the query it actually contained.
 ///

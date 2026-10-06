@@ -78,6 +78,16 @@ void main() {
       ),
       isNull,
     );
+    // The brief's related search passes the same third answer through.
+    expect(
+      await store.relatedConversations(
+        encodeEmbedding(List.filled(embedDims, 0.1)),
+        embedModel: EmbeddingsClient.documentModelTag,
+        sinceIso: '2026-01-01T00:00:00.000000Z',
+        floor: 0.6,
+      ),
+      isNull,
+    );
 
     final result = await MessageSearch(store, workingServer()).search('invoice');
 

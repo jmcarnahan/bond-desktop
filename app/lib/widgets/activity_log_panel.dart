@@ -139,7 +139,9 @@ class ActivityLogPanel extends StatefulWidget {
     'no_others': 'nobody else invited',
     'cancelled': 'cancelled',
     'declined': 'declined',
-    'no_mail': 'no recent mail with these people',
+    'no_mail': 'no recent mail or Teams chats with these people',
+    // No build writes this word any more (there is no people cap); it
+    // words the activity rows older builds stored.
     'too_many': 'too many people',
     'gone': 'no longer on the calendar',
     'materials_pending': 'reading the files sent ahead',
@@ -246,7 +248,15 @@ class ActivityLogPanel extends StatefulWidget {
         case 'ok':
           final threads = detail['threads'];
           final n = threads is num ? threads.toInt() : 0;
-          return '$label — written from $n ${n == 1 ? 'thread' : 'threads'}';
+          // The related path's threads were found by the meeting's subject
+          // — when it found any: a brief from the invite alone says no more.
+          final related = detail['related'];
+          final found =
+              detail['path'] == 'related' && related is num && related > 0
+                  ? ', found by subject'
+                  : '';
+          return '$label — written from $n '
+              '${n == 1 ? 'thread' : 'threads'}$found';
         case 'skipped':
           final why = detail['reason'];
           final words = why is String ? (_briefSkips[why] ?? _reason(why)) : '';

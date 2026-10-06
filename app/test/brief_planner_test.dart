@@ -8,10 +8,12 @@ import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/attachments/attachment_policy.dart'
     show attachmentEntityId;
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/models/home_models.dart' show RelatedConversation;
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/calendar/brief_gatherer.dart';
 import 'package:bond_inbox/services/calendar/brief_planner.dart';
 import 'package:bond_inbox/services/calendar/calendar_zone.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/fake_embed_server.dart';
@@ -190,11 +192,13 @@ void main() {
   test('a fresh brief whose rewrite failed is not retried on the same '
       'inputs until it ages, and is when they move again', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    // Every stamp below is past `rewriteAfter`, so the young-brief guard
+    // holds nothing and each answer is the rule this test is about.
     await calendar.putBrief(
       eventId: 'evt-1',
       inputsHash: 'stale',
       status: EventBrief.ready,
-      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
+      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 31))),
     );
     expect(await plan(), 1);
 
@@ -204,7 +208,7 @@ void main() {
         status: 'done');
     await calendar.touchBrief('evt-1',
         generatedAt: calendarStamp(now.add(const Duration(minutes: 1))));
-    expect(await plan(after: const Duration(minutes: 20)), 0,
+    expect(await plan(after: const Duration(minutes: 35)), 0,
         reason: 'these inputs were already tried while the brief is fresh');
 
     // New mail moves the inputs again.
@@ -245,17 +249,19 @@ void main() {
   test('a ready brief whose rewrite failed IS retried on the same moved '
       'inputs once it is older than two hours', () async {
     await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+    // Past `rewriteAfter` at every pass, so the young-brief guard is not
+    // what any answer below turns on.
     await calendar.putBrief(
       eventId: 'evt-1',
       inputsHash: 'stale',
       status: EventBrief.ready,
-      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 30))),
+      generatedAt: calendarStamp(now.subtract(const Duration(minutes: 31))),
     );
     expect(await plan(), 1);
     await store.writeWork(BriefPlanner.kind, BriefPlanner.source, 'evt-1',
         status: 'done');
     await calendar.touchBrief('evt-1', generatedAt: calendarStamp(now));
-    expect(await plan(after: const Duration(minutes: 20)), 0,
+    expect(await plan(after: const Duration(minutes: 35)), 0,
         reason: 'tried once while fresh');
 
     // Two hours and a bit after the failed rewrite's stamp: the same moved
@@ -264,8 +270,8 @@ void main() {
     expect(await status('evt-1'), 'pending');
   });
 
-  test('the planner makes no embedding call, even when the files have '
-      'passages', () async {
+  test('the planner embeds no passages, even when the files have them: '
+      "its one embedding is the people search's query", () async {
     final chunks = _ChunkStore(db);
     final server = FakeEmbedServer();
     final counting = _CountingGatherer(
@@ -306,14 +312,225 @@ void main() {
     expect(await planning.plan(now: now, zone: la), 2);
     expect(counting.gathers, 2);
     expect(counting.passageAsks, [false, false]);
-    expect(server.calls, 0);
+    // Two topical meetings, two query texts: one search query each, and
+    // nothing embedded as a document.
+    expect(server.inputs, [
+      '${EmbeddingsClient.searchQueryPrefix}Meeting evt-1',
+      '${EmbeddingsClient.searchQueryPrefix}Meeting evt-2',
+    ]);
     expect(chunks.knnCalls, 0);
 
-    // The handler's gather (the default) is the one that embeds — once.
+    // The handler's gather (the default) is the one that embeds the meeting
+    // for its passages — once; its query is cached.
     final asked = await counting.gather(meeting('evt-1'), now: now);
     expect((asked as BriefEligible).input.materials.single.passages,
         isNotEmpty);
+    expect(server.calls, 3);
+    expect(server.inputs.last,
+        isNot(startsWith(EmbeddingsClient.searchQueryPrefix)));
+  });
+
+  test('a related-path meeting costs one embedding call across two passes, '
+      'and an unchanged related set is not queued twice', () async {
+    final related = _RelatedStore(db)
+      ..hits = [
+        (
+          source: 'email',
+          conversationKey: 'c-1',
+          cosine: 0.8,
+          messageId: 'm-c-1',
+          receivedAt:
+              MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+        ),
+      ];
+    final server = FakeEmbedServer();
+    final counting = _CountingGatherer(
+      related,
+      calendar,
+      ownerAddress: () async => owner,
+      zone: () => la,
+      embeddings: server.client,
+    );
+    final planning = BriefPlanner(related, calendar, counting);
+    // Six others: the related path, whoever the threads are with.
+    await calendar.upsertEvents([
+      meeting('evt-big', attendees: [
+        for (var i = 0; i < 6; i++)
+          Attendee(name: 'Guest $i', address: 'guest$i@northwind.com'),
+      ]),
+    ], syncRun: 'run-1');
+
+    expect(await planning.plan(now: now, zone: la), 1);
+    expect(await status('evt-big'), 'pending');
     expect(server.calls, 1);
+    expect(related.calls, 1);
+
+    expect(await planning.plan(now: now.add(const Duration(minutes: 1)), zone: la),
+        0, reason: 'the same related set, already queued');
+    expect(server.calls, 1, reason: 'the query vector is cached');
+    expect(related.calls, 2, reason: 'the search itself runs every pass');
+    // The pending work row alone would also answer 0, so the hash is read
+    // directly: the same related set hashes the same on both passes.
+    expect(counting.hashes, hasLength(2));
+    expect(counting.hashes.last, counting.hashes.first);
+  });
+
+  group('a young ready brief waits out its inputs settling, on either path',
+      () {
+    late _CountingGatherer counting;
+    late BriefPlanner planning;
+
+    setUp(() {
+      final related = _RelatedStore(db)
+        ..hits = [
+          (
+            source: 'email',
+            conversationKey: 'c-1',
+            cosine: 0.8,
+            messageId: 'm-c-1',
+            receivedAt:
+                MessageStore.isoStamp(now.subtract(const Duration(hours: 2))),
+          ),
+        ];
+      counting = _CountingGatherer(
+        related,
+        calendar,
+        ownerAddress: () async => owner,
+        zone: () => la,
+        embeddings: FakeEmbedServer().client,
+      );
+      planning = BriefPlanner(related, calendar, counting);
+    });
+
+    /// Six others: the related path.
+    CalendarEvent big(String id, {Duration startsIn = const Duration(hours: 3)}) =>
+        meeting(id, startsIn: startsIn, attendees: [
+          for (var i = 0; i < 6; i++)
+            Attendee(name: 'Guest $i', address: 'guest$i@northwind.com'),
+        ]);
+
+    /// A stored row under an OLD hash, written [age] ago. No work row is
+    /// left pending, so a 0 below is the guard and never a queued row.
+    Future<void> stored(String id, Duration age,
+            {String status = EventBrief.ready}) =>
+        calendar.putBrief(
+          eventId: id,
+          inputsHash: 'stale',
+          status: status,
+          briefJson: status == EventBrief.ready ? '{"headline":"Old."}' : null,
+          generatedAt: calendarStamp(now.subtract(age)),
+        );
+
+    Future<int> planAt([Duration after = Duration.zero]) =>
+        planning.plan(now: now.add(after), zone: la);
+
+    test('related, ten minutes old, meeting three hours off: nothing queued',
+        () async {
+      await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 10));
+      expect(await planAt(), 0);
+      expect(counting.hashes.single, isNot('stale'),
+          reason: 'the inputs did move; the guard is what held it');
+      expect(await status('evt-big'), isNull);
+    });
+
+    test('related, thirty-one minutes old: queued', () async {
+      await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 31));
+      expect(await planAt(), 1);
+      expect(await status('evt-big'), 'pending');
+    });
+
+    test('people, ten minutes old, meeting three hours off: nothing queued',
+        () async {
+      // Dana alone, with mail: the people path.
+      await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+      await stored('evt-1', const Duration(minutes: 10));
+      expect(await planAt(), 0);
+      expect(counting.hashes.single, isNot('stale'),
+          reason: 'the inputs did move; the guard is what held it');
+      expect(await status('evt-1'), isNull);
+    });
+
+    test('people, thirty-one minutes old: queued', () async {
+      await calendar.upsertEvents([meeting('evt-1')], syncRun: 'run-1');
+      await stored('evt-1', const Duration(minutes: 31));
+      expect(await planAt(), 1);
+      expect(await status('evt-1'), 'pending');
+    });
+
+    test('a meeting inside the hour waits only five minutes, on either path',
+        () async {
+      expect(BriefPlanner.rewriteAfter, const Duration(minutes: 30));
+      expect(BriefPlanner.rewriteNear, const Duration(hours: 1));
+      expect(BriefPlanner.rewriteNearAfter, const Duration(minutes: 5));
+      await calendar.upsertEvents([
+        big('evt-big', startsIn: const Duration(minutes: 40)),
+        meeting('evt-1', startsIn: const Duration(minutes: 45)),
+      ], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 2));
+      await stored('evt-1', const Duration(minutes: 2));
+      expect(await planAt(), 0);
+      expect(counting.hashes, hasLength(2));
+      expect(counting.hashes, everyElement(isNot('stale')),
+          reason: 'both moved; the near wait is what held them');
+      expect(await status('evt-big'), isNull);
+      expect(await status('evt-1'), isNull);
+    });
+
+    test('and is queued once past those five minutes, on either path',
+        () async {
+      await calendar.upsertEvents([
+        big('evt-big', startsIn: const Duration(minutes: 40)),
+        meeting('evt-1', startsIn: const Duration(minutes: 45)),
+      ], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 6));
+      await stored('evt-1', const Duration(minutes: 6));
+      expect(await planAt(), 2);
+      expect(await status('evt-big'), 'pending');
+      expect(await status('evt-1'), 'pending');
+    });
+
+    test('only a READY row is held: none, failed and skipped are queued as '
+        'before, on either path, far or near', () async {
+      await calendar.upsertEvents([
+        big('evt-none'),
+        big('evt-failed', startsIn: const Duration(hours: 3, minutes: 5)),
+        big('evt-skipped', startsIn: const Duration(hours: 3, minutes: 10)),
+        meeting('p-failed', startsIn: const Duration(minutes: 30)),
+        meeting('p-skipped', startsIn: const Duration(minutes: 35)),
+      ], syncRun: 'run-1');
+      await stored('evt-failed', const Duration(minutes: 10),
+          status: EventBrief.failed);
+      await stored('evt-skipped', const Duration(minutes: 10),
+          status: EventBrief.skipped);
+      await stored('p-failed', const Duration(minutes: 1),
+          status: EventBrief.failed);
+      await stored('p-skipped', const Duration(minutes: 1),
+          status: EventBrief.skipped);
+      expect(await planAt(), 5);
+      for (final id in [
+        'evt-none',
+        'evt-failed',
+        'evt-skipped',
+        'p-failed',
+        'p-skipped',
+      ]) {
+        expect(await status(id), 'pending', reason: id);
+      }
+    });
+
+    test('the guard only delays: the same moved inputs are queued once the '
+        'brief is past thirty minutes', () async {
+      await calendar.upsertEvents([big('evt-big')], syncRun: 'run-1');
+      await stored('evt-big', const Duration(minutes: 10));
+      expect(await planAt(), 0);
+      expect(await status('evt-big'), isNull);
+      expect(await planAt(const Duration(minutes: 25)), 1);
+      expect(await status('evt-big'), 'pending');
+      expect(counting.hashes.last, counting.hashes.first,
+          reason: 'the same moved inputs on both passes');
+    });
   });
 
   test('an old brief is requeued only when its inputs moved', () async {
@@ -668,27 +885,57 @@ void main() {
   });
 
   group('the ineligible reasons it records', () {
-    test('no mail, nobody else and too many people each get a skipped row, '
-        'with no work queued', () async {
+    test('no mail and nobody else each get a skipped row, with no work '
+        'queued; a town hall is briefed', () async {
       await calendar.upsertEvents([
         meeting('evt-ed', attendees: const [Attendee(name: 'Ed', address: ed)]),
         meeting('solo',
             attendees: const [Attendee(name: 'Me', address: owner)]),
         meeting('town-hall', attendees: [
           const Attendee(name: 'Dana Lee', address: dana),
-          for (var i = 0; i < briefMaxOthers; i++)
+          for (var i = 0; i < 15; i++)
             Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
         ]),
       ], syncRun: 'run-1');
 
-      expect(await plan(), 0);
+      expect(await plan(), 1);
       final rows = await calendar.briefsFor(['evt-ed', 'solo', 'town-hall']);
       expect(rows['evt-ed']?.skipReason, 'no_mail');
       expect(rows['solo']?.skipReason, 'no_others');
-      expect(rows['town-hall']?.skipReason, 'too_many');
-      for (final id in ['evt-ed', 'solo', 'town-hall']) {
+      expect(rows['town-hall'], isNull);
+      for (final id in ['evt-ed', 'solo']) {
         expect(await status(id), isNull, reason: id);
       }
+      expect(await status('town-hall'), 'pending',
+          reason: 'sixteen others: the related path, no people cap');
+    });
+
+    test('a stored too_many row from an older build is queued on the next '
+        'pass', () async {
+      await calendar.upsertEvents([
+        meeting('town-hall', attendees: [
+          for (var i = 0; i < 16; i++)
+            Attendee(name: 'Guest $i', address: 'guest$i@fabrikam.com'),
+        ]),
+      ], syncRun: 'run-1');
+      await calendar.putBrief(
+        eventId: 'town-hall',
+        inputsHash: '${EventBrief.ineligiblePrefix}too_many',
+        status: EventBrief.skipped,
+        generatedAt: calendarStamp(now.subtract(const Duration(minutes: 5))),
+      );
+      // No work row before the pass, so a queued row can only be this
+      // pass's doing.
+      expect(await status('town-hall'), isNull);
+
+      expect(await plan(), 1);
+      expect(await status('town-hall'), 'pending');
+      expect(gatherer.hashes, hasLength(1));
+      expect(gatherer.hashes.single,
+          isNot(startsWith(EventBrief.ineligiblePrefix)));
+      expect(gatherer.hashes.single,
+          isNot((await calendar.brief('town-hall'))!.inputsHash),
+          reason: 'the stored row still says too_many; the gathered hash moved');
     });
 
     test('a row that already says so is not rewritten', () async {
@@ -801,11 +1048,17 @@ class _CountingGatherer extends BriefGatherer {
     required DateTime now,
     bool passages = true,
     bool asked = false,
-  }) {
+  }) async {
     gathers++;
     passageAsks.add(passages);
-    return super.gather(event, now: now, passages: passages, asked: asked);
+    final gathered =
+        await super.gather(event, now: now, passages: passages, asked: asked);
+    if (gathered is BriefEligible) hashes.add(gathered.input.inputsHash);
+    return gathered;
   }
+
+  /// The inputs hash of every eligible gather, in order.
+  final List<String> hashes = [];
 }
 
 /// [MessageStore] whose files always have chunks and whose KNN answers one
@@ -844,5 +1097,25 @@ class _ChunkStore extends MessageStore {
           outbound: false,
         ),
     ];
+  }
+}
+
+/// [MessageStore] whose related search answers [hits] and counts its calls.
+class _RelatedStore extends MessageStore {
+  _RelatedStore(super.db);
+
+  List<RelatedConversation> hits = const [];
+  int calls = 0;
+
+  @override
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async {
+    calls++;
+    return hits;
   }
 }

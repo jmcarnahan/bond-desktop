@@ -708,16 +708,24 @@ class BriefThreadRef {
   final String conversationKey;
   final String subject;
 
+  /// Whether this is one of the meeting's own invite threads, which lead the
+  /// list on either path. Written only when true, so a ref without one keeps
+  /// the shape every older row has; anything but a literal `true` reads
+  /// false.
+  final bool invite;
+
   const BriefThreadRef({
     required this.source,
     required this.conversationKey,
     required this.subject,
+    this.invite = false,
   });
 
   Map<String, Object?> toJson() => {
         'source': source,
         'conversation_key': conversationKey,
         'subject': subject,
+        if (invite) 'invite': true,
       };
 
   static BriefThreadRef? fromJson(Object? raw) {
@@ -728,6 +736,7 @@ class BriefThreadRef {
       source: _str(raw['source'], fallback: 'email'),
       conversationKey: key,
       subject: _str(raw['subject']),
+      invite: raw['invite'] == true,
     );
   }
 }
@@ -887,6 +896,17 @@ class MeetingBrief {
   /// same way as [threads].
   final List<BriefMaterialRef> materialRefs;
 
+  /// Which way [threads] were found: [pathPeople] (the mail with the people
+  /// in the meeting) or [pathRelated] (the threads nearest its subject).
+  /// The words are the gatherer's `BriefPath.wire`, written here as literals
+  /// because models never import services; a test pins the two together. A
+  /// row written before this field is [pathPeople], which every such row
+  /// was.
+  final String path;
+
+  static const String pathPeople = 'people';
+  static const String pathRelated = 'related';
+
   const MeetingBrief({
     this.evidence = '',
     required this.headline,
@@ -899,11 +919,13 @@ class MeetingBrief {
     this.prep = const [],
     this.threads = const [],
     this.materialRefs = const [],
+    this.path = pathPeople,
   });
 
   MeetingBrief _copy({
     List<BriefThreadRef>? threads,
     List<BriefMaterialRef>? materialRefs,
+    String? path,
   }) =>
       MeetingBrief(
         evidence: evidence,
@@ -917,6 +939,7 @@ class MeetingBrief {
         prep: prep,
         threads: threads ?? this.threads,
         materialRefs: materialRefs ?? this.materialRefs,
+        path: path ?? this.path,
       );
 
   MeetingBrief withThreads(List<BriefThreadRef> threads) =>
@@ -924,6 +947,16 @@ class MeetingBrief {
 
   MeetingBrief withMaterials(List<BriefMaterialRef> materialRefs) =>
       _copy(materialRefs: materialRefs);
+
+  MeetingBrief withPath(String path) => _copy(path: path);
+
+  /// Whether the threads were found by the meeting's subject.
+  bool get isRelated => path == pathRelated;
+
+  /// How many of [threads] the related search found (the invite threads
+  /// aside); 0 on the people path.
+  int get relatedThreadCount =>
+      isRelated ? threads.where((t) => !t.invite).length : 0;
 
   /// The thread [index] names, or null for -1 or an index the stored list
   /// does not hold (a row written by an older build).
@@ -950,6 +983,7 @@ class MeetingBrief {
         'open_asks': [for (final a in openAsks) a.toJson()],
         'points': [for (final p in points) p.toJson()],
         'prep': prep,
+        'path': path,
         'threads': [for (final t in threads) t.toJson()],
         'material_refs': [for (final r in materialRefs) r.toJson()],
       };
@@ -1020,6 +1054,9 @@ class MeetingBrief {
                 name: '',
               ),
       ],
+      // Only the exact word is related; a missing, null or unknown value is
+      // the people path every older row was written on.
+      path: json['path'] == pathRelated ? pathRelated : pathPeople,
     );
   }
 

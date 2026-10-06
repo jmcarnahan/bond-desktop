@@ -10852,6 +10852,225 @@ $where
     return ranked;
   }
 
+  /// The conversations nearest [queryEmbedding], nearest first, each scored
+  /// by its BEST message's cosine (`1 - distance`): what a meeting brief's
+  /// related search reads. Mail and Teams, dropped messages excluded,
+  /// messages received since [sinceIso] only.
+  ///
+  /// [semanticSearch]'s KNN and its model, dropped, date and source filters,
+  /// but a read of its own: that one hydrates a feed row per hit (five joins
+  /// and four subqueries) and keeps only the nearest [semanticSearch] `limit`
+  /// messages, where this is asked once per meeting on every brief plan and
+  /// must not let one busy chat's hundred near messages crowd every other
+  /// conversation out. So it takes ALL of the [_keywordCap] neighbours, keeps
+  /// those at or above [floor] (the list is nearest first, so it stops at the
+  /// first below), and reads three columns for them. The first, and so best,
+  /// message per `(source, conversationKey)` is the conversation's; it stops
+  /// at [limit] conversations.
+  ///
+  /// Null when the index is unavailable, [semanticSearch]'s third answer.
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async {
+    if (!await _vecIndex.ensureReady()) return null;
+    // Heal before asking, as [semanticSearch] does and for its reason.
+    await _vecIndex.backfill();
+    final near = [
+      for (final hit in await _vecIndex.knn(queryEmbedding, k: _keywordCap))
+        if (1 - hit.distance >= floor) hit,
+    ];
+    if (near.isEmpty) return const [];
+
+    final result = await db
+        .customSelect(
+          '''
+SELECT v.id AS vector_id, p.source, p.conversation_key,
+       p.source_message_id, p.received_at
+FROM message_vectors v
+JOIN message_progress p
+  ON p.source = v.source AND p.source_message_id = v.source_message_id
+WHERE v.id IN (${_placeholders(near.length)}) AND v.embed_model = ?
+  AND p.dropped = 0 AND p.received_at >= ?
+  AND p.source IN ('email', 'teams')
+''',
+          variables: _args([
+            for (final hit in near) hit.id,
+            embedModel,
+            sinceIso,
+          ]),
+        )
+        .get();
+    final byVector = {
+      for (final row in result) row.data['vector_id'] as int: row.data,
+    };
+
+    final seen = <(String, String)>{};
+    final out = <RelatedConversation>[];
+    for (final hit in near) {
+      if (out.length >= limit) break;
+      final row = byVector[hit.id];
+      if (row == null) continue;
+      final source = row['source'] as String;
+      final key = row['conversation_key'] as String;
+      if (!seen.add((source, key))) continue;
+      out.add((
+        source: source,
+        conversationKey: key,
+        cosine: 1 - hit.distance,
+        messageId: row['source_message_id'] as String,
+        receivedAt: row['received_at'] as String,
+      ));
+    }
+    return out;
+  }
+
+  /// The conversations a set of PEOPLE wrote in since [sinceIso], each with
+  /// the one message of theirs that stands for it: what a meeting brief
+  /// reads about the people in a small meeting. Mail and Teams, kept inbound
+  /// messages only. A mail is theirs by its sender's address ([addresses]);
+  /// a chat message by its sender's display name ([names]), because a chat
+  /// knows its people by id and name and never by address.
+  ///
+  /// With [queryEmbedding] it is [relatedConversations]' search with the
+  /// senders and the date as an extra constraint, and no floor: each
+  /// conversation is scored by the cosine of their message nearest the
+  /// query, nearest first. vec0 can only be asked for neighbours, not for
+  /// neighbours-matching-a-predicate, and these people's messages can sit
+  /// far outside the mailbox's nearest [_keywordCap]; so the stored vectors
+  /// of just their messages are compared in SQL (`vec_distance_cosine`), a
+  /// few hundred rows at most. Only a message with a vector under
+  /// [embedModel] can be scored. Null when the index's functions are not on
+  /// this connection, [semanticSearch]'s third answer.
+  ///
+  /// Without it nothing is compared and no vector is needed: each
+  /// conversation is stood for by their NEWEST message, newest first, and
+  /// the cosine reads 0.
+  ///
+  /// One row per conversation either way (SQLite hands a bare column the
+  /// value of the row its one `MIN` or `MAX` came from), so a chat busy
+  /// with one of them cannot crowd the other conversations out of [limit].
+  /// Both sides of the sender match are folded as SQLite's `lower` folds
+  /// (ASCII letters only), so a name's accented capital matches itself.
+  Future<List<RelatedConversation>?> conversationsFromSenders({
+    Uint8List? queryEmbedding,
+    required String embedModel,
+    required Set<String> addresses,
+    required Set<String> names,
+    required String sinceIso,
+    int limit = 12,
+  }) async {
+    List<String> folded(Set<String> values) => {
+          for (final v in values)
+            if (v.trim().isNotEmpty) _asciiLower(v.trim()),
+        }.toList();
+    final mail = folded(addresses);
+    final chat = folded(names);
+    if (mail.isEmpty && chat.isEmpty) return const [];
+    if (queryEmbedding != null && !await _vecIndex.ensureReady()) return null;
+
+    final sender = [
+      if (mail.isNotEmpty)
+        "(p.source = 'email' AND lower(trim(m.from_address)) "
+            'IN (${_placeholders(mail.length)}))',
+      if (chat.isNotEmpty)
+        "(p.source = 'teams' AND lower(trim(m.from_name)) "
+            'IN (${_placeholders(chat.length)}))',
+    ].join(' OR ');
+    const from = 'FROM message_progress p '
+        'JOIN messages m ON m.source = p.source '
+        '  AND m.source_message_id = p.source_message_id ';
+    final theirs = "p.dropped = 0 AND p.received_at >= ? "
+        "AND m.direction = 'inbound' AND ($sender) ";
+
+    final result = queryEmbedding == null
+        ? await db
+            .customSelect(
+              'SELECT p.source, p.conversation_key, p.source_message_id, '
+              'MAX(p.received_at) AS stamp '
+              '$from WHERE $theirs '
+              'GROUP BY p.source, p.conversation_key '
+              'ORDER BY stamp DESC, p.conversation_key ASC LIMIT ?',
+              variables: _args([sinceIso, ...mail, ...chat, limit]),
+            )
+            .get()
+        : await db
+            .customSelect(
+              'SELECT p.source, p.conversation_key, p.source_message_id, '
+              'p.received_at AS stamp, '
+              'MIN(vec_distance_cosine(v.embedding, ?)) AS distance '
+              '$from JOIN message_vectors v ON v.source = p.source '
+              '  AND v.source_message_id = p.source_message_id '
+              // The width with the tag: the distance function refuses two
+              // vectors of different widths, and that would fail the whole
+              // statement for one old row.
+              'WHERE v.embed_model = ? AND v.dims = ? AND $theirs '
+              'GROUP BY p.source, p.conversation_key '
+              'ORDER BY distance ASC, p.conversation_key ASC LIMIT ?',
+              variables: [
+                Variable<Uint8List>(queryEmbedding),
+                ..._args([
+                  embedModel,
+                  MessageVectorIndex.dims,
+                  sinceIso,
+                  ...mail,
+                  ...chat,
+                  limit,
+                ]),
+              ],
+            )
+            .get();
+    return [
+      for (final row in result)
+        (
+          source: row.data['source'] as String,
+          conversationKey: row.data['conversation_key'] as String,
+          // Nothing was compared without a query.
+          cosine: queryEmbedding == null
+              ? 0
+              : 1 - (row.data['distance'] as num).toDouble(),
+          messageId: row.data['source_message_id'] as String,
+          receivedAt: row.data['stamp'] as String,
+        ),
+    ];
+  }
+
+  /// [s] with its ASCII capitals lowered and nothing else touched: what
+  /// SQLite's `lower` does, for a value compared against a `lower(column)`.
+  static String _asciiLower(String s) => s.replaceAllMapped(
+      RegExp('[A-Z]'), (m) => m[0]!.toLowerCase());
+
+  /// One conversation's messages received from [fromIso] to [toIso], both
+  /// inclusive, oldest first: the part of a chat around one moment, for a
+  /// caller that must not load a room's whole history to read one exchange.
+  /// No attachments are hydrated ([loadThread] is the read that draws a
+  /// thread), and nothing is filtered: the owner's own messages and a
+  /// dropped one are part of what was said. A message with no `received_at`
+  /// is placed by when it was stored, [loadThread]'s rule and the stamp
+  /// `message_progress` (and so [relatedConversations]) carries for it.
+  Future<List<Message>> messagesBetween(
+    String source,
+    String conversationKey, {
+    required String fromIso,
+    required String toIso,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          'WHERE source = ? AND conversation_key = ? '
+          'AND COALESCE(received_at, created_at) >= ? '
+          'AND COALESCE(received_at, created_at) <= ? '
+          'ORDER BY COALESCE(received_at, created_at) ASC, '
+          'source_message_id ASC',
+          variables: _args([source, conversationKey, fromIso, toIso]),
+        )
+        .get();
+    return [for (final row in result) Message.fromRow(row.data)];
+  }
+
   /// The most rowids either word read will carry back into Dart.
   ///
   /// `semanticSearch` caps its `k` at the same number and for the same reason:
