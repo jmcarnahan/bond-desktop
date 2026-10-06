@@ -49,6 +49,31 @@ enforce the ones that are commands.
   `customSelect` must never carry a write: a read pool would send it to a
   reader (four `INSERT … RETURNING` sites still do, which is why there is no
   pool), so a new write that returns rows uses `customWriteReturning`.
+- Every statement is a ROUND TRIP to the database isolate, so a loop of
+  single statements is the thing to avoid: `db.batch((b) =>
+  b.customStatement(sql, [first, second]))` is one round trip and one
+  transaction (the arguments are raw values, not `Variable`s; a `Uint8List`
+  binds as a BLOB, to a vec0 table too). `test/fixtures/counting_interceptor.dart`
+  (`CountingInterceptor`, `countingTestDb()`) counts statements by kind, and
+  is how a test says "one batch" or "no write". `make app-profile
+  BOND_PERF_LOG=1` prints UI stalls and slow statements
+  (`docs/performance.md`); the gates cannot see performance.
+- Timers under `testWidgets`: a bare `tester.pump()` does NOT advance the
+  fake clock, so a zero-duration timer (Riverpod's autoDispose check after a
+  `sub.close()`) needs `pump(const Duration(milliseconds: 1))`; `await
+  sub.cancel()` on a `StreamSubscription` in a test body hangs the run
+  silently (`unawaited(sub.cancel()); await tester.pump();`); an
+  `addTearDown` runs AFTER the pending-timer check, so a test that proves
+  "nothing fires after dispose" disposes in its body.
+- A read model that follows the activity tick re-reads a window after its
+  event: `await tester.pump(activityTickWindow)` (250 ms,
+  `providers/activity_provider.dart`) before asserting on it, or the real
+  wait in a plain `test`.
+- A list load logs READ, then RECOMPUTE (it reads the rows and hands them to
+  the attention pass). A double that watches a load overrides
+  `MessageStore.conversationRows` and `AttentionService.recompute`;
+  `loadConversations` and `recomputeAll` still exist and delegate to them
+  (`pipeline_settle_test.dart`).
 - Screen tests NEVER `pumpAndSettle` on `InboxScreen` (a 60 s periodic timer
   and no-looping-animation rule): three bare `tester.pump()` calls is the
   idiom; `pump(Duration(milliseconds: 400))` for scoring passes.
@@ -179,6 +204,48 @@ enforce the ones that are commands.
 - `services/` never imports `providers/`; no dialogs or popups
   (`test/no_dialogs_test.dart`) — every surface is a screen or pane with a
   back button.
+- The attention pass (`AttentionService.recompute`,
+  `docs/pipeline/08-attention.md`) writes EVERY score and bucket in one batch
+  (`MessageStore.writeAttentionPass`) and skips none for being unchanged:
+  each write stamps `conversation_ai.updated_at`, which
+  `NotificationCoordinator._isComplete` reads as "the pass has seen this
+  thread since its message changed", so a skipped write holds a notification
+  to its deadline. The stamp is taken as the pass STARTS, before its reads.
+  Its clock ticks once a minute (`minuteOf`, cut on the instant), which is
+  what makes an unchanged thread score bit-identically within the minute.
+- The inbox list applies the pass's writes to the rows it just read
+  (`AttentionPass.applyTo`) rather than reading twice. That is exact only
+  because the list query reads just `bucket`, `attention_score` and
+  `snoozed_until` off `conversation_ai` and selects no BLOB: a new list
+  column the pass writes goes into `applyTo` (the parity test in
+  `attention_service_test.dart` fails otherwise), and a BLOB added to that
+  SELECT goes under `listEquals` in `sameConversationRows`.
+- `ConversationsNotifier` replaces its state only when the RAW rows or the
+  error changed (`_shownRows`, `sameConversationRows`); its `state` setter
+  drops `_shownRows` on every other assignment, which is what lets the next
+  reload correct an optimistic patch the store did not keep. So the list
+  state is NOT a tick: something that must re-run on every reload watches
+  something else (`schedulingAsksProvider` follows the state and can lag a
+  decision rewrite by up to a minute; owner actions invalidate it). The
+  progress-driven reload goes through a `Coalescer` (`utils/coalescer.dart`:
+  400 ms after the last report, at most 2 s into a burst, one at a time); a
+  load the user asked for calls `load` directly.
+- `activityTickProvider` is the one tick eleven read models follow: a
+  notifier holding its own subscription to `coalesceLatest(log.events,
+  activityTickWindow)`, NOT a `StreamProvider` (Riverpod 2.6.1 keeps a
+  listener on the stream when a stream provider is disposed before its first
+  event). Its watchers never read a value off it, and anything that needs
+  EVERY event listens to `ActivityLog.events` itself, as the notification
+  coordinator does. `MessageStore.recordActivity` returns the row it wrote
+  and `ActivityLog.record` announces that row.
+- `decodeEmbedding` returns a fixed-length `Float32List`, on the usual path
+  a VIEW over the blob's own bytes: a decoded vector is read, never grown or
+  written to, and `identical(a.buffer, b.buffer)` is always false on the VM
+  (compare `==`). `cosine`'s typed branch does the general loop's sums in
+  the same order and must keep doing so — sweep results may not move without
+  a `make golden-sweep` row on each side. `ConversationVectorIndex.backfill`
+  reads keys, hashes and widths, fetches a vector only for a row it writes,
+  and writes nothing when the index is level.
 - Mail and chat HTML keep their links the same way: `holdAnchorRuns` before
   the converter's own tag strip + entity decode, then `releaseHeldMarks` /
   `stripHeldMarks` (`html_text.dart`; both `_mailText` and `stripChatHtml`).

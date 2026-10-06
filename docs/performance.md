@@ -17,6 +17,14 @@ the connection opens (`loadSqliteVecInIsolate`), and the launch log's
 same-isolate executor (`BondDatabase.memory()` / `BondDatabase.open`), because
 a widget test's fake-async zone must never wait on a real isolate.
 
+Stored vectors are read in place as float32 (`decodeEmbedding` returns a
+`Float32List` view over the blob's bytes), so a storyline pass that reads
+thousands of them builds no boxed double per element. And the clustering
+index's backfill, which runs at the start of every sweep, no longer carries
+every 4 KB vector across from the database isolate to find out that nothing
+changed: it compares keys and hashes, and fetches a vector only for a row it
+writes.
+
 ## What rides on a tick
 
 Moving the database off the UI isolate does not make a read free; it only

@@ -342,7 +342,9 @@ carries the `(source, conversation_key)` pair and the `embedded_hash` on the
 vec0 row itself (sqlite-vec *auxiliary* columns), and its backfill is a **diff**
 — insert what is missing, replace what re-embedded under a new hash, delete
 what left the corpus or was re-tagged to another model. That diff is a full
-scan of both sides, run once per sweep against a few hundred rows; it is worth
+scan of both sides' keys, hashes and vector widths, run once per sweep against
+a few hundred rows; a vector itself is read only for a row being inserted, and
+a sweep that finds the index level writes nothing. The scan is worth
 revisiting if the clustering corpus ever reaches the tens of thousands.
 
 **No chat-model call.** The server is a third llama-server in embedding mode.
