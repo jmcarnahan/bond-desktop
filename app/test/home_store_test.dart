@@ -7,6 +7,7 @@ import 'package:bond_inbox/widgets/app_rail.dart' show isNeedsYou, needsYouRows;
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 
 /// The reads behind the home screen: the tiles, the feed, the live patch, and
@@ -123,7 +124,7 @@ void main() {
       });
     }
     if (attentionScore != null) {
-      await store.writeAttentionScore(source, conversationKey, attentionScore);
+      await writeScore(store, source, conversationKey, attentionScore);
     }
     if (bucket != null) {
       await store.setConversationBucket(
@@ -1201,7 +1202,7 @@ void main() {
         bucket: 'later',
         reason: 'low_value',
       );
-      await store.writeAttentionScore('email', 'c1', 0.42);
+      await writeScore(store, 'email', 'c1', 0.42);
       await seedStoryline('sl-1');
       await store.addStorylineMember(
         'sl-1',
@@ -1746,7 +1747,7 @@ void main() {
       await db.customUpdate(
         "UPDATE messages SET needs_you_p = 0.3 WHERE conversation_key = 'live'",
       );
-      await store.writeAttentionScore('email', 'live', 0.01);
+      await writeScore(store, 'email', 'live', 0.01);
 
       Future<int> counted(double threshold) async =>
           (await store.homeMetrics(

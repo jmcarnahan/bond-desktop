@@ -44,6 +44,11 @@ not the tick.
 A read now queues behind a long write transaction on the one connection. The
 UI stays live while it waits, but the data can arrive later than it used to.
 
+The connection also waits up to five seconds for a lock rather than failing on
+one (`waitOutLocks`), which only ever matters after a debug hot restart, while
+the old isolate's connection is still being closed. On a `BOND_DB_UI_ISOLATE`
+build that wait is on the UI isolate.
+
 A read pool is deliberately not used yet. Four `INSERT … RETURNING`
 statements run through `customSelect` (two in `context_store.dart`, two in
 `message_store.dart`), which a pool would send to a reader connection — the
@@ -66,12 +71,18 @@ spends. It is not what to measure.
 
 `BOND_PERF_LOG` prints two kinds of line to the run's console.
 
-- `ui-stall <ms>ms` — a 50 ms heartbeat timer runs on the UI isolate, and a
+- `ui-stall <ms>ms` — a 10 ms heartbeat timer runs on the UI isolate, and a
   tick can only fire when that isolate is free, so how late it fires is how
-  long the isolate was blocked. A lateness of 100 ms or more gets a line.
-  Every 60 seconds a summary follows, `ui-stalls 60s: n=<count> max=<ms>ms
-  total=<ms>ms`, printed even when the count is zero so a quiet minute is
-  visible.
+  long the isolate was blocked, read at most 10 ms short (the timer keeps to
+  a fixed grid, so a block that starts between two ticks loses the part of
+  the gap already spent; at a 50 ms heartbeat a 100 ms freeze read as 54 to
+  99 and was never logged, which is why it is 10). A lateness of 100 ms or
+  more gets a line. Every 60 seconds a summary follows, `ui-stalls 60s:
+  janks=<n> stalls=<n> max=<ms>ms blocked=<ms>ms`: `janks` counts heartbeats
+  late by 33 ms or more (two frames, the first a person can see), `stalls`
+  those late by 100 ms or more, `max` the worst, and `blocked` the sum of
+  every lateness of a jank or more. It is printed even when everything is
+  zero, so a quiet minute is visible.
 - `db-slow <ms>ms <kind> <sql>` — a statement that took 50 ms or more as the
   UI isolate saw it: the wait in the connection's queue, the hop to the
   database isolate and back, and the execution. `<kind>` is `select`,
@@ -83,9 +94,66 @@ spends. It is not what to measure.
   a slow `open` mid-session is a transaction waiting its turn behind another
   one), `commit` and `rollback`.
 
+What to read first in a run: the `blocked` total and the `janks` count of the
+minutes a burst covered, then the `db-slow` lines. A line shows only the first
+120 characters of its statement, so know these by how they START: `select
+SELECT c.*, ai.bucket AS bucket` is the inbox's list read, `select SELECT
+conversation_key, source, source_message_id, from_address` is the attention
+pass's read of every thread's newest message, and `open -` in the middle of a
+session is a transaction that waited its turn. Those three say whether a click
+that needs data is still waiting behind a reload.
+
 The gates (`flutter analyze` and `flutter test`) cannot see performance. The
-before and after numbers — stall count, worst stall, total, and the slowest
+before and after numbers — janks, stalls, worst, blocked, and the slowest
 statements — go in the PR description.
+
+## A bench without the app
+
+`make bench-ui` measures the same thing with no app and no server
+(`app/test/ui_stall_bench_test.dart`, skipped in every ordinary run). It seeds
+a fictional mailbox on a temp file and drives the real store while a
+`UiStallMonitor` heartbeat runs on the test's own isolate, which stands in for
+the UI isolate. Each scenario runs on both executors — `ui`, SQLite on that
+isolate, which is what `main` did, and `bg`, SQLite on a background isolate —
+and the two that changed algorithm run `main`'s version beside the branch's
+(kept in the bench file as its baseline, nowhere else). It prints a table and
+asserts only shape: a timing that holds on one machine fails for no defect on
+another.
+
+It runs under `flutter test`, so the Dart-side costs are several times a
+release build's and SQLite's are not: read the rows against each other, not
+as what a user sees. `BENCH_UI_THREADS`, `BENCH_UI_RELOADS`, `BENCH_UI_ARRIVAL`
+and `BENCH_UI_LABEL` size and name a run; `BENCH_UI_OUT=<dir>` also writes the
+rows as JSON. Run each row twice and keep the second, and record the keeper
+here: the JSON is disposable, this table is the record.
+
+**2026-10-06, M-series Mac, the round that moved the database off the UI
+isolate.** `worst` is the longest the isolate was blocked in one go, in
+milliseconds, read at most 10 short; `blocked` is the sum of every block of
+33 ms or more, so a 0 there means no jank, not no work; a reload row is ten
+reloads, so its `worst` is one reload.
+
+| Scenario | Threads | `main` (its algorithm, `ui`): worst / blocked | Branch (`bg`): worst / blocked | Time per reload, branch |
+|---|---|---|---|---|
+| Reload ×10 | 2,000 | 523 / 5,015 | 3 / 0 | about 100 |
+| Reload ×10 | 5,000 | 1,362 / 13,136 | 13 / 0 | about 290 |
+| Arrival of 200 messages | 2,000 | 37 / 37 | 1 / 0 | n/a |
+| Index backfill ×5, corpus unchanged | 2,000 | 82 / 82 | 2 / 0 | n/a |
+| Index backfill ×5, corpus unchanged | 5,000 | 265 / 265 | 9 / 0 | n/a |
+
+What the rows say. Every reload `main` made was a stall, half a second at
+2,000 threads and about 1.4 s at 5,000; on the branch no reload is
+even a jank (nothing reaches 33 ms). The two changes need each other: `main`'s
+transaction-per-thread pass run on the background connection blocks nothing
+but takes LONGER end to end (6.8 s against 5.4 s for ten reloads at 2,000
+threads, a round trip per statement), and the branch's batched pass run on the
+UI isolate still freezes it for about 100 ms a reload. The last column is the
+trade in numbers: it is a whole reload end to end, this isolate's own share
+included, so it is the most a read that needs the connection can wait behind
+one. The backfill's own change (keys and hashes instead of every vector)
+saves little time at these sizes — 79 ms against 82 for five passes on the
+`ui` arm — and reading vectors in place saves 16 ms per 2,000; what took those
+two off the UI isolate was the background connection.
 
 ## A second opinion: the VM-service probe
 

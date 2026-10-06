@@ -58,6 +58,34 @@ enforce the ones that are commands.
   is how a test says "one batch" or "no write". `make app-profile
   BOND_PERF_LOG=1` prints UI stalls and slow statements
   (`docs/performance.md`); the gates cannot see performance.
+- `make bench-ui` (`test/ui_stall_bench_test.dart`, `@Skip`'d, so one more
+  skipped file in every run) is the serverless measure of how long the UI
+  isolate is blocked: both executors, the branch's reload beside the one
+  `main` ran (kept in that file as its baseline and nowhere else). It prints
+  and asserts shape only; keeper rows go in the table in
+  `docs/performance.md`. A change to the reload, the ingest or the index
+  backfill is measured with it on each side, run twice, second kept, alone.
+  Its test name must keep clear of `triage`, `reply`, `storyline`, `sweep`
+  and `gates`.
+- The stall heartbeat (`UiStallMonitor`) reads a block short by up to its
+  interval, because a periodic timer keeps to a fixed grid: it is 10 ms for
+  that reason (at 50 a 100 ms freeze read 54–99). A REAL-time test asserts a
+  floor only, never a ceiling or an exact count: a loaded machine can only
+  make a wait longer, and a real-time window that "five events fit inside"
+  is a flake (it was; that test is on the fake clock now).
+- The app's connection sets `busy_timeout` (5 s) as it OPENS (`waitOutLocks`,
+  the executor's `setup:` in `lib/data/db.dart`), not in `beforeOpen`: drift
+  reads the version and runs a pending migration before that callback, and a
+  migration is the write most likely to meet a lock. The app has one
+  connection, but a debug hot restart leaves the old isolate's open until it
+  is finalised, and a write that met its lock failed at once.
+  `db_background_test` holds a lock from a second raw connection to pin
+  both a plain write and an upgrade — on the BACKGROUND executor, because on
+  the same-isolate one the waiting write would block the timer that releases
+  the lock. `BondDatabase.open` / `.memory` (tests) set no timeout.
+- A test that needs one attention score on a row calls `writeScore(store,
+  source, key, score)` (`test/fixtures/attention_score.dart`); the store has
+  no single-thread score writer, because nothing in the app writes one.
 - Timers under `testWidgets`: a bare `tester.pump()` does NOT advance the
   fake clock, so a zero-duration timer (Riverpod's autoDispose check after a
   `sub.close()`) needs `pump(const Duration(milliseconds: 1))`; `await

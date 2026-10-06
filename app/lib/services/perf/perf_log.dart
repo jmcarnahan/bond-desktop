@@ -32,22 +32,60 @@ int Function() _stopwatchMicros() {
   return () => watch.elapsedMicroseconds;
 }
 
+/// What a [UiStallMonitor] saw over one window.
+///
+/// Two bands, because they are two different complaints: a [janks] count is
+/// frames visibly dropped (a heartbeat late by two frames or more), and a
+/// [stalls] count is the app not answering (late by a tenth of a second or
+/// more). [blockedMs] adds up every lateness of at least a jank, which is the
+/// one number that says how much of the window the isolate was not there for.
+class UiStallSummary {
+  const UiStallSummary({
+    required this.ticks,
+    required this.janks,
+    required this.stalls,
+    required this.maxMs,
+    required this.blockedMs,
+  });
+
+  /// Heartbeats that fired in the window. Zero means the monitor never ran.
+  final int ticks;
+
+  /// Heartbeats late by at least [UiStallMonitor.jank].
+  final int janks;
+
+  /// Heartbeats late by at least [UiStallMonitor.threshold].
+  final int stalls;
+
+  /// The worst lateness in the window, in milliseconds.
+  final int maxMs;
+
+  /// The sum of every lateness of at least a jank, in milliseconds.
+  final int blockedMs;
+}
+
 /// A heartbeat on the UI isolate that says how long that isolate was blocked.
 ///
 /// A periodic timer's callback runs on the event loop of the isolate that made
 /// it, so when the UI isolate is busy — stepping a statement, laying out a long
 /// list, decoding a body — the tick cannot run until it is free again. How
-/// late the tick fires, past its [interval] since the tick before it, is how
-/// long the isolate was blocked, to within the lateness that earlier tick
-/// already carried. A lateness of at least [threshold] is logged as
-/// `ui-stall <ms>ms`,
-/// and every [summaryEvery] a summary line counts the window's stalls, its
-/// worst and their total — printed even when the count is zero, so a quiet
+/// late the tick fires, past its [interval], is how long the isolate was
+/// blocked, to within one interval: the timer keeps to a fixed grid, so a
+/// block that begins part-way between two ticks is read short by however much
+/// of that gap had already passed. That is why the interval is ten
+/// milliseconds and not fifty. At fifty a hundred-millisecond freeze read as
+/// anything from 54 to 99 and never reached a hundred-millisecond line; at
+/// ten the reading is at most ten short.
+///
+/// A lateness of at least [threshold] is logged as `ui-stall <ms>ms`, and
+/// every [summaryEvery] a summary line gives the window's two counts, its
+/// worst and its total — printed even when everything is zero, so a quiet
 /// minute is visible rather than indistinguishable from a monitor that never
 /// started.
 class UiStallMonitor {
   UiStallMonitor({
-    this.interval = const Duration(milliseconds: 50),
+    this.interval = const Duration(milliseconds: 10),
+    this.jank = const Duration(milliseconds: 33),
     this.threshold = const Duration(milliseconds: 100),
     this.summaryEvery = const Duration(seconds: 60),
     int Function()? nowMicros,
@@ -55,10 +93,15 @@ class UiStallMonitor {
   })  : _nowMicros = nowMicros ?? _stopwatchMicros(),
         _log = log ?? debugPrint;
 
-  /// How often the heartbeat is asked to tick.
+  /// How often the heartbeat is asked to tick, and so the most a reading can
+  /// fall short of the block it measures.
   final Duration interval;
 
-  /// The least lateness worth a line of its own.
+  /// The least lateness counted as a jank: two frames at sixty a second, the
+  /// first a person can see.
+  final Duration jank;
+
+  /// The least lateness worth a line of its own, and counted as a stall.
   final Duration threshold;
 
   /// How long each summary window lasts.
@@ -70,9 +113,11 @@ class UiStallMonitor {
   Timer? _timer;
   int _previousTick = 0;
   int _windowStart = 0;
-  int _count = 0;
+  int _ticks = 0;
+  int _janks = 0;
+  int _stalls = 0;
   int _maxMs = 0;
-  int _totalMs = 0;
+  int _blockedMs = 0;
 
   /// Starts the heartbeat. A second call while it runs does nothing, so two
   /// callers cannot double the ticks and halve every reading.
@@ -91,31 +136,54 @@ class UiStallMonitor {
     _timer = null;
   }
 
+  /// The window so far, and a new window from now.
+  ///
+  /// What a caller that measures one piece of work reads when the work is
+  /// done; the once-a-[summaryEvery] line is this, printed.
+  UiStallSummary take() {
+    final summary = UiStallSummary(
+      ticks: _ticks,
+      janks: _janks,
+      stalls: _stalls,
+      maxMs: _maxMs,
+      blockedMs: _blockedMs,
+    );
+    _resetWindow();
+    _windowStart = _nowMicros();
+    return summary;
+  }
+
   void _tick() {
     final now = _nowMicros();
     var lateMicros = (now - _previousTick) - interval.inMicroseconds;
     if (lateMicros < 0) lateMicros = 0;
     final lateness = Duration(microseconds: lateMicros);
+    final ms = lateness.inMilliseconds;
+    _ticks += 1;
+    if (ms > _maxMs) _maxMs = ms;
+    if (lateness >= jank) {
+      _janks += 1;
+      _blockedMs += ms;
+    }
     if (lateness >= threshold) {
-      final ms = lateness.inMilliseconds;
+      _stalls += 1;
       _log('ui-stall ${ms}ms');
-      _count += 1;
-      if (ms > _maxMs) _maxMs = ms;
-      _totalMs += ms;
     }
     _previousTick = now;
     if (now - _windowStart >= summaryEvery.inMicroseconds) {
+      final window = take();
       _log('ui-stalls ${summaryEvery.inSeconds}s: '
-          'n=$_count max=${_maxMs}ms total=${_totalMs}ms');
-      _resetWindow();
-      _windowStart = now;
+          'janks=${window.janks} stalls=${window.stalls} '
+          'max=${window.maxMs}ms blocked=${window.blockedMs}ms');
     }
   }
 
   void _resetWindow() {
-    _count = 0;
+    _ticks = 0;
+    _janks = 0;
+    _stalls = 0;
     _maxMs = 0;
-    _totalMs = 0;
+    _blockedMs = 0;
   }
 }
 

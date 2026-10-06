@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
@@ -291,7 +292,7 @@ void main() {
       // at the settle, which owns no queue, so nothing above can be owed. The
       // backstop sweep is the repair.
       await seed(needsYouP: 0.0);
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
       final service = PipelineRepairService(
         store,
         progress: PipelineProgress(store),

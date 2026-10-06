@@ -23,6 +23,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -830,7 +831,7 @@ void main() {
         reason: 'not_worthy',
         dropped: false,
       );
-      await store.writeAttentionScore('email', 'chat-1', 0.9);
+      await writeScore(store, 'email', 'chat-1', 0.9);
     }
 
     Future<Object?> flagOf(String id) async => (await db

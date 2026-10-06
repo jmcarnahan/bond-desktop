@@ -335,7 +335,16 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     super.dispose();
   }
 
+  /// Whether a load numbered [seq] should stop where it is: a later load has
+  /// started, or this notifier has gone.
+  ///
+  /// The second half is what lets a load outlive its notifier quietly. A read
+  /// that comes back after `dispose` used to go on to touch `state`, which a
+  /// disposed notifier refuses.
+  bool _stale(int seq) => seq != _fetchSeq || !mounted;
+
   Future<void> load({bool syncFirst = true}) async {
+    if (!mounted) return;
     // Stamped before the first await, so a load started later always wins
     // however the two finish.
     final seq = ++_fetchSeq;
@@ -359,19 +368,19 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         // arrive later through the progress stream.
         _startPumpChain();
       } on AuthException catch (e) {
-        if (seq != _fetchSeq) return;
+        if (_stale(seq)) return;
         // Only these two mean "sign in again". A generic AuthException is a
         // 5xx or an offline laptop, and signing a user out over one would
         // cost them their session for a dropped packet.
         sessionEnded = e is NotSignedIn || e is ReconsentRequired;
         loadError = sessionEnded ? e.message : _staleInboxMessage;
       } catch (_) {
-        if (seq != _fetchSeq) return;
+        if (_stale(seq)) return;
         loadError = _staleInboxMessage;
       }
     }
 
-    if (seq != _fetchSeq) return;
+    if (_stale(seq)) return;
 
     final List<Conversation> rows;
     List<Map<String, Object?>> raw;
@@ -420,7 +429,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
       // fall back to beyond whatever is already on screen.
-      if (seq != _fetchSeq) return;
+      if (_stale(seq)) return;
       final current = state;
       state = current is ConversationsLoaded
           ? current.withRows(current.conversations, _staleInboxMessage)
@@ -428,7 +437,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       return;
     }
 
-    if (seq != _fetchSeq) return;
+    if (_stale(seq)) return;
 
     // Signed out AND nothing stored: there is no inbox to keep, so route to
     // sign-in. With rows in hand the banner says the session ended and the

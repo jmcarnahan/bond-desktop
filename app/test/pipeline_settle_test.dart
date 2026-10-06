@@ -13,6 +13,7 @@ import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/test_db.dart';
 
@@ -167,7 +168,7 @@ void main() {
       'state': state,
       'last_message_at': '2026-08-29T10:00:00Z',
     });
-    if (score != null) await store.writeAttentionScore('email', key, score);
+    if (score != null) await writeScore(store, 'email', key, score);
   }
 
   Future<List<String>> queuedDrafts() async => [
@@ -292,7 +293,7 @@ void main() {
           'conv-1',
           ConversationState.needsReply,
         );
-        await store.writeAttentionScore('email', 'conv-1', 0.9);
+        await writeScore(store, 'email', 'conv-1', 0.9);
       },
     );
     final worker = FakeWorker(store, log);

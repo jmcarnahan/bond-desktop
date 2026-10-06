@@ -192,7 +192,7 @@ RESET  := \033[0m
         app-install app-run app-profile app-test app-gen app-migrations app-analyze \
         app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
-        ab drain bench-pipeline bench-compare \
+        ab drain bench-pipeline bench-compare bench-ui \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
         golden-pairs golden-gate golden-decision decision-agreement _decide-health \
@@ -240,6 +240,7 @@ help:
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
+	@printf "  make bench-ui      → how long the UI isolate is blocked by reloads, an arrival and the index backfill (no server; prints, never asserts a time)\n"
 	@printf "  make golden        → the golden set through the decision model + needs-you ladder + message text on the bulk slot (needs make decide; GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → member_of for every golden item against the gold registry, on the decision model\n"
@@ -902,6 +903,21 @@ BENCH_VERIFY ?= 1
 # thing being measured.
 BENCH_K      ?= 1,3
 
+# ── the UI-isolate bench: how long the UI isolate is blocked ───────────
+# `make bench-ui` needs no server and no app: it seeds a fictional mailbox on a
+# temp file and times the store's bursty paths on both executors (see
+# docs/performance.md). How many threads the mailbox holds.
+BENCH_UI_THREADS ?= 2000
+# How many list reloads one reload row runs back to back.
+BENCH_UI_RELOADS ?= 10
+# How many new messages the one arrival transaction ingests.
+BENCH_UI_ARRIVAL ?= 200
+# Names the run in the header and in the JSON filename.
+BENCH_UI_LABEL ?= local
+# Empty prints only; a directory (absolute: the test runs from $(APP_DIR)) also
+# gets ui-stall-<label>.json.
+BENCH_UI_OUT ?=
+
 # ── the pipeline bench: how the backlog behaves end to end ─────────────
 # How many copies of the fixture corpus `make bench-pipeline` seeds. 3 is ~66
 # messages, which is the backlog size the roadmap's targets are written about.
@@ -1467,6 +1483,17 @@ bench-compare:
 	   printf "$(RED)✗$(RESET) usage: make bench-compare A=<a.json> B=<b.json>\n"; \
 	   printf "    results land in $(BENCH_OUT)\n"; exit 1; }
 	@cd $(APP_DIR) && dart run tool/bench_compare.dart '$(A)' '$(B)'
+
+# The UI-isolate bench: no server, no app. The @Skip'd test seeds a fictional
+# mailbox and prints how long its own isolate (standing in for the UI's) is
+# blocked by reloads, an arrival and the index backfill, with SQLite on that
+# isolate and on a background one, beside the algorithms `main` ran. It prints
+# and never asserts a time; see docs/performance.md.
+bench-ui:
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) test --run-skipped --reporter expanded test/ui_stall_bench_test.dart \
+	  --dart-define=BENCH_UI_THREADS=$(BENCH_UI_THREADS) --dart-define=BENCH_UI_RELOADS=$(BENCH_UI_RELOADS) \
+	  --dart-define=BENCH_UI_ARRIVAL=$(BENCH_UI_ARRIVAL) --dart-define=BENCH_UI_LABEL='$(BENCH_UI_LABEL)' \
+	  --dart-define=BENCH_UI_OUT=$(BENCH_UI_OUT)
 
 # ── the golden set ─────────────────────────────────────────────────────
 # Accuracy against 100 real messages, scored by golden/tools/score_run.py.

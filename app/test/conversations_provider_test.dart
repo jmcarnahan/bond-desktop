@@ -125,12 +125,18 @@ class ReadCountingStore extends MessageStore {
 
   int reads = 0;
 
+  /// While set, a list read waits here before it runs: how a test catches a
+  /// load in flight.
+  Completer<void>? hold;
+
   @override
   Future<List<Map<String, Object?>>> conversationRows({
     List<String> sources = const ['email'],
     ConversationState? state,
-  }) {
+  }) async {
     reads++;
+    final gate = hold;
+    if (gate != null) await gate.future;
     return super.conversationRows(sources: sources, state: state);
   }
 }
@@ -1066,6 +1072,33 @@ void main() {
         await tester.pump();
       }
     }
+
+    testWidgets('a load that comes back after the notifier has gone touches '
+        'nothing', (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+
+      // A load caught at its read, and the notifier disposed under it — the
+      // list torn down while a refresh was on its way back.
+      final gate = Completer<void>();
+      counted.hold = gate;
+      final late = notifier.load(syncFirst: false);
+      await tester.pump();
+      notifier.dispose();
+      counted.hold = null;
+      gate.complete();
+
+      // It finishes, and quietly: a disposed notifier refuses its state, and
+      // a load that went on to read or set it would throw here.
+      await late;
+      await tester.pump(const Duration(seconds: 3));
+
+      // And one asked for after the notifier has gone does not start.
+      final readsBefore = counted.reads;
+      await notifier.load(syncFirst: false);
+      expect(counted.reads, readsBefore);
+    });
 
     testWidgets('a reload still pending when the notifier goes away never runs',
         (tester) async {

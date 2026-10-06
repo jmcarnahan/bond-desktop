@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 
 void main() {
@@ -250,10 +251,10 @@ void main() {
     });
   });
 
-  group('writeAttentionScore', () {
+  group('a score written', () {
     test('writes, and creating the ai row if needed', () async {
       await seedConversation('c1');
-      await store.writeAttentionScore('email', 'c1', 1.25);
+      await writeScore(store, 'email', 'c1', 1.25);
       expect((await store.getConversationAi('email', 'c1'))!['attention_score'],
           1.25);
     });
@@ -262,7 +263,7 @@ void main() {
       await seedConversation('c1');
       await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
-      await store.writeAttentionScore('email', 'c1', 0.5);
+      await writeScore(store, 'email', 'c1', 0.5);
 
       final ai = (await store.getConversationAi('email', 'c1'))!;
       expect(ai['bucket'], 'later');
@@ -280,7 +281,7 @@ void main() {
           bucket: 'later', reason: 'user');
       await store.setConversationBucket('email', 'c2',
           bucket: 'later', reason: 'low_value');
-      await store.writeAttentionScore('email', 'c3', 1);
+      await writeScore(store, 'email', 'c3', 1);
 
       expect(await store.bucketReasons(), {'c1': 'user', 'c2': 'low_value'});
     });
@@ -291,7 +292,7 @@ void main() {
       await seedConversation('c1');
       await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
-      await store.writeAttentionScore('email', 'c1', 1.5);
+      await writeScore(store, 'email', 'c1', 1.5);
 
       final conversation = (await store.loadConversations()).single;
       expect(conversation.bucket, 'later');

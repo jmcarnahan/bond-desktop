@@ -7,6 +7,7 @@ import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 
 /// `message_progress` — the row per message that the home screen reads, and
@@ -533,7 +534,7 @@ void main() {
     test('it closes a row whose stages are all finished', () async {
       await ingest('m1');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
 
@@ -546,7 +547,7 @@ void main() {
         () async {
       await ingest('m1');
       await progress.noteTriage('email', 'm1', state: 'done');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.5), 0);
       expect((await progressOf('m1'))['settle_state'], 'pending');
@@ -566,7 +567,7 @@ void main() {
         () async {
       await ingest('m1');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
       await progress.noteSettled(
         'email',
         'm1',
@@ -581,7 +582,7 @@ void main() {
 
     test('a dropped row that reaches the sweep stays dropped', () async {
       await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       // Already `settle_state = 'done'` from the gate, so the sweep passes
       // over it — and if it ever did not, the outcome would still say dropped.
@@ -593,7 +594,7 @@ void main() {
       await ingest('m1');
       await store.writeNeedsYouP('email', 'm1', p: 0.6);
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.9), 1);
       expect((await progressOf('m1'))['needs_you'], 0);
@@ -605,7 +606,7 @@ void main() {
       await store.writeNeedsYouP('email', 'm1', p: 0.6);
       await finishStages('m1');
       // A low score: it orders Needs You and gates nothing.
-      await store.writeAttentionScore('email', 'c1', 0.05);
+      await writeScore(store, 'email', 'c1', 0.05);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
       expect((await progressOf('m1'))['needs_you'], 1);
@@ -614,7 +615,7 @@ void main() {
     test("triage's asks alone read as needing nobody", () async {
       await ingest('m1', urgency: 'high');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.95);
+      await writeScore(store, 'email', 'c1', 0.95);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
       expect((await progressOf('m1'))['needs_you'], 0);
@@ -624,7 +625,7 @@ void main() {
       await ingest('m1', urgency: 'urgent', isRead: true);
       await store.writeNeedsYouP('email', 'm1', p: 0.9);
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.95);
+      await writeScore(store, 'email', 'c1', 0.95);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
       // The coordinator's decision table drops a read message before
@@ -642,7 +643,7 @@ void main() {
         'state': 'done',
       });
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.95);
+      await writeScore(store, 'email', 'c1', 0.95);
 
       await progress.sweepSettled(threshold: 0.5);
 
@@ -653,7 +654,7 @@ void main() {
       await ingest('m1', urgency: 'high');
       await store.writeNeedsYouP('email', 'm1', p: 0.9);
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.95);
+      await writeScore(store, 'email', 'c1', 0.95);
       await store.setConversationBucket(
         'email',
         'c1',
@@ -670,7 +671,7 @@ void main() {
         () async {
       await ingest('m1');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.99);
+      await writeScore(store, 'email', 'c1', 0.99);
 
       await progress.sweepSettled(threshold: 0.5);
 
@@ -686,7 +687,7 @@ void main() {
       await store.writeNeedsYouP('email', 'm1',
           p: 0.9, reason: 'names the owner and asks for a date');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
       expect((await progressOf('m1'))['needs_you'], 1);
@@ -697,7 +698,7 @@ void main() {
       await store.writeNeedsYouP('email', 'm1',
           p: 0.1, reason: 'a status update, addressed to the team');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.5), 1);
       expect((await progressOf('m1'))['needs_you'], 0);
@@ -707,7 +708,7 @@ void main() {
       await progress.noteTriage('email', 'm1', state: 'done');
       await progress.noteExtract('email', 'm1', state: 'done');
       await progress.noteStoryline('email', 'c1', state: 'done');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.sweepSettled(threshold: 0.5), 0);
       expect((await progressOf('m1'))['settle_state'], 'pending');
@@ -718,7 +719,7 @@ void main() {
       await progress.noteTriage('email', 'm1', state: 'done');
       await progress.noteExtract('email', 'm1', state: 'done');
       await progress.noteStoryline('email', 'c1', state: 'done');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
       await progress.noteSettled(
         'email',
         'm1',
@@ -743,7 +744,7 @@ void main() {
         () async {
       await ingest('m1', urgency: 'high');
       await finishStages('m1');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
       await progress.noteSettled(
         'email',
         'm1',
@@ -1090,7 +1091,7 @@ void main() {
         await store.setConversationBucket('email', conversationKey,
             bucket: bucket);
       }
-      await store.writeAttentionScore('email', conversationKey, score);
+      await writeScore(store, 'email', conversationKey, score);
     }
 
     test('a live thread over the slider gains the chip, and ticks', () async {
@@ -1126,7 +1127,7 @@ void main() {
         reason: 'not_worthy',
         dropped: false,
       );
-      await store.writeAttentionScore('email', 'c2', 0.9);
+      await writeScore(store, 'email', 'c2', 0.9);
       ticks.clear();
 
       expect(
@@ -1184,7 +1185,7 @@ void main() {
       await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
       await store.writeNeedsYouP('email', 'm1',
           p: 0.9, reason: 'names the owner');
-      await store.writeAttentionScore('email', 'c1', 0.9);
+      await writeScore(store, 'email', 'c1', 0.9);
 
       expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
       expect((await progressOf('m1'))['needs_you'], 0);

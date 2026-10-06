@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 
 /// One message's story, assembled and kept current.
@@ -174,7 +175,7 @@ void main() {
 
   test('the threshold the score is read against comes back with it', () async {
     await seed('m1');
-    await store.writeAttentionScore('email', 'c1', 0.71);
+    await writeScore(store, 'email', 'c1', 0.71);
     await store.setConversationBucket(
       'email',
       'c1',

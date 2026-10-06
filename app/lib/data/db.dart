@@ -5,6 +5,7 @@ import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:sqlite3/sqlite3.dart' show Database;
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import '../services/perf/perf_log.dart';
@@ -51,6 +52,25 @@ void loadSqliteVecInIsolate() {
   ensureSqliteVecLoaded();
 }
 
+/// Makes the app's connection wait for a lock instead of failing on it.
+///
+/// The app has one connection and so nobody to wait for, with one exception:
+/// a debug hot restart ends the old isolate, and its connection is only
+/// closed when the runtime gets round to finalising it. A new connection that
+/// met its lock in that gap failed at once with "database is locked"; with a
+/// timeout it waits the moment out. Five seconds, because past that the other
+/// holder is not on its way out and failing is the honest answer.
+///
+/// Set on the connection as it opens, not in the database's `beforeOpen`:
+/// drift reads the schema version and runs a pending migration BEFORE that
+/// callback, and a migration is the write most likely to meet the lock.
+/// Top-level because, like [loadSqliteVecInIsolate], it is sent to the
+/// database isolate. On the `BOND_DB_UI_ISOLATE` build the wait is on the UI
+/// isolate, which is one more reason that build is for measuring only.
+void waitOutLocks(Database database) {
+  database.execute('PRAGMA busy_timeout = 5000;');
+}
+
 /// The executor the app's database runs on.
 ///
 /// By default a background isolate, spawned as this executor is built, with
@@ -70,9 +90,10 @@ QueryExecutor appExecutor(
   required bool perfLog,
 }) {
   final QueryExecutor executor = onUiIsolate
-      ? NativeDatabase(File(path))
+      ? NativeDatabase(File(path), setup: waitOutLocks)
       : NativeDatabase.createInBackground(
           File(path),
+          setup: waitOutLocks,
           isolateSetup: loadSqliteVecInIsolate,
         );
   return perfLog ? executor.interceptWith(SlowStatementLog()) : executor;

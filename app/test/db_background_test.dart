@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -12,6 +13,7 @@ import 'package:drift/native.dart' show SqliteException;
 import 'package:drift/isolate.dart' show DriftRemoteException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart' as raw;
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 /// A unit vector in the plane spanned by dimensions `2 * plane` and
@@ -218,6 +220,62 @@ void main() {
       caught.toString(),
       anyOf(contains('UNIQUE'), contains('constraint')),
     );
+  });
+
+  // A second connection holding the write lock for a moment: what a debug
+  // hot restart can leave behind until the old isolate's connection is
+  // finalised. Without `busy_timeout` the write below fails at once with
+  // "database is locked". Only a floor is asserted on the wait: the lock is
+  // released by a timer, which can run late and never early.
+  test('a write waits out a lock another connection holds briefly', () async {
+    final db = background();
+    await setPref(db, 'before', 'x');
+
+    final other = raw.sqlite3.open(path);
+    other.execute('BEGIN IMMEDIATE');
+    final release = Timer(const Duration(milliseconds: 300), () {
+      other.execute('COMMIT');
+    });
+    addTearDown(() {
+      release.cancel();
+      other.close();
+    });
+
+    final waited = Stopwatch()..start();
+    await setPref(db, 'after', 'y');
+
+    expect(waited.elapsedMilliseconds, greaterThanOrEqualTo(250));
+    expect(await pref(db, 'after'), 'y');
+  });
+
+  // The same wait, for the write an open can bring with it. The file is
+  // stamped one version back, so the first statement runs the newest
+  // migration step, inside a transaction, before `beforeOpen` — which is why
+  // the timeout is set on the connection and not there.
+  test('an upgrade waits out the lock too', () async {
+    final seed = BondDatabase.open(path);
+    final current = seed.schemaVersion;
+    await seed.customSelect('SELECT 1').get();
+    await seed.customStatement('PRAGMA user_version = ${current - 1}');
+    await seed.close();
+
+    final other = raw.sqlite3.open(path);
+    other.execute('BEGIN IMMEDIATE');
+    final release = Timer(const Duration(milliseconds: 300), () {
+      other.execute('COMMIT');
+    });
+    addTearDown(() {
+      release.cancel();
+      other.close();
+    });
+
+    final db = background();
+    final waited = Stopwatch()..start();
+    final version =
+        await db.customSelect('PRAGMA user_version').getSingle();
+
+    expect(version.data.values.single, current);
+    expect(waited.elapsedMilliseconds, greaterThanOrEqualTo(250));
   });
 
   test('what the background connection wrote is on disk', () async {

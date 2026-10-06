@@ -5116,35 +5116,11 @@ FROM messages
     }
   }
 
-  /// Stores one thread's ranking score. Same targeted insert-then-update as
-  /// [setConversationBucket]: the score is recomputed on every list load and
-  /// must never disturb an embedding or a bucket sitting on the same row.
-  Future<void> writeAttentionScore(
-    String source,
-    String conversationKey,
-    double score,
-  ) async {
-    final now = _nowIso();
-    await db.transaction(() async {
-      await db.customUpdate(
-        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
-        'VALUES (?, ?, ?) '
-        'ON CONFLICT(source, conversation_key) DO NOTHING',
-        variables: _args([source, conversationKey, now]),
-      );
-      await db.customUpdate(
-        'UPDATE conversation_ai SET attention_score = ?, updated_at = ? '
-        'WHERE source = ? AND conversation_key = ?',
-        variables: _args([score, now, source, conversationKey]),
-      );
-    });
-  }
-
   /// One attention pass's writes, in ONE batch: every score in [scores], then
   /// every bucket in [buckets].
   ///
-  /// The same writes [writeAttentionScore] and [setConversationBucket] make,
-  /// one per thread and none skipped, and each one stamps `updated_at`. That
+  /// A score for every thread scored and a bucket for every thread filed,
+  /// none skipped, and each one stamps `updated_at`. That
   /// stamp is load-bearing rather than bookkeeping: the notification settle
   /// reads `conversation_ai.updated_at` at or after the message's own stamp
   /// as "the attention pass has seen this thread since its message last

@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/fake_decision_client.dart';
 import 'fixtures/scripted_llm.dart';
 import 'fixtures/test_db.dart';
@@ -514,7 +515,7 @@ void main() {
       // `message_progress`, not the work queue.
       await progress.noteExtract('email', 'm1', state: 'done');
       await progress.noteStoryline('email', 'c1', state: 'done');
-      await store.writeAttentionScore('email', 'c1', attentionScore);
+      await writeScore(store, 'email', 'c1', attentionScore);
       // The pipeline has finished with it, drafting included — a settle
       // writes the verdict either way, but the row is only CLOSED once the
       // reply suggestion (or the decision that none is needed) is stored, and

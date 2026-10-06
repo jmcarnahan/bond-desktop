@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -97,7 +98,7 @@ void main() {
       );
     }
     // Last, so the score is not older than the row it scores.
-    await store.writeAttentionScore('email', 'conv-onboarding', 0.9);
+    await writeScore(store, 'email', 'conv-onboarding', 0.9);
   }
 
   /// What the SQL half says about the seeded message at [threshold].
@@ -130,7 +131,7 @@ void main() {
     await seed(null);
     await store.updateConversationTriage('email', 'conv-onboarding',
         ctaText: 'Send the appraisal', ctaUrgency: 'urgent');
-    await store.writeAttentionScore('email', 'conv-onboarding', 0.9);
+    await writeScore(store, 'email', 'conv-onboarding', 0.9);
 
     expect(await sqlVerdict(), 0);
     expect(await dartVerdict(), isFalse);
@@ -184,7 +185,7 @@ void main() {
 
   test('the attention score gates neither side', () async {
     await seed(0.9);
-    await store.writeAttentionScore('email', 'conv-onboarding', 0.01);
+    await writeScore(store, 'email', 'conv-onboarding', 0.01);
 
     expect(await sqlVerdict(), 1);
     expect(await dartVerdict(), isTrue);
