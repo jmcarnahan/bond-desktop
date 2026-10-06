@@ -189,7 +189,7 @@ RESET  := \033[0m
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         decide decide-stop decide-fetch _wait-decide \
-        app-install app-run app-test app-gen app-migrations app-analyze \
+        app-install app-run app-profile app-test app-gen app-migrations app-analyze \
         app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
         ab drain bench-pipeline bench-compare \
@@ -226,6 +226,7 @@ help:
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
 	@printf "  make app-doctor   → check this environment's local.mk and .env before the first app-run\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
+	@printf "  make app-profile  → the same in profile mode (timings; BOND_PERF_LOG=1 prints UI stalls and slow statements)\n"
 	@printf "  make foreground W=<worktree>   → check a round's branch out HERE for the manual pass (the worktree detaches)\n"
 	@printf "  make background W=<worktree>   → the reverse: this checkout back on main, the worktree back on its branch\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
@@ -813,9 +814,9 @@ MS_ENV ?= $(CURDIR)/.env
 # ── this environment: the model registry and Your server ───────────────
 # The four values a new environment is configured with, all written in
 # local.mk (local.mk.example is the template; plain `=`, comments on their
-# own line). Each one is a compiled DEFAULT: `make app-run` and `make
-# app-build` pass it to the app as a --dart-define, and a value saved under
-# Settings, Models in the app beats it. `make app-doctor` checks them.
+# own line). Each one is a compiled DEFAULT: `make app-run`, `make
+# app-profile` and `make app-build` pass it to the app as a --dart-define,
+# and a value saved under Settings, Models in the app beats it. `make app-doctor` checks them.
 #
 # The model registry's base address, an Artifactory repository URL; the app
 # downloads the decision model's files from <it>/bundles/<bundle>/<file>.
@@ -842,7 +843,7 @@ DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
 # line says. So the recipes that must NOT carry them take them out instead,
 # with $(APP_NO_SECRET_ENV): the hand-started servers (model, fast, embed,
 # decide, omlx), app-test's flutter test, the dist scripts, and app-run /
-# app-build after the shell has read them into the defines.
+# app-profile / app-build after the shell has read them into the defines.
 export BOND_REGISTRY_TOKEN BOND_BOX_KEY
 # A secret written into a curl config (`-K -`) sits inside double quotes,
 # where curl reads a backslash or a double quote as an escape: both are
@@ -1249,7 +1250,8 @@ endif
 # build still gets its defines, and this prefix then takes both secrets out of
 # the environment flutter, the app and the llama-server the app starts would
 # otherwise inherit from the `export` beside MS_ENV. They are still in the
-# flutter process's ARGUMENTS for as long as `make app-run` lives (see
+# flutter process's ARGUMENTS for as long as `make app-run` or `make
+# app-profile` lives (see
 # app/CLAUDE.md: never list that process with its arguments). Every other
 # recipe that uses neither secret carries the same prefix (see the `export`).
 APP_NO_SECRET_ENV := env -u BOND_BOX_KEY -u BOND_REGISTRY_TOKEN
@@ -1283,12 +1285,30 @@ endif
 ifneq ($(strip $(BOND_SAMPLE_DIR)),)
 APP_LLM_DEFINES += --dart-define=BOND_SAMPLE_DIR='$(BOND_SAMPLE_DIR)'
 endif
+# Read by `perfLogOn` (app/lib/services/perf/perf_log.dart): the UI-stall
+# heartbeat and the slow-statement log, printed to the run's console. Off
+# unless set; see docs/performance.md for how to read the lines.
+ifneq ($(strip $(BOND_PERF_LOG)),)
+APP_LLM_DEFINES += --dart-define=BOND_PERF_LOG='$(BOND_PERF_LOG)'
+endif
+# Read by `dbOnUiIsolate` (app/lib/data/db.dart): puts SQLite back on the UI
+# isolate, for the "before" half of a measurement on the same build and as the
+# way out if the background connection misbehaves.
+ifneq ($(strip $(BOND_DB_UI_ISOLATE)),)
+APP_LLM_DEFINES += --dart-define=BOND_DB_UI_ISOLATE='$(BOND_DB_UI_ISOLATE)'
+endif
 
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
 
 app-run:
 	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+
+# app-run in profile mode, which is where a timing means something: a debug
+# build runs Dart several times slower and so inflates everything except the
+# time SQLite itself spends. Pair it with BOND_PERF_LOG=1 (docs/performance.md).
+app-profile:
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) run -d macos --profile $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 
 # A round is built in a worktree under .claude/worktrees/<name> and tested by
 # hand from THIS checkout, where local.mk, .env, the signing config and the

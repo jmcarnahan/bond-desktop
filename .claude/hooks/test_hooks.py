@@ -149,6 +149,9 @@ BASH_CASES = [
     ("ask", "git merge --no-ff feat/x", False),
     ("ask", "gh repo delete x", False),
     ("ask", "make app-run", False),
+    ("ask", "make app-profile BOND_PERF_LOG=1", False),
+    ("ask", "make BOND_PERF_LOG=1 app-profile", False),
+    ("ask", "make BOND_SAMPLE_DIR= app-run", False),
     ("ask", "flutter run -d macos", False),
     ("ask", "make model", False),
     # --- distribution: the signing half asks, the packaging half does not ---

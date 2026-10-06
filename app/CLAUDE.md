@@ -39,6 +39,16 @@ enforce the ones that are commands.
 
 - Flat files: `test/<subject>_test.dart`; in-memory Drift via `testDb()` →
   `BondDatabase.memory()`; ALWAYS `await db.close()` in tearDown.
+- The APP's database runs on a background isolate (`appExecutor` in
+  `lib/data/db.dart`, `docs/performance.md`); tests open the same-isolate
+  `BondDatabase.memory()` / `BondDatabase.open`. The background executor is
+  opened ONLY in plain `test()`s (`db_background_test.dart`), never under
+  `testWidgets`: fake async waiting on a real isolate hangs silently. An
+  error from it arrives as `DriftRemoteException` (its `remoteCause` is the
+  `SqliteException`), so never write `on SqliteException` in `lib/`. A
+  `customSelect` must never carry a write: a read pool would send it to a
+  reader (four `INSERT … RETURNING` sites still do, which is why there is no
+  pool), so a new write that returns rows uses `customWriteReturning`.
 - Screen tests NEVER `pumpAndSettle` on `InboxScreen` (a 60 s periodic timer
   and no-looping-animation rule): three bare `tester.pump()` calls is the
   idiom; `pump(Duration(milliseconds: 400))` for scoring passes.
@@ -50,16 +60,16 @@ enforce the ones that are commands.
 - Never run `flutter test` or `flutter analyze` while a live `make` bench is
   running: any load moves the timings the bench exists to measure, and the
   run is spent.
-- `make app-run` and `make app-build` carry the box key and the registry
-  token from `local.mk` in the `flutter` command line (and its
+- `make app-run`, `make app-profile` and `make app-build` carry the box key
+  and the registry token from `local.mk` in the `flutter` command line (and its
   `frontend_server` child's) for as long as they run, so never list a running
-  flutter process WITH its arguments either. The two recipes drop both from
+  flutter process WITH its arguments either. The three recipes drop both from
   the environment (`APP_NO_SECRET_ENV`), so the app and its llama-server do
   not inherit them, and so does every recipe that uses neither (the
   hand-started servers, `app-test`, the `dist-*` scripts): the Makefile's
   `export` is global because GNU Make 3.81 has no target-specific `export
-  VAR`, and only `decide-fetch`, `app-doctor`, `app-run`, `app-build` and the
-  `BENCH_DEFINES` benches read them.
+  VAR`, and only `decide-fetch`, `app-doctor`, `app-run`, `app-profile`,
+  `app-build` and the `BENCH_DEFINES` benches read them.
 - The Makefile resolves `BENCH_BEARER` into the `flutter test` command line,
   so never list a running bench's process WITH its arguments — `pgrep -f …
   >/dev/null` answers "is it running" without printing the key.
