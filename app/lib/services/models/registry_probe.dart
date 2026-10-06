@@ -5,8 +5,9 @@ import 'package:http/http.dart' as http;
 
 /// What Settings' **Check** under Model registry found.
 enum RegistryCheck {
-  /// The registry answered the decision model's file with its bytes: 200
-  /// or 206, and not a web page.
+  /// The registry answered the file asked for with its bytes: 200 or 206,
+  /// and not a web page. Said of the registry only once every model's file
+  /// answered so.
   reachable,
 
   /// The registry answered with a redirect, which the probe does not follow
@@ -30,8 +31,9 @@ enum RegistryCheck {
   notConfigured,
 }
 
-/// One look at the model registry: a `GET` of [url] (the decision model's
-/// small heads file) for its FIRST byte, with the bearer when there is one.
+/// One look at the model registry: a `GET` of [url] (one model's file: the
+/// embedding model's GGUF, the decision model's small heads file) for its
+/// FIRST byte, with the bearer when there is one.
 ///
 /// Never throws: this is a settings screen's status line. Redirects are not
 /// followed, so the token rides to [url]'s own origin and nowhere else; a

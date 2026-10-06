@@ -79,8 +79,10 @@ void main() {
     await open(tester, tokenStored: true);
 
     expect(find.text(ModelRegistryForm.title), findsOneWidget);
-    expect(find.text('Where Bond downloads the decision model from.'),
-        findsOneWidget);
+    expect(
+      find.text('Where Bond downloads the decision and embedding models from.'),
+      findsOneWidget,
+    );
     expect(field(tester, ModelRegistryForm.urlKey).controller!.text, _registry);
     final token = field(tester, ModelRegistryForm.tokenKey);
     expect(token.obscureText, isTrue);

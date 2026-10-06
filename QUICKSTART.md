@@ -17,9 +17,10 @@ Bond uses three models, one per role. A new environment starts like this:
 | **AI processing** | off | | the **AI processing** switch in the sidebar, or Settings, Processing |
 | **Decision model** (sorts and flags every message, judges storylines) | ModernBERT v3 swap, on this Mac, about 0.8 GB | downloaded from your model registry when it is not on disk | Settings, Models |
 | **Generative model** (summaries, storyline titles and recaps, drafts) | Qwen3.8 27B on **Your server** | the server address and access key in `local.mk` | Settings, Models |
-| **Embeddings** (clustering, search) | Qwen3-Embedding-0.6B, on this Mac, about 0.6 GB | downloaded from Hugging Face | always this Mac |
+| **Embeddings** (clustering, search) | Qwen3-Embedding-0.6B, on this Mac, about 0.6 GB | downloaded from your model registry when it is not on disk | always this Mac |
 
-So this Mac downloads about 1.4 GB, and the large model stays on the server.
+So this Mac downloads about 1.4 GB, both from the model registry, and the
+large model stays on the server.
 Mail content goes to no model server you have not named.
 
 You need:
@@ -33,8 +34,8 @@ You need:
 - **Five values from the project owner.** None of them appears in this
   repository:
   1. the bond-mcps server URL (you sign in to it with your own login);
-  2. the model registry address;
-  3. a READ token for that registry;
+  2. the model registry address, where both models on this Mac come from;
+  3. a READ token for that registry (setup cannot finish without these two);
   4. your server's address, which is the GPU box that runs the 27B;
   5. your server's access key.
 
@@ -89,7 +90,8 @@ BOND_BOX_KEY = <the server access key>
 ```
 
 - `BOND_REGISTRY_URL` is the repository URL, with nothing after the
-  repository name. Use the https address when your registry has one.
+  repository name. Use the https address when your registry has one. The
+  app downloads the decision model and the embedding model from it.
 - `BOND_BOX_URL` is the server's origin, with no path. The app adds
   `/prose/v1/chat/completions` itself.
 - Write each value with a plain `=` and no comment after it on the same
@@ -113,6 +115,7 @@ It prints one line per check and exits non-zero when any fails:
 | `✓ llama-server at …` | the model runtime is found |
 | `✓ BOND_MCP_SERVER_URL is set in …/.env` | sign-in has a server to talk to |
 | `✓ the registry has bond-decide-mbl-v3swap` | the address and token work and the decision model is there |
+| `✓ the registry has bond-embed-qwen3-0.6b` | the embedding model is there too |
 | `✓ your server answers at …` | the address and key work |
 
 A `✗` names what is wrong: a value that is not set, a refused token or key
@@ -142,9 +145,15 @@ nine screens:
    and takes the name it lists.
 4. **Models.** The two downloads and their sizes.
 5. **Storage.** Where the models are kept. The default is fine.
-6. **Download.** Two bars, about 1.4 GB together. **Continue** waits for the
-   embedding model only. If the decision model's bar fails it says why, adds
-   `Bond tries again after setup, and under Settings, Models. You can
+6. **Download.** Two bars, about 1.4 GB together, both from the model
+   registry. **Continue** waits for the embedding model only. When a bar
+   fails, the **Model registry** fields appear under the bars: **Registry
+   address**, **Access token** and **Save**. When the registry is plainly
+   the problem (no address, a refused token, an address that does not hold
+   the models or answers with a web page) the bar says so and points below;
+   a mistyped address can also show as a connection failure, and is fixed in
+   the same fields. Fix them and press **Save**; the download starts again. If the decision model's bar fails it says why,
+   adds `Bond tries again after setup, and under Settings, Models. You can
    continue.`, and does not hold you here (step 6 below has the fixes).
 7. **Sign in.** Your browser opens the bond-mcps login. Sign in there and
    come back to the app; it picks the session up on its own. If your
@@ -235,14 +244,22 @@ token in the app, that one is still winning: **Remove token** goes back to
 the one in `local.mk`.
 
 **"The model registry does not have this model. Check its address."** The
-address reaches a registry but not the repository that holds the decision
-model. It should end at the repository name, for example
+address reaches a registry but not the repository that holds the models. It
+should end at the repository name, for example
 `…/artifactory/bond-models`.
 
 **"The model registry answered with a web page, not a model. Check its
 address."** The address reaches a login page or a proxy. An http address
 that the server upgrades to https also loses the token on the way: use the
 https address.
+
+**During setup** the same four problems are fixed on the wizard's Download
+step, not under Settings: each sentence ends in `below.`, the **Model
+registry** fields sit under the bars, and **Save** starts the download
+again. A wrong address can also show there as `The connection dropped too
+many times. Check the network and try again.`: the fields are drawn for any
+failed registry bar, so fix the address in the same place. After setup they
+are under Settings, Models.
 
 **"The decision model is not downloaded yet. Open Settings, Models."** New
 mail waits at triage until the decision model is on disk. Settings, Models
@@ -293,28 +310,37 @@ Switch back to **MCP** under Settings, Microsoft connection.
 ## Appendix A: a model registry on this Mac
 
 The model registry is a JFrog Artifactory generic repository. The app reads
-two files from it, each checked against a sha256 pinned in the app:
+three files from two bundles in it, each checked against a sha256 pinned in
+the app:
 
 ```
 <BOND_REGISTRY_URL>/bundles/bond-decide-mbl-v3swap/model-f16.gguf
 <BOND_REGISTRY_URL>/bundles/bond-decide-mbl-v3swap/heads.json
+<BOND_REGISTRY_URL>/bundles/bond-embed-qwen3-0.6b/model-q8_0.gguf
 ```
 
 Where there is no shared registry, a local Artifactory in Docker stands in
 for it. It is not part of this repository: the training project keeps its
-compose file and publishes the bundle into it. Once it is up:
+compose file and publishes the bundles into it. Once it is up:
 
 ```make
 BOND_REGISTRY_URL = http://localhost:18082/artifactory/bond-models
 ```
 
 - Bring it up with `docker compose up -d` in its folder before `make
-  app-doctor` or the first launch. When it is down the decision model cannot
-  download; a model already on disk keeps working.
+  app-doctor` or the first launch. When it is down neither model can
+  download, and a new setup cannot finish; a model already on disk keeps
+  working.
 - It refuses anonymous reads, so `BOND_REGISTRY_TOKEN` is still needed.
 - **Use a read token, not the admin one.** The token is compiled into your
   build. Mint a token scoped to read this one repository and put that in
   `local.mk`.
+
+**Publishing the embedding bundle.** Every registry an environment points at
+must hold both bundles before a new install there can finish setup. The
+embedding bundle is the upstream Qwen file republished unmodified; how it is
+built and published is "Bumping the embedding model" in
+[docs/distribution.md](docs/distribution.md#bumping-the-embedding-model).
 
 ## Appendix B: models on this Mac
 
@@ -341,17 +367,20 @@ BOND_DEV_SKIP_SETUP = 1
 ```
 
 ```sh
-make decide-fetch
+make decide-fetch embed-fetch
 make decide embed
 make status
 ```
 
-`make decide-fetch` downloads the decision model from the registry into the
-same folder the app uses, sha-checked, so a model the app has already
-downloaded needs no fetch. `make decide` serves it on :8083 and `make embed`
-serves embeddings on :8081. `make setup` adds the 27B on :8080 and the
+`make decide-fetch` and `make embed-fetch` download the decision model and
+the embedding model from the registry into the same folder the app uses,
+sha-checked, so a model the app has already downloaded needs no fetch.
+`make decide` serves the decision model on :8083 and `make embed` serves
+embeddings on :8081, each from that folder; both refuse to start when the
+file is not there yet. `make setup` adds the 27B on :8080 and the
 bench-only 4B on :8082 (about 23 GB of downloads into
-`~/.cache/huggingface/hub/`), for a generative model on this Mac: set the
+`~/.cache/huggingface/hub/`, the only models still fetched from Hugging
+Face), for a generative model on this Mac: set the
 Generative model to **This Mac** too, or the app keeps using your server. With `BOND_DEV_HAND_SERVERS = 1` the app uses those ports and starts no
 server of its own; after a reboot you bring them back yourself. Stop them
 with `make stop fast-stop embed-stop decide-stop`. Ports, context size and
@@ -384,13 +413,20 @@ account.
 - Models the app downloads:
   `~/Library/Application Support/com.bondinbox.app/models/`, or the folder
   chosen on the wizard's Storage step. The decision model is in
-  `artifactory_bond-decide-mbl-v3swap/` there.
+  `artifactory_bond-decide-mbl-v3swap/` there, and the embedding model in
+  `Qwen_Qwen3-Embedding-0.6B-GGUF/` (the folder kept its old name when the
+  download moved to the registry, so an existing install fetches nothing
+  again).
 - App data (database, attachments, settings):
   `~/Library/Application Support/com.bondinbox.app/`
 - The app's own server: its log is `logs/llama-server.log` and its files are
   in `servers/`, both under the app data folder.
-- Hand-started servers: logs in `tmp/logs/model-<port>.log`, weights in
+- Hand-started servers: logs in `tmp/logs/model-<port>.log`. `make decide`
+  and `make embed` read the models folder above; the 27B and the 4B are in
   `~/.cache/huggingface/hub/`.
+- An older checkout's `make embed` downloaded the embedding model into
+  `~/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-0.6B-GGUF/`.
+  Nothing reads that folder now; delete it to get about 0.6 GB back.
 - An older checkout installed the decision model by hand into
   `models/local_bond-decide/`. Nothing reads that folder now; delete it to
   get about 0.8 GB back.
@@ -404,7 +440,8 @@ rm -rf ~/Library/Containers/com.bondinbox.app   # only if an older build ran her
 
 If you ran servers by hand: `make stop fast-stop embed-stop decide-stop`,
 `make clean-model`, and delete what is left under
-`~/.cache/huggingface/hub/`. `brew uninstall llama.cpp` if nothing else uses
+`~/.cache/huggingface/hub/` (the 4B, and an older checkout's embedding
+model). `brew uninstall llama.cpp` if nothing else uses
 it.
 
 **"This device" mode (direct Microsoft Graph).** Only for someone who holds

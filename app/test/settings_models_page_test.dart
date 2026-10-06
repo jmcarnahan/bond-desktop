@@ -1105,6 +1105,65 @@ void main() {
           SettingsModelsPage.onDiskLoadedText);
       expect(find.text('Qwen3 Embedding 0.6B · 1.0 GB'), findsOneWidget);
     });
+
+    // The missing file is the cause and the park its consequence: the row
+    // says why the download failed, whatever the park says, and offers
+    // Download unless the fix is in the registry block.
+    const embedPark = ParkedFact(reason: 'embed_unavailable', waiting: 3);
+
+    EnsureState failedWith(String error) => EnsureState(
+          phase: EnsurePhase.failed,
+          modelId: routerEmbedId,
+          error: error,
+          failedIds: const {routerEmbedId},
+          errors: {routerEmbedId: error},
+        );
+
+    testWidgets('a missing file whose registry has no address says so over '
+        'the park, with no Download', (tester) async {
+      await open(
+        tester,
+        statuses: [_row('embed', onDisk: false)],
+        parked: embedPark,
+        ensureState: failedWith(DownloadError.registryNotConfigured),
+      );
+
+      expect(
+        textOf(tester, SettingsModelsPage.embedStatusKey),
+        SetupDownloadBody.describeDownloadError(
+            DownloadError.registryNotConfigured),
+      );
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsNothing);
+    });
+
+    testWidgets('a missing file that failed on the network says so over the '
+        'park, and offers Download', (tester) async {
+      await open(
+        tester,
+        statuses: [_row('embed', onDisk: false)],
+        parked: embedPark,
+        ensureState: failedWith(DownloadError.network),
+      );
+
+      expect(
+        textOf(tester, SettingsModelsPage.embedStatusKey),
+        SetupDownloadBody.describeDownloadError(DownloadError.network),
+      );
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsOneWidget);
+    });
+
+    testWidgets('with the file on disk the park is still the news',
+        (tester) async {
+      await open(
+        tester,
+        statuses: [_row('embed')],
+        parked: embedPark,
+      );
+
+      expect(textOf(tester, SettingsModelsPage.embedStatusKey),
+          SettingsModelsPage.embedUnavailableText);
+      expect(find.byKey(SettingsModelsPage.embedDownloadKey), findsNothing);
+    });
   });
 
   group('the collapsed summary', () {

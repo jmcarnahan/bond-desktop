@@ -98,20 +98,46 @@ SETUP_WAIT   ?= 1800
 # Qwen3-Embedding-0.6B since Round E Phase 2 (2026-09-19), replacing
 # embeddinggemma-300M: it was the only candidate of the twenty measured whose
 # cross-effort share stayed under 20% on every card
-# (docs/model-bakeoff.md, "Clustering vector"). A local.mk that pins EMBED_HF
-# back to ggml-org/embeddinggemma-300M-GGUF MUST be updated or deleted. Nothing
+# (docs/model-bakeoff.md, "Clustering vector"). A local.mk that overrides
+# EMBED_GGUF, or sets EMBED_HF, to another model (an old one pinning
+# ggml-org/embeddinggemma-300M-GGUF) MUST be updated or deleted. Nothing
 # throws if it is not: the app would embed 768-wide vectors into indexes
 # declared at 1024, every clustering read would fall back to brute force over
 # an empty corpus, and search would find nothing new — quietly, because a
 # wrong-width blob is skipped rather than refused.
 EMBED_PORT   ?= 8081
-EMBED_HF     ?= Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
+# The folder the app's downloader writes the embedding model into, and where
+# the managed server looks: <models>/<repo with '/' as '_'>/<file>
+# (RouterPreset.modelPath), for the manifest repo
+# `Qwen/Qwen3-Embedding-0.6B-GGUF`, which stays the folder's name although the
+# bytes now come from the model registry. `make embed-fetch` fills the same
+# folder. It holds a space, so every recipe quotes it.
+EMBED_DIR    ?= $(HOME)/Library/Application Support/com.bondinbox.app/models/Qwen_Qwen3-Embedding-0.6B-GGUF
+# The file's name on disk, the manifest entry's `file`.
+EMBED_FILE   ?= Qwen3-Embedding-0.6B-Q8_0.gguf
+# What `make embed` serves with -m: the app's own copy, so the hand server and
+# the managed one read the same bytes.
+EMBED_GGUF   ?= $(EMBED_DIR)/$(EMBED_FILE)
+# The registry bundle the embedding model is published in, beside the
+# decision model's (`<registry>/bundles/<bundle>/<file>`).
+EMBED_BUNDLE ?= bond-embed-qwen3-0.6b
+# The weights' name inside EMBED_BUNDLE. On disk it is renamed EMBED_FILE.
+EMBED_REMOTE_GGUF ?= model-q8_0.gguf
+# The sha256 the downloaded GGUF must have — the manifest's `sha256` for the
+# embed entry, which the parity test holds equal. Bumped together, from the
+# bundle's bundle.json.
+EMBED_GGUF_SHA ?= 06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439
+# EMPTY by default, and the parity test holds it so: the shipping model is
+# EMBED_GGUF. Set it only to stand up a CANDIDATE embedding server for the
+# bake-off, which then launches with -hf from the Hugging Face cache:
+# `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS=…`.
+EMBED_HF     ?=
 # Whatever flags the embedding model needs that llama.cpp does not read off its
 # GGUF. Pooling is the usual one, and the shipping model needs it: Qwen3-
 # Embedding wants --pooling last, nomic and bge-m3 want mean, and
 # embeddinggemma needed nothing. A local.mk that overrides this to empty while
-# EMBED_HF is Qwen leaves the server pooling by its own default, which is a
-# different vector for the same text.
+# the shipping Qwen model is served leaves the server pooling by its own
+# default, which is a different vector for the same text.
 # `make embed EMBED_PORT=8091 EMBED_HF=<repo> EMBED_ARGS=…` is how a second
 # server is stood up beside it for `make golden-vector`.
 EMBED_ARGS   ?= --pooling last
@@ -188,7 +214,7 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
-        decide decide-stop decide-fetch _wait-decide \
+        decide decide-stop decide-fetch embed-fetch registry-verify _wait-decide \
         app-install app-run app-profile app-test app-gen app-migrations app-analyze \
         app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
@@ -207,13 +233,15 @@ help:
 	@printf "  make install      → brew install llama.cpp + dart pub get in agent/\n"
 	@printf "  make model        → start llama-server :$(MODEL_PORT) ($(MODEL_HF))\n"
 	@printf "  make stop         → stop the model server on :$(MODEL_PORT)\n"
-	@printf "  make embed        → start the embedding server :$(EMBED_PORT) ($(EMBED_HF))\n"
+	@printf "  make embed        → start the embedding server :$(EMBED_PORT) ($(if $(strip $(EMBED_HF)),$(EMBED_HF),$(EMBED_FILE)))\n"
 	@printf "  make embed-stop   → stop the embedding server on :$(EMBED_PORT)\n"
 	@printf "  make fast         → start the bulk-work server :$(FAST_PORT) ($(FAST_HF))\n"
 	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
 	@printf "  make decide       → start the decision-model server :$(DECIDE_PORT) ($(DECIDE_FILE))\n"
 	@printf "  make decide-stop  → stop the decision-model server on :$(DECIDE_PORT)\n"
 	@printf "  make decide-fetch → download the decision model from the model registry (BOND_REGISTRY_URL) into the models folder, sha-checked\n"
+	@printf "  make embed-fetch  → download the embedding model from the model registry (BOND_REGISTRY_URL) into the models folder, sha-checked\n"
+	@printf "  make registry-verify → live: the app's downloader fetches every registry model to its pinned digest (BOND_REGISTRY_URL, BOND_REGISTRY_TOKEN)\n"
 	@printf "  make omlx         → start the oMLX bakeoff server :$(OMLX_PORT) (all cached models)\n"
 	@printf "  make omlx-stop    → stop the oMLX server on :$(OMLX_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
@@ -458,9 +486,14 @@ stop:
 	 printf "  $(GREEN)✓$(RESET) :$(MODEL_PORT) free\n"
 
 # The embedding server. Same port guard as `model:`, same split between the
-# launch line and the wait line so `make -n embed` stays a dry run.
+# launch line and the wait line so `make -n embed` stays a dry run. -m rather
+# than -hf, as `decide:` does: the weights come from the model registry (the
+# app's download, or `make embed-fetch`) into the app's own models folder, so
+# the hand server reads the very file the managed one does, and a missing file
+# is said as one, not a download to wait for. EMBED_HF set (a bake-off
+# candidate) launches with -hf from the Hugging Face cache instead.
 #
-# No --jinja and no -ngl: /v1/embeddings runs no chat template, and a 300M
+# No --jinja and no -ngl: /v1/embeddings runs no chat template, and a 0.6B
 # model needs no persuading onto the GPU. --embeddings is what puts the server
 # in embedding mode, which is also why this cannot share the chat model's
 # process — one llama-server serves one mode.
@@ -476,10 +509,22 @@ embed:
 	   esac; \
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
-	 printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_HF), embeddings)\n"; \
-	 $(APP_NO_SECRET_ENV) nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
-	   $(EMBED_ARGS) \
-	   > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 &
+	 if [ -n "$(strip $(EMBED_HF))" ]; then \
+	   printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_HF), embeddings)\n"; \
+	   $(APP_NO_SECRET_ENV) nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
+	     $(EMBED_ARGS) \
+	     > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 & \
+	 else \
+	   if [ ! -f "$(EMBED_GGUF)" ]; then \
+	     printf "  $(RED)✗$(RESET) no embedding model at %s\n" "$(EMBED_GGUF)"; \
+	     printf "    download it first: run the app once, or make embed-fetch\n"; \
+	     exit 1; \
+	   fi; \
+	   printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_FILE), embeddings)\n"; \
+	   $(APP_NO_SECRET_ENV) nohup llama-server -m "$(EMBED_GGUF)" --embeddings --port $(EMBED_PORT) \
+	     $(EMBED_ARGS) \
+	     > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 & \
+	 fi
 	@$(MAKE) --no-print-directory _wait-embed
 
 # Port-based only, for the reason `stop:` is: killing by name would take the
@@ -623,29 +668,36 @@ decide-stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(DECIDE_PORT) free\n"
 
-# Downloads the decision model's two files — the GGUF and the heads file, which
-# are needed even when the decision server is remote, because the app applies
-# the heads — from the model registry into DECIDE_DIR, the folder the app's own
-# downloader fills, under the app's names. For a bench on a Mac where the app
-# has not run; the app needs none of this. Each file lands as the dot-temp
-# `.<name>.fetch` beside its final name — never the app's own `.part`, which
-# its downloader resumes from — and is renamed only once its sha256 matches
-# the pinned digest, so a running server's mmapped GGUF is never overwritten
-# in place; a failure of any kind deletes the temp and replaces nothing. A
-# file already present at its digest is skipped. Files placed this way have
-# no ledger row, so the app hashes them on its next download run and only
-# then counts them on disk. The token goes as the exported
+# ONE fetch recipe for every registry model `make` downloads: the decision
+# model's two files (the GGUF and the heads file, which are needed even when
+# the decision server is remote, because the app applies the heads) and the
+# embedding model's GGUF. It downloads from the model registry
+# (`<BOND_REGISTRY_URL>/bundles/<bundle>/<remote>`) into the folder the app's
+# own downloader fills, under the app's names. For a hand server or a bench on
+# a Mac where the app has not run; the app needs none of this. Each file lands
+# as the dot-temp `.<name>.fetch` beside its final name — never the app's own
+# `.part`, which its downloader resumes from — and is renamed only once its
+# sha256 matches the pinned digest, so a running server's mmapped GGUF is never
+# overwritten in place; a failure of any kind deletes the temp and replaces
+# nothing. A file already present at its digest is skipped. Files placed this
+# way have no ledger row, so the app hashes them on its next download run and
+# only then counts them on disk. The token goes as the exported
 # "$$BOND_REGISTRY_TOKEN", so `make -n` prints the reference, never the
 # value; curl reads the header from a config on stdin (`-K -`), so it is not
 # in curl's argv for `ps` to show, and curl sends it only to the registry's
 # own host (it drops a custom Authorization header on a redirect elsewhere).
-# The two lines it checked are kept as decide.sha256 beside the files.
-decide-fetch:
-	@if [ -z "$(strip $(BOND_REGISTRY_URL))" ]; then \
+# The lines it checked are kept as the sums file beside the files.
+#
+# $(call REGISTRY_FETCH,<folder>,<bundle>,<sums file>,<noun>,<specs>), each
+# spec `remote:name:sha256` (no spaces, so the shell splits them on `:`). The
+# folder holds a space, so every use of it is quoted. A canned recipe rather
+# than a second copy: the two targets differ only in what they fetch.
+define REGISTRY_FETCH
+if [ -z "$(strip $(BOND_REGISTRY_URL))" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_URL is empty: set it in local.mk (see local.mk.example)\n"; \
 	   exit 1; \
 	 fi; \
-	 dir="$(DECIDE_DIR)"; base="$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)"; \
+	 dir="$(1)"; base="$(BOND_REGISTRY_URL:%/=%)/bundles/$(2)"; \
 	 mkdir -p "$$dir" || exit 1; \
 	 fetch() { \
 	   if [ -n "$$BOND_REGISTRY_TOKEN" ]; then \
@@ -655,9 +707,9 @@ decide-fetch:
 	     curl -fSL --retry 2 -o "$$2" "$$1"; \
 	   fi; \
 	 }; \
-	 for spec in "$(DECIDE_REMOTE_GGUF) $(DECIDE_FILE) $(DECIDE_GGUF_SHA)" \
-	             "$(DECIDE_REMOTE_HEADS) $(DECIDE_HEADS) $(DECIDE_HEADS_SHA)"; do \
-	   set -- $$spec; remote=$$1; name=$$2; want=$$3; dest="$$dir/$$name"; tmp="$$dir/.$$name.fetch"; \
+	 for spec in $(5); do \
+	   remote=$${spec%%:*}; rest=$${spec#*:}; name=$${rest%%:*}; want=$${rest#*:}; \
+	   dest="$$dir/$$name"; tmp="$$dir/.$$name.fetch"; \
 	   if [ -f "$$dest" ] && [ "$$(shasum -a 256 "$$dest" | cut -d' ' -f1)" = "$$want" ]; then \
 	     printf "  $(GREEN)✓$(RESET) %s already present at its digest\n" "$$name"; \
 	     continue; \
@@ -678,8 +730,20 @@ decide-fetch:
 	   mv -f "$$tmp" "$$dest" || { rm -f "$$tmp"; exit 1; }; \
 	   printf "  $(GREEN)✓$(RESET) %s\n" "$$name"; \
 	 done; \
-	 printf '%s  %s\n%s  %s\n' "$(DECIDE_GGUF_SHA)" "$(DECIDE_FILE)" "$(DECIDE_HEADS_SHA)" "$(DECIDE_HEADS)" > "$$dir/decide.sha256"; \
-	 printf "  $(GREEN)✓$(RESET) decision model in %s\n" "$$dir"
+	 for spec in $(5); do \
+	   rest=$${spec#*:}; printf '%s  %s\n' "$${rest#*:}" "$${rest%%:*}"; \
+	 done > "$$dir/$(3)"; \
+	 printf "  $(GREEN)✓$(RESET) $(4) in %s\n" "$$dir"
+endef
+
+# The decision model's GGUF and heads file, checked into decide.sha256.
+decide-fetch:
+	@$(call REGISTRY_FETCH,$(DECIDE_DIR),$(DECIDE_BUNDLE),decide.sha256,decision model,$(DECIDE_REMOTE_GGUF):$(DECIDE_FILE):$(DECIDE_GGUF_SHA) $(DECIDE_REMOTE_HEADS):$(DECIDE_HEADS):$(DECIDE_HEADS_SHA))
+
+# The embedding model's one GGUF, into EMBED_DIR, the file `make embed` serves,
+# checked into embed.sha256.
+embed-fetch:
+	@$(call REGISTRY_FETCH,$(EMBED_DIR),$(EMBED_BUNDLE),embed.sha256,embedding model,$(EMBED_REMOTE_GGUF):$(EMBED_FILE):$(EMBED_GGUF_SHA))
 
 # ~0.8GB from local disk: no download, so a timeout here is a failure worth the
 # log.
@@ -820,7 +884,8 @@ MS_ENV ?= $(CURDIR)/.env
 # and a value saved under Settings, Models in the app beats it. `make app-doctor` checks them.
 #
 # The model registry's base address, an Artifactory repository URL; the app
-# downloads the decision model's files from <it>/bundles/<bundle>/<file>.
+# downloads the decision model's and the embedding model's files from
+# <it>/bundles/<bundle>/<file>.
 BOND_REGISTRY_URL   ?=
 # The registry's READ token. A SECRET: exported below and handed to the app
 # and to curl as the shell's "$$BOND_REGISTRY_TOKEN", so `make -n` prints the
@@ -834,8 +899,9 @@ BOND_BOX_URL        ?=
 # sends it only to BOND_BOX_URL's own origin, and a key saved in the app's
 # keychain beats it. A distributed build (dist/) carries none.
 BOND_BOX_KEY        ?=
-# The registry bundle the decision model is downloaded from, and the one
-# `make app-doctor` asks the registry for (its $(DECIDE_REMOTE_HEADS)).
+# The registry bundle the decision model is downloaded from, and one of the
+# two `make app-doctor` asks the registry for (its $(DECIDE_REMOTE_HEADS));
+# the other is EMBED_BUNDLE's $(EMBED_REMOTE_GGUF).
 DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
 # The secrets travel as ENVIRONMENT, never as make text: every recipe that
 # needs one names it as a shell reference. Exported to every recipe because
@@ -844,7 +910,9 @@ DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
 # line says. So the recipes that must NOT carry them take them out instead,
 # with $(APP_NO_SECRET_ENV): the hand-started servers (model, fast, embed,
 # decide, omlx), app-test's flutter test, the dist scripts, and app-run /
-# app-profile / app-build after the shell has read them into the defines.
+# app-profile / app-build after the shell has read them into the defines. The
+# ones that read the registry token are decide-fetch, embed-fetch, app-doctor,
+# registry-verify (from its environment), app-run, app-profile and app-build.
 export BOND_REGISTRY_TOKEN BOND_BOX_KEY
 # A secret written into a curl config (`-K -`) sits inside double quotes,
 # where curl reads a backslash or a double quote as an escape: both are
@@ -1787,11 +1855,12 @@ app-analyze:
 
 # Is this environment configured? One line each, ✓ or ✗: flutter and its
 # version, a llama-server to run, the bond-mcps URL in $(MS_ENV), the model
-# registry answering for $(DECIDE_BUNDLE) with the token (its first byte of
-# $(DECIDE_REMOTE_HEADS), a file the app really downloads, the way Settings'
-# Check asks: 200 or 206 is ✓ unless it is a `text/html` page, and a redirect
-# is a `!` warning, as Check words it, since the app's downloads follow one
-# though doctor itself does not), and Your server
+# registry answering with the token for each bundle the app downloads, one
+# line each: $(DECIDE_BUNDLE) (its first byte of $(DECIDE_REMOTE_HEADS)) and
+# $(EMBED_BUNDLE) (its first byte of $(EMBED_REMOTE_GGUF)), the same two
+# files Settings' Check asks for; 200 or 206 is ✓ unless it is a `text/html`
+# page, and a redirect is a `!` warning, as Check words it, since the app's
+# downloads follow one though doctor itself does not; and Your server
 # answering /prose/v1/models with the key. It prints HTTP status codes only,
 # never a secret: the two tokens reach the shell as "$$BOND_…" references
 # through the `export` beside MS_ENV, so `make -n app-doctor` shows the
@@ -1820,19 +1889,22 @@ app-doctor:
 	 elif [ -z "$$BOND_REGISTRY_TOKEN" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_REGISTRY_TOKEN is not set in local.mk\n"; fail=1; \
 	 else \
-	   out=$$(printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_REGISTRY_TOKEN" | $(CURL_CONFIG_ESCAPE))" | \
-	     curl -K - -s -o /dev/null -w '%{http_code} %{content_type}' -m 8 -r 0-0 "$(BOND_REGISTRY_URL:%/=%)/bundles/$(DECIDE_BUNDLE)/$(DECIDE_REMOTE_HEADS)"); \
-	   code=$${out%% *}; type=$$(printf '%s' "$${out#* }" | tr 'A-Z' 'a-z'); \
-	   case "$$code" in \
-	     200|206) case "$$type" in \
-	       text/html*) printf "  $(RED)✗$(RESET) the registry answered with a web page, not a model — check BOND_REGISTRY_URL\n"; fail=1;; \
-	       *) printf "  $(GREEN)✓$(RESET) the registry has $(DECIDE_BUNDLE)\n";; \
-	     esac;; \
-	     3[0-9][0-9]) printf "  $(YELLOW)!$(RESET) the registry answered with a redirect — HTTP %s; the app follows it, but the https address, or the one it redirects to, is steadier\n" "$$code";; \
-	     401|403) printf "  $(RED)✗$(RESET) the registry refused the token — HTTP %s\n" "$$code"; fail=1;; \
-	     404) printf "  $(RED)✗$(RESET) the registry does not have $(DECIDE_BUNDLE) — HTTP 404; check BOND_REGISTRY_URL\n"; fail=1;; \
-	     *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for $(DECIDE_BUNDLE)\n" "$$code"; fail=1;; \
-	   esac; \
+	   for probe in "$(DECIDE_BUNDLE)/$(DECIDE_REMOTE_HEADS)" "$(EMBED_BUNDLE)/$(EMBED_REMOTE_GGUF)"; do \
+	     bundle=$${probe%%/*}; \
+	     out=$$(printf 'header = "Authorization: Bearer %s"\n' "$$(printf '%s' "$$BOND_REGISTRY_TOKEN" | $(CURL_CONFIG_ESCAPE))" | \
+	       curl -K - -s -o /dev/null -w '%{http_code} %{content_type}' -m 8 -r 0-0 "$(BOND_REGISTRY_URL:%/=%)/bundles/$$probe"); \
+	     code=$${out%% *}; type=$$(printf '%s' "$${out#* }" | tr 'A-Z' 'a-z'); \
+	     case "$$code" in \
+	       200|206) case "$$type" in \
+	         text/html*) printf "  $(RED)✗$(RESET) the registry answered with a web page, not a model — check BOND_REGISTRY_URL\n"; fail=1;; \
+	         *) printf "  $(GREEN)✓$(RESET) the registry has %s\n" "$$bundle";; \
+	       esac;; \
+	       3[0-9][0-9]) printf "  $(YELLOW)!$(RESET) the registry answered with a redirect for %s — HTTP %s; the app follows it, but the https address, or the one it redirects to, is steadier\n" "$$bundle" "$$code";; \
+	       401|403) printf "  $(RED)✗$(RESET) the registry refused the token for %s — HTTP %s\n" "$$bundle" "$$code"; fail=1;; \
+	       404) printf "  $(RED)✗$(RESET) the registry does not have %s — HTTP 404; check BOND_REGISTRY_URL\n" "$$bundle"; fail=1;; \
+	       *) printf "  $(RED)✗$(RESET) the registry answered HTTP %s for %s\n" "$$code" "$$bundle"; fail=1;; \
+	     esac; \
+	   done; \
 	 fi; \
 	 if [ -z "$(strip $(BOND_BOX_URL))" ]; then \
 	   printf "  $(RED)✗$(RESET) BOND_BOX_URL is not set in local.mk\n"; fail=1; \
@@ -1848,6 +1920,18 @@ app-doctor:
 	   esac; \
 	 fi; \
 	 exit $$fail
+
+# LIVE, and never a gate: the one registry check that asserts, on
+# `bench-verify`'s rule that it checks facts about a server's configuration
+# rather than judgements. Every registry entry in the committed manifest (the
+# embedding model and the decision model) is downloaded by the app's REAL
+# downloader into a temp folder and must land at its pinned digest, which is
+# the path no offline test can take: those run against the fake. The address
+# and the token are read from the ENVIRONMENT (the token through the `export`
+# above), never a --dart-define, so the token is never in a command line. The
+# box key it has no use for is taken out of its environment.
+registry-verify:
+	@cd $(APP_DIR) && env -u BOND_BOX_KEY BOND_REGISTRY_URL='$(BOND_REGISTRY_URL)' $(FLUTTER) test test/registry_fetch_live_test.dart --run-skipped
 
 # ── vendored sqlite-vec sources ────────────────────────────────────────
 # The four C/H files under $(VEC_SRC) are COMMITTED, not fetched at build
@@ -2103,7 +2187,8 @@ _wait-model:
 	 printf "    'make status' flips to [up] once loading finishes.\n"; \
 	 exit 1
 
-# The embedding model is ~600MB rather than ~19GB, so unlike _wait-model a
+# The embedding model is ~600MB rather than ~19GB and is read from the models
+# folder (a download only for an EMBED_HF candidate), so unlike _wait-model a
 # timeout here really is a failure worth reading the log over.
 _wait-embed:
 	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
@@ -2115,9 +2200,13 @@ _wait-embed:
 	   sleep 1; \
 	 done; \
 	 printf "  $(YELLOW)!$(RESET) embed has not bound :$(EMBED_PORT) after $(WAIT_TIMEOUT)s\n"; \
-	 printf "    On the FIRST run it is downloading $(EMBED_HF)\n"; \
-	 printf "    (~600MB) — much smaller than the chat model, so give it a\n"; \
-	 printf "    moment and re-run. Otherwise the log has the reason:\n"; \
+	 if [ -n "$(strip $(EMBED_HF))" ]; then \
+	   printf "    On the FIRST run it is downloading $(EMBED_HF)\n"; \
+	   printf "    (~600MB) — much smaller than the chat model, so give it a\n"; \
+	   printf "    moment and re-run. Otherwise the log has the reason:\n"; \
+	 else \
+	   printf "    It loads $(EMBED_FILE) from local disk, so the log has the reason:\n"; \
+	 fi; \
 	 printf "    tail -f $(LOG_DIR)/model-$(EMBED_PORT).log\n"; \
 	 exit 1
 

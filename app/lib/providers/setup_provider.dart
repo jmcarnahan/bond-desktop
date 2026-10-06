@@ -74,9 +74,10 @@ class SetupState {
   /// controls, never as a dead Start button.
   final bool downloadWaiting;
 
-  /// Every GATING file (the Hugging Face ones) is done in the ledger AND
-  /// present on disk: what enables the download step's Continue. A model
-  /// registry file never holds it (decision D7).
+  /// Every GATING file (the Hugging Face ones and the embedding model,
+  /// [ModelFile.gatesSetup]) is done in the ledger AND present on disk: what
+  /// enables the download step's Continue. The decision model's registry
+  /// files never hold it (decision D7).
   final bool downloadsComplete;
 
   /// Every file the step downloads is here, registry files included: what
@@ -471,7 +472,8 @@ class SetupController extends StateNotifier<SetupState> {
     // weights on disk are the previous checkpoint, and the download step is
     // where that gets put right — its `_onEnter` starts the transfer for
     // everything missing or stale. Only the entries that GATE setup decide
-    // it (decision D7): a registry file is best-effort and never reopens the
+    // it, the Hugging Face files and the embedding model (decision D7): the
+    // decision model's registry files are best-effort and never reopen the
     // wizard.
     if (step == SetupStep.done) {
       step = _ledger.matches(resolvedManifest.gating)
@@ -842,6 +844,32 @@ class SetupController extends StateNotifier<SetupState> {
     }
   }
 
+  /// The download again from the top, whatever this step's run is doing: a
+  /// registry address or token just changed, and a run already past its
+  /// registry entries, paused, or winding down would never ask it. A run in
+  /// flight is cancelled the way Cancel does it, so its parts stay and the new
+  /// run carries on from the byte. While another start is between its first
+  /// line and its run this does nothing: that run reads the address per entry
+  /// when it gets there.
+  ///
+  /// [ModelDownloader.running] is true for a PAUSED run too, so one check
+  /// covers both.
+  Future<void> restartDownload() async {
+    if (_starting) return;
+    _starting = true;
+    try {
+      if (downloader.running) {
+        await downloader.cancel();
+        await downloader.idle;
+        if (!mounted) return;
+        state = state.copyWith(downloadRunning: false, downloadPaused: false);
+      }
+      await _startDownload();
+    } finally {
+      _starting = false;
+    }
+  }
+
   Future<void> _startDownload() async {
     // A PAUSED run inherited from an earlier visit is never waited for:
     // nothing would resume it. Cancelled, its parts kept, so the run below
@@ -1110,10 +1138,11 @@ class SetupController extends StateNotifier<SetupState> {
   /// granted on it would hand over an inbox serving the old weights.
   ///
   /// [gatingOnly] asks about the GATING entries alone (the Hugging Face
-  /// ones), which is what Continue waits for (decision D7): a registry file
+  /// ones and the embedding model, wherever it is downloaded from), which is
+  /// what Continue waits for (decision D7): a decision model registry file
   /// that failed or is still missing never traps anybody in the wizard,
-  /// because its address is fixed in Settings, which the wizard cannot
-  /// reach, and the model ensurer retries it after setup.
+  /// because the model ensurer retries it after setup and its role parks on
+  /// its own reason meanwhile.
   bool _allFilesPresent(String folder, {bool gatingOnly = false}) {
     if (folder.isEmpty) return false;
     final ledger = _currentLedger;

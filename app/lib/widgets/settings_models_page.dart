@@ -53,8 +53,8 @@ typedef RoleWrite = Future<void> Function({
 /// status block (and, for the generative model, the choice of the 27B or the
 /// 4B); Your server is the one-address [ModelServersForm]. **Embeddings**
 /// always run on this Mac and are a status line only. **Model registry**
-/// under them is where the decision model is downloaded from
-/// ([ModelRegistryForm]).
+/// under them is where the decision and embedding models are downloaded
+/// from ([ModelRegistryForm]).
 ///
 /// PROP-ONLY, like every other body here: nothing reaches for a provider, the
 /// host resolves every fact and takes every write back as a closure. The
@@ -79,8 +79,9 @@ class SettingsModelsPage extends StatefulWidget {
   final ServerState serverState;
 
   /// Whether this build runs its own llama-server. False under
-  /// `BOND_DEV_HAND_SERVERS`, where `make embed` serves embeddings and
-  /// nothing downloads them, so the Embeddings block offers no Download.
+  /// `BOND_DEV_HAND_SERVERS`, where `make embed` serves embeddings from the
+  /// models folder: the model ensurer still fills that folder at launch, and
+  /// the Embeddings block says whose server it is and offers no Download.
   final bool managedServer;
 
   /// The decision remote's effective address and model, and whether its key
@@ -154,8 +155,8 @@ class SettingsModelsPage extends StatefulWidget {
   /// Forgets the stored registry token. Null takes **Remove token** off.
   final Future<void> Function()? onRemoveRegistryToken;
 
-  /// Asks the saved registry for the decision model's file. Null takes
-  /// **Check** off the registry block.
+  /// Asks the saved registry for the embedding model's file and the decision
+  /// model's. Null takes **Check** off the registry block.
   final Future<RegistryCheck> Function()? onCheckRegistry;
 
   /// What the model ensurer is doing: a download's percentage, or why the
@@ -364,7 +365,7 @@ class SettingsModelsPage extends StatefulWidget {
   static const String notDownloadedText = notDownloadedYetText;
 
   /// The Embeddings row on a build with no managed server: `make embed`
-  /// serves the model, and nothing here downloads it.
+  /// serves the model, so the row names that server rather than a download.
   static const String embedHandServedText =
       'Served by your own embedding server.';
   static const String onDiskLoadedText = 'On disk · loaded';
@@ -726,24 +727,16 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
         child: const Text(SettingsModelsPage.downloadLabel),
       );
 
-  /// The failures whose fix is the registry's address or token: the
-  /// sentence names it, and the registry block's Save retries the download,
-  /// so a Download button would only repeat the same refusal.
-  static const Set<String> _registryFixes = {
-    DownloadError.registryNotConfigured,
-    DownloadError.unauthorized,
-    DownloadError.registryNotFound,
-    DownloadError.registryNotAModel,
-  };
-
   /// Whether a missing downloaded model's row offers **Download**: not
   /// while any run is in flight, and not after a failure whose fix is in
-  /// the registry block.
+  /// the registry block ([DownloadError.registryFixes]): the registry
+  /// block's Save retries the download, so a Download button would only
+  /// repeat the same refusal.
   bool _offersDownload(String routerId) {
     if (widget.onDownloadModels == null || _downloading) return false;
     final ensure = widget.ensureState;
     if (ensure != null && ensure.failedIds.contains(routerId)) {
-      return !_registryFixes.contains(ensure.errorFor(routerId));
+      return !DownloadError.registryFixes.contains(ensure.errorFor(routerId));
     }
     return true;
   }
@@ -1046,15 +1039,21 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
   List<Widget> _embedBlock() {
     final row = _row('embed');
     final parked = _parked(const {'embed_unavailable'});
+    // A file this Mac's router needs and lacks is the CAUSE, and a park
+    // (`embed_unavailable`, "not answering") is only its consequence: the
+    // missing file and why its download failed win over the park, and so
+    // does Download, the decision row's rule. With the file on disk the park
+    // is the news.
+    final missing = widget.managedServer && row != null && !row.onDisk;
     final String status;
-    if (parked != null) {
+    if (missing) {
+      status = _downloadStatus(row.routerId);
+    } else if (parked != null) {
       status = parked;
     } else if (!widget.managedServer) {
       status = SettingsModelsPage.embedHandServedText;
     } else if (row == null) {
       status = '${SettingsModelsPage.embedModelName} on this Mac';
-    } else if (!row.onDisk) {
-      status = _downloadStatus(row.routerId);
     } else {
       status = SettingsModelsPage.loaded(row, widget.serverState)
           ? SettingsModelsPage.onDiskLoadedText
@@ -1074,11 +1073,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
               style: BondType.small,
             ),
           ),
-          if (parked == null &&
-              widget.managedServer &&
-              row != null &&
-              !row.onDisk &&
-              _offersDownload(row.routerId)) ...[
+          if (missing && _offersDownload(row.routerId)) ...[
             const SizedBox(width: BondSpacing.s12),
             _downloadButton(SettingsModelsPage.embedDownloadKey),
           ],

@@ -51,10 +51,13 @@ Map<String, Object?> embedJson() => {
       'serverArgs': {'embedding': 'true'},
     };
 
+// Each its own FILE in the shared fixture repo: the parser refuses two
+// entries stored at one path.
 Map<String, Object?> bulkJson() => {
       ...embedJson(),
       'id': 'bond-bulk',
       'role': 'bulk',
+      'file': 'fixture-bulk-Q8_0.gguf',
       'serverArgs': {'c': '32768'},
     };
 
@@ -62,6 +65,7 @@ Map<String, Object?> proseJson() => {
       ...embedJson(),
       'id': 'bond-prose',
       'role': 'prose',
+      'file': 'fixture-prose-Q8_0.gguf',
       'serverArgs': {'c': '32768'},
     };
 
@@ -212,12 +216,55 @@ void main() {
       });
     });
 
-    test('a downloaded entry is hf-sourced and carries no heads', () {
-      final embed = realManifest().byRole(ModelRole.embed);
+    test('the embedding model is a registry bundle kept in its upstream '
+        "repo's folder, with no heads, and it gates setup", () {
+      final manifest = realManifest();
+      final embed = manifest.byRole(ModelRole.embed);
+
+      expect(embed.id, routerEmbedId);
+      expect(embed.source, sourceArtifactory);
+      expect(embed.isRegistry, isTrue);
       expect(embed.isLocal, isFalse);
-      expect(embed.source, sourceHf);
+      expect(embed.bundle, 'bond-embed-qwen3-0.6b');
+      expect(embed.remoteFile, 'model-q8_0.gguf');
+      expect(embed.revision, '');
       expect(embed.heads, isNull);
       expect(embed.headsRelativePath, isNull);
+      expect(embed.sidecar, isNull);
+      expect(embed.repo, 'Qwen/Qwen3-Embedding-0.6B-GGUF');
+      expect(embed.file, 'Qwen3-Embedding-0.6B-Q8_0.gguf');
+      expect(embed.sizeBytes, 639150592);
+      expect(
+        embed.sha256,
+        '06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439',
+      );
+      // The path an install that fetched it from Hugging Face already has:
+      // same folder, same file, same digest, so nothing is downloaded again.
+      expect(embed.relativePath,
+          'Qwen_Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf');
+      const base = 'http://localhost:18082/artifactory/bond-models/';
+      expect(
+        embed.registryUri(base).toString(),
+        'http://localhost:18082/artifactory/bond-models/bundles/'
+        'bond-embed-qwen3-0.6b/model-q8_0.gguf',
+      );
+      expect(embed.headsRegistryUri(base), isNull);
+      // One leg: the weights alone.
+      expect(embed.downloadBytes, 639150592);
+      // It still gates setup wherever it comes from; the decision model,
+      // the other registry entry, does not.
+      expect(embed.gatesSetup, isTrue);
+      expect(manifest.byRole(ModelRole.decide).gatesSetup, isFalse);
+    });
+
+    test('a hub entry is hf-sourced and carries no heads', () {
+      final bulk = realManifest().byId(routerBulkId);
+      expect(bulk.isLocal, isFalse);
+      expect(bulk.isRegistry, isFalse);
+      expect(bulk.source, sourceHf);
+      expect(bulk.heads, isNull);
+      expect(bulk.headsRelativePath, isNull);
+      expect(bulk.gatesSetup, isTrue);
     });
 
     test('a registry entry round-trips through toJson', () {
@@ -307,15 +354,21 @@ void main() {
       final manifest = realManifest();
       final decide = manifest.byRole(ModelRole.decide);
       final embed = manifest.byRole(ModelRole.embed);
+      final bulk = manifest.byId(routerBulkId);
       expect(() => decide.registryUri(''), throwsStateError);
       expect(() => decide.registryUri('  /  '), throwsStateError);
       expect(() => decide.headsRegistryUri(''), throwsStateError);
-      expect(() => embed.registryUri('https://artifactory.example.com/r'),
+      expect(() => embed.registryUri(''), throwsStateError);
+      expect(() => bulk.registryUri('https://artifactory.example.com/r'),
           throwsStateError);
-      expect(() => embed.headsRegistryUri('https://artifactory.example.com/r'),
+      expect(() => bulk.headsRegistryUri('https://artifactory.example.com/r'),
           throwsStateError);
       expect(() => decide.resolveUri, throwsStateError);
       expect(() => decide.sidecarResolveUri, throwsStateError);
+      // The embedding model keeps a Hugging Face repo as its folder, and is
+      // a registry entry all the same: no hub URL for it.
+      expect(() => embed.resolveUri, throwsStateError);
+      expect(() => embed.sidecarResolveUri, throwsStateError);
     });
 
     test('toString never cuts an empty revision', () {
@@ -341,8 +394,9 @@ void main() {
       expect(bare.toString, returnsNormally);
     });
 
-    test('the gating view leaves the registry entry out, the downloadable '
-        'view keeps it', () {
+    test('the gating view keeps the embedding model by role and the hub '
+        'entries by source, and leaves the decision model out; the '
+        'downloadable view keeps every one', () {
       final manifest = realManifest();
       expect([for (final m in manifest.gating.models) m.id],
           [routerEmbedId, routerBulkId, routerProseId]);
@@ -355,6 +409,24 @@ void main() {
           isNot(contains(routerDecideId)));
       expect([for (final m in local.downloadable.models) m.id],
           isNot(contains(routerDecideId)));
+    });
+
+    test('under the default placements the gating view is the embedding '
+        'model, never empty', () {
+      // Generative on Your server, decision here: this Mac serves the
+      // embedding model and the decision model. Both are registry entries,
+      // so a gating rule by source alone would leave NOTHING here, and
+      // `DownloadLedger.matches` of an empty set is vacuously true: setup
+      // would let a Mac through with no embedding model and wait for
+      // nothing. The embedding model gates by role for that reason.
+      final served = realManifest().forRoles(
+        hardwareTier: MachineTier.full,
+        decisionManaged: true,
+        generativeManagedId: null,
+      );
+      expect(served.gating.models, isNotEmpty);
+      expect([for (final m in served.gating.models) m.id], [routerEmbedId]);
+      expect(DownloadLedger.empty.matches(served.gating), isFalse);
     });
 
     test('carries the measured sizes and digests', () {
@@ -404,11 +476,16 @@ void main() {
 
     test('a checkpoint with no sidecar answers null for all of it', () {
       final embed = realManifest().byRole(ModelRole.embed);
+      final bulk = realManifest().byId(routerBulkId);
 
       expect(embed.sidecar, isNull);
       expect(embed.sidecarRelativePath, isNull);
-      expect(embed.sidecarResolveUri, isNull);
       expect(embed.downloadBytes, embed.sizeBytes);
+      // The hub half on a hub entry: a registry entry has no hub URL at all.
+      expect(bulk.sidecar, isNull);
+      expect(bulk.sidecarRelativePath, isNull);
+      expect(bulk.sidecarResolveUri, isNull);
+      expect(bulk.downloadBytes, bulk.sizeBytes);
     });
 
     test('the sidecar path and URI sit in the parent repo, at its revision',
@@ -446,11 +523,14 @@ void main() {
 
     test('resolveUri pins the commit, not main', () {
       expect(
-        realManifest().byRole(ModelRole.embed).resolveUri.toString(),
-        'https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/'
-        '370f27d7550e0def9b39c1f16d3fbaa13aa67728/'
-        'Qwen3-Embedding-0.6B-Q8_0.gguf',
+        realManifest().byId(routerBulkId).resolveUri.toString(),
+        'https://huggingface.co/ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF/'
+        'resolve/e6f794d44f9395d0184a966c27b5ae99ea356fcb/'
+        'qwen3-4b-instruct-2507-q8_0.gguf',
       );
+      // The embedding model is downloaded from the registry, so it has none.
+      expect(() => realManifest().byRole(ModelRole.embed).resolveUri,
+          throwsStateError);
     });
 
     test('relativePath flattens the repo slash, as the preset does', () {
@@ -762,6 +842,19 @@ spec-type = draft-mtp
               m.id,
           ];
 
+      test('the registry embedding model is kept with no ledger row and no '
+          'file, as the hub one always was', () {
+        // A registry entry is served only on current rows, EXCEPT the
+        // embedding model: the keep is by role, so moving it to the registry
+        // did not make it droppable, and its absence still fails the start
+        // with the preflight's own sentence.
+        final manifest = realManifest().forTier(MachineTier.full);
+        expect(manifest.byId(routerEmbedId).isRegistry, isTrue);
+
+        expect(kept(manifest, ledger: DownloadLedger.empty),
+            contains(routerEmbedId));
+      });
+
       test('drops the decision model until both of its files are there', () {
         final manifest = realManifest().forTier(MachineTier.full);
         final decide = manifest.byId(routerDecideId);
@@ -1017,6 +1110,18 @@ spec-type = draft-mtp
     );
 
     refuses(
+      'two entries stored at one path',
+      // A registry entry's repo is only its folder, so the one thing left
+      // that keeps two entries off one file is this.
+      manifestText([
+        embedJson(),
+        {...bulkJson(), 'repo': embedJson()['repo'], 'file': embedJson()['file']},
+        proseJson(),
+      ]),
+      contains('already uses'),
+    );
+
+    refuses(
       'two models for one role',
       manifestText([
         embedJson(),
@@ -1228,12 +1333,12 @@ spec-type = draft-mtp
     );
 
     refuses(
-      'a registry entry outside the artifactory/ repo namespace',
+      'a registry entry whose repo is under local/',
       manifestText([
         ...models,
-        {...registryDecideJson(), 'repo': 'bond-decide-mbl-v3swap'},
+        {...registryDecideJson(), 'repo': 'local/x'},
       ]),
-      allOf(contains('artifactory'), contains('bond-decide-mbl-v3swap')),
+      allOf(contains('artifactory'), contains('local/x')),
     );
 
     refuses(
@@ -1343,16 +1448,6 @@ spec-type = draft-mtp
     );
 
     refuses(
-      'a registry repo that is not artifactory/<bundle>',
-      manifestText([
-        ...models,
-        {...registryDecideJson(), 'repo': 'artifactory/another-bundle'},
-      ]),
-      allOf(contains('artifactory/bond-decide-mbl-v3swap'),
-          contains('artifactory/another-bundle')),
-    );
-
-    refuses(
       'a heads record with an empty remote file',
       manifestText([
         ...models,
@@ -1412,6 +1507,29 @@ spec-type = draft-mtp
       final manifest = ModelManifest.parse(manifestText(
           [embedJson(), decideJson(), bulkJson(), proseJson()]));
       expect(manifest.byRole(ModelRole.decide).isLocal, isTrue);
+    });
+
+    test('a registry entry with any repo but local/, kept as its folder, '
+        'that round-trips', () {
+      // A registry entry's repo only derives its folder: the upstream repo
+      // for a public model (the embedding model keeps Qwen's), another
+      // bundle's name, or a bare name.
+      for (final repo in [
+        'Qwen/Qwen3-Embedding-0.6B-GGUF',
+        'artifactory/another-bundle',
+        'bond-decide-mbl-v3swap',
+      ]) {
+        final file = ModelFile.fromJson({...registryDecideJson(), 'repo': repo});
+        expect(file.repo, repo);
+        expect(file.isRegistry, isTrue);
+        expect(file.bundle, 'bond-decide-mbl-v3swap');
+        expect(file.relativePath,
+            '${repo.replaceAll('/', '_')}/bond-decide-mbl-v3-f16.gguf');
+        final again = ModelFile.fromJson(
+            jsonDecode(jsonEncode(file.toJson())) as Map<String, Object?>);
+        expect(again, file);
+        expect(again.toJson()['repo'], repo);
+      }
     });
 
     test('a bundle on a hub entry is ignored, as every unknown key is', () {

@@ -699,21 +699,19 @@ final setupShowingProvider = StateProvider<bool>((ref) => false);
 /// rule and no heads-only path. A Kev server ignores the files. Then only
 /// what downloads (`downloadable`).
 ///
-/// Under `BOND_DEV_HAND_SERVERS` (no managed server) the embedding model is
-/// left out: `make embed` serves it from the Homebrew/Hugging Face cache, and
-/// nothing reads it from the models folder. The decision model stays, since
-/// the app reads its heads file there and `make decide` reads the same folder.
+/// Under `BOND_DEV_HAND_SERVERS` (no managed server) both files are still
+/// ensured: `make embed` and `make decide` serve them from the DEFAULT models
+/// folder (`EMBED_DIR`, `DECIDE_DIR`), which is the one the app fills unless
+/// its folder was moved, and the app reads the decision model's heads file
+/// from its own folder too.
 final modelEnsureSetProvider = FutureProvider<ModelManifest>((ref) async {
   final manifest = ref.watch(modelManifestProvider);
   final served = await ref.watch(managedManifestProvider.future);
   final decide = manifest.byRoleOrNull(ModelRole.decide);
-  // A build constant, so a read is as good as a watch.
-  final managed = ref.read(appPrefsProvider).managedServer;
   return ModelManifest(
     version: served.version,
     models: List.unmodifiable([
-      for (final model in served.models)
-        if (managed || model.role != ModelRole.embed) model,
+      ...served.models,
       if (decide != null && !served.models.any((m) => m.id == decide.id))
         decide,
     ]),

@@ -705,14 +705,20 @@ about which models belong in one. One entry per model, in file order, which is
 the INI's section order and the router's load order: smallest first, so the
 embedding model is resident while the 27B is still mapping.
 
-Three sources. The embedding model, the 4B and the 27B come from Hugging Face.
-The decision model is a **registry** entry (`source: artifactory`): the
-`bond-decide-mbl-v3swap` bundle in the owner's model registry (Artifactory),
-fetched from `<registry base>/bundles/<bundle>/<remote file>` with
+Three sources. The 4B and the 27B come from Hugging Face. The embedding model
+and the decision model are **registry** entries (`source: artifactory`):
+bundles in the owner's model registry (Artifactory), fetched from
+`<registry base>/bundles/<bundle>/<remote file>` with
 `Authorization: Bearer <token>`, where the base and the token are
 `AppPrefs.effectiveRegistryUrl` and `bearerFor(registryId)` (Settings, else
-`local.mk`'s `BOND_REGISTRY_URL` / `BOND_REGISTRY_TOKEN`). Its two files keep
-the names the app reads (`model-f16.gguf` lands as
+`local.mk`'s `BOND_REGISTRY_URL` / `BOND_REGISTRY_TOKEN`). The embedding model
+is the `bond-embed-qwen3-0.6b` bundle, one file, `model-q8_0.gguf`, which
+lands as `Qwen3-Embedding-0.6B-Q8_0.gguf` in its UPSTREAM repo's folder,
+`<models folder>/Qwen_Qwen3-Embedding-0.6B-GGUF/`: the path, the ledger id and
+the digest are the ones an install that fetched it from Hugging Face already
+has, so such an install downloads nothing again and keeps working with no
+registry configured. The decision model is the `bond-decide-mbl-v3swap`
+bundle; its two files keep the names the app reads (`model-f16.gguf` lands as
 `bond-decide-mbl-v3-f16.gguf`, `heads.json` as `decide-heads.json`, because
 the heads file's `model` must prefix the GGUF's name) in
 `<models folder>/artifactory_bond-decide-mbl-v3swap/`. A third source,
@@ -724,10 +730,10 @@ the parser and every reader still handle one.
 |-------|------------|
 | `id` | The router id: `bond-embed`, `bond-decide`, `bond-bulk`, `bond-prose`. |
 | `role` | `embed`, `decide`, `bulk` or `prose` (`ModelRole`). One model per role; the generative ROLE can be filled by either `bulk` or `prose`. |
-| `source` | Absent for a Hugging Face download; `artifactory` for a registry download (the decision model); `local` for a model installed by hand. Anything else is refused. |
-| `repo`, `file` | The Hugging Face repo and file; `artifactory/<bundle>` for a registry entry and `local/<name>` for a local one, whose prefixes keep their folders apart. On disk: `<repo with '/' → '_'>/<file>`. |
-| `bundle`, `remoteFile` | A registry entry only, both required: the bundle id and the weights' name inside it. Each must be one URL path segment (`[A-Za-z0-9._-]+`, never `.` or `..`), as must `heads.remoteFile`; `repo` must be exactly `artifactory/<bundle>`, and a registry entry carries no `sidecar`. |
-| `revision` | A 40-character commit sha, never `main`, for every Hugging Face entry; optional for a registry entry, whose bytes `sha256` pins alone; absent for a local one. |
+| `source` | Absent for a Hugging Face download; `artifactory` for a registry download (the embedding model and the decision model); `local` for a model installed by hand. Anything else is refused. |
+| `repo`, `file` | The folder's identity and the file on disk. The upstream Hugging Face repo for a public model wherever it is downloaded from (the hub entries, and the embedding model, a registry entry that keeps `Qwen/Qwen3-Embedding-0.6B-GGUF`); `artifactory/<bundle>` for a model that exists only in the registry; `local/<name>` for a hand-installed one, and a registry entry's repo may not start with `local/`. On disk: `<repo with '/' → '_'>/<file>`, and the parser refuses two entries (weights, sidecar or heads) stored at one path. |
+| `bundle`, `remoteFile` | A registry entry only, both required: the bundle id and the weights' name inside it. Each must be one URL path segment (`[A-Za-z0-9._-]+`, never `.` or `..`), as must `heads.remoteFile`; a registry entry carries no `sidecar`, and its `repo` is not tied to its bundle. |
+| `revision` | A 40-character commit sha, never `main`, for every Hugging Face entry; optional for a registry entry, whose bytes `sha256` pins alone, and absent on both of the committed ones; absent for a local one. |
 | `sizeBytes`, `sha256` | Measured size and digest, checked against the hub's headers on the redirect (hub) and by the download's own sha256 (every source). For a local entry, the installed file's. |
 | `heads` | The decide entry only: `file`, `sha256`, `sizeBytes` of `decide-heads.json`, and for a registry entry its `remoteFile` in the bundle (`heads.json`). `RouterPreset` ignores it; it is what the app reads. For a registry entry it is a download leg of its own (below). Refused on a Hugging Face entry. |
 | `minRamBytes` | What the machine must have; informational (the tier decides). |
@@ -757,11 +763,20 @@ exactly those facts. Its `.downloadable` view (every entry but `source:
 local`, so the registry's decision model is in it) is what the wizard
 downloads, so a full-tier Mac with both roles here downloads the embedding
 model, the decision model and the 27B, and the 4B only if chosen. Its
-`.gating` view (the Hugging Face entries only, `ModelFile.gatesSetup`) is what
-`SetupGate` and the wizard's resume check the ledger against (decision D7): a
-registry file is best-effort, because its address is set under Settings, which
-the wizard cannot reach, so a missing or failed one never reopens the wizard;
-its role parks on its own reason instead. The supervisor serves
+`.gating` view (`ModelFile.gatesSetup`: the Hugging Face entries plus the
+embedding model, wherever it is downloaded from) is what `SetupGate` and the
+wizard's resume check the ledger against. The embedding model gates by ROLE
+because every stage needs it and the local model server cannot start without
+it; under the default placements (generative on Your server, decision here) it
+is the whole gating set, and a gating rule by source alone would leave that set
+empty, which `DownloadLedger.matches` answers true for nothing at all. The
+decision model's registry file stays best-effort (decision D7): a missing or
+failed one never reopens the wizard and never holds its Continue; its role
+parks on its own reason instead. The download step does show the Model
+registry fields while any registry row has failed, whatever the reason, since
+a wrong address can fail as a plain network error too, and their Save cancels
+a run still going, parts kept, and starts the download again, which is how a
+fresh install fixes the embedding model's address there. The supervisor serves
 `forRoles(…).withPresentFiles(folder, ledger)`: any entry whose files (weights,
 sidecar, heads, whichever it has) are not all in the folder is left out of the
 preset, and so is a REGISTRY entry whose ledger rows are not current
@@ -820,7 +835,8 @@ models folder with the `.downloadable` set.
 - **One stream at a time, smallest first**; the server serves only the files
   that are here and, for a registry entry, current (`withPresentFiles`), and
   the wizard's Continue waits for the
-  GATING (Hugging Face) files only: a registry file never holds it (D7).
+  GATING files only, the Hugging Face files and the embedding model: the
+  decision model's registry files never hold it (D7).
 - **A failure moves on**: one file's failure is an event, the run continues.
 - **Legs.** One entry can cost several files, each its own transfer and its
   own ledger row, and still ONE bar: the weights (row `<id>`), the 27B's MTP
@@ -894,10 +910,12 @@ this Mac, a manifest bump.
   already there, which is exactly when the decision role is on Your server
   (D10): a ModernBERT server still needs this Mac's heads file and the entry
   is one download, so there is one rule and no heads-only path (a Kev server
-  ignores the files). Under `BOND_DEV_HAND_SERVERS` (no managed server) the
-  embedding entry is left out, because `make embed` serves it from the
-  Homebrew/Hugging Face cache; the decide entry stays, since the app reads the
-  heads file from the models folder and `make decide` reads the same folder.
+  ignores the files). Under `BOND_DEV_HAND_SERVERS` (no managed server) both
+  the embedding entry and the decide entry are still ensured: `make embed`
+  and `make decide` serve their files with `-m` from the DEFAULT models folder
+  (`EMBED_DIR`, `DECIDE_DIR`; filled by the app unless its folder was moved,
+  or by `make embed-fetch` / `make decide-fetch`), and the app reads the heads
+  file from its own folder too.
   Then `.downloadable`. An entry is missing when its
   ledger rows are not current at this build's digests (`isCurrent`) or any of
   its files is gone from the folder (`filesPresent`).

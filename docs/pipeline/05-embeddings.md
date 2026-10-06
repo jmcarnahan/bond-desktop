@@ -352,8 +352,8 @@ revisiting if the clustering corpus ever reaches the tens of thousands.
 | | |
 |---|---|
 | Client | `EmbeddingsClient` — `app/lib/services/llm/embeddings_client.dart` |
-| Server | `EMBED_URL`, default `http://localhost:8081/v1/embeddings` (`make embed`) |
-| Model | Qwen3-Embedding-0.6B, GGUF `Q8_0`, started `--pooling last` (`EMBED_HF` / `EMBED_ARGS` in the `Makefile`), 1,024 wide |
+| Server | `EMBED_URL`, default `http://localhost:8081/v1/embeddings` (`make embed`, which serves `EMBED_GGUF` with `-m`: the file the app downloads from the model registry into its models folder, or `make embed-fetch` does; `EMBED_HF` only for a candidate server in the bake-off) |
+| Model | Qwen3-Embedding-0.6B, GGUF `Q8_0`, the registry bundle `bond-embed-qwen3-0.6b`, started `--pooling last` (`EMBED_GGUF` / `EMBED_ARGS` in the `Makefile`), 1,024 wide |
 | Corpus separation | clustering prefix/tag vs document/query prefixes + tag, constants in `embeddings_client.dart`; Qwen3-Embedding is instruction-sensitive, so a vector's corpus is baked in at embed time |
 
 **Failure behavior.** Embed failures park and self-heal instead of silently

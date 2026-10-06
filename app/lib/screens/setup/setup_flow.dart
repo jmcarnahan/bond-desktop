@@ -12,7 +12,9 @@ import '../../services/attachments/file_dialogs.dart';
 import '../../services/llm/model_slots.dart';
 import '../../services/models/model_manifest.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/model_registry_form.dart';
 import '../../widgets/pane_surface.dart';
+import '../registry_save.dart';
 import 'setup_controls.dart';
 import 'setup_device_body.dart';
 import 'setup_done_body.dart';
@@ -79,6 +81,27 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
     final uri = Uri.tryParse(file.licenseUrl);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  /// The download step's registry Save: the same write Settings makes, then
+  /// the download again from the top, which is what the corrected address is
+  /// for. A run still going is cancelled first, parts kept: one already past
+  /// the registry entries would never ask the new address.
+  Future<String?> _saveRegistry({
+    required String url,
+    String? token,
+    required bool clearToken,
+  }) async {
+    if (!mounted) return null;
+    final notifier = ref.read(appPrefsProvider.notifier);
+    final refusal = await saveRegistry(
+      notifier,
+      url: url,
+      token: token,
+      clearToken: clearToken,
+    );
+    if (refusal == null && mounted) unawaited(_controller.restartDownload());
+    return refusal;
   }
 
   /// Leaves ONLY on a finish that saved. A false answer means the stored
@@ -229,6 +252,10 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
           onContinue: next,
         );
       case SetupStep.download:
+        // The form is drawn only while a registry row failed for a reason it
+        // fixes; built here so the body stays prop-only. No Check and no
+        // Remove token: a Save that lands IS the check, the download again.
+        final prefs = ref.watch(appPrefsProvider);
         return SetupDownloadBody(
           files: manifest.bySize,
           progress: state.downloads,
@@ -242,6 +269,13 @@ class _SetupFlowState extends ConsumerState<SetupFlow> {
           onResume: () => unawaited(_controller.resumeDownload()),
           onCancel: () => unawaited(_controller.cancelDownload()),
           onContinue: next,
+          registryFix: ModelRegistryForm(
+            key: const ValueKey('setup-registry-form'),
+            url: prefs.effectiveRegistryUrl,
+            tokenStored: prefs.registryTokenStored,
+            tokenFromBuild: prefs.registryTokenFromBuild,
+            onSave: _saveRegistry,
+          ),
         );
       case SetupStep.signIn:
         return SetupSignInBody(

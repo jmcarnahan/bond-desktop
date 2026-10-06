@@ -420,6 +420,47 @@ void main() {
     expect(find.text('the app'), findsOneWidget);
   });
 
+  testWidgets('a registry EMBEDDING model that is missing reopens the '
+      'wizard on the download step', (tester) async {
+    // The twin of the decision model's case, and the opposite answer: the
+    // embedding model gates setup wherever it is downloaded from, because
+    // every stage needs it and the local model server cannot start without
+    // it. The hub files are all here; the embed row is not.
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
+    await store.recordDownload(
+        (await store.downloadLedger()).without(routerEmbedId));
+    final manifest = testManifest(embed: testEmbedFile(), withDecide: true);
+    expect(manifest.byRole(ModelRole.embed).isRegistry, isTrue);
+    await makeContainer(manifest: manifest);
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsNothing);
+    expect(find.text('Download'), findsOneWidget);
+  });
+
+  testWidgets('a registry embedding model that is current goes through, '
+      'with the decision model still missing', (tester) async {
+    await store.set(SetupStore.setupKey, SetupStep.done.name);
+    await seedLedger();
+    final embed = testEmbedFile();
+    final ledger = await store.downloadLedger();
+    await store.recordDownload(ledger.record(FileDownloadState(
+      id: embed.id,
+      status: DownloadStatus.done,
+      receivedBytes: embed.sizeBytes,
+      totalBytes: embed.sizeBytes,
+      sha256: embed.sha256,
+    )));
+    await makeContainer(
+        manifest: testManifest(embed: embed, withDecide: true));
+
+    await mount(tester);
+
+    expect(find.text('the app'), findsOneWidget);
+  });
+
   testWidgets('with the registry entry in the manifest, a missing hub file '
       'still reopens the wizard', (tester) async {
     await store.set(SetupStore.setupKey, SetupStep.done.name);

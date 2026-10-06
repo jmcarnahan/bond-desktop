@@ -29,12 +29,10 @@ import '../services/llm/model_slots.dart'
         managedGenerativeIdFor,
         registryId,
         routerDecideId;
-import '../services/models/model_manifest.dart' show ModelRole;
 import '../services/models/registry_probe.dart' show RegistryCheck;
 import '../services/reminders/tasks_availability.dart';
-import '../widgets/model_registry_form.dart' show ModelRegistryForm;
-import '../widgets/model_servers_form.dart' show ModelServersForm;
 import '../widgets/settings_screen.dart';
+import 'registry_save.dart';
 
 /// Whether an older build left Needs You rules text in `needs_you_rules`. The
 /// pref is inert — the slider is the one control — so Settings only says so,
@@ -423,7 +421,8 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       managedServer: prefs.managedServer,
       parked: ref.watch(parkedProvider).valueOrNull,
       modelStatuses: statuses,
-      // The model registry: where the decision model is downloaded from.
+      // The model registry: where the decision and embedding models are
+      // downloaded from.
       // The address the form opens on and two presence flags, never a token.
       registryUrl: prefs.effectiveRegistryUrl,
       registryTokenStored: prefs.registryTokenStored,
@@ -727,19 +726,13 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     if (!mounted) return null;
     final notifier = ref.read(appPrefsProvider.notifier);
     final ensurer = ref.read(modelEnsurerProvider);
-    try {
-      await notifier.useRegistry(
-        url: url,
-        token: token,
-        clearToken: clearToken,
-      );
-    } on ArgumentError catch (e) {
-      // The address's own sentence for a refused address; the writer's for a
-      // token no header can carry, which never quotes it.
-      if (e.name == 'url') return ModelRegistryForm.addressRefusalText;
-      final message = e.message;
-      return message is String ? message : ModelServersForm.saveFailedText;
-    }
+    final refusal = await saveRegistry(
+      notifier,
+      url: url,
+      token: token,
+      clearToken: clearToken,
+    );
+    if (refusal != null) return refusal;
     unawaited(ensurer.ensure());
     return null;
   }
@@ -754,22 +747,34 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
     unawaited(ensurer.ensure());
   }
 
-  /// The Model registry's **Check**: the SAVED address asked for the
-  /// decision model's small file, with the token [AppPrefsNotifier.bearerFor]
-  /// answers at the press. The token goes to the probe and nowhere else.
+  /// The Model registry's **Check**: the SAVED address asked for EVERY model
+  /// this build downloads from it, the embedding model's file and the
+  /// decision model's small heads file, with the token
+  /// [AppPrefsNotifier.bearerFor] answers at the press. The first answer that
+  /// is not `reachable` is the one said, so a registry that holds one bundle
+  /// and not the other is not called reachable: the embedding model holds
+  /// setup, and a registry without it cannot finish a new install. One byte
+  /// of each (`Range: bytes=0-0`). The token goes to the probe and nowhere
+  /// else.
   Future<RegistryCheck> _checkRegistry() async {
     if (!mounted) return RegistryCheck.unreachable;
     final base = ref.read(appPrefsProvider).effectiveRegistryUrl;
-    final decide =
-        ref.read(modelManifestProvider).byRoleOrNull(ModelRole.decide);
-    if (base.isEmpty || decide == null || !decide.isRegistry) {
-      return RegistryCheck.notConfigured;
+    final entries = [
+      for (final model in ref.read(modelManifestProvider).models)
+        if (model.isRegistry) model,
+    ];
+    if (base.isEmpty || entries.isEmpty) return RegistryCheck.notConfigured;
+    // Read before the first await: the press may outlive this screen.
+    final probe = ref.read(registryProbeProvider);
+    final token = ref.read(appPrefsProvider.notifier).bearerFor(registryId);
+    for (final model in entries) {
+      final check = await probe(
+        url: model.headsRegistryUri(base) ?? model.registryUri(base),
+        token: token,
+      );
+      if (check != RegistryCheck.reachable) return check;
     }
-    final url = decide.headsRegistryUri(base) ?? decide.registryUri(base);
-    return ref.read(registryProbeProvider)(
-      url: url,
-      token: ref.read(appPrefsProvider.notifier).bearerFor(registryId),
-    );
+    return RegistryCheck.reachable;
   }
 
   /// Settings' **Clear AI results**: every verdict, summary, storyline, draft

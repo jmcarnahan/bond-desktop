@@ -166,9 +166,14 @@ void main() {
   /// What Settings' registry Check asked, and with which token.
   late List<({Uri url, String? token})> registryProbes;
 
+  /// What the registry answers a probe whose path ends with a key; any other
+  /// probe is answered reachable.
+  late Map<String, RegistryCheck> registryAnswers;
+
   setUp(() async {
     ensurer = RecordingEnsurer();
     registryProbes = [];
+    registryAnswers = {};
     db = testDb();
     store = MessageStore(db);
     support = await Directory.systemTemp.createTemp('models-host');
@@ -305,6 +310,9 @@ void main() {
         ...extra,
         registryProbeProvider.overrideWithValue(({required url, token}) async {
           registryProbes.add((url: url, token: token));
+          for (final answer in registryAnswers.entries) {
+            if (url.path.endsWith(answer.key)) return answer.value;
+          }
           return RegistryCheck.reachable;
         }),
         // An in-memory keychain for the cases that store a token: the real
@@ -790,8 +798,79 @@ void main() {
       expect(ensurer.calls, before + 1);
     });
 
-    testWidgets('Check asks the saved registry for the decision model\'s '
-        'heads file, with the token, and says what it found', (tester) async {
+    /// Settings on the Models section over the manifest the app ships in
+    /// shape: BOTH local models registry entries, the registry saved with a
+    /// token.
+    Future<void> openOnBothRegistryModels(WidgetTester tester) async {
+      await pumpHost(
+        tester,
+        probe: _ScriptedProbe(const {}),
+        tokens: MemoryTokenStore(),
+        manifest: testManifest(embed: testEmbedFile(), withDecide: true),
+      );
+      await container.read(appPrefsProvider.notifier).useRegistry(
+            url: registry,
+            token: fakeToken,
+          );
+      await tester.pump();
+      await openHostSection(tester, 'Models');
+    }
+
+    testWidgets('Check asks the saved registry for EVERY model it serves, '
+        'the embedding model\'s file and the decision model\'s heads file, '
+        'with the one token', (tester) async {
+      await openOnBothRegistryModels(tester);
+
+      await tapKey(tester, ModelRegistryForm.checkKey);
+      await settle(tester);
+
+      // One address, one token, one probe per model, in the manifest's order.
+      expect(
+        [for (final probe in registryProbes) probe.url.toString()],
+        [
+          '$registry/bundles/bond-embed-qwen3-0.6b/model-q8_0.gguf',
+          '$registry/bundles/bond-decide-mbl-v3swap/heads.json',
+        ],
+      );
+      expect([for (final probe in registryProbes) probe.token],
+          everyElement(fakeToken));
+      expect(find.text(ModelRegistryForm.reachableText), findsOneWidget);
+      expect(rendered(tester), everyElement(isNot(contains(fakeToken))));
+    });
+
+    testWidgets('Check does not call a registry reachable when it lacks the '
+        'embedding model, though the decision model is there', (tester) async {
+      // The state of a registry the embedding bundle was never published
+      // to: a new install pointed at it could not finish setup.
+      registryAnswers = {'model-q8_0.gguf': RegistryCheck.notFound};
+      await openOnBothRegistryModels(tester);
+
+      await tapKey(tester, ModelRegistryForm.checkKey);
+      await settle(tester);
+
+      expect(find.text(ModelRegistryForm.notFoundText), findsOneWidget);
+      expect(find.text(ModelRegistryForm.reachableText), findsNothing);
+      // The first answer that is not reachable ends the check.
+      expect(registryProbes, hasLength(1));
+    });
+
+    testWidgets('Check says the decision model\'s answer when the embedding '
+        'model\'s was fine', (tester) async {
+      registryAnswers = {'heads.json': RegistryCheck.unauthorized};
+      await openOnBothRegistryModels(tester);
+
+      await tapKey(tester, ModelRegistryForm.checkKey);
+      await settle(tester);
+
+      expect(registryProbes, hasLength(2));
+      expect(find.text(ModelRegistryForm.unauthorizedText), findsOneWidget);
+      expect(find.text(ModelRegistryForm.reachableText), findsNothing);
+    });
+
+    testWidgets('Check asks only for the models that come from the registry, '
+        'with the token, and says what it found', (tester) async {
+      // The fixture's default embedding model is a Hugging Face entry, so
+      // the decision model's heads file is the one thing to ask for.
       final tokens = MemoryTokenStore();
       await pumpHost(
         tester,

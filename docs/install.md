@@ -90,12 +90,19 @@ first, because there is nothing behind it.
 6. **Download** — one progress bar per model, smallest first, with a rate and
    an estimate. **You can quit.** Closing Bond mid-download is safe: the next
    launch comes back to this screen and picks up the same file where it
-   stopped. **Continue** waits for the models from Hugging Face. The decision
-   model comes from your model registry, and an installer build has no
-   registry address yet, so its bar says `The model registry has no address.
-   Add one under Settings, Models.` and `Bond tries again after setup, and
-   under Settings, Models. You can continue.` It does not hold you here: you
-   add the address after setup.
+   stopped. **Continue** waits for the embedding model and any model being
+   downloaded from Hugging Face. The embedding model, and the decision model
+   when it runs on this Mac, come from your model registry, and an installer
+   build has no registry address yet, so their bars say `The model registry
+   has no address. Add it below.` and the step shows the **Model registry**
+   fields: type the address and the access token and press **Save**, and the
+   download starts again, from where it stopped. The fields stay on the step
+   whenever a registry download has failed, for any reason: a mistyped
+   address can also fail as `The connection dropped too many times. Check the
+   network and try again.`, and is fixed in the same fields. The decision
+   model's bar also says `Bond tries again after setup, and under
+   Settings, Models. You can continue.` It does not hold you here; the
+   embedding model does, until it is downloaded.
 7. **Sign in** — your browser opens on the Bond login. Sign in there and come
    back; Bond picks the session up on its own. If your workspace has never
    connected a Microsoft account, there is one more step in the browser and a
@@ -112,10 +119,11 @@ processing starts off, so you can finish setting up before any mail goes to a
 model:
 
 1. Open **Settings → Models** from the avatar menu at the top of the inbox.
-2. Under **Model registry**, type the **Registry address** and the **Access
-   token**, press **Save**, then **Check**. It should say `Registry
-   reachable.` Saving starts the decision model's download; the Decision
-   model block shows `Downloading NN%` until it lands.
+2. Under **Model registry**, check what you entered on the Download step:
+   the **Registry address** is there and the token field hints `Stored. Type
+   to replace`. Press **Check**; it should say `Registry reachable.` If the
+   decision model's bar had failed, the Decision model block offers
+   **Download**, and shows `Downloading NN%` until it lands.
 3. Switch **AI processing** on, at the top of the sidebar or under
    **Settings → Processing**. Bond remembers where you left it.
 
@@ -157,9 +165,9 @@ failed, and hands the log to the Mac's own viewer. Under it are four blocks:
   showing, unless one of the names it lists is the one this install already
   uses, which connects on the first press.
 - **Embeddings** always runs on this Mac.
-- **Model registry** is where the decision model is downloaded from: a
-  **Registry address** and an **Access token**, with **Save**, **Remove
-  token** and **Check**.
+- **Model registry** is where the decision and embedding models are
+  downloaded from: a **Registry address** and an **Access token**, with
+  **Save**, **Remove token** and **Check**.
 - **Set up again** — runs the whole flow from the top, and is how the models
   folder changes. It keeps what is expensive and
   still true: the models stay on disk and you stay signed in, so those two

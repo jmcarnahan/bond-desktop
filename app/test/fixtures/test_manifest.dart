@@ -26,6 +26,14 @@ import 'package:bond_inbox/services/server/router_preset.dart';
 /// decide entry instead, such as [testLocalDecideFile]. A
 /// sidecar changes the preset's text, the download count, the ledger's rows
 /// and the total, and only the suites that are about those want it.
+///
+/// The DEFAULT embed entry is a Hugging Face one, although the committed
+/// manifest's embedding model comes from the model registry: the 4B and the
+/// 27B still ship from Hugging Face, the hub machinery needs a small hub
+/// fixture, and flipping it would rewrite dozens of suites that are not about
+/// where the embedding model comes from (decision D8 of the embed-registry
+/// round). [embed] hands in another embed entry instead, such as
+/// [testEmbedFile], the registry shape the committed manifest ships.
 ModelManifest testManifest({
   Map<String, int>? sizes,
   Map<String, String>? sha256s,
@@ -33,6 +41,7 @@ ModelManifest testManifest({
   ModelSidecar? proseSidecar,
   bool withDecide = false,
   ModelFile? decide,
+  ModelFile? embed,
 }) {
   final defaultSha = '0' * 64;
   ModelFile file({
@@ -63,19 +72,20 @@ ModelManifest testManifest({
 
   return ModelManifest(
       version: ModelManifest.manifestVersion, tiers: testTiers, models: [
-    file(
-      id: routerEmbedId,
-      role: ModelRole.embed,
-      displayName: 'Test Embed',
-      repo: 'ggml-org/embeddinggemma-300M-GGUF',
-      name: 'embeddinggemma-300M-Q8_0.gguf',
-      size: 1024,
-      args: const {
-        'embedding': 'true',
-        'pooling': 'mean',
-        'load-on-startup': 'true',
-      },
-    ),
+    embed ??
+        file(
+          id: routerEmbedId,
+          role: ModelRole.embed,
+          displayName: 'Test Embed',
+          repo: 'ggml-org/embeddinggemma-300M-GGUF',
+          name: 'embeddinggemma-300M-Q8_0.gguf',
+          size: 1024,
+          args: const {
+            'embedding': 'true',
+            'pooling': 'mean',
+            'load-on-startup': 'true',
+          },
+        ),
     if (withDecide || decide != null) decide ?? testDecideFile(),
     file(
       id: routerBulkId,
@@ -133,6 +143,35 @@ ModelFile testDecideFile({
         sizeBytes: headsSizeBytes,
       ),
       serverArgs: _decideArgs,
+    );
+
+/// The embedding model as the committed manifest ships it, a REGISTRY entry
+/// (`source: artifactory`) that keeps its upstream repo as its folder, with
+/// the REAL repo, bundle, remote and on-disk file names (the path is the one
+/// an install that fetched it from Hugging Face already has, and the registry
+/// URL is what `make embed-fetch` asks for) and a fictional size and digest.
+/// No heads file: the downloader fetches it as one leg. A downloader test
+/// hands in the digest of the bytes its fake registry serves.
+ModelFile testEmbedFile({int sizeBytes = 1024, String? sha256}) => ModelFile(
+      id: routerEmbedId,
+      role: ModelRole.embed,
+      displayName: 'Test Embed',
+      repo: 'Qwen/Qwen3-Embedding-0.6B-GGUF',
+      file: 'Qwen3-Embedding-0.6B-Q8_0.gguf',
+      revision: '',
+      sizeBytes: sizeBytes,
+      sha256: sha256 ?? 'd' * 64,
+      minRamBytes: 0,
+      license: 'Fictional-1.0',
+      licenseUrl: 'https://example.invalid/licence',
+      source: sourceArtifactory,
+      bundle: 'bond-embed-qwen3-0.6b',
+      remoteFile: 'model-q8_0.gguf',
+      serverArgs: const {
+        'embedding': 'true',
+        'pooling': 'last',
+        'load-on-startup': 'true',
+      },
     );
 
 /// A HAND-INSTALLED decision model (`source: local`, repo

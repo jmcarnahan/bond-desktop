@@ -1338,6 +1338,113 @@ void main() {
       }
     });
 
+    /// Serves the embedding model's one file from the fake registry and
+    /// returns the registry embed entry (no heads) whose size and digest
+    /// describe it.
+    ModelFile publishEmbed({int gguf = 5120}) {
+      final weights = fakeWeights(gguf, seed: 23);
+      hub.registryContents['bond-embed-qwen3-0.6b/model-q8_0.gguf'] = weights;
+      return testEmbedFile(
+        sizeBytes: weights.length,
+        sha256: sha256Hex(weights),
+      );
+    }
+
+    test('a registry entry with no heads file is one leg, under its repo '
+        'folder', () async {
+      final embed = publishEmbed();
+      hub.registryBearer = _fakeToken;
+
+      final events = await build(
+        which: testManifest(embed: embed),
+        registryBase: () => hub.registryBase,
+        registryToken: (_) => _fakeToken,
+      ).run([embed]).toList();
+
+      // The folder an install that fetched it from Hugging Face already has.
+      expect(
+        destOf(embed),
+        endsWith(
+            'Qwen_Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf'),
+      );
+      expect(File(destOf(embed)).readAsBytesSync(),
+          hub.registryContents['bond-embed-qwen3-0.6b/model-q8_0.gguf']);
+      expect(File(partOf(embed)).existsSync(), isFalse);
+
+      // One request, to the bundle's own name, with the bearer.
+      expect(hub.registryCount, 1);
+      expect(hub.registryAuth, ['Bearer $_fakeToken']);
+      expect(
+        [for (final u in hub.requests) u.path],
+        ['/artifactory/bond-models/bundles/bond-embed-qwen3-0.6b/'
+            'model-q8_0.gguf'],
+      );
+      expect(hub.resolveCount, 0);
+
+      expect(ledger[routerEmbedId]?.status, DownloadStatus.done);
+      expect(ledger[routerEmbedId]?.sha256, embed.sha256);
+      expect(ledger[DownloadLedger.headsId(routerEmbedId)], isNull);
+      expect(ledger.isCurrent(embed), isTrue);
+      expect(events.last.status, DownloadStatus.done);
+      expect(events.last.receivedBytes, embed.downloadBytes);
+    });
+
+    test('no registry address fails the embedding entry before any request',
+        () async {
+      final embed = publishEmbed();
+
+      final events = await build(
+        which: testManifest(embed: embed),
+        registryBase: () => '',
+        registryToken: (_) => _fakeToken,
+      ).run([embed]).toList();
+
+      expect(events.last.status, DownloadStatus.failed);
+      expect(events.last.error, DownloadError.registryNotConfigured);
+      expect(ledger[routerEmbedId]?.error,
+          DownloadError.registryNotConfigured);
+      expect(hub.registryCount, 0);
+      expect(File(destOf(embed)).existsSync(), isFalse);
+    });
+
+    test('a file already here with a current row is done with no request, '
+        'with or without an address', () async {
+      final embed = publishEmbed();
+      final bytes =
+          hub.registryContents['bond-embed-qwen3-0.6b/model-q8_0.gguf']!;
+
+      // No address two ways (an empty one, no lookup at all), then WITH one
+      // and its token: the case of an install that fetched the file from
+      // Hugging Face and now has a registry configured. None may ask.
+      hub.registryBearer = _fakeToken;
+      for (final base in <String Function()?>[
+        () => '',
+        null,
+        () => hub.registryBase,
+      ]) {
+        await Directory(p.dirname(destOf(embed))).create(recursive: true);
+        await File(destOf(embed)).writeAsBytes(bytes);
+        ledger = DownloadLedger.empty.record(FileDownloadState(
+          id: embed.id,
+          status: DownloadStatus.done,
+          receivedBytes: embed.sizeBytes,
+          totalBytes: embed.sizeBytes,
+          sha256: embed.sha256,
+        ));
+
+        final events = await build(
+          which: testManifest(embed: embed),
+          registryBase: base,
+          registryToken: (_) => _fakeToken,
+        ).run([embed]).toList();
+
+        expect(events.last.id, routerEmbedId);
+        expect(events.last.status, DownloadStatus.done);
+        expect(hub.registryCount, 0);
+        expect(ledger.isCurrent(embed), isTrue);
+      }
+    });
+
     test('no registry address leaves an entry already here alone', () async {
       final decide = publishDecide();
       hub.registryBearer = _fakeToken;

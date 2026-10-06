@@ -13,12 +13,23 @@ import 'setup_controls.dart';
 /// top rather than somewhere in the middle.
 ///
 /// Continue is enabled only when every GATING file is done ([complete]: the
-/// Hugging Face files), not at the "usable" pair. Finishing early would leave
-/// a non-engineer looking at an idle inbox with no progress bar left to
-/// explain it. A model REGISTRY file never holds Continue (decision D7): its
-/// address lives in Settings, which the wizard cannot reach, so a failed
-/// registry row says why and [registryLaterText], and Bond keeps trying
-/// after setup.
+/// Hugging Face files and the embedding model, [ModelFile.gatesSetup]), not
+/// at the "usable" pair. Finishing early would leave a non-engineer looking
+/// at an idle inbox with no progress bar left to explain it. The embedding
+/// model holds Continue wherever it is downloaded from, because every stage
+/// needs it and the local model server cannot start without it. The other
+/// model REGISTRY files, the decision model's, never hold Continue (decision
+/// D7): a failed one of those says why and [registryLaterText], and Bond
+/// keeps trying after setup.
+///
+/// A registry problem is fixable on this step: while ANY registry row has
+/// failed, the host's [registryFix], the same Model registry form Settings
+/// draws, sits under the rows. Any failure, because a wrong address fails as
+/// a plain network error too (a mistyped host, a closed port, a proxy's
+/// 5xx), and the embedding model's row would otherwise hold Continue with no
+/// way forward. A row that failed for a reason only the address or token
+/// fixes ([DownloadError.registryFixes]) says so and points at the fields;
+/// any other failure keeps its own sentence, with the fields still there.
 class SetupDownloadBody extends StatelessWidget {
   final List<ModelFile> files;
 
@@ -46,6 +57,12 @@ class SetupDownloadBody extends StatelessWidget {
   final VoidCallback onCancel;
   final VoidCallback onContinue;
 
+  /// The host's registry form, drawn under the rows while any registry
+  /// download has failed, because a wrong address can fail as a plain
+  /// network error too. Null, the default, draws nothing and leaves every
+  /// sentence as it is.
+  final Widget? registryFix;
+
   const SetupDownloadBody({
     super.key,
     required this.files,
@@ -60,6 +77,7 @@ class SetupDownloadBody extends StatelessWidget {
     required this.onResume,
     required this.onCancel,
     required this.onContinue,
+    this.registryFix,
   });
 
   static const Key startKey = ValueKey('setup-download-start');
@@ -72,8 +90,10 @@ class SetupDownloadBody extends StatelessWidget {
   static const String orderText =
       'The models arrive one at a time, smallest first.';
 
-  /// Under a model registry row that failed: it does not hold Continue, and
-  /// the app retries it after setup.
+  /// Under a failed model registry row that does not gate setup (the
+  /// decision model's): it does not hold Continue, and the app retries it
+  /// after setup. Never under the embedding model's row, which does hold
+  /// Continue, so "You can continue" would be false there.
   static const String registryLaterText =
       'Bond tries again after setup, and under Settings, Models. You can '
       'continue.';
@@ -137,6 +157,24 @@ class SetupDownloadBody extends StatelessWidget {
         _ => _httpOrGeneric(error),
       };
 
+  /// The wizard's sentence for a registry failure whose fix is the form
+  /// under the rows: the same failures as [describeDownloadError]'s, pointing
+  /// below rather than at Settings. Anything else is
+  /// [describeDownloadError]'s.
+  static String describeRegistryFixHere(String? error) => switch (error) {
+        DownloadError.registryNotConfigured =>
+          'The model registry has no address. Add it below.',
+        DownloadError.unauthorized =>
+          'The model registry refused the access token. Check it below.',
+        DownloadError.registryNotFound =>
+          'The model registry does not have this model. Check its address '
+              'below.',
+        DownloadError.registryNotAModel =>
+          'The model registry answered with a web page, not a model. Check '
+              'its address below.',
+        _ => describeDownloadError(error),
+      };
+
   /// Digits and nothing else — not `int.tryParse`, which would take a sign.
   static final RegExp _digits = RegExp(r'^[0-9]+$');
 
@@ -175,6 +213,19 @@ class SetupDownloadBody extends StatelessWidget {
   bool get _anyFailed =>
       progress.values.any((p) => p.status == DownloadStatus.failed);
 
+  /// Whether [file] is a registry download that failed, for any reason:
+  /// what draws the registry form.
+  bool _registryFailed(ModelFile file) =>
+      file.isRegistry && progress[file.id]?.status == DownloadStatus.failed;
+
+  /// Whether [file] failed for a reason only the registry's address or token
+  /// fixes: what makes its sentence point at the form.
+  bool _registryFixable(ModelFile file) =>
+      _registryFailed(file) &&
+      DownloadError.registryFixes.contains(progress[file.id]?.error);
+
+  bool get _registryNeedsFix => files.any(_registryFailed);
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -184,6 +235,10 @@ class SetupDownloadBody extends StatelessWidget {
         Text(orderText, style: BondType.caption),
         const SizedBox(height: BondSpacing.s16),
         for (final file in files) ..._row(file),
+        if (registryFix != null && _registryNeedsFix) ...[
+          registryFix!,
+          const SizedBox(height: BondSpacing.s16),
+        ],
         ..._buttons(),
         const SizedBox(height: BondSpacing.s8),
         // Always, whatever the state: it is the one thing about this screen
@@ -247,7 +302,9 @@ class SetupDownloadBody extends StatelessWidget {
           Expanded(
             flex: 2,
             child: Text(
-              _status(entry, complete: _allHere),
+              registryFix != null && _registryFixable(file)
+                  ? describeRegistryFixHere(entry?.error)
+                  : _status(entry, complete: _allHere),
               style: BondType.caption,
               textAlign: TextAlign.right,
             ),
@@ -258,7 +315,9 @@ class SetupDownloadBody extends StatelessWidget {
       LinearProgressIndicator(value: entry?.fraction ?? (_allHere ? 1 : 0)),
       const SizedBox(height: BondSpacing.s4),
       Text('$detail', style: BondType.caption),
-      if (file.isRegistry && entry?.status == DownloadStatus.failed) ...[
+      if (file.isRegistry &&
+          !file.gatesSetup &&
+          entry?.status == DownloadStatus.failed) ...[
         const SizedBox(height: BondSpacing.s4),
         Text(registryLaterText, style: BondType.caption),
       ],
