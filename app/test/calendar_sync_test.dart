@@ -486,6 +486,98 @@ void main() {
       expect(await storedCursor(), 'c1');
       expect(await storedRun(), calendarStamp(clock));
     });
+
+    const attendees = [
+      Attendee(name: 'Dana', address: 'dana@contoso.com'),
+      Attendee(name: 'Sam', address: 'sam@fabrikam.com'),
+    ];
+
+    CalendarEvent seriesMaster() => CalendarEvent(
+          id: 'series',
+          eventType: 'seriesMaster',
+          subject: 'Weekly sync',
+          organizerAddress: 'dana@contoso.com',
+          attendees: attendees,
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          startUtc: t0.add(const Duration(hours: 2)),
+          endUtc: t0.add(const Duration(hours: 3)),
+        );
+
+    // What Graph's delta sends for a plain occurrence: a pointer and a time.
+    CalendarEvent stub(String id, int day) => CalendarEvent(
+          id: id,
+          seriesMasterId: 'series',
+          eventType: 'occurrence',
+          startUtc: t0.add(Duration(days: day, hours: 2)),
+          endUtc: t0.add(Duration(days: day, hours: 3)),
+        );
+
+    Future<void> expectFilled(String id) async {
+      final stored = (await calendar.event(id))!;
+      expect(stored.subject, 'Weekly sync');
+      expect(stored.attendees, attendees);
+      expect(stored.responseStatus, 'accepted');
+    }
+
+    test('a stub occurrence takes its details from a master on a later page',
+        () async {
+      backend.steps
+        ..add(CalendarSyncPage(
+          events: [stub('o1', 1), stub('o2', 2)],
+          cursor: 'c1',
+          complete: false,
+        ))
+        ..add(CalendarSyncPage(events: [seriesMaster()], cursor: 'd1'));
+      await build().syncNow();
+
+      await expectFilled('o1');
+      await expectFilled('o2');
+    });
+
+    test('rows stored as stubs before this build are filled by the next page',
+        () async {
+      // An installed Mac: a live run and cursor, its stubs stored as they
+      // came. The next page brings nothing about them.
+      await store.setPref(
+        calendarRunKey,
+        jsonEncode({
+          'start': '2026-09-05T00:00:00Z',
+          'end': '2027-02-03T00:00:00Z',
+          'run': 'old',
+          'swept': true,
+        }),
+      );
+      await store.setDeltaLink('primary', 'd-old', source: 'calendar');
+      await calendar.upsertEvents(
+        [seriesMaster(), stub('o1', 1), stub('o2', 2)],
+        syncRun: 'old',
+      );
+      backend.steps.add(page(cursor: 'd1'));
+      final outcome = await build().syncNow();
+
+      expect(outcome.newRun, isFalse);
+      expect(outcome.upserts, 0);
+      await expectFilled('o1');
+      await expectFilled('o2');
+      expect(await syncRunOf('o1'), 'old');
+    });
+
+    test('a lagging page that re-sends a stub does not blank it', () async {
+      final sync = build();
+      backend.steps.add(CalendarSyncPage(
+        events: [seriesMaster(), stub('o1', 1), stub('o2', 2)],
+        cursor: 'd1',
+      ));
+      await sync.syncNow();
+      await expectFilled('o1');
+
+      backend.steps.add(CalendarSyncPage(events: [stub('o1', 1)], cursor: 'd2'));
+      await sync.syncNow(force: true);
+
+      await expectFilled('o1');
+      await expectFilled('o2');
+    });
   });
 
   group('the generation check', () {
