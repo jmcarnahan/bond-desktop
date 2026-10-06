@@ -5984,7 +5984,15 @@ SELECT conversation_key FROM (
   ///
   /// [count] and [durationMs] must be Dart ints: the table is STRICT and an
   /// INTEGER column rejects a double at write time.
-  Future<void> recordActivity({
+  ///
+  /// Returns the stored row, id and stamp included, so the caller can announce
+  /// exactly the row it wrote without a second read. A second read would also
+  /// be the wrong one under concurrent drains: "the newest row" is a sibling's
+  /// as often as not when three lanes record at once. A write that hands rows
+  /// back goes through `customWriteReturning`, never `customSelect`: a write
+  /// must not travel on a read path. Callers with no use for the row ignore
+  /// it.
+  Future<Map<String, Object?>?> recordActivity({
     required String kind,
     required String status,
     String? source,
@@ -5994,10 +6002,10 @@ SELECT conversation_key FROM (
     String? detailJson,
     String? createdAt,
   }) async {
-    await db.customUpdate(
+    final rows = await db.customWriteReturning(
       'INSERT INTO activity_events '
       '(kind, source, status, entity_id, count, duration_ms, detail_json, '
-      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
       variables: _args([
         kind,
         source,
@@ -6009,6 +6017,7 @@ SELECT conversation_key FROM (
         createdAt ?? _nowIso(),
       ]),
     );
+    return rows.isEmpty ? null : Map<String, Object?>.from(rows.first.data);
   }
 
   /// The newest events first. Bounded by [limit] because the panel that reads
@@ -6032,6 +6041,34 @@ SELECT conversation_key FROM (
             )
             .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// `'$source|$conversationKey'` → subject, for every conversation of
+  /// [sources] that has one.
+  ///
+  /// The activity pane's lookup for the thread an event was about. A narrow
+  /// two-column read in place of the whole list query the pane used to run
+  /// for it: that query counts unread mail, busy work, attachments and drafts
+  /// per thread, and the pane wanted none of it, only the subject, on every
+  /// activity tick. `Conversation.subject` is this column verbatim, so the
+  /// map is the one the old loop built.
+  Future<Map<String, String>> conversationSubjects({
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return const {};
+    final result = await db
+        .customSelect(
+          'SELECT source, conversation_key, subject FROM conversations '
+          'WHERE source IN (${_placeholders(sources.length)}) '
+          "AND subject IS NOT NULL AND subject <> ''",
+          variables: _args(sources),
+        )
+        .get();
+    return {
+      for (final row in result)
+        '${row.data['source']}|${row.data['conversation_key']}':
+            row.data['subject'] as String,
+    };
   }
 
   /// Everything the log holds about one message: its own events, its thread's,

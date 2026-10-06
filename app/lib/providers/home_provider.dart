@@ -1102,7 +1102,7 @@ final pipelinePulseProvider = FutureProvider.autoDispose<PipelinePulse>((ref) {
   // A sync or a sweep finishing records an event and moves nothing the bus
   // ticks on, so the epoch alone would leave the queue's own comings and
   // goings unreported.
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   return ref.watch(messageStoreProvider).pipelinePulse(
         sinceIso: MessageStore.isoStamp(
           DateTime.now().subtract(homePulseWindow),

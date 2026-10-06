@@ -319,4 +319,88 @@ void main() {
       expect(stats.errorCount, 0);
     });
   });
+
+  group('recordActivity hands back what it wrote', () {
+    test('the returned row is the stored row, column for column', () async {
+      final returned = await store.recordActivity(
+        kind: 'triage',
+        status: 'ok',
+        source: 'email',
+        entityId: 'm1',
+        count: 3,
+        durationMs: 1200,
+        detailJson: '{"urgency":"high"}',
+      );
+
+      final stored = (await store.recentActivity(limit: 1)).single;
+      expect(returned, isNotNull);
+      expect(returned!['id'], stored['id']);
+      // Every column, the stamp the store chose included: the caller builds
+      // its event from this map and nothing else.
+      expect(returned, stored);
+    });
+
+    test('two inserts hand back two ids', () async {
+      final first = await store.recordActivity(kind: 'a', status: 'ok');
+      final second = await store.recordActivity(kind: 'b', status: 'ok');
+
+      expect(first!['id'], isNot(second!['id']));
+      expect(first['kind'], 'a');
+      expect(second['kind'], 'b');
+    });
+  });
+
+  group('conversationSubjects', () {
+    Future<void> seed(String source, String key, String? subject) =>
+        store.upsertConversation({
+          'source': source,
+          'conversation_key': key,
+          'subject': subject,
+          'state': 'waiting',
+          'last_message_at': '2026-08-28T09:00:00Z',
+        });
+
+    Future<void> seedMixed() async {
+      await seed('email', 'c1', 'Homepage copy');
+      await seed('email', 'c2', '');
+      await seed('email', 'c3', null);
+      await seed('teams', 't1', 'Launch checklist');
+      await seed('calendar', 'e1', 'Weekly sync');
+    }
+
+    test('keys the threads that have a subject by source and key', () async {
+      await seedMixed();
+
+      expect(
+        await store.conversationSubjects(sources: const ['email', 'teams']),
+        {
+          'email|c1': 'Homepage copy',
+          'teams|t1': 'Launch checklist',
+        },
+      );
+    });
+
+    test('reads only the sources it is asked for', () async {
+      await seedMixed();
+
+      expect(await store.conversationSubjects(), {'email|c1': 'Homepage copy'});
+      expect(await store.conversationSubjects(sources: const []), isEmpty);
+    });
+
+    test('is the map the pane used to build from the whole list', () async {
+      await seedMixed();
+      const sources = ['email', 'teams'];
+
+      // The loop the activity snapshot ran before this read existed.
+      final old = <String, String>{};
+      for (final conversation
+          in await store.loadConversations(sources: sources)) {
+        final subject = conversation.subject;
+        if (subject == null || subject.isEmpty) continue;
+        old['${conversation.source}|${conversation.id}'] = subject;
+      }
+
+      expect(await store.conversationSubjects(sources: sources), old);
+    });
+  });
 }

@@ -17,6 +17,20 @@ the connection opens (`loadSqliteVecInIsolate`), and the launch log's
 same-isolate executor (`BondDatabase.memory()` / `BondDatabase.open`), because
 a widget test's fake-async zone must never wait on a real isolate.
 
+## What rides on a tick
+
+Moving the database off the UI isolate does not make a read free; it only
+moves where the wait is. So the two pulses that most reads follow are thinned
+at the source. The inbox list reloads 400 ms after the last progress report
+and at most 2 s into a burst (`Coalescer` in `app/lib/utils/coalescer.dart`),
+however many items the drains finish meanwhile. The activity tick that eleven
+read models follow — the activity pane, the Sync & data stamps, the cloud-draft
+count, the context panes, the notification and pipeline reads, the Home pulse —
+is thinned to one per 250 ms (`activityTickWindow`, `coalesceLatest`), where it
+used to re-run all of them once per recorded event. The notification
+coordinator still hears every event: it listens to the recorder's own stream,
+not the tick.
+
 ## The trade
 
 A read now queues behind a long write transaction on the one connection. The

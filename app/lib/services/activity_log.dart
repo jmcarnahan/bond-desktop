@@ -289,7 +289,11 @@ class ActivityLog {
       }
 
       final json = merged.isEmpty ? null : jsonEncode(merged);
-      await store.recordActivity(
+      // The insert hands back the row it wrote, and that row is the event:
+      // re-reading "the newest row" afterwards was a second round trip, and
+      // with three lanes recording at once it could announce a sibling's row
+      // in place of this one.
+      final row = await store.recordActivity(
         kind: kind,
         status: status,
         source: source,
@@ -299,11 +303,8 @@ class ActivityLog {
         detailJson: json,
       );
       final events = _events;
-      if (events != null && !events.isClosed) {
-        final rows = await store.recentActivity(limit: 1);
-        if (rows.isNotEmpty && !events.isClosed) {
-          events.add(ActivityEvent.fromRow(rows.first));
-        }
+      if (events != null && !events.isClosed && row != null) {
+        events.add(ActivityEvent.fromRow(row));
       }
     } catch (e) {
       debugPrint('ActivityLog: dropped a $kind event: $e');

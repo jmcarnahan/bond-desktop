@@ -25,12 +25,13 @@ final settledEventsProvider = Provider<Stream<MessageSettled>>(
 /// What was announced in the last [NotificationCoordinator.recencyWindow] —
 /// the backing read for "what did I miss", newest first.
 ///
-/// Watching [activityEventsProvider] is what keeps it live, the same trick
+/// Watching [activityTickProvider] is what keeps it live, the same trick
 /// [activitySnapshotProvider] plays: a settle follows pipeline activity, so
-/// re-reading on every recorded event costs one query and needs no timer.
+/// re-reading on the activity tick, at most once per 250 ms, costs one query
+/// and needs no timer of its own.
 final recentNotificationsProvider =
     FutureProvider.autoDispose<List<Map<String, Object?>>>((ref) async {
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   final store = ref.watch(messageStoreProvider);
   final since = DateTime.now()
       .toUtc()
@@ -39,12 +40,12 @@ final recentNotificationsProvider =
   return store.recentNotified(sinceIso: since, limit: 20);
 });
 
-/// Both queues' standing, re-read on every recorded event. The activity panel
+/// Both queues' standing, re-read on the activity tick. The activity panel
 /// reads it for one number: how much work has been given up on, which is the
 /// only pipeline fact the counters above it cannot show.
 final pipelineHealthProvider =
     FutureProvider.autoDispose<PipelineHealth>((ref) async {
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   return ref.watch(messageStoreProvider).pipelineHealth();
 });
 
