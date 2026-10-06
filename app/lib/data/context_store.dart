@@ -898,8 +898,8 @@ class ContextStore {
         variables: _args([fileId]),
       );
       for (final chunk in chunks) {
-        final row = await db
-            .customSelect(
+        final rows = await db
+            .customWriteReturning(
               'INSERT INTO context_chunks '
               '(file_id, seq, locator, chunk_text, chars, embedding, dims, '
               ' embed_model, embedded_at, indexed_at, created_at) '
@@ -913,9 +913,8 @@ class ContextStore {
                 chunk.text.length,
                 now,
               ]),
-            )
-            .getSingle();
-        ids.add(row.data['id'] as int);
+            );
+        ids.add(rows.single.data['id'] as int);
       }
     });
     // The old rowids, not the new ones — and the two lists usually hold the
@@ -941,8 +940,8 @@ class ContextStore {
     final now = _nowIso();
     var id = 0;
     await db.transaction(() async {
-      final row = await db
-          .customSelect(
+      final rows = await db
+          .customWriteReturning(
             'INSERT INTO context_chunks '
             '(file_id, seq, locator, chunk_text, chars, embedding, dims, '
             ' embed_model, embedded_at, indexed_at, created_at) '
@@ -958,9 +957,8 @@ class ContextStore {
               now,
               fileId,
             ]),
-          )
-          .getSingle();
-      id = row.data['id'] as int;
+          );
+      id = rows.single.data['id'] as int;
     });
     return id;
   }

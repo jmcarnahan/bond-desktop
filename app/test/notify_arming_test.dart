@@ -4,6 +4,7 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -81,7 +82,7 @@ void main() {
     // `message_progress`, not the work queue.
     await store.writeExtractProgress('email', id, state: 'done');
     await store.writeStorylineProgress('email', key, state: 'done');
-    await store.writeAttentionScore('email', key, 0.9);
+    await writeScore(store, 'email', key, 0.9);
   }
 
   Future<List<String>> admittedIds() async {

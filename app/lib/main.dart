@@ -16,6 +16,7 @@ import 'screens/setup/setup_gate.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/calendar/calendar_zone.dart';
 import 'services/models/model_manifest.dart';
+import 'services/perf/perf_log.dart';
 import 'services/triage_queue.dart';
 import 'widgets/preview/pdf_preview.dart';
 import 'widgets/server_bootstrap.dart';
@@ -68,14 +69,19 @@ Future<void> main() async {
   // launch failure, not something to discover three screens in.
   final db = await openAppDb();
 
+  // The heartbeat that says how long the UI isolate was blocked: a tick that
+  // fires late fires late because this isolate was busy. Off unless the build
+  // asks for it (`BOND_PERF_LOG`); see docs/performance.md.
+  if (perfLogOn) UiStallMonitor().start();
+
   // Anything the last run was working on when it quit is still claimed —
   // triage on the message row, everything else on the work queue. Clearing
   // both here, before a screen exists to start a new drain, is what keeps a
   // crash from stranding that work permanently.
   // The activity log is trimmed in the same breath. Once per launch is the
   // whole policy: the table only grows while the app is running, and a prune
-  // on every write would be a delete per sync on a database the UI isolate
-  // reads synchronously.
+  // on every write would be a delete per sync on the one connection every
+  // read waits its turn on.
   final store = MessageStore(db);
   // Every source the queue drains, so a chat claimed at the moment of a crash
   // is freed exactly as an email is.

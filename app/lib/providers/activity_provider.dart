@@ -9,6 +9,7 @@ import '../data/message_store.dart'
 import '../models/message_models.dart';
 import '../services/activity_log.dart';
 import '../services/sync_service.dart' show mailLastReconcileKey;
+import '../utils/coalescer.dart' show coalesceLatest;
 import 'app_providers.dart';
 import 'conversations_provider.dart' show inboxSources;
 
@@ -51,11 +52,52 @@ class ActivitySnapshot {
   }
 }
 
-/// The recorder's own stream, lifted into a provider so the snapshot below can
-/// depend on it. One subscription for however many widgets watch.
-final activityEventsProvider = StreamProvider.autoDispose<ActivityEvent>(
-  (ref) => ref.watch(activityLogProvider).events,
-);
+/// How far apart two activity ticks are, at the closest: the width of the
+/// window [activityTickProvider] thins the recorder's stream to.
+///
+/// A quarter second because a read model a quarter second behind its event is
+/// not something a person sees, and the AI lanes record one event per item,
+/// several a second in a burst; every one of them used to re-run every read
+/// model below.
+const Duration activityTickWindow = Duration(milliseconds: 250);
+
+/// The activity TICK for read models: a count that moves at most once per
+/// [activityTickWindow], whenever the recorder wrote anything in that window.
+///
+/// Eleven providers re-read the store on it — the snapshot and the stamps
+/// below, the cloud-draft count, the context panes, the notification and
+/// pipeline reads, the Home pulse — and none of them reads a value off it: it
+/// only says "something happened". Unthinned, a drain burst re-ran all of
+/// them once per recorded item, which is why the window is here, on the one
+/// provider they all watch, and not in each of them.
+///
+/// Anything that needs EVERY event listens to [ActivityLog.events] itself, as
+/// the notification coordinator does; this provider drops events inside a
+/// window on purpose.
+///
+/// A notifier holding its own subscription rather than a `StreamProvider`
+/// over the thinned stream, because of when each lets go. A stream provider
+/// that is disposed before its first event keeps a listener on the stream
+/// until the stream ends, and the recorder's never does: a Settings pane or a
+/// context pane opened and closed between two syncs would each leave a
+/// thinned stream behind, arming a timer for every busy window for the rest
+/// of the session. Here the subscription is cancelled as the provider is
+/// disposed, and the window's timer with it.
+final activityTickProvider =
+    NotifierProvider.autoDispose<ActivityTick, int>(ActivityTick.new);
+
+/// The count behind [activityTickProvider].
+class ActivityTick extends AutoDisposeNotifier<int> {
+  @override
+  int build() {
+    final ticks = coalesceLatest(
+      ref.watch(activityLogProvider).events,
+      activityTickWindow,
+    ).listen((_) => state++);
+    ref.onDispose(ticks.cancel);
+    return 0;
+  }
+}
 
 /// When each pass last completed, and nothing else.
 @immutable
@@ -83,14 +125,15 @@ class SyncStamps {
 ///
 /// Split from [activitySnapshotProvider] because that one pays for the whole
 /// pane — three hundred events and every conversation subject — on every
-/// recorded event, and the settings screen's Sync & data section needs three
-/// preference reads. Kept live the same way: watching [activityEventsProvider]
-/// re-reads it after every event, and the sync passes stamp their preference
-/// before they record, so the re-read always sees the new time. The reconcile
+/// activity tick, and the settings screen's Sync & data section needs four
+/// preference reads. Kept live the same way: watching [activityTickProvider]
+/// re-reads it on the tick, at most once per [activityTickWindow], and the
+/// sync passes stamp their preference before they record, so the re-read
+/// always sees the new time. The reconcile
 /// stamp rides along for the same reason and by the same mechanism: the mail
 /// pass writes it before recording `sync_mail`.
 final syncStampsProvider = FutureProvider.autoDispose<SyncStamps>((ref) async {
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   final store = ref.watch(messageStoreProvider);
   return SyncStamps(
     mailIso: await store.getPref(activityLastSyncMailKey),
@@ -105,23 +148,24 @@ final syncStampsProvider = FutureProvider.autoDispose<SyncStamps>((ref) async {
 ///
 /// Here rather than beside [cloudDraftLedgerProvider] in `app_providers.dart`
 /// only because this file imports that one: the live tick is
-/// [activityEventsProvider], which lives here, and the import the other way
+/// [activityTickProvider], which lives here, and the import the other way
 /// round would be a cycle. Watching that tick is the whole liveness
 /// mechanism, exactly as it is for the three providers above — the draft
 /// handler records a row, and the line moves.
 final cloudDraftsTodayProvider = FutureProvider.autoDispose<int>((ref) {
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   return ref.watch(cloudDraftLedgerProvider).usedToday();
 });
 
-/// The activity pane's read model, re-read on every recorded event.
+/// The activity pane's read model, re-read on the activity tick.
 ///
-/// Watching [activityEventsProvider] is what keeps it live: each event is a new
-/// value, which recomputes this. Riverpod carries the previous snapshot through
-/// the reload, so the table does not blink between an event and its re-read.
+/// Watching [activityTickProvider] is what keeps it live: each tick is a new
+/// value, which recomputes this, at most once per [activityTickWindow] however
+/// fast the drains record. Riverpod carries the previous snapshot through the
+/// reload, so the table does not blink between a tick and its re-read.
 final activitySnapshotProvider =
     FutureProvider.autoDispose<ActivitySnapshot>((ref) async {
-  ref.watch(activityEventsProvider);
+  ref.watch(activityTickProvider);
   final store = ref.watch(messageStoreProvider);
 
   final sinceIso = DateTime.now()
@@ -129,16 +173,13 @@ final activitySnapshotProvider =
       .subtract(const Duration(days: 7))
       .toIso8601String();
 
-  // One list read for every subject the rows might name, rather than a lookup
-  // per row: the panel can ask about three hundred events, and a query behind
-  // each one would be three hundred round trips per recorded event.
-  final conversations = await store.loadConversations(sources: inboxSources);
-  final subjects = <String, String>{};
-  for (final conversation in conversations) {
-    final subject = conversation.subject;
-    if (subject == null || subject.isEmpty) continue;
-    subjects['${conversation.source}|${conversation.id}'] = subject;
-  }
+  // One read for every subject the rows might name, rather than a lookup per
+  // row: the panel can ask about three hundred events, and a query behind each
+  // one would be three hundred round trips per tick. And a narrow two-column
+  // read rather than the inbox's list query, which would count unread mail,
+  // busy work, attachments and drafts per thread only for this to keep the
+  // subject.
+  final subjects = await store.conversationSubjects(sources: inboxSources);
 
   return ActivitySnapshot(
     stats: await store.activityStats(sinceIso: sinceIso),

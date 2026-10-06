@@ -168,8 +168,8 @@ Every one of those writes lives in
 `app/lib/providers/context_provider.dart` (`ContextDirectoriesActions`); the
 section and the screen above it are prop-only. `contextDirectoriesProvider` is
 the read model — one `ContextDirRow` per directory carrying its link, passage
-and embedded counts — and it re-reads on every recorded activity event, the
-same liveness mechanism `syncStampsProvider` uses.
+and embedded counts — and it re-reads on the activity tick (at most once per
+250 ms), the same liveness mechanism `syncStampsProvider` uses.
 
 An **identity wipe** drops `context_links` and keeps everything else. Both
 doors call it: `IdentityGuard`'s `onWipe` in `app_providers.dart`, and
@@ -979,7 +979,7 @@ switch off would answer a question nobody asked
 Settings ›** opens the library, which is where a directory is re-read,
 renamed or removed.
 
-Two providers back the panel, both re-read on every activity event like the
+Two providers back the panel, both re-read on the activity tick like the
 library is: `contextLinksProvider(scope)` for the switches, and
 `contextInheritedProvider(target)` for the muted lines.
 

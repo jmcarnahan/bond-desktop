@@ -5,6 +5,7 @@ import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -80,7 +81,7 @@ void main() {
     await store.writeExtractProgress('email', id, state: 'done');
     await store.writeStorylineProgress('email', key, state: 'done');
     if (attentionScore != null) {
-      await store.writeAttentionScore('email', key, attentionScore);
+      await writeScore(store, 'email', key, attentionScore);
     }
   }
 
@@ -131,7 +132,7 @@ void main() {
     // The pipeline finishes under the new process, which never admitted this
     // row and does not need to have.
     await store.writeTriage('email', 'm-1', status: 'triaged');
-    await store.writeAttentionScore('email', 'conv-1', 0.9);
+    await writeScore(store, 'email', 'conv-1', 0.9);
 
     final second = launch();
     addTearDown(second.coordinator.dispose);

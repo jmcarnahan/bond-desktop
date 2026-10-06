@@ -7,6 +7,7 @@ import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -133,7 +134,7 @@ void main() {
       await store.setConversationBucket(source, key, bucket: bucket);
     }
     if (attentionScore != null) {
-      await store.writeAttentionScore(source, key, attentionScore);
+      await writeScore(store, source, key, attentionScore);
     }
   }
 
@@ -294,7 +295,7 @@ void main() {
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
-      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await writeScore(store, 'email', 'conv-1', 0.9);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
@@ -312,7 +313,7 @@ void main() {
 
       await store.writeNeedsYouP('email', 'm-1',
           p: 0.9, reason: 'model says so');
-      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await writeScore(store, 'email', 'conv-1', 0.9);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
@@ -546,7 +547,7 @@ void main() {
         await store.enqueueWork('needs_you', 'email', 'm-1');
         await store.writeWork('needs_you', 'email', 'm-1', status: 'done');
       }
-      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await writeScore(store, 'email', 'conv-1', 0.9);
     }
 
     test('a probability at or above the slider is the ask', () async {
@@ -587,7 +588,7 @@ void main() {
       await seedCandidate(replyExpected: false);
       await store.writeNeedsYouP('email', 'm-1',
           p: 0.9, reason: 'model says so');
-      await store.writeAttentionScore('email', 'conv-1', 0.1);
+      await writeScore(store, 'email', 'conv-1', 0.1);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
@@ -597,7 +598,7 @@ void main() {
       await seedCandidate(replyExpected: false, bucket: 'later');
       await store.writeNeedsYouP('email', 'm-1',
           p: 0.9, reason: 'model says so');
-      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await writeScore(store, 'email', 'conv-1', 0.9);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
@@ -785,7 +786,7 @@ void main() {
       // the handler's card refresh re-stamps it right after the text.
       await sweep();
       expect(emitted, isEmpty, reason: 'the stage is still pending');
-      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await writeScore(store, 'email', 'conv-1', 0.9);
       await store.writeExtractProgress('email', 'm-1', state: 'done');
       await sweep();
 
@@ -870,7 +871,7 @@ void main() {
       // this row is built column by column rather than through `seedCandidate`.
       await store.writeExtractProgress('email', 'm-1', state: 'done');
       await store.writeStorylineProgress('email', 'conv-1', state: 'done');
-      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await writeScore(store, 'email', 'conv-1', 0.9);
       await sweep();
 
       expect(emitted.single.title, 'Sarah');

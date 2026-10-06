@@ -1,25 +1,80 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'attention.dart';
 import 'decision/needs_you_predicate.dart';
 import '../models/extraction_models.dart';
 
+/// What one attention pass wrote — see [AttentionService.recompute].
+class AttentionPass {
+  const AttentionPass({
+    required this.scored,
+    required this.scores,
+    required this.buckets,
+  });
+
+  /// How many threads were scored (every thread not done).
+  final int scored;
+
+  /// The score written per thread this pass, keyed [MessageStore.openAskKey].
+  final Map<String, double> scores;
+
+  /// The bucket written per thread this pass, same key. A key PRESENT with a
+  /// null value is a bucket cleared, so read it with `containsKey`, never by
+  /// the value alone.
+  final Map<String, String?> buckets;
+
+  /// A pass over an empty mailbox: nothing scored, nothing written.
+  static const AttentionPass empty =
+      AttentionPass(scored: 0, scores: {}, buckets: {});
+
+  /// [rows] (the list query's rows, see [MessageStore.conversationRows]) with
+  /// this pass's writes applied: `attention_score` and `bucket`, the two
+  /// columns of that query the pass writes.
+  ///
+  /// A row the pass did not change in value is returned as the SAME map
+  /// instance, so the caller can tell which models to rebuild with
+  /// `identical`.
+  List<Map<String, Object?>> applyTo(List<Map<String, Object?>> rows) => [
+        for (final row in rows) _applyToRow(row),
+      ];
+
+  Map<String, Object?> _applyToRow(Map<String, Object?> row) {
+    final key = MessageStore.openAskKey(
+      row['source'] as String? ?? '',
+      row['conversation_key'] as String? ?? '',
+    );
+    final score = scores[key];
+    final scoreMoved = score != null &&
+        score != (row['attention_score'] as num?)?.toDouble();
+    final bucketMoved =
+        buckets.containsKey(key) && buckets[key] != row['bucket'];
+    if (!scoreMoved && !bucketMoved) return row;
+    return {
+      ...row,
+      if (scoreMoved) 'attention_score': score,
+      if (bucketMoved) 'bucket': buckets[key],
+    };
+  }
+}
+
 /// Scores and files the whole mailbox in one pass.
 ///
-/// Two jobs rather than one because they need exactly the same handful of
-/// reads —
-/// the threads, each one's newest inbound message and extraction, the sender
-/// answer rates, and the sender rules — and doing them separately would mean
-/// running all four twice.
+/// Two jobs rather than one because they need exactly the same reads — the
+/// threads, each one's newest inbound message and extraction, the sender
+/// answer rates, the sender rules, who owns each bucket and which threads
+/// hold an open ask — and doing them separately would mean running all of
+/// them twice.
 ///
-/// It is awaited by the list load, immediately before the rows are read. That
-/// is affordable because none of it is a model call: four indexed queries and
-/// a few hundred multiplications, well under a millisecond on a mailbox this
-/// size. Doing it on a timer instead would mean the list can
-/// render rows whose score was computed against a different sender rule than
-/// the one the user just set, which reads as the correction not having worked.
+/// It is awaited by the list load, on the rows that load has just read: eight
+/// reads (seven when the load hands its rows over), a few hundred
+/// multiplications, and every write in ONE batch. Awaited rather than put on
+/// a timer of its own, because a pass anywhere else would let the list render
+/// rows whose score was computed against a different sender rule than the
+/// one the user just set, which reads as the correction not having worked.
 class AttentionService {
   final MessageStore _store;
 
@@ -36,10 +91,35 @@ class AttentionService {
   Future<int> recomputeAll({
     List<String> sources = const ['email'],
     DateTime? now,
+  }) async =>
+      (await recompute(sources: sources, now: now)).scored;
+
+  /// The pass itself: what [recomputeAll] does, answering with everything it
+  /// wrote rather than only the count.
+  ///
+  /// [conversations] is the list the caller has just read, when it has one:
+  /// the pass then scores exactly those threads and does not read the list a
+  /// second time. Without it the pass reads the list itself.
+  ///
+  /// Every score and every bucket goes out in ONE batch
+  /// ([MessageStore.writeAttentionPass]), and none is skipped for being
+  /// unchanged: each write stamps `conversation_ai.updated_at`, which the
+  /// notification settle reads as this pass having seen the thread. The stamp
+  /// is taken as the pass STARTS, before any of its reads, so a message that
+  /// changes while the pass runs is stamped later than the pass and waits for
+  /// the next one.
+  Future<AttentionPass> recompute({
+    List<String> sources = const ['email'],
+    DateTime? now,
+    List<Conversation>? conversations,
   }) async {
-    final at = now ?? DateTime.now();
-    final conversations = await _store.loadConversations(sources: sources);
-    if (conversations.isEmpty) return 0;
+    // The real clock, whatever [now] says: this is when the pass looked, which
+    // is a different question from the instant the decay is measured at.
+    final stamp = MessageStore.isoStamp(DateTime.now());
+    final at = now ?? minuteOf(DateTime.now());
+    final list =
+        conversations ?? await _store.loadConversations(sources: sources);
+    if (list.isEmpty) return AttentionPass.empty;
 
     final meta = await _store.latestInboundMeta(sources: sources);
     final prefs = await _store.allSenderPrefs();
@@ -64,8 +144,10 @@ class AttentionService {
       ...await _store.senderReplyRates(source: 'teams'),
     };
 
-    var scored = 0;
-    for (final conversation in conversations) {
+    final scoreWrites = <({String source, String key, double score})>[];
+    final bucketWrites =
+        <({String source, String key, String? bucket, String? reason})>[];
+    for (final conversation in list) {
       final latest = meta[conversation.id];
       final address =
           (latest?['from_address'] as String? ?? '').toLowerCase();
@@ -73,10 +155,10 @@ class AttentionService {
       final extraction = _extraction(latest?['extraction_json']);
 
       if (conversation.state != ConversationState.done) {
-        await _store.writeAttentionScore(
-          conversation.source,
-          conversation.id,
-          attentionScore(
+        scoreWrites.add((
+          source: conversation.source,
+          key: conversation.id,
+          score: attentionScore(
             conversation: conversation,
             latestIntent: extraction?.intent,
             senderReplyRate: replyRates[address] ?? 0,
@@ -91,12 +173,12 @@ class AttentionService {
             ),
             now: at,
           ),
-        );
-        scored++;
+        ));
       }
 
-      await _sweepBucket(
+      _sweepBucket(
         conversation,
+        bucketWrites,
         senderPref: senderPref,
         extraction: extraction,
         reason: reasons[conversation.id],
@@ -105,11 +187,51 @@ class AttentionService {
         ),
       );
     }
-    return scored;
+
+    await _store.writeAttentionPass(
+      scores: scoreWrites,
+      buckets: bucketWrites,
+      stamp: stamp,
+    );
+    return AttentionPass(
+      scored: scoreWrites.length,
+      scores: {
+        for (final w in scoreWrites)
+          MessageStore.openAskKey(w.source, w.key): w.score,
+      },
+      buckets: {
+        for (final w in bucketWrites)
+          MessageStore.openAskKey(w.source, w.key): w.bucket,
+      },
+    );
   }
 
-  /// Decides where one thread belongs and writes it — but only when the
-  /// decision is this pass's to make.
+  /// [d] cut to the start of its minute: the pass's clock when none is
+  /// injected.
+  ///
+  /// The recency decay is continuous, so on the raw wall clock every pass
+  /// would store a different number for every thread, and no two reads of the
+  /// list would ever compare equal — every reload would be a new screen.
+  /// Ticking once a minute makes an unchanged thread score bit-identically
+  /// within the minute. It costs at most a minute of decay — 0.007 % at the
+  /// seven-day half-life — applied to every thread alike, so the order is
+  /// exactly that minute's. An injected `now` is used as given, so a test
+  /// pins the decay to the instant it names.
+  ///
+  /// Cut on the instant rather than rebuilt from the calendar fields: in the
+  /// hour a clock change repeats, the fields name two instants and a rebuild
+  /// would pick the earlier one.
+  @visibleForTesting
+  static DateTime minuteOf(DateTime d) {
+    final ms = d.millisecondsSinceEpoch;
+    return DateTime.fromMillisecondsSinceEpoch(
+      ms - ms % Duration.millisecondsPerMinute,
+      isUtc: d.isUtc,
+    );
+  }
+
+  /// Decides where one thread belongs and adds the write to [writes] — but
+  /// only when the decision is this pass's to make.
   ///
   /// The ownership rule is what keeps a sweep that runs on every keystroke from
   /// undoing people. A bucket carries the name of whoever wrote it:
@@ -126,21 +248,34 @@ class AttentionService {
   /// [hasOpenAsk] changes none of that ownership. It reaches only the
   /// `low_value` decision, where an unanswered ask on the thread is what stops
   /// the quiet-FYI rule from deferring it — see [bucketFor].
-  Future<void> _sweepBucket(
-    Conversation conversation, {
+  ///
+  /// A write is queued wherever a decision is made, whether or not the thread
+  /// already sits there: each one stamps `updated_at`, which the notification
+  /// settle reads (see [recompute]).
+  void _sweepBucket(
+    Conversation conversation,
+    List<({String source, String key, String? bucket, String? reason})>
+        writes, {
     required String? senderPref,
     required ExtractionResult? extraction,
     required String? reason,
     required bool hasOpenAsk,
-  }) async {
+  }) {
+    void file(String? to, String? by) => writes.add((
+          source: conversation.source,
+          key: conversation.id,
+          bucket: to,
+          reason: by,
+        ));
+
     if (reason == 'user') return;
 
     if (quietsSender(senderPref)) {
-      await _file(conversation, 'later', 'sender_pref');
+      file('later', 'sender_pref');
       return;
     }
     if (senderPref == 'keep') {
-      if (conversation.bucket != null) await _file(conversation, null, null);
+      if (conversation.bucket != null) file(null, null);
       return;
     }
 
@@ -156,23 +291,10 @@ class AttentionService {
           );
 
     if (bucket != null) {
-      await _file(conversation, bucket, 'low_value');
+      file(bucket, 'low_value');
     } else if (reason == 'low_value') {
-      await _file(conversation, null, null);
+      file(null, null);
     }
-  }
-
-  Future<void> _file(
-    Conversation conversation,
-    String? bucket,
-    String? reason,
-  ) {
-    return _store.setConversationBucket(
-      conversation.source,
-      conversation.id,
-      bucket: bucket,
-      reason: reason,
-    );
   }
 
   /// One of triage's 0/1/NULL judgment columns as a nullable bool.

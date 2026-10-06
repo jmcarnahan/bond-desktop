@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/counting_interceptor.dart';
 import 'fixtures/test_db.dart';
 
 /// The recorder itself: one row and one stream event per [ActivityLog.record],
@@ -111,6 +112,73 @@ void main() {
       // And the failed write clears the pending slot rather than leaving it to
       // be attributed to whatever records next.
       expect(broken.pendingStatusOr('ok'), 'ok');
+    });
+  });
+
+  group('the event is the row this call wrote', () {
+    test('concurrent records each announce their own row', () async {
+      final seen = <ActivityEvent>[];
+      final sub = log.events.listen(seen.add);
+      addTearDown(sub.cancel);
+
+      const calls = [
+        ('triage', 'm1'),
+        ('extract', 'm2'),
+        ('draft', 'c3'),
+        ('triage', 'm4'),
+        ('extract', 'm5'),
+      ];
+      await Future.wait([
+        for (final (kind, entityId) in calls)
+          log.record(kind, source: 'email', entityId: entityId),
+      ]);
+      await pumpEventQueue();
+
+      // One event per call, and no row announced twice: the old re-read of
+      // "the newest row" could hand two concurrent recorders the same one.
+      expect(seen, hasLength(calls.length));
+      expect({for (final e in seen) e.id}, hasLength(calls.length));
+      expect(
+        {for (final e in seen) (e.kind, e.entityId)},
+        {for (final call in calls) call},
+      );
+      // And each event's id is the id of the row with its own kind and
+      // entity in the table.
+      final stored = {
+        for (final row in await store.recentActivity())
+          row['id']: (row['kind'], row['entity_id']),
+      };
+      for (final e in seen) {
+        expect(stored[e.id], (e.kind, e.entityId));
+      }
+    });
+
+    test('a record is one statement against the table, with no read after',
+        () async {
+      final counter = CountingInterceptor();
+      final counted = countingTestDb(counter);
+      final countedLog = ActivityLog(MessageStore(counted));
+      addTearDown(() async {
+        countedLog.dispose();
+        await counted.close();
+      });
+      final seen = <ActivityEvent>[];
+      final sub = countedLog.events.listen(seen.add);
+      addTearDown(sub.cancel);
+      // Opening the database runs its own statements; only the record counts.
+      await counted.customSelect('SELECT 1').get();
+      counter.reset();
+
+      await countedLog.record('triage', source: 'email', entityId: 'm1');
+      await pumpEventQueue();
+
+      // `INSERT … RETURNING` reaches the executor as a select, which is why
+      // the one statement is counted there.
+      expect(counter.selects, hasLength(1));
+      expect(counter.selects.single, startsWith('INSERT INTO activity_events'));
+      expect(counter.singleWrites, 0);
+      expect(seen.single.entityId, 'm1');
+      expect(seen.single.id, greaterThan(0));
     });
   });
 

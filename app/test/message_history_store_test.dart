@@ -4,6 +4,7 @@ import 'package:bond_inbox/services/decision/needs_you_predicate.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/attention_score.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -326,7 +327,7 @@ void main() {
         bucket: 'later',
         reason: 'quiet thread',
       );
-      await store.writeAttentionScore('email', 'c1', 0.42);
+      await writeScore(store, 'email', 'c1', 0.42);
 
       final row = (await store.getConversationAi('email', 'c1'))!;
 

@@ -164,7 +164,7 @@ ASK = [
     (r"\bgh\s+pr\s+(create|merge|close|ready|edit|review|comment)\b|\bgh\s+repo\s+(create|delete|edit|rename|archive|sync|fork)\b"
      r"|\bgh\s+api\b[^|;&]*(\s(-X|--method)\s*(POST|PATCH|PUT|DELETE)\b|\s(-f|-F|--field|--raw-field|--input)\b)",
      "The user owns pushes and PRs (house rule: one PR per round, opened by the user)."),
-    (r"\bflutter\s+run\b(?![^|;&]*--help)|\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?:\s+(?:-C\s+\S+|-\S+))*\s+(app-run|model|fast|embed|omlx|setup|install|stop|clean-model)\b"
+    (r"\bflutter\s+run\b(?![^|;&]*--help)|\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?:\s+(?:-C\s+\S+|-\S+|[A-Za-z_][A-Za-z0-9_]*=\S*))*\s+(app-run|app-profile|model|fast|embed|omlx|setup|install|stop|clean-model)\b"
      r"|\bopen\s+-a\b|\bopen\s+\S*\.app\b|(?:^|[;&|(]\s*)\S*\.app/Contents/MacOS/\S+"
      r"|\bxcodebuild\b(?![^|;&]*(-showBuildSettings|-list|-version|-showsdks|-showdestinations))",
      "The user drives the live app and the model servers; gates are serverless."),

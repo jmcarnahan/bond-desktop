@@ -189,10 +189,10 @@ RESET  := \033[0m
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         decide decide-stop decide-fetch _wait-decide \
-        app-install app-run app-test app-gen app-migrations app-analyze \
+        app-install app-run app-profile app-test app-gen app-migrations app-analyze \
         app-build app-doctor vec-vendor bench bench-verify bench-verify-prose bench-prose \
         ask-read-eval \
-        ab drain bench-pipeline bench-compare \
+        ab drain bench-pipeline bench-compare bench-ui \
         golden-check golden-baseline golden-score golden golden-prose \
         golden-storyline golden-sweep golden-vector golden-declared \
         golden-pairs golden-gate golden-decision decision-agreement _decide-health \
@@ -226,6 +226,7 @@ help:
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
 	@printf "  make app-doctor   → check this environment's local.mk and .env before the first app-run\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
+	@printf "  make app-profile  → the same in profile mode (timings; BOND_PERF_LOG=1 prints UI stalls and slow statements)\n"
 	@printf "  make foreground W=<worktree>   → check a round's branch out HERE for the manual pass (the worktree detaches)\n"
 	@printf "  make background W=<worktree>   → the reverse: this checkout back on main, the worktree back on its branch\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
@@ -239,6 +240,7 @@ help:
 	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-pipeline → the backlog end to end, PIPE_SHAPE=single|lanes, PIPE_POLICY=all|needsYou|onDemand (needs fast + model up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
+	@printf "  make bench-ui      → how long the UI isolate is blocked by reloads, an arrival and the index backfill (no server; prints, never asserts a time)\n"
 	@printf "  make golden        → the golden set through the decision model + needs-you ladder + message text on the bulk slot (needs make decide; GOLDEN_CTX=none|tail3|compressed|digest, GOLDEN_K=…)\n"
 	@printf "  make golden-prose  → reply decisions + drafts for the golden set on the prose slot\n"
 	@printf "  make golden-storyline GOLDEN_RUN=<run.json> → member_of for every golden item against the gold registry, on the decision model\n"
@@ -813,9 +815,9 @@ MS_ENV ?= $(CURDIR)/.env
 # ── this environment: the model registry and Your server ───────────────
 # The four values a new environment is configured with, all written in
 # local.mk (local.mk.example is the template; plain `=`, comments on their
-# own line). Each one is a compiled DEFAULT: `make app-run` and `make
-# app-build` pass it to the app as a --dart-define, and a value saved under
-# Settings, Models in the app beats it. `make app-doctor` checks them.
+# own line). Each one is a compiled DEFAULT: `make app-run`, `make
+# app-profile` and `make app-build` pass it to the app as a --dart-define,
+# and a value saved under Settings, Models in the app beats it. `make app-doctor` checks them.
 #
 # The model registry's base address, an Artifactory repository URL; the app
 # downloads the decision model's files from <it>/bundles/<bundle>/<file>.
@@ -842,7 +844,7 @@ DECIDE_BUNDLE       ?= bond-decide-mbl-v3swap
 # line says. So the recipes that must NOT carry them take them out instead,
 # with $(APP_NO_SECRET_ENV): the hand-started servers (model, fast, embed,
 # decide, omlx), app-test's flutter test, the dist scripts, and app-run /
-# app-build after the shell has read them into the defines.
+# app-profile / app-build after the shell has read them into the defines.
 export BOND_REGISTRY_TOKEN BOND_BOX_KEY
 # A secret written into a curl config (`-K -`) sits inside double quotes,
 # where curl reads a backslash or a double quote as an escape: both are
@@ -900,6 +902,21 @@ BENCH_VERIFY ?= 1
 # rounds measure queue-wait rather than batching, which is the opposite of the
 # thing being measured.
 BENCH_K      ?= 1,3
+
+# ── the UI-isolate bench: how long the UI isolate is blocked ───────────
+# `make bench-ui` needs no server and no app: it seeds a fictional mailbox on a
+# temp file and times the store's bursty paths on both executors (see
+# docs/performance.md). How many threads the mailbox holds.
+BENCH_UI_THREADS ?= 2000
+# How many list reloads one reload row runs back to back.
+BENCH_UI_RELOADS ?= 10
+# How many new messages the one arrival transaction ingests.
+BENCH_UI_ARRIVAL ?= 200
+# Names the run in the header and in the JSON filename.
+BENCH_UI_LABEL ?= local
+# Empty prints only; a directory (absolute: the test runs from $(APP_DIR)) also
+# gets ui-stall-<label>.json.
+BENCH_UI_OUT ?=
 
 # ── the pipeline bench: how the backlog behaves end to end ─────────────
 # How many copies of the fixture corpus `make bench-pipeline` seeds. 3 is ~66
@@ -1249,7 +1266,8 @@ endif
 # build still gets its defines, and this prefix then takes both secrets out of
 # the environment flutter, the app and the llama-server the app starts would
 # otherwise inherit from the `export` beside MS_ENV. They are still in the
-# flutter process's ARGUMENTS for as long as `make app-run` lives (see
+# flutter process's ARGUMENTS for as long as `make app-run` or `make
+# app-profile` lives (see
 # app/CLAUDE.md: never list that process with its arguments). Every other
 # recipe that uses neither secret carries the same prefix (see the `export`).
 APP_NO_SECRET_ENV := env -u BOND_BOX_KEY -u BOND_REGISTRY_TOKEN
@@ -1283,12 +1301,30 @@ endif
 ifneq ($(strip $(BOND_SAMPLE_DIR)),)
 APP_LLM_DEFINES += --dart-define=BOND_SAMPLE_DIR='$(BOND_SAMPLE_DIR)'
 endif
+# Read by `perfLogOn` (app/lib/services/perf/perf_log.dart): the UI-stall
+# heartbeat and the slow-statement log, printed to the run's console. Off
+# unless set; see docs/performance.md for how to read the lines.
+ifneq ($(strip $(BOND_PERF_LOG)),)
+APP_LLM_DEFINES += --dart-define=BOND_PERF_LOG='$(BOND_PERF_LOG)'
+endif
+# Read by `dbOnUiIsolate` (app/lib/data/db.dart): puts SQLite back on the UI
+# isolate, for the "before" half of a measurement on the same build and as the
+# way out if the background connection misbehaves.
+ifneq ($(strip $(BOND_DB_UI_ISOLATE)),)
+APP_LLM_DEFINES += --dart-define=BOND_DB_UI_ISOLATE='$(BOND_DB_UI_ISOLATE)'
+endif
 
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
 
 app-run:
 	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
+
+# app-run in profile mode, which is where a timing means something: a debug
+# build runs Dart several times slower and so inflates everything except the
+# time SQLite itself spends. Pair it with BOND_PERF_LOG=1 (docs/performance.md).
+app-profile:
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) run -d macos --profile $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 
 # A round is built in a worktree under .claude/worktrees/<name> and tested by
 # hand from THIS checkout, where local.mk, .env, the signing config and the
@@ -1447,6 +1483,17 @@ bench-compare:
 	   printf "$(RED)✗$(RESET) usage: make bench-compare A=<a.json> B=<b.json>\n"; \
 	   printf "    results land in $(BENCH_OUT)\n"; exit 1; }
 	@cd $(APP_DIR) && dart run tool/bench_compare.dart '$(A)' '$(B)'
+
+# The UI-isolate bench: no server, no app. The @Skip'd test seeds a fictional
+# mailbox and prints how long its own isolate (standing in for the UI's) is
+# blocked by reloads, an arrival and the index backfill, with SQLite on that
+# isolate and on a background one, beside the algorithms `main` ran. It prints
+# and never asserts a time; see docs/performance.md.
+bench-ui:
+	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) test --run-skipped --reporter expanded test/ui_stall_bench_test.dart \
+	  --dart-define=BENCH_UI_THREADS=$(BENCH_UI_THREADS) --dart-define=BENCH_UI_RELOADS=$(BENCH_UI_RELOADS) \
+	  --dart-define=BENCH_UI_ARRIVAL=$(BENCH_UI_ARRIVAL) --dart-define=BENCH_UI_LABEL='$(BENCH_UI_LABEL)' \
+	  --dart-define=BENCH_UI_OUT='$(BENCH_UI_OUT)'
 
 # ── the golden set ─────────────────────────────────────────────────────
 # Accuracy against 100 real messages, scored by golden/tools/score_run.py.

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
@@ -24,12 +26,15 @@ import 'database.dart';
 /// derived index's convenience, so [backfill] compares the two sides instead:
 /// the `(source, key) → embedded_hash` pairs the corpus has against the ones
 /// the index holds, inserting what is missing, replacing what changed, and
-/// deleting what is gone. That is a full scan of both sides on every call —
-/// a few hundred rows of three short columns, once per sweep, which is far
-/// below the cost of the model calls the sweep exists to make. It is worth
-/// revisiting if the clustering corpus ever reaches the tens of thousands, at
-/// which point an `indexed_at`-style watermark (and the schema change to carry
-/// it) starts to pay for itself.
+/// deleting what is gone. That is a full scan of both sides' KEYS and HASHES
+/// on every call — a few hundred rows of three short columns, once per sweep,
+/// which is far below the cost of the model calls the sweep exists to make.
+/// The vectors themselves (4 KB each) are read only for the rows being
+/// written, and a call that finds nothing to do writes nothing. The key scan
+/// is still linear in the corpus, so it is worth revisiting if the clustering
+/// corpus ever reaches the tens of thousands, at which point an
+/// `indexed_at`-style watermark (and the schema change to carry it) starts to
+/// pay for itself.
 ///
 /// Everything fails soft, for [MessageVectorIndex]'s reason and one more of
 /// its own: the sweep's caller has an exact arithmetic fallback, so an index
@@ -150,15 +155,25 @@ class ConversationVectorIndex {
   /// attempted. They are not an error (a model change leaves a corpus at two
   /// widths for a while) but they ARE a hole in the index, which is why the
   /// sweep checks its own candidates' width before trusting this.
+  ///
+  /// Two scans of keys and hashes decide what moves; the blobs are fetched
+  /// only for the rows to insert, [_chunk] keys per select, and every delete
+  /// and insert goes in ONE batch — one transaction and one round trip to the
+  /// database isolate. A call over an unchanged corpus returns after the two
+  /// scans, having written nothing.
   Future<int?> backfill({required String embedModel}) async {
     if (!await ensureReady()) return null;
     final db = _db!;
     try {
-      final durable = <String, ({String source, String key, Uint8List blob})>{};
+      // Keys, hashes and the blob's WIDTH, never the blob: most calls find
+      // nothing to write, and a vector is fetched below only for a row about
+      // to be inserted.
+      final durable = <String, ({String source, String key})>{};
       final hashes = <String, String>{};
       for (final row in await db
           .customSelect(
-            'SELECT source, conversation_key, embedded_hash, embedding '
+            'SELECT source, conversation_key, embedded_hash, '
+            'length(embedding) AS width '
             'FROM conversation_ai '
             'WHERE embedding IS NOT NULL AND embed_model = ?1',
             variables: [Variable<String>(embedModel)],
@@ -166,15 +181,15 @@ class ConversationVectorIndex {
           .get()) {
         final source = row.data['source'] as String? ?? '';
         final key = row.data['conversation_key'] as String? ?? '';
-        final blob = row.data['embedding'];
-        if (key.isEmpty || blob is! Uint8List) continue;
-        if (blob.lengthInBytes != dims * 4) {
-          debugPrint('vec: $source/$key is ${blob.lengthInBytes ~/ 4}-wide, '
+        final width = row.data['width'];
+        if (key.isEmpty || width is! int) continue;
+        if (width != dims * 4) {
+          debugPrint('vec: $source/$key is ${width ~/ 4}-wide, '
               'not $dims — skipped');
           continue;
         }
         final id = _rowKey(source, key);
-        durable[id] = (source: source, key: key, blob: blob);
+        durable[id] = (source: source, key: key);
         // NULL is a hash like any other here: the pair only ever has to be
         // compared against itself, and a row whose writer left it null is a
         // row the diff treats as unchanged rather than one it re-files on
@@ -208,23 +223,75 @@ class ConversationVectorIndex {
         }
       }
 
-      await db.transaction(() async {
-        for (final rowid in stale) {
-          await db.customStatement(
-              'DELETE FROM vec_conversations WHERE rowid = ?1', [rowid]);
+      final missing = [
+        for (final entry in durable.entries)
+          if (!keep.containsKey(entry.key)) entry.value,
+      ];
+      // The common case on every sweep: the index is already level, and a
+      // call that has nothing to do writes nothing — no transaction, no
+      // batch, no further statement.
+      if (stale.isEmpty && missing.isEmpty) return durable.length;
+
+      // The blobs for the rows to insert, a chunk of keys per select. Each
+      // insert takes the hash and the blob THIS select returned, so the pair
+      // written to the index is one row's even if the thread was re-embedded
+      // since the scan above; a row deleted meanwhile is simply not returned
+      // and not inserted. Keyed, then written in [missing]'s order, so the
+      // index's rowids are assigned in the order they always were.
+      final fetched = <String, List<Object?>>{};
+      for (var start = 0; start < missing.length; start += _chunk) {
+        final chunk = missing.sublist(
+          start,
+          math.min(start + _chunk, missing.length),
+        );
+        final pairs = List.filled(chunk.length, '(?, ?)').join(', ');
+        for (final row in await db
+            .customSelect(
+              'SELECT source, conversation_key, embedded_hash, embedding '
+              'FROM conversation_ai '
+              'WHERE embedding IS NOT NULL AND embed_model = ? '
+              'AND (source, conversation_key) IN (VALUES $pairs)',
+              variables: [
+                Variable<String>(embedModel),
+                for (final m in chunk) ...[
+                  Variable<String>(m.source),
+                  Variable<String>(m.key),
+                ],
+              ],
+            )
+            .get()) {
+          final blob = row.data['embedding'];
+          if (blob is! Uint8List || blob.lengthInBytes != dims * 4) continue;
+          final source = row.data['source'] as String? ?? '';
+          final key = row.data['conversation_key'] as String? ?? '';
+          fetched[_rowKey(source, key)] = [
+            blob,
+            source,
+            key,
+            row.data['embedded_hash'] as String? ?? '',
+          ];
         }
-        for (final entry in durable.entries) {
-          if (keep.containsKey(entry.key)) continue;
-          await db.customInsert(
+      }
+      final inserts = [
+        for (final m in missing) ?fetched[_rowKey(m.source, m.key)],
+      ];
+      // Every missing row left between the scan and the fetch, and nothing was
+      // stale: there is nothing to write after all.
+      if (stale.isEmpty && inserts.isEmpty) return durable.length;
+
+      // One batch: one transaction and one round trip to the database
+      // isolate, however many rows move.
+      await db.batch((batch) {
+        for (final rowid in stale) {
+          batch.customStatement(
+              'DELETE FROM vec_conversations WHERE rowid = ?', [rowid]);
+        }
+        for (final args in inserts) {
+          batch.customStatement(
             'INSERT INTO vec_conversations'
             '(embedding, source, conversation_key, embedded_hash) '
-            'VALUES (?1, ?2, ?3, ?4)',
-            variables: [
-              Variable<Uint8List>(entry.value.blob),
-              Variable<String>(entry.value.source),
-              Variable<String>(entry.value.key),
-              Variable<String>(hashes[entry.key]!),
-            ],
+            'VALUES (?, ?, ?, ?)',
+            args,
           );
         }
       });
@@ -284,4 +351,8 @@ class ConversationVectorIndex {
   /// conversation key contains one, which is the same reason
   /// `StorylineService._threadKey` picked it.
   static String _rowKey(String source, String key) => '$source\n$key';
+
+  /// Keys per blob fetch in [backfill]: 201 variables a select (the model and
+  /// a pair per key), well under SQLite's variable limit.
+  static const int _chunk = 100;
 }

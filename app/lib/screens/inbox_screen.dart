@@ -10051,7 +10051,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the sync and the local model have been doing, over the last week.
   ///
-  /// [activitySnapshotProvider] re-reads once per recorded event, so a sync
+  /// [activitySnapshotProvider] re-reads on the activity tick, so a sync
   /// landing while the panel is open appears without a refresh. It also
   /// re-reads on the events the recorder SUPPRESSED — a poll that brought
   /// nothing in emits a transient tick and writes no row — and that is what
@@ -10059,10 +10059,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// prefs read in that same pass, so without a tick roughly once a minute they
   /// would freeze at whatever they said when the panel opened.
   ///
-  /// Each re-read is a handful of indexed queries. Even a first sync of a large
-  /// mailbox records one row per drained item, not per message. If a future
-  /// drain ever ticks fast enough to be felt here, the debounce in
-  /// `conversations_provider` is the documented pattern to copy.
+  /// Each re-read is a handful of indexed queries, and the tick comes at most
+  /// once per 250 ms (`activityTickWindow`): the drains record one row per
+  /// item, several a second in a burst, and the window is what keeps that
+  /// from being a re-read per row.
   Widget _activityLog() {
     // The previous snapshot is carried through a reload, so this is null only
     // before the very first read of the pane.

@@ -1,12 +1,17 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:bond_inbox/data/database.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart' show Conversation;
+import 'package:bond_inbox/providers/conversations_provider.dart'
+    show sameConversationRows;
 import 'package:bond_inbox/services/attention.dart';
 import 'package:bond_inbox/services/attention_service.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/counting_interceptor.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/triage_seed.dart';
 
@@ -748,4 +753,345 @@ void main() {
       expect(await scoreOf('c1'), isNull);
     });
   });
+
+  group('recompute: one pass, one batch', () {
+    Future<String?> stampOf(String key) async =>
+        (await store.getConversationAi('email', key))?['updated_at']
+            as String?;
+
+    /// A stamp older than any the store writes.
+    const oldStamp = '2000-01-01T00:00:00.000000Z';
+
+    Future<void> ageStamp(String key) => db.customUpdate(
+          'UPDATE conversation_ai SET updated_at = ? '
+          "WHERE source = 'email' AND conversation_key = ?",
+          variables: [Variable(oldStamp), Variable(key)],
+        );
+
+    test('answers what recomputeAll counted, and what it wrote', () async {
+      await seed('c1', state: 'needs_reply', intent: 'question');
+      await seed('c2', intent: 'fyi', importance: 'low');
+      await seed('c3', state: 'done');
+
+      final pass = await service.recompute(now: now);
+
+      expect(pass.scored, 2);
+      expect(pass.scores.keys.toSet(), {
+        MessageStore.openAskKey('email', 'c1'),
+        MessageStore.openAskKey('email', 'c2'),
+      });
+      expect(pass.scores[MessageStore.openAskKey('email', 'c1')],
+          await scoreOf('c1'));
+      expect(
+        (await scoreOf('c1'))!,
+        closeTo((1.0 + AttentionTuning.questionBonus) * decay, 1e-9),
+      );
+      expect(pass.buckets, {MessageStore.openAskKey('email', 'c2'): 'later'});
+      expect(await bucketOf('c2'), 'later');
+    });
+
+    test('an unchanged thread is still written, and stamped (I1)', () async {
+      // The notification settle holds a message until
+      // `conversation_ai.updated_at` is at or after it, and the pass
+      // re-stamping that column is what lets it go. A pass that skipped a
+      // write for being unchanged would hold the notification forever.
+      await seed('c-open', state: 'needs_reply', intent: 'question');
+      // Done, so its only write is the bucket.
+      await seed('c-done', state: 'done', intent: 'fyi', importance: 'low');
+      await service.recompute(now: now);
+      final score = await scoreOf('c-open');
+      expect(await bucketOf('c-done'), 'later');
+
+      await ageStamp('c-open');
+      await ageStamp('c-done');
+      await service.recompute(now: now);
+
+      expect(await scoreOf('c-open'), score, reason: 'bit-identical');
+      expect(await bucketOf('c-done'), 'later');
+      expect((await stampOf('c-open'))!.compareTo(oldStamp), greaterThan(0));
+      expect((await stampOf('c-done'))!.compareTo(oldStamp), greaterThan(0));
+    });
+
+    test('the stamp is taken before the pass reads, not after', () async {
+      // A message that changes after the pass read it must sort LATER than
+      // the pass's stamp, so the settle holds it for the next pass instead of
+      // taking a score computed from the older version as a verdict on it.
+      await seed('c1', state: 'needs_reply', intent: 'question');
+      final reading = _ReadTimingStore(db);
+      await AttentionService(reading).recompute(now: now);
+
+      expect(reading.metaReadAt, isNotNull);
+      final written = (await stampOf('c1'))!;
+      expect(written.compareTo(reading.metaReadAt!), lessThan(0));
+    });
+
+    test('the minute clock cuts to the start of the minute', () {
+      expect(
+        AttentionService.minuteOf(DateTime(2026, 10, 6, 13, 45, 59, 999)),
+        DateTime(2026, 10, 6, 13, 45),
+      );
+      expect(
+        AttentionService.minuteOf(DateTime(2026, 10, 6, 13, 45)),
+        DateTime(2026, 10, 6, 13, 45),
+      );
+      final utc =
+          AttentionService.minuteOf(DateTime.utc(2026, 10, 6, 13, 45, 30));
+      expect(utc, DateTime.utc(2026, 10, 6, 13, 45));
+      expect(utc.isUtc, isTrue);
+    });
+
+    test('the clock ticks once a minute: two passes in one minute store the '
+        'same score', () async {
+      await seed('c1', state: 'needs_reply', intent: 'question');
+      final before = DateTime.now();
+      await service.recompute();
+      final first = await scoreOf('c1');
+      await service.recompute();
+      final second = await scoreOf('c1');
+      final after = DateTime.now();
+
+      expect(first, isNotNull);
+      // A pass on either side of a minute boundary is allowed to differ —
+      // that is the tick — so the equality is only asserted when both passes
+      // fell in the same wall-clock minute, which is almost always.
+      final sameMinute = before.year == after.year &&
+          before.month == after.month &&
+          before.day == after.day &&
+          before.hour == after.hour &&
+          before.minute == after.minute;
+      if (sameMinute) expect(second, first);
+    });
+
+    test('rows handed over are scored without reading the list again',
+        () async {
+      await seed('c1', state: 'needs_reply');
+      final rows = [
+        for (final row in await store.conversationRows())
+          Conversation.fromRow(row),
+      ];
+
+      final counter = CountingInterceptor();
+      final countedDb = countingTestDb(counter);
+      addTearDown(countedDb.close);
+      final countedStore = MessageStore(countedDb);
+      await countedStore.upsertConversation({
+        'conversation_key': 'c1',
+        'state': 'needs_reply',
+        'last_message_at': justNow,
+      });
+      final counted = AttentionService(countedStore);
+
+      counter.reset();
+      await counted.recompute(now: now, conversations: rows);
+      expect(
+        counter.selects.where((s) => s.contains('FROM conversations c')),
+        isEmpty,
+      );
+
+      // And without them, the pass reads the list itself — the probe works.
+      counter.reset();
+      await counted.recompute(now: now);
+      expect(
+        counter.selects.where((s) => s.contains('FROM conversations c')),
+        hasLength(1),
+      );
+    });
+  });
+
+  group('recompute against a counted database', () {
+    late CountingInterceptor counter;
+    late BondDatabase countedDb;
+    late MessageStore countedStore;
+    late AttentionService counted;
+
+    setUp(() {
+      counter = CountingInterceptor();
+      countedDb = countingTestDb(counter);
+      countedStore = MessageStore(countedDb);
+      counted = AttentionService(countedStore);
+    });
+
+    tearDown(() async => countedDb.close());
+
+    Future<void> seedThread(String key, {String state = 'needs_reply'}) async {
+      await countedStore.upsertConversation({
+        'conversation_key': key,
+        'state': state,
+        'last_message_at': justNow,
+        'last_inbound_at': justNow,
+      });
+      await countedStore.upsertMessage({
+        'source_message_id': '$key-m1',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'from_address': 'ada@example.com',
+        'received_at': justNow,
+      });
+      await countedStore.writeExtraction(
+        'email',
+        '$key-m1',
+        jsonEncode({'intent': 'fyi', 'importance': 'low'}),
+      );
+    }
+
+    test('every write of the pass is ONE batch, and none is a statement of '
+        'its own', () async {
+      await seedThread('c1');
+      await seedThread('c2', state: 'waiting');
+      await seedThread('c3', state: 'done');
+      await countedStore.setConversationBucket('email', 'c4',
+          bucket: 'later', reason: 'low_value');
+      await countedStore.upsertConversation({
+        'conversation_key': 'c4',
+        'state': 'waiting',
+        'last_message_at': justNow,
+      });
+
+      counter.reset();
+      final pass = await counted.recompute(now: now);
+
+      // Three scores (c1, c2, c4) and three bucket writes (c2 and c3 filed,
+      // c4's low_value guess withdrawn) — all of it one round trip.
+      expect(pass.scored, 3);
+      expect(pass.buckets.length, 3);
+      expect(counter.batched, 1);
+      expect(counter.inserts, 0);
+      expect(counter.updates, 0);
+      expect(counter.deletes, 0);
+      expect(counter.customs, 0);
+    });
+
+    test('a pass over an empty mailbox writes nothing at all', () async {
+      counter.reset();
+      final pass = await counted.recompute(now: now);
+
+      expect(pass.scored, 0);
+      expect(counter.batched, 0);
+      expect(counter.singleWrites, 0);
+    });
+  });
+
+  group('the pass applied to the rows it was handed', () {
+    test('equals a fresh read after the pass, and is not vacuous', () async {
+      // One thread per thing the pass can do to a row.
+      await seed('p-score', state: 'needs_reply', from: 'ada@example.com');
+      await seed('p-low',
+          from: 'ben@example.com', intent: 'fyi', importance: 'low');
+      await seed('p-clear',
+          from: 'cy@example.com', intent: 'request', importance: 'high');
+      await store.setConversationBucket('email', 'p-clear',
+          bucket: 'later', reason: 'low_value');
+      await seed('p-later', from: 'later@example.com', intent: 'request');
+      await store.setSenderPref('later@example.com', 'later');
+      await seed('p-drop', from: 'drop@example.com', intent: 'request');
+      await store.setSenderPref('drop@example.com', 'drop');
+      await seed('p-keep',
+          from: 'keep@example.com', intent: 'fyi', importance: 'low');
+      await store.setConversationBucket('email', 'p-keep',
+          bucket: 'later', reason: 'low_value');
+      await store.setSenderPref('keep@example.com', 'keep');
+      await seed('p-done',
+          state: 'done',
+          from: 'dee@example.com',
+          intent: 'fyi',
+          importance: 'low');
+      await seed('p-user',
+          from: 'eve@example.com', intent: 'request', importance: 'high');
+      await store.setConversationBucket('email', 'p-user',
+          bucket: 'later', reason: 'user');
+
+      final raw = await store.conversationRows();
+      final pass = await service.recompute(
+        now: now,
+        conversations: [for (final row in raw) Conversation.fromRow(row)],
+      );
+      final patched = pass.applyTo(raw);
+      final fresh = await store.conversationRows();
+
+      expect(sameConversationRows(patched, fresh), isTrue);
+
+      Map<String, Object?> rowOf(List<Map<String, Object?>> rows, String key) =>
+          rows.singleWhere((r) => r['conversation_key'] == key);
+      bool movedRow(String key) =>
+          !identical(rowOf(patched, key), rowOf(raw, key));
+
+      // Not vacuous: rows really moved, and each scenario shows in the read.
+      expect(movedRow('p-score'), isTrue);
+      expect(rowOf(fresh, 'p-score')['attention_score'], isNotNull);
+      expect(rowOf(fresh, 'p-low')['bucket'], 'later');
+      expect(movedRow('p-clear'), isTrue);
+      expect(rowOf(raw, 'p-clear')['bucket'], 'later');
+      expect(rowOf(fresh, 'p-clear')['bucket'], isNull);
+      expect(rowOf(fresh, 'p-later')['bucket'], 'later');
+      expect(rowOf(fresh, 'p-later')['attention_score'], 0.0);
+      expect(rowOf(fresh, 'p-drop')['bucket'], 'later');
+      expect(rowOf(raw, 'p-keep')['bucket'], 'later');
+      expect(rowOf(fresh, 'p-keep')['bucket'], isNull);
+      expect(rowOf(fresh, 'p-done')['bucket'], 'later');
+      expect(rowOf(fresh, 'p-done')['attention_score'], isNull);
+      expect(rowOf(fresh, 'p-user')['bucket'], 'later');
+      expect(await reasonOf('p-user'), 'user');
+      expect(
+        pass.buckets.containsKey(MessageStore.openAskKey('email', 'p-user')),
+        isFalse,
+      );
+
+      // A second pass at the same instant moves nothing: every row comes
+      // back as the very map it was handed, which is what lets the list
+      // leave an unchanged screen alone.
+      final again = await service.recompute(
+        now: now,
+        conversations: [for (final row in fresh) Conversation.fromRow(row)],
+      );
+      final twice = again.applyTo(fresh);
+      for (var i = 0; i < fresh.length; i++) {
+        expect(identical(twice[i], fresh[i]), isTrue,
+            reason: '${fresh[i]['conversation_key']} did not change');
+      }
+    });
+
+    test('a write lands on its own source when two threads share a key',
+        () async {
+      // The same key under two sources, and only the open one is scored: a
+      // patch keyed on the conversation key alone would put the chat's score
+      // on the closed mail thread as well.
+      const both = ['email', 'teams'];
+      await seed('shared', state: 'done', from: 'ada@example.com');
+      await seed('shared',
+          source: 'teams', state: 'needs_reply', from: 'teams:ben');
+
+      final raw = await store.conversationRows(sources: both);
+      final pass = await service.recompute(
+        now: now,
+        sources: both,
+        conversations: [for (final row in raw) Conversation.fromRow(row)],
+      );
+      final patched = pass.applyTo(raw);
+      final fresh = await store.conversationRows(sources: both);
+
+      expect(sameConversationRows(patched, fresh), isTrue);
+      Map<String, Object?> of(List<Map<String, Object?>> rows, String source) =>
+          rows.singleWhere((r) => r['source'] == source);
+      expect(of(patched, 'teams')['attention_score'], isNotNull);
+      expect(of(patched, 'email')['attention_score'], isNull);
+      expect(identical(of(patched, 'email'), of(raw, 'email')), isTrue);
+    });
+  });
+}
+
+/// Notes when the pass made its first read, a moment after it asked.
+class _ReadTimingStore extends MessageStore {
+  _ReadTimingStore(super.db);
+
+  String? metaReadAt;
+
+  @override
+  Future<Map<String, Map<String, Object?>>> latestInboundMeta({
+    List<String> sources = const ['email'],
+  }) async {
+    // Long enough that a stamp taken after this read could not tie with it.
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    metaReadAt = MessageStore.isoStamp(DateTime.now());
+    return super.latestInboundMeta(sources: sources);
+  }
 }

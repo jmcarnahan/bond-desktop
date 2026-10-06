@@ -406,14 +406,37 @@ Uint8List encodeEmbedding(List<double> v) {
   return bytes.buffer.asUint8List();
 }
 
-/// The inverse of [encodeEmbedding]. A trailing partial float — a truncated
-/// blob — is dropped rather than throwing.
+/// The inverse of [encodeEmbedding]: the blob's floats as a [Float32List].
+///
+/// A typed list rather than a growable `List<double>`, because a pass reads
+/// thousands of these: one stored vector used to be 1024 heap doubles, each
+/// boxed, and a typed list holds the same float32 values packed. Reading an
+/// element gives exactly the `double` `getFloat32` gave, so nothing a caller
+/// computes from it moves.
+///
+/// When the host is little-endian (every Mac) and the bytes start on a
+/// four-byte boundary, the result is a VIEW over the blob's own bytes: no copy
+/// at all. Otherwise the floats are copied out one by one into a new
+/// [Float32List]. A trailing partial float — a truncated blob — is dropped
+/// rather than throwing.
+///
+/// What a caller must know: the result is fixed-length and, on the in-place
+/// path, shares the blob's bytes. It is read, never grown or written to; a
+/// caller that needs its own list copies it (`List<double>.of`).
 List<double> decodeEmbedding(Uint8List b) {
-  final view = ByteData.sublistView(b);
   final count = b.lengthInBytes ~/ 4;
-  return [
-    for (var i = 0; i < count; i++) view.getFloat32(i * 4, Endian.little),
-  ];
+  // Zero-copy when the bytes can be read in place: a Float32List view reads
+  // the host's byte order and needs an aligned offset, and the blob is
+  // little-endian by [encodeEmbedding]'s contract.
+  if (Endian.host == Endian.little && b.offsetInBytes % 4 == 0) {
+    return b.buffer.asFloat32List(b.offsetInBytes, count);
+  }
+  final view = ByteData.sublistView(b);
+  final out = Float32List(count);
+  for (var i = 0; i < count; i++) {
+    out[i] = view.getFloat32(i * 4, Endian.little);
+  }
+  return out;
 }
 
 /// Cosine similarity, in full rather than as a bare dot product.
@@ -426,8 +449,14 @@ List<double> decodeEmbedding(Uint8List b) {
 ///
 /// Mismatched lengths and zero vectors both give 0: no similarity, rather than
 /// a NaN that poisons every sort it touches.
+///
+/// Stored vectors arrive as [Float32List] ([decodeEmbedding]) and take a
+/// typed loop, which does the same sums in the same order and so returns the
+/// same number; a freshly embedded vector (boxed, from JSON) or a mixed pair
+/// takes the general one.
 double cosine(List<double> a, List<double> b) {
   if (a.length != b.length || a.isEmpty) return 0;
+  if (a is Float32List && b is Float32List) return _cosineFloat32(a, b);
   var dot = 0.0;
   var normA = 0.0;
   var normB = 0.0;
@@ -435,6 +464,24 @@ double cosine(List<double> a, List<double> b) {
     dot += a[i] * b[i];
     normA += a[i] * a[i];
     normB += b[i] * b[i];
+  }
+  if (normA == 0 || normB == 0) return 0;
+  return dot / (math.sqrt(normA) * math.sqrt(normB));
+}
+
+/// [cosine]'s loop over two [Float32List]s, kept step for step identical to
+/// the general one — dot, then each norm, summed in index order, and the same
+/// final expression — so the typed path returns the bit-identical double.
+double _cosineFloat32(Float32List a, Float32List b) {
+  var dot = 0.0;
+  var normA = 0.0;
+  var normB = 0.0;
+  for (var i = 0; i < a.length; i++) {
+    final x = a[i];
+    final y = b[i];
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
   }
   if (normA == 0 || normB == 0) return 0;
   return dot / (math.sqrt(normA) * math.sqrt(normB));

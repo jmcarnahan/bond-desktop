@@ -1025,6 +1025,24 @@ WHERE source = ? AND conversation_key = ?
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
+  }) async =>
+      [
+        for (final row
+            in await conversationRows(sources: sources, state: state))
+          Conversation.fromRow(row),
+      ];
+
+  /// The conversation list's rows as the query returned them — see
+  /// [loadConversations], which is these rows made into models.
+  ///
+  /// Raw, because the list provider compares two reads' maps to decide
+  /// whether anything on screen changed. A hand-written thirty-field `==` on
+  /// the model would do the same job until the day a column is added to this
+  /// SELECT and not to the `==`, and from then on would silently call two
+  /// different rows the same.
+  Future<List<Map<String, Object?>>> conversationRows({
+    List<String> sources = const ['email'],
+    ConversationState? state,
   }) async {
     if (sources.isEmpty) return const [];
     final where =
@@ -1193,7 +1211,7 @@ WHERE source = ? AND conversation_key = ?
           variables: _args(args),
         )
         .get();
-    return [for (final row in result) Conversation.fromRow(row.data)];
+    return [for (final row in result) row.data];
   }
 
   /// The conversations, of every source, that any of [addresses] took part
@@ -5098,27 +5116,62 @@ FROM messages
     }
   }
 
-  /// Stores one thread's ranking score. Same targeted insert-then-update as
-  /// [setConversationBucket]: the score is recomputed on every list load and
-  /// must never disturb an embedding or a bucket sitting on the same row.
-  Future<void> writeAttentionScore(
-    String source,
-    String conversationKey,
-    double score,
-  ) async {
-    final now = _nowIso();
-    await db.transaction(() async {
-      await db.customUpdate(
-        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
-        'VALUES (?, ?, ?) '
-        'ON CONFLICT(source, conversation_key) DO NOTHING',
-        variables: _args([source, conversationKey, now]),
-      );
-      await db.customUpdate(
-        'UPDATE conversation_ai SET attention_score = ?, updated_at = ? '
-        'WHERE source = ? AND conversation_key = ?',
-        variables: _args([score, now, source, conversationKey]),
-      );
+  /// One attention pass's writes, in ONE batch: every score in [scores], then
+  /// every bucket in [buckets].
+  ///
+  /// A score for every thread scored and a bucket for every thread filed,
+  /// none skipped, and each one stamps `updated_at`. That
+  /// stamp is load-bearing rather than bookkeeping: the notification settle
+  /// reads `conversation_ai.updated_at` at or after the message's own stamp
+  /// as "the attention pass has seen this thread since its message last
+  /// changed", so a write left out for being unchanged would hold a
+  /// notification back. What changes is the cost: one round trip to the
+  /// database and one transaction, instead of one of each per thread — which
+  /// with the database on its own isolate was most of a list load.
+  ///
+  /// An upsert per row rather than the insert-then-update pair: the insert
+  /// names only the key, the column it sets and `updated_at`, so a row that
+  /// did not exist is created as the pair created it, and a row that did
+  /// keeps its embedding, its date and the other kind's column.
+  ///
+  /// One [stamp] for the whole pass ([isoStamp]), and the CALLER's: it is
+  /// taken before the pass's reads, not here after them. A message that
+  /// changed after the pass read it then carries the later stamp of the two,
+  /// so the settle holds it for the next pass instead of taking this one's
+  /// score — computed from the older version — as a verdict on the new one.
+  /// Nothing at all is written when both lists are empty.
+  Future<void> writeAttentionPass({
+    required List<({String source, String key, double score})> scores,
+    required List<({String source, String key, String? bucket, String? reason})>
+        buckets,
+    required String stamp,
+  }) async {
+    if (scores.isEmpty && buckets.isEmpty) return;
+    final now = stamp;
+    await db.batch((b) {
+      for (final s in scores) {
+        b.customStatement(
+          'INSERT INTO conversation_ai '
+          '  (source, conversation_key, attention_score, updated_at) '
+          'VALUES (?, ?, ?, ?) '
+          'ON CONFLICT(source, conversation_key) DO UPDATE SET '
+          '  attention_score = excluded.attention_score, '
+          '  updated_at = excluded.updated_at',
+          [s.source, s.key, s.score, now],
+        );
+      }
+      for (final f in buckets) {
+        b.customStatement(
+          'INSERT INTO conversation_ai '
+          '  (source, conversation_key, bucket, bucket_reason, updated_at) '
+          'VALUES (?, ?, ?, ?, ?) '
+          'ON CONFLICT(source, conversation_key) DO UPDATE SET '
+          '  bucket = excluded.bucket, '
+          '  bucket_reason = excluded.bucket_reason, '
+          '  updated_at = excluded.updated_at',
+          [f.source, f.key, f.bucket, f.reason, now],
+        );
+      }
     });
   }
 
@@ -5907,7 +5960,15 @@ SELECT conversation_key FROM (
   ///
   /// [count] and [durationMs] must be Dart ints: the table is STRICT and an
   /// INTEGER column rejects a double at write time.
-  Future<void> recordActivity({
+  ///
+  /// Returns the stored row, id and stamp included, so the caller can announce
+  /// exactly the row it wrote without a second read. A second read would also
+  /// be the wrong one under concurrent drains: "the newest row" is a sibling's
+  /// as often as not when three lanes record at once. A write that hands rows
+  /// back goes through `customWriteReturning`, never `customSelect`: a write
+  /// must not travel on a read path. Callers with no use for the row ignore
+  /// it.
+  Future<Map<String, Object?>?> recordActivity({
     required String kind,
     required String status,
     String? source,
@@ -5917,10 +5978,10 @@ SELECT conversation_key FROM (
     String? detailJson,
     String? createdAt,
   }) async {
-    await db.customUpdate(
+    final rows = await db.customWriteReturning(
       'INSERT INTO activity_events '
       '(kind, source, status, entity_id, count, duration_ms, detail_json, '
-      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
       variables: _args([
         kind,
         source,
@@ -5932,6 +5993,7 @@ SELECT conversation_key FROM (
         createdAt ?? _nowIso(),
       ]),
     );
+    return rows.isEmpty ? null : Map<String, Object?>.from(rows.first.data);
   }
 
   /// The newest events first. Bounded by [limit] because the panel that reads
@@ -5955,6 +6017,34 @@ SELECT conversation_key FROM (
             )
             .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// `'$source|$conversationKey'` → subject, for every conversation of
+  /// [sources] that has one.
+  ///
+  /// The activity pane's lookup for the thread an event was about. A narrow
+  /// two-column read in place of the whole list query the pane used to run
+  /// for it: that query counts unread mail, busy work, attachments and drafts
+  /// per thread, and the pane wanted none of it, only the subject, on every
+  /// activity tick. `Conversation.subject` is this column verbatim, so the
+  /// map is the one the old loop built.
+  Future<Map<String, String>> conversationSubjects({
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return const {};
+    final result = await db
+        .customSelect(
+          'SELECT source, conversation_key, subject FROM conversations '
+          'WHERE source IN (${_placeholders(sources.length)}) '
+          "AND subject IS NOT NULL AND subject <> ''",
+          variables: _args(sources),
+        )
+        .get();
+    return {
+      for (final row in result)
+        '${row.data['source']}|${row.data['conversation_key']}':
+            row.data['subject'] as String,
+    };
   }
 
   /// Everything the log holds about one message: its own events, its thread's,
@@ -9000,22 +9090,6 @@ WHERE m.source = ? AND m.source_message_id = ?
       "WHERE state = 'pending' AND deadline_at < ?",
       variables: _args([now, now, nowIso]),
     );
-  }
-
-  /// What was announced recently — the backing read for the "what did I miss"
-  /// list, newest first.
-  Future<List<Map<String, Object?>>> recentNotified({
-    required String sinceIso,
-    int limit = 20,
-  }) async {
-    final result = await db
-        .customSelect(
-          "SELECT * FROM message_notify WHERE state = 'notified' "
-          'AND settled_at >= ? ORDER BY settled_at DESC LIMIT ?',
-          variables: _args([sinceIso, limit]),
-        )
-        .get();
-    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   // ── pipeline progress ────────────────────────────────────────────────
@@ -12078,8 +12152,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
         variables: _args([source, messageId, attachmentId]),
       );
       for (final chunk in chunks) {
-        final row = await db
-            .customSelect(
+        final rows = await db
+            .customWriteReturning(
               'INSERT INTO attachment_chunks '
               '(source, source_message_id, attachment_id, seq, locator, '
               ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
@@ -12096,9 +12170,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
                 chunk.text.length,
                 now,
               ]),
-            )
-            .getSingle();
-        ids.add(row.data['id'] as int);
+            );
+        ids.add(rows.single.data['id'] as int);
       }
     });
     return ids;
@@ -12121,8 +12194,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
     final now = _nowIso();
     var id = 0;
     await db.transaction(() async {
-      final row = await db
-          .customSelect(
+      final rows = await db
+          .customWriteReturning(
             'INSERT INTO attachment_chunks '
             '(source, source_message_id, attachment_id, seq, locator, '
             ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
@@ -12145,9 +12218,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
               messageId,
               attachmentId,
             ]),
-          )
-          .getSingle();
-      id = row.data['id'] as int;
+          );
+      id = rows.single.data['id'] as int;
     });
     return id;
   }

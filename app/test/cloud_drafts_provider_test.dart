@@ -67,6 +67,8 @@ void main() {
             detail: {'cloud': cloud},
           );
       await container.pump();
+      // The tick lands at the end of its window, not with the event.
+      await Future<void>.delayed(activityTickWindow);
       await Future<void>.delayed(const Duration(milliseconds: 20));
       return container.read(cloudDraftsTodayProvider.future);
     }

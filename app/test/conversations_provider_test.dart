@@ -6,6 +6,8 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/ai_worker.dart' show WorkProgress;
+import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/decision/needs_you_exemplars.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart'
@@ -113,6 +115,29 @@ class LabelRefusingStore extends MessageStore {
   ) async {
     if (refuseRemove) throw StateError('database is locked');
     return super.removeLabel(source, conversationKey, labelId);
+  }
+}
+
+/// A store that counts the list reads, which is how a test sees a reload
+/// happen whether or not it changed the state.
+class ReadCountingStore extends MessageStore {
+  ReadCountingStore(super.db);
+
+  int reads = 0;
+
+  /// While set, a list read waits here before it runs: how a test catches a
+  /// load in flight.
+  Completer<void>? hold;
+
+  @override
+  Future<List<Map<String, Object?>>> conversationRows({
+    List<String> sources = const ['email'],
+    ConversationState? state,
+  }) async {
+    reads++;
+    final gate = hold;
+    if (gate != null) await gate.future;
+    return super.conversationRows(sources: sources, state: state);
   }
 }
 
@@ -994,6 +1019,274 @@ void main() {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       expect(() => container.read(dbProvider), throwsUnimplementedError);
+    });
+  });
+
+  group('progress-driven reloads', () {
+    late ReadCountingStore counted;
+    late StreamController<WorkProgress> progress;
+
+    setUp(() {
+      counted = ReadCountingStore(db);
+      progress = StreamController<WorkProgress>.broadcast();
+    });
+
+    tearDown(() => progress.close());
+
+    const report = WorkProgress('extract', {'pending': 1});
+
+    /// A thread whose score and bucket do not depend on the clock: its
+    /// sender is under a `later` rule, which scores zero and files the
+    /// thread under `sender_pref` on every pass. So a reload of an unchanged
+    /// mailbox reads exactly the rows the last one did, whatever minute it
+    /// is.
+    Future<void> seedSteady(String key) async {
+      await counted.upsertConversation({
+        'conversation_key': key,
+        'subject': key,
+        'state': 'needs_reply',
+        'last_message_at': '2026-08-28T10:00:00Z',
+        'last_inbound_at': '2026-08-28T10:00:00Z',
+      });
+      await counted.upsertMessage({
+        'source_message_id': '$key-m1',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'from_address': 'ada@example.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'body of $key',
+      });
+      await counted.setSenderPref('ada@example.com', 'later');
+    }
+
+    ConversationsNotifier build() => ConversationsNotifier(
+          counted,
+          sync,
+          workProgress: progress.stream,
+          attention: AttentionService(counted),
+        );
+
+    /// The frames a reload's reads and writes take to come back.
+    Future<void> flush(WidgetTester tester) async {
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+      }
+    }
+
+    testWidgets('a load that comes back after the notifier has gone touches '
+        'nothing', (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+
+      // A load caught at its read, and the notifier disposed under it — the
+      // list torn down while a refresh was on its way back.
+      final gate = Completer<void>();
+      counted.hold = gate;
+      final late = notifier.load(syncFirst: false);
+      await tester.pump();
+      notifier.dispose();
+      counted.hold = null;
+      gate.complete();
+
+      // It finishes, and quietly: a disposed notifier refuses its state, and
+      // a load that went on to read or set it would throw here.
+      await late;
+      await tester.pump(const Duration(seconds: 3));
+
+      // And one asked for after the notifier has gone does not start.
+      final readsBefore = counted.reads;
+      await notifier.load(syncFirst: false);
+      expect(counted.reads, readsBefore);
+    });
+
+    testWidgets('a reload still pending when the notifier goes away never runs',
+        (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+      counted.reads = 0;
+
+      progress.add(report);
+      await tester.pump(const Duration(milliseconds: 100));
+      notifier.dispose();
+      await tester.pump(const Duration(seconds: 3));
+
+      expect(counted.reads, 0);
+    });
+
+    testWidgets('a burst of reports inside the quiet window is one reload',
+        (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+      counted.reads = 0;
+
+      for (var i = 0; i < 8; i++) {
+        progress.add(report);
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+      expect(counted.reads, 0, reason: 'still inside the quiet window');
+      await tester.pump(const Duration(milliseconds: 400));
+      await flush(tester);
+      expect(counted.reads, 1);
+
+      await tester.pump(const Duration(seconds: 3));
+      expect(counted.reads, 1);
+      notifier.dispose();
+    });
+
+    testWidgets('a steady stream of reports reloads by the two-second mark',
+        (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+      counted.reads = 0;
+
+      // A report every 100 ms: the quiet window never opens.
+      for (var i = 0; i < 20; i++) {
+        progress.add(report);
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await flush(tester);
+      expect(counted.reads, 1, reason: 'the max wait is two seconds');
+
+      for (var i = 0; i < 10; i++) {
+        progress.add(report);
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.pump(const Duration(milliseconds: 400));
+      await flush(tester);
+      expect(counted.reads, 2, reason: 'and the tail gets its own reload');
+      await tester.pump(const Duration(seconds: 3));
+      notifier.dispose();
+    });
+
+    testWidgets('a reload that reads the same rows sets no state',
+        (tester) async {
+      await seedSteady('c1');
+      await seedSteady('c2');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+      final shown = notifier.state;
+      var emissions = 0;
+      final remove = notifier.addListener((_) => emissions++,
+          fireImmediately: false);
+
+      progress.add(report);
+      await tester.pump(const Duration(milliseconds: 400));
+      await flush(tester);
+
+      expect(counted.reads, 2, reason: 'the reload did read the list');
+      expect(emissions, 0);
+      expect(identical(notifier.state, shown), isTrue);
+      remove();
+      notifier.dispose();
+    });
+
+    testWidgets('a reload after a row changed sets the new rows, once',
+        (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+      var emissions = 0;
+      final remove = notifier.addListener((_) => emissions++,
+          fireImmediately: false);
+
+      // A second unread message lands on the thread.
+      await counted.upsertMessage({
+        'source_message_id': 'c1-m2',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'from_address': 'ada@example.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'a second message',
+      });
+      progress.add(report);
+      await tester.pump(const Duration(milliseconds: 400));
+      await flush(tester);
+
+      expect(emissions, 1);
+      final state = notifier.state as ConversationsLoaded;
+      expect(state.conversations.single.unreadCount, 2);
+      remove();
+      notifier.dispose();
+    });
+
+    testWidgets('an in-place patch the store does not keep is put right by '
+        'the next reload, even when the rows match the last read',
+        (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load(syncFirst: false);
+      final before = (await db
+              .customSelect(
+                'SELECT state, state_changed_at, updated_at '
+                "FROM conversations WHERE conversation_key = 'c1'",
+              )
+              .get())
+          .single
+          .data;
+
+      await notifier.markDone('email', 'c1');
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.done,
+      );
+
+      // The store goes back to exactly what the last reload read — as if
+      // the write had been lost — while the screen still shows the patch.
+      await db.customUpdate(
+        'UPDATE conversations SET state = ?, state_changed_at = ?, '
+        "updated_at = ? WHERE conversation_key = 'c1'",
+        variables: [
+          Variable(before['state']),
+          Variable(before['state_changed_at']),
+          Variable(before['updated_at']),
+        ],
+      );
+      var emissions = 0;
+      final remove = notifier.addListener((_) => emissions++,
+          fireImmediately: false);
+
+      progress.add(report);
+      await tester.pump(const Duration(milliseconds: 400));
+      await flush(tester);
+
+      expect(emissions, 1);
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.needsReply,
+      );
+      remove();
+      notifier.dispose();
+    });
+
+    testWidgets('a load error appearing or clearing over the same rows is a '
+        'new state', (tester) async {
+      await seedSteady('c1');
+      final notifier = build();
+      await notifier.load();
+      var emissions = 0;
+      final remove = notifier.addListener((_) => emissions++,
+          fireImmediately: false);
+
+      sync.syncError = Exception('socket closed');
+      await notifier.load();
+      expect(emissions, 1);
+      expect((notifier.state as ConversationsLoaded).loadError,
+          contains("Couldn't refresh"));
+
+      sync.syncError = null;
+      await notifier.load();
+      expect(emissions, 2);
+      expect((notifier.state as ConversationsLoaded).loadError, isNull);
+
+      // And a third clean load over the same rows is nothing new.
+      await notifier.load();
+      expect(emissions, 2);
+      remove();
+      notifier.dispose();
     });
   });
 }
