@@ -1065,6 +1065,16 @@ that bite.
   - Calendar providers never read the clock. Their family arguments are
     dates or instants the HOST computes from `DateTime.now()` on each
     build, so nothing goes stale at midnight.
+  - Graph's delta sends a plain occurrence as a stub (id, type, master id,
+    times); `CalendarStore.fillFromMasters` runs on every sync page over the
+    whole table and copies the stored master's details onto it. An
+    occurrence's details are the master's by construction, so a new detail
+    column on `CalendarEvent` must be added to the fill's hand-written column
+    list or occurrences never carry it. `response_status` / `show_as` are
+    the master's too (a series re-answered in Outlook follows on every
+    occurrence), except for the page's `keepAnswerFor` ids, which the fill
+    skips entirely so a fresh answer on one meeting survives until Graph
+    sends it back as an exception.
   - A row written outside `CalendarSync` must carry the CURRENT run, or the
     next sweep deletes it. That is what `CalendarSync.storeWritten`
     (noteWrite + upsert tagged with the run, the write guard) is for.

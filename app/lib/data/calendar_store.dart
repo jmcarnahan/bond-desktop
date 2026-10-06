@@ -191,6 +191,68 @@ class CalendarStore {
     return tagged;
   }
 
+  /// Gives every plain occurrence the details of its stored series master.
+  /// Graph's calendarView delta sends a plain occurrence as a stub (its id,
+  /// type, series master id and times) and only the master and the
+  /// exceptions in full, so the mirror fills the rest from the master.
+  ///
+  /// Only an `occurrence` row is filled, and only from a stored row whose id
+  /// is its `series_master_id` and whose type is `seriesMaster`: an
+  /// exception carries its own details, a single instance has no master, and
+  /// an occurrence whose master is not stored is left as it is. The subject,
+  /// location, organizer, attendees, categories, join and web links,
+  /// preview, sensitivity, reminder and the two invite flags are the
+  /// master's, since a plain occurrence IS the series at another time, and
+  /// so are `response_status` and `show_as`: a series answered or
+  /// re-answered anywhere follows on every occurrence. The ids in
+  /// [keepAnswerFor] (the write guard's, an answer the app gave within
+  /// `CalendarSync.answerHold`) are skipped entirely: that meeting's own
+  /// answer is in flight, and Graph sends it back as an exception.
+  /// `is_all_day` is the master's; when the master is all-day and the
+  /// occurrence came timed (no dates), its dates are derived from the
+  /// instants by bond-mcps' own rule (the UTC instant plus 12 hours, then
+  /// the date) and the instants are cleared, the all-day row's shape. The
+  /// id, type, master id, iCal uid, times, change key, cancelled flag and
+  /// the run tag are never touched.
+  ///
+  /// The columns are named here by hand, not read off [_columns]: a column
+  /// added to [CalendarEvent] later is NOT inherited unless it is added to
+  /// this list. Runs over the whole table, so a master that lands on a later
+  /// page than its occurrences, a renamed series (the master re-sent, the
+  /// stubs not) and rows stored before this existed are all covered by the
+  /// next page. Returns the rows matched, not the rows changed.
+  Future<int> fillFromMasters({Set<String> keepAnswerFor = const {}}) {
+    final keep = keepAnswerFor.toList();
+    return db.customUpdate(
+      'UPDATE calendar_events AS o SET '
+      'subject = m.subject, location = m.location, '
+      'organizer_name = m.organizer_name, '
+      'organizer_address = m.organizer_address, '
+      'is_organizer = m.is_organizer, attendees_json = m.attendees_json, '
+      'categories_json = m.categories_json, join_url = m.join_url, '
+      'web_link = m.web_link, body_preview = m.body_preview, '
+      'sensitivity = m.sensitivity, is_reminder_on = m.is_reminder_on, '
+      'reminder_minutes = m.reminder_minutes, '
+      'response_requested = m.response_requested, '
+      'allow_new_time_proposals = m.allow_new_time_proposals, '
+      'response_status = m.response_status, show_as = m.show_as, '
+      'is_all_day = m.is_all_day, '
+      'start_date = CASE WHEN m.is_all_day = 1 AND o.start_date IS NULL '
+      "AND o.start_utc IS NOT NULL THEN date(o.start_utc, '+12 hours') "
+      'ELSE o.start_date END, '
+      'end_date = CASE WHEN m.is_all_day = 1 AND o.end_date IS NULL '
+      "AND o.end_utc IS NOT NULL THEN date(o.end_utc, '+12 hours') "
+      'ELSE o.end_date END, '
+      'start_utc = CASE WHEN m.is_all_day = 1 THEN NULL ELSE o.start_utc END, '
+      'end_utc = CASE WHEN m.is_all_day = 1 THEN NULL ELSE o.end_utc END '
+      'FROM calendar_events AS m '
+      "WHERE o.event_type = 'occurrence' AND m.id = o.series_master_id "
+      "AND m.event_type = 'seriesMaster'"
+      '${keep.isEmpty ? '' : ' AND o.id NOT IN (${_placeholders(keep.length)})'}',
+      variables: _args(keep),
+    );
+  }
+
   /// The sweep half of mark-and-sweep: deletes every row a completed run
   /// [runId] did not return, except [keepIds] (rows this app wrote while the
   /// run was in flight, which the run may simply have read too early).

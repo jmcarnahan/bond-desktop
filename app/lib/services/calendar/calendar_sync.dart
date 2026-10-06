@@ -617,6 +617,10 @@ class CalendarSync {
         // re-tag is what keeps a sweep long after the guard's span from
         // deleting it.
         await _calendar.retagRun(held, next.run);
+        // Graph sends a plain occurrence as a stub; the master in the mirror
+        // has the details (CalendarStore.fillFromMasters). Whole table, every
+        // page.
+        await _calendar.fillFromMasters(keepAnswerFor: keepAnswerFor);
         final gone = await _calendar.deleteEvents(page.removed);
         if (page.cursor.isNotEmpty) {
           await _store.setDeltaLink(_folder, page.cursor, source: _source);

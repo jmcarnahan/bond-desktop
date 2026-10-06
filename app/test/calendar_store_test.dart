@@ -335,6 +335,354 @@ void main() {
     });
   });
 
+  group('fillFromMasters', () {
+    const attendees = [
+      Attendee(name: 'Dana', address: 'dana@contoso.com'),
+      Attendee(name: 'Sam', address: 'sam@fabrikam.com'),
+    ];
+
+    CalendarEvent master(String id, {bool isAllDay = false}) =>
+        CalendarEvent(
+          id: id,
+          eventType: 'seriesMaster',
+          subject: 'Weekly sync',
+          location: 'Room 4',
+          organizerName: 'Dana',
+          organizerAddress: 'dana@contoso.com',
+          attendees: attendees,
+          responseStatus: 'accepted',
+          showAs: 'busy',
+          joinUrl: 'https://teams.example.com/join/weekly',
+          categories: const ['Team'],
+          responseRequested: true,
+          isAllDay: isAllDay,
+          startUtc: isAllDay ? null : inHours(2),
+          endUtc: isAllDay ? null : inHours(3),
+          startDate: isAllDay ? CalendarDate(2026, 11, 2) : null,
+          endDate: isAllDay ? CalendarDate(2026, 11, 3) : null,
+          changeKey: 'ck-master',
+        );
+
+    // What Graph's delta sends for a plain occurrence: a pointer and a time.
+    CalendarEvent stub(
+      String id,
+      String master, {
+      num at = 24,
+      bool isCancelled = false,
+    }) =>
+        CalendarEvent(
+          id: id,
+          seriesMasterId: master,
+          eventType: 'occurrence',
+          startUtc: inHours(at),
+          endUtc: inHours(at + 1),
+          isCancelled: isCancelled,
+          changeKey: 'ck-$id',
+        );
+
+    test('copies the details onto its stub occurrences and nothing else',
+        () async {
+      await calendar.upsertEvents(
+        [master('series'), stub('o1', 'series'), stub('o2', 'series', at: 48)],
+        syncRun: 'run-a',
+      );
+      Future<Map<String, Object?>> runOf(String id) async => (await db
+              .customSelect(
+                "SELECT sync_run, synced_at FROM calendar_events WHERE id = '$id'")
+              .getSingle())
+          .data;
+      final before = await runOf('o1');
+
+      expect(await calendar.fillFromMasters(), 2);
+
+      final one = (await calendar.event('o1'))!;
+      expect(one.subject, 'Weekly sync');
+      expect(one.location, 'Room 4');
+      expect(one.organizerName, 'Dana');
+      expect(one.organizerAddress, 'dana@contoso.com');
+      expect(one.attendees, attendees);
+      expect(one.joinUrl, 'https://teams.example.com/join/weekly');
+      expect(one.categories, ['Team']);
+      expect(one.responseStatus, 'accepted');
+      expect(one.showAs, 'busy');
+      expect(one.responseRequested, isTrue);
+      // The stub's own identity and time are kept.
+      expect(one.id, 'o1');
+      expect(one.seriesMasterId, 'series');
+      expect(one.eventType, 'occurrence');
+      expect(one.startUtc, DateTime.parse(calendarStamp(inHours(24))));
+      expect(one.endUtc, DateTime.parse(calendarStamp(inHours(25))));
+      expect(one.changeKey, 'ck-o1');
+      expect(one.isCancelled, isFalse);
+      expect(one.isAllDay, isFalse);
+      expect(one.startDate, isNull);
+      expect(one.endDate, isNull);
+      expect(await runOf('o1'), before);
+      expect((await calendar.event('o2'))!.subject, 'Weekly sync');
+      expect((await calendar.event('series'))!.changeKey, 'ck-master');
+    });
+
+    test(
+        "the write guard's ids are skipped; past it the series answer wins",
+        () async {
+      await calendar.upsertEvents(
+        [master('series'), stub('o1', 'series'), stub('o2', 'series', at: 48)],
+        syncRun: 'run-a',
+      );
+      await calendar.setResponseStatus('o1', 'tentativelyAccepted');
+
+      // Within the answer hold the whole row is left alone.
+      await calendar.fillFromMasters(keepAnswerFor: {'o1'});
+
+      final held = (await calendar.event('o1'))!;
+      expect(held.responseStatus, 'tentativelyAccepted');
+      expect(held.showAs, 'tentative');
+      expect(held.subject, '');
+      final two = (await calendar.event('o2'))!;
+      expect(two.responseStatus, 'accepted');
+      expect(two.showAs, 'busy');
+
+      // Once the guard has lapsed, the series answer is the occurrence's.
+      await calendar.fillFromMasters();
+
+      final one = (await calendar.event('o1'))!;
+      expect(one.responseStatus, 'accepted');
+      expect(one.showAs, 'busy');
+      expect(one.subject, 'Weekly sync');
+    });
+
+    test('a master re-sent with a new subject and answer moves every '
+        'occurrence', () async {
+      await calendar.upsertEvents(
+        [master('series'), stub('o1', 'series'), stub('o2', 'series', at: 48)],
+        syncRun: 'run-a',
+      );
+      await calendar.fillFromMasters();
+
+      final renamed = master('series');
+      await calendar.upsertEvents(
+        [
+          CalendarEvent(
+            id: renamed.id,
+            eventType: renamed.eventType,
+            subject: 'Weekly sync, renamed',
+            organizerAddress: renamed.organizerAddress,
+            attendees: renamed.attendees,
+            responseStatus: 'tentativelyAccepted',
+            showAs: 'tentative',
+            startUtc: renamed.startUtc,
+            endUtc: renamed.endUtc,
+          ),
+        ],
+        syncRun: 'run-a',
+      );
+      expect(await calendar.fillFromMasters(), 2);
+
+      for (final id in ['o1', 'o2']) {
+        final stored = (await calendar.event(id))!;
+        expect(stored.subject, 'Weekly sync, renamed');
+        expect(stored.responseStatus, 'tentativelyAccepted');
+        expect(stored.showAs, 'tentative');
+      }
+    });
+
+    test('every column is either inherited or left alone, by name', () async {
+      // Every field away from its default, so a column copied wrongly, or
+      // not at all, differs from the stub's own value.
+      final full = CalendarEvent(
+        id: 'series',
+        seriesMasterId: 'series-parent',
+        icalUid: 'uid-master',
+        eventType: 'seriesMaster',
+        subject: 'Weekly sync',
+        location: 'Room 4',
+        organizerName: 'Dana',
+        organizerAddress: 'dana@contoso.com',
+        isOrganizer: true,
+        startUtc: inHours(2),
+        endUtc: inHours(3),
+        showAs: 'busy',
+        responseStatus: 'organizer',
+        responseRequested: true,
+        allowNewTimeProposals: true,
+        sensitivity: 'private',
+        joinUrl: 'https://teams.example.com/join/weekly',
+        webLink: 'https://outlook.example.com/event/weekly',
+        changeKey: 'ck-master',
+        attendees: attendees,
+        categories: const ['Team', 'Planning'],
+        isReminderOn: true,
+        reminderMinutes: 15,
+        bodyPreview: 'Agenda in the doc.',
+      );
+      final own = CalendarEvent(
+        id: 'o1',
+        seriesMasterId: 'series',
+        icalUid: 'uid-o1',
+        eventType: 'occurrence',
+        startUtc: inHours(24),
+        endUtc: inHours(25),
+        changeKey: 'ck-o1',
+      );
+      await calendar.upsertEvents([full, own], syncRun: 'run-a');
+      Future<Map<String, Object?>> row(String id) async => (await db
+              .customSelect("SELECT * FROM calendar_events WHERE id = '$id'")
+              .getSingle())
+          .data;
+      final before = await row('o1');
+      final masterRow = await row('series');
+
+      expect(await calendar.fillFromMasters(), 1);
+      final after = await row('o1');
+
+      const inherited = {
+        'subject', 'location', 'organizer_name', 'organizer_address',
+        'is_organizer', 'attendees_json', 'categories_json', 'join_url',
+        'web_link', 'body_preview', 'sensitivity', 'is_reminder_on',
+        'reminder_minutes', 'response_requested', 'allow_new_time_proposals',
+        'response_status', 'show_as', 'is_all_day',
+      };
+      const kept = {
+        'id', 'series_master_id', 'ical_uid', 'event_type', 'start_utc',
+        'end_utc', 'start_date', 'end_date', 'change_key', 'is_cancelled',
+        'sync_run', 'synced_at',
+      };
+      final columns = const CalendarEvent(id: '')
+          .toDbRow(syncRun: '', syncedAt: '')
+          .keys
+          .toSet();
+      // A column added to the model fails here until the fill names it.
+      expect({...inherited, ...kept}, columns);
+      expect(inherited.intersection(kept), isEmpty);
+      for (final c in inherited) {
+        expect(after[c], masterRow[c], reason: c);
+        // A timed master and a timed stub share is_all_day = 0.
+        if (c != 'is_all_day') {
+          expect(before[c], isNot(masterRow[c]), reason: c);
+        }
+      }
+      for (final c in kept) {
+        expect(after[c], before[c], reason: c);
+      }
+    });
+
+    test('exceptions, single instances and orphans are left alone', () async {
+      await calendar.upsertEvents(
+        [
+          master('series'),
+          stub('o1', 'series'),
+          CalendarEvent(
+            id: 'moved',
+            seriesMasterId: 'series',
+            eventType: 'exception',
+            subject: 'Weekly sync, moved',
+            responseStatus: 'declined',
+            startUtc: inHours(30),
+            endUtc: inHours(31),
+          ),
+          timed('single', start: inHours(31)),
+          stub('orphan', 'never-stored'),
+          stub('not-a-master', 'series', at: 50),
+          stub('under-occurrence', 'not-a-master', at: 52),
+        ],
+        syncRun: 'run-a',
+      );
+
+      // Only o1 and not-a-master (a plain occurrence of `series`) match.
+      expect(await calendar.fillFromMasters(), 2);
+
+      final moved = (await calendar.event('moved'))!;
+      expect(moved.subject, 'Weekly sync, moved');
+      expect(moved.responseStatus, 'declined');
+      expect(moved.attendees, isEmpty);
+      expect((await calendar.event('single'))!.subject, 'Meeting single');
+      expect((await calendar.event('orphan'))!.subject, '');
+      final under = (await calendar.event('under-occurrence'))!;
+      expect(under.subject, '');
+      expect(under.responseStatus, 'none');
+    });
+
+    test('a cancelled stub stays cancelled', () async {
+      await calendar.upsertEvents(
+        [master('series'), stub('o1', 'series', isCancelled: true)],
+        syncRun: 'run-a',
+      );
+      await calendar.fillFromMasters();
+      final one = (await calendar.event('o1'))!;
+      expect(one.isCancelled, isTrue);
+      expect(one.subject, 'Weekly sync');
+    });
+
+    test('an all-day series: a stub stored timed becomes all-day dates',
+        () async {
+      await calendar.upsertEvents(
+        [
+          master('series', isAllDay: true),
+          // An organiser west of UTC: the day's midnights land at 08:00Z.
+          CalendarEvent(
+            id: 'o1',
+            seriesMasterId: 'series',
+            eventType: 'occurrence',
+            startUtc: DateTime.parse('2026-11-03T08:00:00Z'),
+            endUtc: DateTime.parse('2026-11-04T08:00:00Z'),
+          ),
+          CalendarEvent(
+            id: 'o2',
+            seriesMasterId: 'series',
+            eventType: 'occurrence',
+            isAllDay: true,
+            startDate: CalendarDate(2026, 11, 10),
+            endDate: CalendarDate(2026, 11, 11),
+          ),
+        ],
+        syncRun: 'run-a',
+      );
+
+      expect(await calendar.fillFromMasters(), 2);
+
+      final one = (await calendar.event('o1'))!;
+      expect(one.isAllDay, isTrue);
+      expect(one.startDate, CalendarDate(2026, 11, 3));
+      expect(one.endDate, CalendarDate(2026, 11, 4));
+      expect(one.startUtc, isNull);
+      expect(one.endUtc, isNull);
+      final two = (await calendar.event('o2'))!;
+      expect(two.isAllDay, isTrue);
+      expect(two.startDate, CalendarDate(2026, 11, 10));
+      expect(two.endDate, CalendarDate(2026, 11, 11));
+      expect(two.subject, 'Weekly sync');
+
+      // A second fill finds dates already there and changes nothing.
+      Future<List<Map<String, Object?>>> rows() async => [
+            for (final r in await db
+                .customSelect("SELECT * FROM calendar_events "
+                    "WHERE id IN ('o1', 'o2') ORDER BY id")
+                .get())
+              r.data,
+          ];
+      final once = await rows();
+      expect(await calendar.fillFromMasters(), 2);
+      expect(await rows(), once);
+    });
+
+    test('a second fill is a no-op in effect', () async {
+      await calendar.upsertEvents(
+        [master('series'), stub('o1', 'series')],
+        syncRun: 'run-a',
+      );
+      expect(await calendar.fillFromMasters(), 1);
+      final once = await db
+          .customSelect("SELECT * FROM calendar_events WHERE id = 'o1'")
+          .getSingle();
+      // The count is rows matched, not rows changed.
+      expect(await calendar.fillFromMasters(), 1);
+      final twice = await db
+          .customSelect("SELECT * FROM calendar_events WHERE id = 'o1'")
+          .getSingle();
+      expect(twice.data, once.data);
+    });
+  });
+
   group('eventsBetween', () {
     // The first Sunday of November 2026: Los Angeles leaves daylight time
     // that morning, so its day is 25 hours long.

@@ -92,7 +92,7 @@ Two tables (`app/lib/data/schema.drift`, schema v25, `from24To25`).
 
 | Table | Holds | Class | Written by |
 |---|---|---|---|
-| `calendar_events` | one row per event id, as `sync_calendar` last reported it | **synced** | `CalendarSync` via `CalendarStore.upsertEvents` / `retagRun` / `deleteEvents` / `sweepRun`; `CalendarWrites` via `CalendarSync.storeWritten` (an `upsertEvents`), `setResponseStatus` and `deleteWithOccurrences` |
+| `calendar_events` | one row per event id, as `sync_calendar` last reported it | **synced** | `CalendarSync` via `CalendarStore.upsertEvents` / `retagRun` / `fillFromMasters` / `deleteEvents` / `sweepRun`; `CalendarWrites` via `CalendarSync.storeWritten` (an `upsertEvents`), `setResponseStatus` and `deleteWithOccurrences` |
 | `event_briefs` | one pre-meeting brief per event occurrence ([Briefs](#briefs)) | **derived** | `MeetingBriefHandler` via `CalendarStore.putBrief`; `BriefPlanner` puts skipped rows (`putBrief`) and deletes out-of-window rows |
 
 `calendar_events` is in `MessageStore.syncedTables`: it is mailbox data, so
@@ -113,8 +113,13 @@ The time rules (D13) hold in the columns:
 - An **all-day** event fills `start_date` / `end_date` (`yyyy-mm-dd`, end
   EXCLUSIVE) and leaves the instants NULL. It is never converted through a
   zone, which is what moves an all-day event a day for everyone west of UTC.
-- Recurring series arrive **expanded** into occurrences. A `seriesMaster` row,
-  if one is sent, is stored but never placed on a day.
+- Recurring series arrive **expanded** into occurrences, but Graph's
+  `calendarView/delta` sends a plain `occurrence` as a stub: its id, type,
+  `series_master_id` and times, nothing else. Only the `seriesMaster` and the
+  `exception`s come in full. The store fills every plain occurrence from its
+  stored master on each sync page (`fillFromMasters`, below), so a reader
+  sees the series' subject, people and answer on each meeting. The master row
+  is stored but never placed on a day.
 - `response_requested`, `allow_new_time_proposals` and `is_reminder_on` are
   nullable: Graph saying nothing is not an explicit false.
 - `sync_run` is the mark in mark-and-sweep (below).
@@ -133,6 +138,7 @@ and unlike it in one respect: this IS mailbox data.
 |---|---|
 | `upsertEvents(events, syncRun:, skipIds:, keepAnswerFor:)` | one transaction (a savepoint when the sync's page transaction is open); `INSERT … ON CONFLICT(id) DO UPDATE` over every column of `CalendarEvent.toDbRow`, so the column list cannot drift from the model; ids in `skipIds` are not written; an id in `keepAnswerFor` whose page status is empty, `none` or `notResponded` keeps a stored `accepted`/`tentativelyAccepted`/`declined` (the rest of the row is the page's) |
 | `retagRun(ids, runId)` | sets `sync_run` on the stored rows of `ids` and nothing else; the write guard's re-tag |
+| `fillFromMasters(keepAnswerFor:)` | one `UPDATE … FROM` over the whole table: every `occurrence` whose `series_master_id` names a stored `seriesMaster` takes the master's subject, location, organiser, attendees, categories, links, preview, sensitivity, reminder and invite flags, and its `response_status` and `show_as`, so a series answered or re-answered anywhere follows on every occurrence; the ids in `keepAnswerFor` (the write guard's, an answer the app gave within `answerHold`, which Graph sends back as an exception) are skipped entirely; `is_all_day` too, and an all-day master turns a stub stored timed into dates (instant + 12 h, bond-mcps' `all_day_date`) with NULL instants; exceptions, single instances and orphans untouched; never the id, times, change key, cancelled flag or run tag; the columns are named by hand, so a new `CalendarEvent` column is not inherited until it is added there; returns rows matched |
 | `deleteEvents(ids)` | by id; ids never stored are ignored |
 | `sweepRun(runId, keepIds:)` | deletes every row whose `sync_run` is not `runId`, except `keepIds` |
 | `setResponseStatus(id, status)` | the owner's answer on `id` and, for a series master, on every mirrored occurrence; returns the ids touched (the write guard notes them) |
@@ -187,10 +193,16 @@ transaction, behind the generation check (below):
 1. a window the first page echoes is written into the run state;
 2. upserts `events` tagged with the run id, skipping the ids the write guard
    names and re-tagging their stored rows with the run instead (below);
-3. deletes `removed` — ids never stored are ignored;
-4. persists a non-empty returned cursor, **after every page**, so a failure
+3. fills every plain occurrence from its stored master (`fillFromMasters`),
+   over the whole table, so a master on a later page, a renamed or
+   re-answered series, a stub re-sent by a lagging page and rows stored
+   before the fill existed are all repaired here; the page's
+   `keepAnswerFor` ids (the write guard's) are skipped, so a fresh answer
+   on one meeting is not overwritten by the series';
+4. deletes `removed` — ids never stored are ignored;
+5. persists a non-empty returned cursor, **after every page**, so a failure
    keeps what was read;
-5. on the run's first page that says `complete: true` explicitly, the sweep
+6. on the run's first page that says `complete: true` explicitly, the sweep
    and `swept: true`.
 
 The loop stops on `complete` (a page with no `complete` flag counts as done,
@@ -2511,6 +2523,43 @@ draft lane pre-warms the cache, since a draft answering an ask reads it first
 ([07-replies.md](07-replies.md#times-in-a-draft-2026-10)).
 
 ## Owner checks and follow-ups
+
+**The occurrence-details round (2026-10-05).** Owed by the owner on the OTHER
+account (the one with the recurring meetings), after the branch merges and
+that Mac pulls `main`; this Mac's mirror holds no series, so it cannot show
+the bug.
+
+- **Recurring meetings read their details.** Launch and wait one sync tick
+  (or any calendar write's forced sync). The agenda's recurring meetings read
+  their subjects; a series the owner accepted shows no Yes / Maybe / No /
+  Dismiss; the clash chips name the meetings.
+- **Briefs reach them.** Tomorrow's recurring meetings get briefs on the next
+  planner pass, with no more `ineligible:no_others` for them in the activity
+  log.
+- **No empty occurrence is left.** A read-only count on that Mac (python3's
+  sqlite, since the system `sqlite3` is too old for the STRICT tables; it
+  prints counts only):
+  `select event_type, (coalesce(subject,'')='') nosubj, count(*) from calendar_events group by 1,2`
+  shows no `occurrence` row with `nosubj = 1` whose master is stored.
+- **All-day series, if the account has one.** Are its occurrences drawn as
+  all-day, and does `is_all_day` read 1 on their rows? If a stub comes
+  without `isAllDay`, the fill's all-day clause is what made them all-day;
+  either way, note which it was.
+- **A series re-answered elsewhere follows.** Answer a recurring series in
+  Outlook (Yes → Maybe), wait a tick: every meeting of it on the agenda
+  follows (pencilled in, "· Maybe").
+- **Follow-up, bond-mcps.** The `sync_calendar` docstring (`ms_graph_mcp.py`
+  ~l.2454, "come back expanded into their occurrences, as in
+  list_calendar_events") is wrong for delta: a plain occurrence arrives as a
+  stub and the master carries the details. Its handoff row
+  (`docs/desktop-calendar-followups-handoff.md:1149`) moves from UNVERIFIED to
+  what was observed.
+- **Follow-up, a missing master.** If an occurrence ever arrives whose master
+  is not in the window, the fix is a `get_calendar_event` of the master folded
+  into the sync; nothing seen so far needs it.
+- **Follow-up, a cancelled series.** A cancelled series master does not
+  cancel its stubs: `is_cancelled` is never inherited, on the expectation
+  that Graph sends the occurrences as `@removed` or as exceptions. Unverified.
 
 **The clean-up round (2026-10-04).** Owed by the owner before the PR merges;
 tests cannot settle these. The app runs from the main checkout
