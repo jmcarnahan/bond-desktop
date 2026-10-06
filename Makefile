@@ -1493,7 +1493,7 @@ bench-ui:
 	@cd $(APP_DIR) && $(APP_NO_SECRET_ENV) $(FLUTTER) test --run-skipped --reporter expanded test/ui_stall_bench_test.dart \
 	  --dart-define=BENCH_UI_THREADS=$(BENCH_UI_THREADS) --dart-define=BENCH_UI_RELOADS=$(BENCH_UI_RELOADS) \
 	  --dart-define=BENCH_UI_ARRIVAL=$(BENCH_UI_ARRIVAL) --dart-define=BENCH_UI_LABEL='$(BENCH_UI_LABEL)' \
-	  --dart-define=BENCH_UI_OUT=$(BENCH_UI_OUT)
+	  --dart-define=BENCH_UI_OUT='$(BENCH_UI_OUT)'
 
 # ── the golden set ─────────────────────────────────────────────────────
 # Accuracy against 100 real messages, scored by golden/tools/score_run.py.

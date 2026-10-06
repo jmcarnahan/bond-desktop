@@ -273,37 +273,6 @@ void main() {
     });
   });
 
-  group('reads', () {
-    test('recentNotified returns notified rows only, newest first', () async {
-      await seedMessage('m-1');
-      await seedMessage('m-2');
-      await seedMessage('m-3');
-      await admit();
-      await store.settleNotify('email', 'm-1',
-          state: 'notified', reason: 'settled');
-      await store.settleNotify('email', 'm-2',
-          state: 'suppressed', reason: 'read');
-      await store.settleNotify('email', 'm-3',
-          state: 'notified', reason: 'deadline');
-
-      final recent = await store.recentNotified(sinceIso: armedAt);
-      expect(recent.map((r) => r['source_message_id']), ['m-3', 'm-1']);
-    });
-
-    test('recentNotified excludes anything settled before the window',
-        () async {
-      await seedMessage('m-1');
-      await admit();
-      await store.settleNotify('email', 'm-1',
-          state: 'notified', reason: 'settled');
-
-      expect(
-        await store.recentNotified(sinceIso: '2099-01-01T00:00:00.000Z'),
-        isEmpty,
-      );
-    });
-  });
-
   test('wipeAll empties message_notify', () async {
     await seedMessage('m-1');
     await admit();

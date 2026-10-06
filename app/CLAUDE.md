@@ -46,9 +46,13 @@ enforce the ones that are commands.
   `testWidgets`: fake async waiting on a real isolate hangs silently. An
   error from it arrives as `DriftRemoteException` (its `remoteCause` is the
   `SqliteException`), so never write `on SqliteException` in `lib/`. A
-  `customSelect` must never carry a write: a read pool would send it to a
-  reader (four `INSERT … RETURNING` sites still do, which is why there is no
-  pool), so a new write that returns rows uses `customWriteReturning`.
+  write that returns rows uses `customWriteReturning`, never `customSelect`
+  (none does any more): it reads as the write it is. There is no read pool,
+  and the reason is NOT those statements (drift's pool routes on the literal,
+  UPPERCASE text `RETURNING`, and on being inside a transaction — so write
+  the keyword in capitals) but that a read
+  outside a transaction would stop waiting for an open one, which needs a
+  read-then-write audit of the stores first.
 - Every statement is a ROUND TRIP to the database isolate, so a loop of
   single statements is the thing to avoid: `db.batch((b) =>
   b.customStatement(sql, [first, second]))` is one round trip and one

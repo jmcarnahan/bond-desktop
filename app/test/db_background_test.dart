@@ -261,7 +261,10 @@ void main() {
 
     final other = raw.sqlite3.open(path);
     other.execute('BEGIN IMMEDIATE');
-    final release = Timer(const Duration(milliseconds: 300), () {
+    // Held for most of a second: the isolate has to be spawned and the file
+    // opened before the migration asks for the lock, and a lock already gone
+    // by then would let this pass with nothing waiting.
+    final release = Timer(const Duration(milliseconds: 800), () {
       other.execute('COMMIT');
     });
     addTearDown(() {
@@ -275,7 +278,7 @@ void main() {
         await db.customSelect('PRAGMA user_version').getSingle();
 
     expect(version.data.values.single, current);
-    expect(waited.elapsedMilliseconds, greaterThanOrEqualTo(250));
+    expect(waited.elapsedMilliseconds, greaterThanOrEqualTo(700));
   });
 
   test('what the background connection wrote is on disk', () async {

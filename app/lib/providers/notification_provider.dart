@@ -6,7 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/message_models.dart' show CtaUrgency;
-import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notification_service.dart';
 import '../services/notify/settled_event.dart';
 import 'activity_provider.dart';
@@ -21,24 +20,6 @@ import 'prefs_provider.dart';
 final settledEventsProvider = Provider<Stream<MessageSettled>>(
   (ref) => ref.watch(notificationCoordinatorProvider).notifications,
 );
-
-/// What was announced in the last [NotificationCoordinator.recencyWindow] —
-/// the backing read for "what did I miss", newest first.
-///
-/// Watching [activityTickProvider] is what keeps it live, the same trick
-/// [activitySnapshotProvider] plays: a settle follows pipeline activity, so
-/// re-reading on the activity tick, at most once per 250 ms, costs one query
-/// and needs no timer of its own.
-final recentNotificationsProvider =
-    FutureProvider.autoDispose<List<Map<String, Object?>>>((ref) async {
-  ref.watch(activityTickProvider);
-  final store = ref.watch(messageStoreProvider);
-  final since = DateTime.now()
-      .toUtc()
-      .subtract(NotificationCoordinator.recencyWindow)
-      .toIso8601String();
-  return store.recentNotified(sinceIso: since, limit: 20);
-});
 
 /// Both queues' standing, re-read on the activity tick. The activity panel
 /// reads it for one number: how much work has been given up on, which is the

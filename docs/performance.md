@@ -49,13 +49,15 @@ one (`waitOutLocks`), which only ever matters after a debug hot restart, while
 the old isolate's connection is still being closed. On a `BOND_DB_UI_ISOLATE`
 build that wait is on the UI isolate.
 
-A read pool is deliberately not used yet. Four `INSERT … RETURNING`
-statements run through `customSelect` (two in `context_store.dart`, two in
-`message_store.dart`), which a pool would send to a reader connection — the
-other statements that write and return rows use `customWriteReturning` and
-would be unaffected; and a read outside a transaction would stop waiting for an open
-one to commit, so code that reads and then writes could act on the state from
-before a transaction that today it always sees the end of.
+A read pool is deliberately not used yet, for one reason: a read outside a
+transaction would stop waiting for an open one to commit, so code that reads
+and then writes could act on the state from before a transaction that today
+it always sees the end of. That needs an audit of every read-then-write in
+the stores before it is safe. It is NOT held back by writes that return rows:
+drift's pool sends a statement to the writer when it runs inside a transaction
+or when its text contains `RETURNING` (matched literally, in capitals, which
+is how every statement here spells it), and every write that hands rows back
+goes through `customWriteReturning` so that it reads as the write it is.
 
 ## Measuring
 

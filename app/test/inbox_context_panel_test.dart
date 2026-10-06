@@ -5,7 +5,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/providers/activity_provider.dart'
-    show activityTickWindow;
+    show activityTickProvider, activityTickWindow;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -420,10 +420,13 @@ void main() {
     }
     expect(find.byKey(ContextPanelBody.toggleKeyFor(id)), findsOneWidget);
 
+    final ticksBefore = container.read(activityTickProvider);
     await recordActivity();
     // The tick the panes re-read on arrives when its window closes, so that
-    // frame is where the reload starts.
+    // frame is where the reload starts. And it must have: frames with no
+    // spinner prove nothing if nothing was reloading.
     await tester.pump(activityTickWindow);
+    expect(container.read(activityTickProvider), greaterThan(ticksBefore));
     expect(spinner(), findsNothing, reason: 'the tick');
     // Asserted on every frame the reload passes through rather than only on
     // the one it settles at: a switch gone for a single frame is a switch
@@ -817,9 +820,12 @@ void main() {
       // The header names the file, not the placeholder it falls back to.
       expect(find.text('pricing.md'), findsOneWidget);
 
+      final ticksBefore = container.read(activityTickProvider);
       await recordActivity();
-      // The reload starts on the tick, a window after the event.
+      // The reload starts on the tick, a window after the event — and the
+      // tick has to have come, or the frames below are of nothing reloading.
       await tester.pump(activityTickWindow);
+      expect(container.read(activityTickProvider), greaterThan(ticksBefore));
       expect(spinner(), findsNothing, reason: 'the tick');
       for (var i = 0; i < 4; i++) {
         await tester.pump();

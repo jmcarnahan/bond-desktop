@@ -9092,22 +9092,6 @@ WHERE m.source = ? AND m.source_message_id = ?
     );
   }
 
-  /// What was announced recently — the backing read for the "what did I miss"
-  /// list, newest first.
-  Future<List<Map<String, Object?>>> recentNotified({
-    required String sinceIso,
-    int limit = 20,
-  }) async {
-    final result = await db
-        .customSelect(
-          "SELECT * FROM message_notify WHERE state = 'notified' "
-          'AND settled_at >= ? ORDER BY settled_at DESC LIMIT ?',
-          variables: _args([sinceIso, limit]),
-        )
-        .get();
-    return [for (final row in result) Map<String, Object?>.from(row.data)];
-  }
-
   // ── pipeline progress ────────────────────────────────────────────────
 
   /// The states a stage stops at. `skipped` is one of them: a message the
@@ -11949,8 +11933,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
         variables: _args([source, messageId, attachmentId]),
       );
       for (final chunk in chunks) {
-        final row = await db
-            .customSelect(
+        final rows = await db
+            .customWriteReturning(
               'INSERT INTO attachment_chunks '
               '(source, source_message_id, attachment_id, seq, locator, '
               ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
@@ -11967,9 +11951,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
                 chunk.text.length,
                 now,
               ]),
-            )
-            .getSingle();
-        ids.add(row.data['id'] as int);
+            );
+        ids.add(rows.single.data['id'] as int);
       }
     });
     return ids;
@@ -11992,8 +11975,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
     final now = _nowIso();
     var id = 0;
     await db.transaction(() async {
-      final row = await db
-          .customSelect(
+      final rows = await db
+          .customWriteReturning(
             'INSERT INTO attachment_chunks '
             '(source, source_message_id, attachment_id, seq, locator, '
             ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
@@ -12016,9 +11999,8 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
               messageId,
               attachmentId,
             ]),
-          )
-          .getSingle();
-      id = row.data['id'] as int;
+          );
+      id = rows.single.data['id'] as int;
     });
     return id;
   }
