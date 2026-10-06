@@ -146,12 +146,13 @@ nine screens:
 4. **Models.** The two downloads and their sizes.
 5. **Storage.** Where the models are kept. The default is fine.
 6. **Download.** Two bars, about 1.4 GB together, both from the model
-   registry. **Continue** waits for the embedding model only. When the
-   registry is the problem (no address, a refused token, an address that
-   does not hold the models or answers with a web page), the bar says so
-   and the **Model registry** fields appear under the bars: **Registry
-   address**, **Access token** and **Save**. Fix them and press **Save**;
-   the download starts again. If the decision model's bar fails it says why,
+   registry. **Continue** waits for the embedding model only. When a bar
+   fails, the **Model registry** fields appear under the bars: **Registry
+   address**, **Access token** and **Save**. When the registry is plainly
+   the problem (no address, a refused token, an address that does not hold
+   the models or answers with a web page) the bar says so and points below;
+   a mistyped address can also show as a connection failure, and is fixed in
+   the same fields. Fix them and press **Save**; the download starts again. If the decision model's bar fails it says why,
    adds `Bond tries again after setup, and under Settings, Models. You can
    continue.`, and does not hold you here (step 6 below has the fixes).
 7. **Sign in.** Your browser opens the bond-mcps login. Sign in there and
@@ -255,7 +256,10 @@ https address.
 **During setup** the same four problems are fixed on the wizard's Download
 step, not under Settings: each sentence ends in `below.`, the **Model
 registry** fields sit under the bars, and **Save** starts the download
-again. After setup they are under Settings, Models.
+again. A wrong address can also show there as `The connection dropped too
+many times. Check the network and try again.`: the fields are drawn for any
+failed registry bar, so fix the address in the same place. After setup they
+are under Settings, Models.
 
 **"The decision model is not downloaded yet. Open Settings, Models."** New
 mail waits at triage until the decision model is on disk. Settings, Models

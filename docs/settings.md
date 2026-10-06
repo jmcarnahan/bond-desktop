@@ -566,7 +566,11 @@ Mac.`), the name-and-size line and a status keyed `settings-embed-status`,
 which uses the same download words as the other two roles (`Not downloaded
 yet.`, `Downloading NN%`, a failure sentence) and, while the model is missing
 and nothing is running, a **Download** button keyed
-`settings-embed-download`. On a `BOND_DEV_HAND_SERVERS` build the block
+`settings-embed-download`, except after a failure whose fix is the Model
+registry block (`DownloadError.registryFixes`). A missing file wins over an
+`embed_unavailable` park: the park is its consequence, so the status says
+why the download failed and **Download** is still offered; with the file on
+disk the park's sentence shows. On a `BOND_DEV_HAND_SERVERS` build the block
 shows no **Download** and its status reads `Served by your own embedding
 server.` (the host passes `managedServer` to the page). The model ensurer
 still downloads it there, from the model registry like the decision model,
@@ -1415,18 +1419,23 @@ progress bar left to explain it. The model registry's decision model is
 best-effort (decision D7): its registry file, failed or still missing, does
 not hold Continue, and the model ensurer retries it once the app shows.
 
-**A registry problem is fixed on the download step.** When a registry row
-fails for a reason the address or token fixes (`DownloadError.registryFixes`:
-no address, a refused token, a missing bundle, a web page instead of a
-model), the step draws the Model registry fields under the rows
+**A registry problem is fixed on the download step.** While ANY registry row
+has failed, the step draws the Model registry fields under the rows
 (`ModelRegistryForm`, outer key `setup-registry-form`, through
 `SetupDownloadBody.registryFix`): `Registry address`, `Access token` and
-**Save**, with no **Check** and no **Remove token**. That row's sentence
-points at the fields rather than at Settings: `The model registry has no
-address. Add it below.`, `The model registry refused the access token. Check
-it below.`, `The model registry does not have this model. Check its address
-below.` or `The model registry answered with a web page, not a model. Check
-its address below.` (`SetupDownloadBody.describeRegistryFixHere`). **Save**
+**Save**, with no **Check** and no **Remove token**. Any failure, because a
+wrong address fails as a plain network error too (a mistyped host, a closed
+port, a proxy's 5xx), and the embedding model's row would otherwise hold
+Continue with no way forward. For the four failures only the address or
+token fixes (`DownloadError.registryFixes`: no address, a refused token, a
+missing bundle, a web page instead of a model) the row's sentence points at
+the fields rather than at Settings: `The model registry has no address. Add
+it below.`, `The model registry refused the access token. Check it below.`,
+`The model registry does not have this model. Check its address below.` or
+`The model registry answered with a web page, not a model. Check its address
+below.` (`SetupDownloadBody.describeRegistryFixHere`). Any other failure
+keeps its own `describeDownloadError` sentence, with the fields still there.
+**Save**
 makes the same write as Settings (`saveRegistry`,
 `screens/registry_save.dart`), draws a refusal under the field the same way,
 and once the write lands cancels a run still going, paused or not, with its

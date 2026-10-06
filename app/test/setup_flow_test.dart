@@ -68,6 +68,7 @@ class _ScriptedDownloader extends ModelDownloader {
     required super.manifest,
     super.registryBase,
     super.registryToken,
+    this.embedError = DownloadError.registryNotConfigured,
     this.laterEmbedError,
     this.hold = false,
   }) : super(
@@ -76,7 +77,7 @@ class _ScriptedDownloader extends ModelDownloader {
           writeLedger: (_) async {},
         );
 
-  final String? embedError = DownloadError.registryNotConfigured;
+  final String? embedError;
   final String? laterEmbedError;
   final bool hold;
   int runs = 0;
@@ -1015,6 +1016,7 @@ void main() {
     /// in the provider override with the two registry lookups the real
     /// `modelDownloaderProvider` passes, copied from `app_providers.dart`.
     void makeWorld({
+      String embedError = DownloadError.registryNotConfigured,
       String? laterEmbedError,
       bool hold = false,
       MessageStore? prefStore,
@@ -1040,6 +1042,7 @@ void main() {
                 sameOrigin(base, ref.read(appPrefsProvider).effectiveRegistryUrl)
                     ? ref.read(appPrefsProvider.notifier).bearerFor(registryId)
                     : null,
+            embedError: embedError,
             laterEmbedError: laterEmbedError,
             hold: hold,
           );
@@ -1118,6 +1121,34 @@ void main() {
       expect(downloader.cancels, 0);
       // The new run cleared the failed row, and the form went with it.
       expect(find.byKey(formKey), findsNothing);
+    });
+
+    testWidgets('a registry row that failed as a network error still draws '
+        'the form, and its Save restarts the download', (tester) async {
+      // A mistyped host or a closed port fails as `network` after the
+      // retries, not as one of the registry's own words: without the fields
+      // the embedding row would hold Continue with no way forward.
+      makeWorld(embedError: DownloadError.network);
+      await mount(tester);
+      await settle(tester);
+
+      expect(downloader.runs, 1);
+      expect(find.byKey(formKey), findsOneWidget);
+      expect(
+        find.text(
+            SetupDownloadBody.describeDownloadError(DownloadError.network)),
+        findsOneWidget,
+      );
+      expect(continueEnabled(tester), isFalse);
+
+      await tester.enterText(find.byKey(ModelRegistryForm.urlKey), registry);
+      await tester.enterText(find.byKey(ModelRegistryForm.tokenKey), fakeToken);
+      await settle(tester);
+      await press(tester, ModelRegistryForm.saveKey);
+
+      expect(downloader.runs, 2);
+      expect(downloader.seen.last.base, registry);
+      expect(downloader.seen.last.token, isTrue);
     });
 
     testWidgets('a Save while this step\'s run is still going cancels it and '

@@ -1141,8 +1141,8 @@ class SetupController extends StateNotifier<SetupState> {
   /// ones and the embedding model, wherever it is downloaded from), which is
   /// what Continue waits for (decision D7): a decision model registry file
   /// that failed or is still missing never traps anybody in the wizard,
-  /// because its address is fixed in Settings, which the wizard cannot
-  /// reach, and the model ensurer retries it after setup.
+  /// because the model ensurer retries it after setup and its role parks on
+  /// its own reason meanwhile.
   bool _allFilesPresent(String folder, {bool gatingOnly = false}) {
     if (folder.isEmpty) return false;
     final ledger = _currentLedger;

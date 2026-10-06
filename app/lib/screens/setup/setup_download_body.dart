@@ -22,12 +22,14 @@ import 'setup_controls.dart';
 /// D7): a failed one of those says why and [registryLaterText], and Bond
 /// keeps trying after setup.
 ///
-/// A registry problem is fixable on this step: while a registry row has
-/// failed for a reason the address or token fixes
-/// ([DownloadError.registryFixes]), the host's [registryFix], the same
-/// Model registry form Settings draws, sits under the rows, and that row's
-/// sentence points at it rather than at Settings, which the wizard cannot
-/// reach.
+/// A registry problem is fixable on this step: while ANY registry row has
+/// failed, the host's [registryFix], the same Model registry form Settings
+/// draws, sits under the rows. Any failure, because a wrong address fails as
+/// a plain network error too (a mistyped host, a closed port, a proxy's
+/// 5xx), and the embedding model's row would otherwise hold Continue with no
+/// way forward. A row that failed for a reason only the address or token
+/// fixes ([DownloadError.registryFixes]) says so and points at the fields;
+/// any other failure keeps its own sentence, with the fields still there.
 class SetupDownloadBody extends StatelessWidget {
   final List<ModelFile> files;
 
@@ -55,9 +57,10 @@ class SetupDownloadBody extends StatelessWidget {
   final VoidCallback onCancel;
   final VoidCallback onContinue;
 
-  /// The host's registry form, drawn under the rows while a registry row has
-  /// failed for a reason the address or token fixes. Null, the default,
-  /// draws nothing and leaves every sentence as it is.
+  /// The host's registry form, drawn under the rows while any registry
+  /// download has failed, because a wrong address can fail as a plain
+  /// network error too. Null, the default, draws nothing and leaves every
+  /// sentence as it is.
   final Widget? registryFix;
 
   const SetupDownloadBody({
@@ -210,15 +213,18 @@ class SetupDownloadBody extends StatelessWidget {
   bool get _anyFailed =>
       progress.values.any((p) => p.status == DownloadStatus.failed);
 
-  /// Whether [file] failed for a reason the registry form fixes.
-  bool _registryFixable(ModelFile file) {
-    final entry = progress[file.id];
-    return file.isRegistry &&
-        entry?.status == DownloadStatus.failed &&
-        DownloadError.registryFixes.contains(entry?.error);
-  }
+  /// Whether [file] is a registry download that failed, for any reason:
+  /// what draws the registry form.
+  bool _registryFailed(ModelFile file) =>
+      file.isRegistry && progress[file.id]?.status == DownloadStatus.failed;
 
-  bool get _registryNeedsFix => files.any(_registryFixable);
+  /// Whether [file] failed for a reason only the registry's address or token
+  /// fixes: what makes its sentence point at the form.
+  bool _registryFixable(ModelFile file) =>
+      _registryFailed(file) &&
+      DownloadError.registryFixes.contains(progress[file.id]?.error);
+
+  bool get _registryNeedsFix => files.any(_registryFailed);
 
   @override
   Widget build(BuildContext context) {

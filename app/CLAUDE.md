@@ -696,11 +696,13 @@ enforce the ones that are commands.
   waits on `downloadsComplete` (the GATING entries only, D7: the Hugging Face
   entries and the embedding model); a failed registry row that does not gate
   (the decision model's) shows `registryLaterText` and never holds it, and
-  `allDownloaded` decides whether arriving at the step starts a run. While a
-  registry row failed with a word in `DownloadError.registryFixes`, the step
-  draws `ModelRegistryForm` (outer key `setup-registry-form`, no Check, no
-  Remove token) through `SetupDownloadBody.registryFix`, and the row reads
-  `describeRegistryFixHere`; its Save is `saveRegistry`
+  `allDownloaded` decides whether arriving at the step starts a run. While
+  ANY registry row has failed (a wrong address can fail as `network` or
+  `http_NNN`, not only as a registry word), the step draws
+  `ModelRegistryForm` (outer key `setup-registry-form`, no Check, no Remove
+  token) through `SetupDownloadBody.registryFix`; a row failed with a word in
+  `DownloadError.registryFixes` reads `describeRegistryFixHere`, any other
+  keeps `describeDownloadError`; its Save is `saveRegistry`
   (`screens/registry_save.dart`, shared with `SettingsHost`) followed by
   `SetupController.restartDownload()`, which cancels a run still going
   (paused included), parts kept, and starts again. A flow test that presses it gives the real event loop

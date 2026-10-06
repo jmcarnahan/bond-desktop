@@ -422,7 +422,8 @@ class _SettingsHostState extends ConsumerState<SettingsHost> {
       managedServer: prefs.managedServer,
       parked: ref.watch(parkedProvider).valueOrNull,
       modelStatuses: statuses,
-      // The model registry: where the decision model is downloaded from.
+      // The model registry: where the decision and embedding models are
+      // downloaded from.
       // The address the form opens on and two presence flags, never a token.
       registryUrl: prefs.effectiveRegistryUrl,
       registryTokenStored: prefs.registryTokenStored,

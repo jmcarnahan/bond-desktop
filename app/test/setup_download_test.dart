@@ -589,17 +589,45 @@ void main() {
       });
     }
 
-    testWidgets('a registry row that failed for another reason draws no form',
-        (tester) async {
+    // A wrong address fails as a plain network error too (a mistyped host,
+    // a closed port) and a proxy's 5xx likewise: the fields are drawn for
+    // any failed registry row, and the row keeps its own sentence.
+    for (final word in [DownloadError.network, DownloadError.http(503)]) {
+      testWidgets('a registry row that failed for another reason ($word) '
+          'still draws the form, with its own sentence', (tester) async {
+        await open(
+          tester,
+          files: both.bySize,
+          complete: false,
+          allDownloaded: false,
+          progress: failing(routerEmbedId, word),
+          registryFix: fix,
+        );
+
+        expect(find.text('FIX-FORM'), findsOneWidget);
+        expect(
+          find.text(SetupDownloadBody.describeDownloadError(word)),
+          findsOneWidget,
+        );
+        // Never a "below" sentence: only the four registry words point there.
+        expect(find.textContaining('below'), findsNothing);
+        expect(canContinue(tester), isFalse);
+      });
+    }
+
+    testWidgets('a failed HUB row draws no form', (tester) async {
       await open(
         tester,
-        files: both.bySize,
         complete: false,
         allDownloaded: false,
-        progress: failing(routerEmbedId, DownloadError.network),
+        progress: {
+          routerEmbedId: entry(routerEmbedId,
+              status: DownloadStatus.failed, error: DownloadError.network),
+        },
         registryFix: fix,
       );
 
+      expect(manifest.byRole(ModelRole.embed).isRegistry, isFalse);
       expect(find.text('FIX-FORM'), findsNothing);
       expect(
         find.text(

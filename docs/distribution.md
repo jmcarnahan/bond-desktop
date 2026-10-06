@@ -690,7 +690,11 @@ whose recorded digest no longer matches and fetches the new one from zero; a
 `.part` from the previous checkpoint is discarded rather than resumed into.
 **Finish** restarts the model server, so the process that comes back is serving
 the new weights (`docs/pipeline/10-model-routing.md`, **Managed mode: one
-router**).
+router**). A later embedding-model digest bump reopens the download step on
+every install, and an install with no registry address (one that got its
+embedding model from Hugging Face and never set one) is asked for the
+address and the token there, in the Model registry fields under the bars,
+before **Continue**.
 
 One thing this does **not** do: a bump that changes `repo` or `file` — a new
 quantisation, say — writes the new file **beside** the old one, and nothing

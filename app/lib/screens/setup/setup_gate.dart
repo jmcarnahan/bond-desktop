@@ -114,7 +114,7 @@ class _SetupGateState extends ConsumerState<SetupGate> {
   /// for a file it is never going to want. The decision model is never
   /// demanded, whether hand-installed or from the model registry (decision
   /// D7): a missing one parks the decision pass rather than forcing the
-  /// wizard, whose screens cannot reach the registry address in Settings.
+  /// wizard, and the model ensurer fetches it once the app shows.
   ///
   /// `DownloadLedger.matches` asks whether every file the RESOLVED manifest
   /// names is current and says nothing about the rest, so an install that

@@ -1039,15 +1039,21 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
   List<Widget> _embedBlock() {
     final row = _row('embed');
     final parked = _parked(const {'embed_unavailable'});
+    // A file this Mac's router needs and lacks is the CAUSE, and a park
+    // (`embed_unavailable`, "not answering") is only its consequence: the
+    // missing file and why its download failed win over the park, and so
+    // does Download, the decision row's rule. With the file on disk the park
+    // is the news.
+    final missing = widget.managedServer && row != null && !row.onDisk;
     final String status;
-    if (parked != null) {
+    if (missing) {
+      status = _downloadStatus(row.routerId);
+    } else if (parked != null) {
       status = parked;
     } else if (!widget.managedServer) {
       status = SettingsModelsPage.embedHandServedText;
     } else if (row == null) {
       status = '${SettingsModelsPage.embedModelName} on this Mac';
-    } else if (!row.onDisk) {
-      status = _downloadStatus(row.routerId);
     } else {
       status = SettingsModelsPage.loaded(row, widget.serverState)
           ? SettingsModelsPage.onDiskLoadedText
@@ -1067,11 +1073,7 @@ class _SettingsModelsPageState extends State<SettingsModelsPage> {
               style: BondType.small,
             ),
           ),
-          if (parked == null &&
-              widget.managedServer &&
-              row != null &&
-              !row.onDisk &&
-              _offersDownload(row.routerId)) ...[
+          if (missing && _offersDownload(row.routerId)) ...[
             const SizedBox(width: BondSpacing.s12),
             _downloadButton(SettingsModelsPage.embedDownloadKey),
           ],
