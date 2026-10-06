@@ -287,6 +287,7 @@ class MeetingBriefHandler extends WorkHandler {
             source: t.source,
             conversationKey: t.conversationKey,
             subject: t.subject,
+            invite: t.invite,
           ),
       ]).withMaterials([
         for (final m in input.materials)
@@ -296,7 +297,7 @@ class MeetingBriefHandler extends WorkHandler {
             attachmentId: m.attachmentId,
             name: m.name,
           ),
-      ]);
+      ]).withPath(input.path.wire);
       await _calendar.putBrief(
         eventId: id,
         inputsHash: input.inputsHash,
@@ -314,6 +315,12 @@ class MeetingBriefHandler extends WorkHandler {
         'people': input.people.length,
         // What the model was shown of the files, not what was gathered.
         'text_chars': MeetingBriefTask.materialTextCharsWritten(input),
+        // Which way the threads were found, how many the related search
+        // gave, and its best cosine in hundredths: words and numbers only.
+        'path': input.path.wire,
+        'related': withThreads.relatedThreadCount,
+        if (input.relatedBest != null)
+          'related_best': (input.relatedBest! * 100).round(),
       });
       _stored();
     } on LlmUnavailableException {

@@ -634,6 +634,38 @@ void main() {
         )),
         'Meeting brief — written from 1 thread',
       );
+      // The related path says its threads were found by subject; the people
+      // path and an older row with no path say nothing more.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 4, 'path': 'related', 'related': 3},
+        )),
+        'Meeting brief — written from 4 threads, found by subject',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 1, 'path': 'related', 'related': 1},
+        )),
+        'Meeting brief — written from 1 thread, found by subject',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 2, 'path': 'people', 'related': 0},
+        )),
+        'Meeting brief — written from 2 threads',
+      );
+      // The related path with only the invite's own thread found nothing
+      // by subject, and says no more.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'meeting_brief',
+          detail: const {'threads': 1, 'path': 'related', 'related': 0},
+        )),
+        'Meeting brief — written from 1 thread',
+      );
       expect(
         ActivityLogPanel.describe(_event(
           kind: 'meeting_brief',

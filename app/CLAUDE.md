@@ -1337,7 +1337,13 @@ that bite.
     headline and briefing cut at a word (`capAtWord`); 2700 tokens (the
     caps' sum / 4 within 1.2 × that, pinned); the first entry per file
     index wins. A
-    material index outside the list is dropped, never -1. `MeetingBrief`
+    material index outside the list is dropped, never -1. `brief_json`
+    also carries `path` (`MeetingBrief.pathPeople`/`pathRelated`, pinned to
+    `BriefPath.wire` by `brief_path_test`; missing or any other value reads
+    `people`) and per-thread `invite` (written only when true); no schema
+    change. The ok note adds `path`, `related` and `related_best` (cosine ×
+    100, only when known); the activity sentence appends ", found by
+    subject" on the related path. `MeetingBrief`
     writes v3; v1 rows and v2 rows (a `takeaway` → one point) still decode,
     and `BriefMaterialOut.takeaway` (the points joined) is kept for old
     readers; the faces draw the points. There is NO people cap (no
@@ -1407,7 +1413,11 @@ that bite.
     `brief-material-$i`, points `brief-material-point-$i-$j` inside
     `brief-material-text-$i`), People (`brief-person-$i`, one `Text.rich`),
     Questions, Prep, Open asks, then the points under References (compact:
-    at most `compactPointsCap` = 3); the widget never reads
+    at most `compactPointsCap` = 3), then the source caption
+    (`brief-source`, `BriefSection.sourceText`: invite alone when every
+    thread is the invite's own, on either path, else related / people) —
+    the panel's above "Generated", the agenda's above Regenerate;
+    the widget never reads
     `BriefMaterialOut.takeaway`; `_setSelectedDay` is the one writer of
     `_selectedDay` and clears `_expandedBriefs` only when the day changes;
     `_openMaterial` rebuilds the `AttachmentRef` from `attachmentRow` and

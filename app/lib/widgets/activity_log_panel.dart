@@ -248,7 +248,15 @@ class ActivityLogPanel extends StatefulWidget {
         case 'ok':
           final threads = detail['threads'];
           final n = threads is num ? threads.toInt() : 0;
-          return '$label — written from $n ${n == 1 ? 'thread' : 'threads'}';
+          // The related path's threads were found by the meeting's subject
+          // — when it found any: a brief from the invite alone says no more.
+          final related = detail['related'];
+          final found =
+              detail['path'] == 'related' && related is num && related > 0
+                  ? ', found by subject'
+                  : '';
+          return '$label — written from $n '
+              '${n == 1 ? 'thread' : 'threads'}$found';
         case 'skipped':
           final why = detail['reason'];
           final words = why is String ? (_briefSkips[why] ?? _reason(why)) : '';

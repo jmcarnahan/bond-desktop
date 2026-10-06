@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:bond_inbox/data/calendar_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/calendar_models.dart';
+import 'package:bond_inbox/models/home_models.dart' show RelatedConversation;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -180,6 +182,102 @@ void main() {
     expect((ref.source, ref.conversationKey, ref.subject),
         ('email', 'c-1', 'Fabrikam renewal'));
     expect(stored, 1);
+  });
+
+  group('where the threads came from', () {
+    Future<Map<String, Object?>> runLogged(BriefGatherer g) async {
+      final llm = ScriptedLlm(answers: {'meeting_brief': answer});
+      final log = ActivityLog(store);
+      await MeetingBriefHandler(
+        calendar,
+        g,
+        client: () => llm,
+        activityLog: log,
+        clock: () => now,
+      ).run(item('evt-1'));
+      await log.record('meeting_brief', source: 'calendar', entityId: 'evt-1');
+      final rows = [
+        for (final r in await store.recentActivity())
+          if (r['kind'] == 'meeting_brief') r,
+      ];
+      return jsonDecode(rows.single['detail_json'] as String)
+          as Map<String, Object?>;
+    }
+
+    test('a related-path meeting stores its path and invite flags, and the '
+        'activity notes them as words and numbers', () async {
+      // Six other people, none of them on the related thread.
+      await seedEvent(attendees: [
+        const Attendee(name: 'Me', address: owner),
+        const Attendee(name: 'Dana Lee', address: dana),
+        for (var i = 0; i < 5; i++)
+          Attendee(name: 'Guest $i', address: 'guest$i@northwind.com'),
+      ]);
+      await seedThread();
+      final at = MessageStore.isoStamp(now.subtract(const Duration(hours: 1)));
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c-rel',
+        'subject': 'Fabrikam pricing',
+        'participants_json': jsonEncode([
+          {'name': 'Kim', 'email': 'kim@contoso.com'},
+        ]),
+        'state': 'waiting',
+        'message_count': 1,
+        'last_message_at': at,
+      });
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-rel',
+        'conversation_key': 'c-rel',
+        'direction': 'inbound',
+        'from_name': 'Kim',
+        'from_address': 'kim@contoso.com',
+        'received_at': at,
+        'body_text': 'The pricing sheet is final.',
+        'triage_status': 'done',
+      });
+      final related = _RelatedStore(db)
+        ..hits = const [
+          (source: 'email', conversationKey: 'c-1', cosine: 0.9),
+          (source: 'email', conversationKey: 'c-rel', cosine: 0.784),
+        ];
+      final relating = BriefGatherer(
+        related,
+        calendar,
+        ownerAddress: () async => owner,
+        zone: () => CalendarZone.tryNamed('America/Los_Angeles')!,
+        embeddings: FakeEmbedServer().client,
+      );
+
+      final detail = await runLogged(relating);
+
+      final brief = (await calendar.brief('evt-1'))!.brief!;
+      expect(brief.path, MeetingBrief.pathRelated);
+      expect([for (final t in brief.threads) (t.conversationKey, t.invite)],
+          [('c-1', true), ('c-rel', false)]);
+      expect(brief.relatedThreadCount, 1);
+      expect(detail['path'], 'related');
+      expect(detail['related'], 1);
+      expect(detail['related_best'], 78);
+      expect(detail['threads'], 2);
+    });
+
+    test('a people-path meeting stores people, related 0 and no best',
+        () async {
+      await seedEvent();
+      await seedThread();
+
+      final detail = await runLogged(gatherer);
+
+      final brief = (await calendar.brief('evt-1'))!.brief!;
+      expect(brief.path, MeetingBrief.pathPeople);
+      expect(brief.threads.single.invite, isTrue,
+          reason: "Dana's thread is the meeting's own invite");
+      expect(detail['path'], 'people');
+      expect(detail['related'], 0);
+      expect(detail.containsKey('related_best'), isFalse);
+    });
   });
 
   test('the stored brief carries its material refs and the activity counts '
@@ -1084,4 +1182,22 @@ class _CountingStore extends MessageStore {
     chunkChecks++;
     return true;
   }
+}
+
+/// A store whose related search is scripted ([hits]); the gatherer and
+/// planner tests carry their own copies.
+class _RelatedStore extends MessageStore {
+  _RelatedStore(super.db);
+
+  List<RelatedConversation> hits = const [];
+
+  @override
+  Future<List<RelatedConversation>?> relatedConversations(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    required String sinceIso,
+    required double floor,
+    int limit = 12,
+  }) async =>
+      hits;
 }

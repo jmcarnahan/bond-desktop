@@ -1515,7 +1515,12 @@ there to read meanwhile), a meeting inside the grace is briefed with what
 is read, and an asked-for row (Regenerate, Write a brief) never waits. Otherwise
 it runs the task and stores `ready` with the brief JSON — plus a `threads`
 list of `{source, conversation_key, subject}` in the order the model was
-shown them, so the panel links a point to its thread without gathering again,
+shown them, so the panel links a point to its thread without gathering again
+(with `"invite": true` on the meeting's own invite threads, the key written
+only when true, so a ref without it keeps the older shape), the `path` the
+threads were found by (`people` or `related`, `BriefPath.wire`; a row
+written before it has none and reads as `people`, which it was; anything but
+the exact word `related` reads as `people`; no schema change),
 and a `material_refs` list of `{source, message_id, attachment_id, name}` in
 the materials' order, so a material line opens its file the same way
 (`MeetingBrief.materialAt`) — and the resolved model name. Stored v1 and v2
@@ -1525,7 +1530,11 @@ characters of the materials' text the message actually carried —
 `MeetingBriefTask.materialTextCharsWritten`, the same spend as the message —
 not what was gathered), `queued_text` when it queued any, and `fetched`
 (how many unlisted messages the fetch completed, failures not counted) when
-it asked for any. An empty headline is an `LlmFormatException`.
+it asked for any, plus where the threads came from: `path` (`people` |
+`related`), `related` (the related path's non-invite threads, 0 on the people
+path) and `related_best` (the best kept cosine × 100, rounded, only when
+there is one) — enum words and numbers only. An empty headline is an
+`LlmFormatException`.
 A dead server (`LlmUnavailableException` and its subclasses) propagates and
 PARKS the kind like a draft, writing nothing; any other failure writes
 `failed` and rethrows, so the worker's retry-once-then-error policy applies.
@@ -1654,7 +1663,13 @@ file's name — tooltip "Open the file" — when the brief still holds its
 alone), **People** (per person the name in bold, " — ", the line; key
 `brief-person-<i>`), **Questions** numbered "1.", "2.", **Prep**, **Open
 asks**, then the points with a chip naming the thread under **References**
-— what it rests on last —, then "Generated 2h ago · Regenerate" — or
+— what it rests on last —, then the **source caption** (muted, key
+`brief-source`, `BriefSection.sourceText`, the one rule): no thread but the
+invite's own, on either path (none at all included), "From the
+invite alone — no other threads were found."; the related path "From
+threads related to this meeting — a sample, not everything on the
+subject."; else "From your mail with the people in this meeting." (an old
+row with no path is the people path), then "Generated 2h ago · Regenerate" — or
 "Rewriting…" while a new one is queued; the old brief stands until the new
 one lands; "Writing the brief…"; "Briefs are paused while processing is off.";
 a skipped row's reason ("No brief — no recent mail with these people.",
@@ -1703,7 +1718,8 @@ draws `BriefSection(compact: true)` under itself from the subject column
 (`DayPane.subjectIndent`): the panel's body in the panel's order — Briefing,
 From the materials, People, Questions, Prep, Open asks, at most three points
 with their thread chips under References (`BriefSection.compactPointsCap`;
-the panel shows them all) — and one Regenerate: no headline (the glance is
+the panel shows them all) — the same source caption (`brief-source`)
+and one Regenerate under it: no headline (the glance is
 it) and no footer. A brief waiting on the files sent ahead
 (`materials_pending`) has no glance to open, so the agenda says so in the
 glance slot instead: `dayBriefsWaitingProvider(day)` (the event ids, from
@@ -1721,7 +1737,9 @@ meeting rows (`AppRail.todayGlances`, key `today-glance-<id>`), from
 
 **Activity.** Kind `meeting_brief`, labelled **Meeting brief**, written by the
 worker with the handler's notes: `ok` with `{threads, asks, materials,
-other_files, questions, people, text_chars}` → "Meeting brief — written from 3 threads"; `skipped` with `{reason: <word>}` (a D6 word,
+other_files, questions, people, text_chars, path, related, related_best}`
+→ "Meeting brief — written from 3 threads", with ", found by subject"
+appended when `path` is `related` and `related` is above 0; `skipped` with `{reason: <word>}` (a D6 word,
 `materials_pending` — "reading the files sent ahead" — or `unchanged`;
 `too_many` — "too many people" — only on rows older builds stored, since no
 build writes it now) →

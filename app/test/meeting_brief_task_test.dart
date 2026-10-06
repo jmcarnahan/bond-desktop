@@ -1211,9 +1211,15 @@ void main() {
         'open_asks',
         'points',
         'prep',
+        'path',
         'threads',
         'material_refs',
       ]);
+      // An older row read the only way it could have been written.
+      expect(v1.path, MeetingBrief.pathPeople);
+      expect(v1.isRelated, isFalse);
+      expect(v1.threads.single.invite, isFalse);
+      expect(v1.relatedThreadCount, 0);
     });
 
     test('a v2 stored brief decodes: its takeaway is one point', () {
@@ -1311,6 +1317,66 @@ void main() {
       expect(back.headline, 'One thing open.');
       expect(back.threadAt(back.points.single.thread)?.conversationKey, 'c-1');
       expect(back.prep, ['Bring numbers']);
+    });
+
+    test('a related brief round-trips with its path and invite flags', () {
+      final brief = const MeetingBrief(headline: 'H.')
+          .withThreads(const [
+            BriefThreadRef(
+              source: 'email',
+              conversationKey: 'c-inv',
+              subject: 'Falcon launch plan',
+              invite: true,
+            ),
+            BriefThreadRef(
+                source: 'email', conversationKey: 'c-a', subject: 'Falcon'),
+            BriefThreadRef(
+                source: 'teams', conversationKey: 't-1', subject: 'Chat'),
+          ])
+          .withPath(MeetingBrief.pathRelated);
+      final json = brief.toJson();
+      expect(json['path'], 'related');
+      final refs = json['threads'] as List;
+      expect(refs.first, containsPair('invite', true));
+      // A non-invite ref keeps the older shape: no key at all.
+      expect((refs[1] as Map).containsKey('invite'), isFalse);
+      expect((refs[2] as Map).containsKey('invite'), isFalse);
+
+      final back = MeetingBrief.fromJson(json);
+      expect(back.toJson(), json);
+      expect(back.path, MeetingBrief.pathRelated);
+      expect(back.isRelated, isTrue);
+      expect([for (final t in back.threads) t.invite], [true, false, false]);
+      expect(back.relatedThreadCount, 2);
+      // withPath keeps everything else.
+      expect(back.headline, 'H.');
+      expect(brief.withPath(MeetingBrief.pathPeople).relatedThreadCount, 0);
+    });
+
+    test('anything but the exact word "related" reads as people, and only a '
+        'literal true is an invite', () {
+      for (final raw in [null, 'People', 'RELATED', 'other', 1, true, '']) {
+        final brief = MeetingBrief.fromJson({
+          'headline': 'H.',
+          'path': raw,
+          'threads': [
+            {
+              'source': 'email',
+              'conversation_key': 'c-1',
+              'subject': 'S',
+              'invite': raw,
+            },
+          ],
+        });
+        expect(brief.path, MeetingBrief.pathPeople, reason: '$raw');
+        if (raw != true) {
+          expect(brief.threads.single.invite, isFalse, reason: '$raw');
+        }
+      }
+      expect(
+          BriefThreadRef.fromJson({'conversation_key': 'c', 'invite': 'true'})!
+              .invite,
+          isFalse);
     });
   });
 }

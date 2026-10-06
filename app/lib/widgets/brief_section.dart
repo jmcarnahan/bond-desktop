@@ -18,11 +18,12 @@ import 'time_format.dart';
 /// [compact] is the agenda's face, drawn under a meeting row whose glance
 /// already shows the headline: a ready brief's body — the catch-up, in the
 /// order it is read: Briefing, From the materials, People, Questions, Prep,
-/// Open asks, at most [compactPointsCap] References — and one Regenerate,
-/// with no heading, headline or footer. In any other state it draws nothing
-/// but the one sentence that says the files sent ahead are still being read
-/// (the event panel is where the other states say why). The panel draws the
-/// headline, the same body in the same order with every point, and the
+/// Open asks, at most [compactPointsCap] References — then the source
+/// caption ([sourceText]) and one Regenerate, with no heading, headline or
+/// footer. In any other state it draws nothing but the one sentence that
+/// says the files sent ahead are still being read (the event panel is where
+/// the other states say why). The panel draws the headline, the same body in
+/// the same order with every point, the same source caption, and the
 /// Generated line. The compact briefing is [BondType.body] on purpose,
 /// larger than the row's glance above it: the catch-up is read, the glance
 /// is scanned.
@@ -77,6 +78,7 @@ class BriefSection extends StatelessWidget {
       ValueKey('brief-material-point-$i-$j');
   static Key personKeyFor(int i) => ValueKey('brief-person-$i');
   static const Key briefingKey = ValueKey('brief-briefing');
+  static const Key sourceKey = ValueKey('brief-source');
   static Key questionKeyFor(int i) => ValueKey('brief-question-$i');
 
   /// How many points the agenda's face shows under References; the panel
@@ -98,6 +100,32 @@ class BriefSection extends StatelessWidget {
   static const String failedText = "The brief couldn't be written.";
   static const String comingText =
       'Brief coming after the next calendar sync.';
+
+  /// The source caption both faces draw under a ready brief: where its
+  /// threads came from, so a brief written from threads found by subject is
+  /// read as a sample rather than everything there is.
+  static const String fromPeopleText =
+      'From your mail with the people in this meeting.';
+  static const String fromRelatedText =
+      'From threads related to this meeting — a sample, not everything on '
+      'the subject.';
+  static const String fromInviteText =
+      'From the invite alone — no other threads were found.';
+
+  /// The one rule choosing the caption: no thread but the invite's own, on
+  /// either path (none at all included), is the invite alone; else the path
+  /// says which. A row written before the path and the invite flags were
+  /// stored reads as the people path, which it was.
+  static String sourceText(MeetingBrief brief) {
+    if (brief.threads.every((t) => t.invite)) return fromInviteText;
+    return brief.isRelated ? fromRelatedText : fromPeopleText;
+  }
+
+  static Widget _source(MeetingBrief brief) => Text(
+        sourceText(brief),
+        key: sourceKey,
+        style: BondType.caption.copyWith(color: BondColors.inkMuted),
+      );
   static const String writeLabel = 'Write a brief';
 
   /// Null while the read is in flight, which draws nothing rather than a
@@ -160,6 +188,10 @@ class BriefSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         ..._body(brief),
+        Padding(
+          padding: const EdgeInsets.only(top: BondSpacing.s4),
+          child: _source(brief),
+        ),
         // The panel footer's rule: a rewrite already asked for says so
         // rather than offering a second press.
         Align(
@@ -272,6 +304,8 @@ class BriefSection extends StatelessWidget {
           style: BondType.body.copyWith(fontWeight: FontWeight.w600),
         ),
         ..._body(brief),
+        const SizedBox(height: BondSpacing.s4),
+        _source(brief),
         const SizedBox(height: BondSpacing.s4),
         Wrap(
           crossAxisAlignment: WrapCrossAlignment.center,

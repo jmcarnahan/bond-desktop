@@ -148,6 +148,13 @@ void main() {
       expect(BriefPath.people.wire, 'people');
       expect(BriefPath.related.wire, 'related');
     });
+
+    test("the wire words are the stored brief's path words", () {
+      // models/ may not import services/, so MeetingBrief spells the words
+      // itself; this keeps the two spellings one.
+      expect(BriefPath.people.wire, MeetingBrief.pathPeople);
+      expect(BriefPath.related.wire, MeetingBrief.pathRelated);
+    });
   });
 
   group('briefQueryText', () {
