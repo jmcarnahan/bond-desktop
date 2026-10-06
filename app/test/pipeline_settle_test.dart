@@ -52,13 +52,15 @@ class RecordingStore extends MessageStore {
 
   RecordingStore(super.db, this.log);
 
+  // The list query itself: `loadConversations` is this plus the models, and
+  // the inbox's own load reads the rows directly.
   @override
-  Future<List<Conversation>> loadConversations({
+  Future<List<Map<String, Object?>>> conversationRows({
     List<String> sources = const ['email'],
     ConversationState? state,
   }) {
     log.add('read');
-    return super.loadConversations(sources: sources, state: state);
+    return super.conversationRows(sources: sources, state: state);
   }
 }
 
@@ -115,15 +117,18 @@ class FakeAttention extends AttentionService {
 
   FakeAttention(super.store, this.log, {this.failOnCall});
 
+  // The pass itself: `recomputeAll` is its count, and the inbox's own load
+  // calls this with the rows it just read.
   @override
-  Future<int> recomputeAll({
+  Future<AttentionPass> recompute({
     List<String> sources = const ['email'],
     DateTime? now,
+    List<Conversation>? conversations,
   }) async {
     calls++;
     log.add('recompute');
     if (calls == failOnCall) throw StateError('scoring fell over');
-    return 0;
+    return AttentionPass.empty;
   }
 }
 
@@ -204,17 +209,18 @@ void main() {
     ).load();
     await settle();
 
-    // Read as: the load scores and reads for the frame on screen, the queues
-    // run, and only then does the mailbox get scored against what they
-    // learned — followed by the trailing re-read that puts it on screen.
+    // Read as: the load reads and then scores the rows it read for the frame
+    // on screen, the queues run, and only then does the mailbox get scored
+    // against what they learned — followed by the trailing re-read (and its
+    // own pass over those rows) that puts it on screen.
     expect(log, [
-      'recompute',
       'read',
+      'recompute',
       'triage',
       'ai',
       'recompute',
-      'recompute',
       'read',
+      'recompute',
     ]);
   });
 
@@ -322,7 +328,7 @@ void main() {
     ).load();
     await settle();
 
-    expect(log, ['recompute', 'read', 'ai', 'recompute', 'recompute', 'read']);
+    expect(log, ['read', 'recompute', 'ai', 'recompute', 'read', 'recompute']);
   });
 
   test('a load that skips the sync starts nothing to settle', () async {
@@ -338,7 +344,7 @@ void main() {
     ).load(syncFirst: false);
     await settle();
 
-    expect(log, ['recompute', 'read']);
+    expect(log, ['read', 'recompute']);
   });
 
   test('a settle pass that falls over is traced, not thrown', () async {

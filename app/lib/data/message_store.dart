@@ -1025,6 +1025,24 @@ WHERE source = ? AND conversation_key = ?
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
+  }) async =>
+      [
+        for (final row
+            in await conversationRows(sources: sources, state: state))
+          Conversation.fromRow(row),
+      ];
+
+  /// The conversation list's rows as the query returned them — see
+  /// [loadConversations], which is these rows made into models.
+  ///
+  /// Raw, because the list provider compares two reads' maps to decide
+  /// whether anything on screen changed. A hand-written thirty-field `==` on
+  /// the model would do the same job until the day a column is added to this
+  /// SELECT and not to the `==`, and from then on would silently call two
+  /// different rows the same.
+  Future<List<Map<String, Object?>>> conversationRows({
+    List<String> sources = const ['email'],
+    ConversationState? state,
   }) async {
     if (sources.isEmpty) return const [];
     final where =
@@ -1193,7 +1211,7 @@ WHERE source = ? AND conversation_key = ?
           variables: _args(args),
         )
         .get();
-    return [for (final row in result) Conversation.fromRow(row.data)];
+    return [for (final row in result) row.data];
   }
 
   /// The conversations, of every source, that any of [addresses] took part
@@ -5119,6 +5137,65 @@ FROM messages
         'WHERE source = ? AND conversation_key = ?',
         variables: _args([score, now, source, conversationKey]),
       );
+    });
+  }
+
+  /// One attention pass's writes, in ONE batch: every score in [scores], then
+  /// every bucket in [buckets].
+  ///
+  /// The same writes [writeAttentionScore] and [setConversationBucket] make,
+  /// one per thread and none skipped, and each one stamps `updated_at`. That
+  /// stamp is load-bearing rather than bookkeeping: the notification settle
+  /// reads `conversation_ai.updated_at` at or after the message's own stamp
+  /// as "the attention pass has seen this thread since its message last
+  /// changed", so a write left out for being unchanged would hold a
+  /// notification back. What changes is the cost: one round trip to the
+  /// database and one transaction, instead of one of each per thread — which
+  /// with the database on its own isolate was most of a list load.
+  ///
+  /// An upsert per row rather than the insert-then-update pair: the insert
+  /// names only the key, the column it sets and `updated_at`, so a row that
+  /// did not exist is created as the pair created it, and a row that did
+  /// keeps its embedding, its date and the other kind's column.
+  ///
+  /// One [stamp] for the whole pass ([isoStamp]), and the CALLER's: it is
+  /// taken before the pass's reads, not here after them. A message that
+  /// changed after the pass read it then carries the later stamp of the two,
+  /// so the settle holds it for the next pass instead of taking this one's
+  /// score — computed from the older version — as a verdict on the new one.
+  /// Nothing at all is written when both lists are empty.
+  Future<void> writeAttentionPass({
+    required List<({String source, String key, double score})> scores,
+    required List<({String source, String key, String? bucket, String? reason})>
+        buckets,
+    required String stamp,
+  }) async {
+    if (scores.isEmpty && buckets.isEmpty) return;
+    final now = stamp;
+    await db.batch((b) {
+      for (final s in scores) {
+        b.customStatement(
+          'INSERT INTO conversation_ai '
+          '  (source, conversation_key, attention_score, updated_at) '
+          'VALUES (?, ?, ?, ?) '
+          'ON CONFLICT(source, conversation_key) DO UPDATE SET '
+          '  attention_score = excluded.attention_score, '
+          '  updated_at = excluded.updated_at',
+          [s.source, s.key, s.score, now],
+        );
+      }
+      for (final f in buckets) {
+        b.customStatement(
+          'INSERT INTO conversation_ai '
+          '  (source, conversation_key, bucket, bucket_reason, updated_at) '
+          'VALUES (?, ?, ?, ?, ?) '
+          'ON CONFLICT(source, conversation_key) DO UPDATE SET '
+          '  bucket = excluded.bucket, '
+          '  bucket_reason = excluded.bucket_reason, '
+          '  updated_at = excluded.updated_at',
+          [f.source, f.key, f.bucket, f.reason, now],
+        );
+      }
     });
   }
 
