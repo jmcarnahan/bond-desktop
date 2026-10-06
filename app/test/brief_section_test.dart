@@ -14,7 +14,9 @@ void main() {
   EventBrief ready(
       {bool withThreads = true,
       bool withMaterials = true,
-      List<BriefPoint> morePoints = const []}) {
+      List<BriefPoint> morePoints = const [],
+      String path = MeetingBrief.pathPeople,
+      List<BriefThreadRef>? threadRefs}) {
     final brief = MeetingBrief(
       headline: 'Dana is waiting on the quote.',
       briefing: const [
@@ -55,7 +57,9 @@ void main() {
               ),
             ]
           : const [],
-      threads: withThreads
+      path: path,
+      threads: threadRefs ??
+          (withThreads
           ? const [
               BriefThreadRef(
                 source: 'email',
@@ -63,7 +67,7 @@ void main() {
                 subject: 'Fabrikam renewal',
               ),
             ]
-          : const [],
+          : const []),
     );
     return EventBrief(
       eventId: 'evt-1',
@@ -446,7 +450,8 @@ void main() {
       EventBriefView(
           brief: row(EventBrief.skipped, hash: 'ineligible:no_mail')),
     );
-    expect(status(tester), 'No brief — no recent mail with these people.');
+    expect(status(tester),
+        'No brief — no recent mail or Teams chats with these people.');
 
     await pump(
       tester,
@@ -460,8 +465,10 @@ void main() {
       EventBriefView(
           brief: row(EventBrief.skipped, hash: 'ineligible:too_many')),
     );
-    expect(status(tester), BriefSection.tooManyText);
-    expect(BriefSection.tooManyText, 'No brief — too many people for a brief.');
+    // No build writes too_many any more (there is no people cap): an older
+    // build's stored row reads the generic sentence until the planner's next
+    // pass replaces it.
+    expect(status(tester), BriefSection.ineligibleText);
 
     await pump(tester, const EventBriefView(), eligible: false);
     expect(status(tester), BriefSection.ineligibleText);
@@ -475,7 +482,7 @@ void main() {
     expect(status(tester), 'No brief — nobody else is invited.');
     await pump(tester, const EventBriefView(),
         eligible: false, reason: 'too_many');
-    expect(status(tester), BriefSection.tooManyText);
+    expect(status(tester), BriefSection.ineligibleText);
     await pump(tester, const EventBriefView(),
         eligible: false, reason: 'cancelled');
     expect(status(tester), BriefSection.ineligibleText);
@@ -627,6 +634,102 @@ void main() {
     expect(status(tester), BriefSection.failedText);
     await tester.tap(find.byKey(BriefSection.regenerateKey));
     expect(regenerated, 1);
+  });
+
+  group('the source caption', () {
+    const invite = BriefThreadRef(
+        source: 'email',
+        conversationKey: 'c-inv',
+        subject: 'Fabrikam renewal',
+        invite: true);
+    const found = BriefThreadRef(
+        source: 'teams', conversationKey: 't-1', subject: 'Renewal chat');
+
+    String caption(WidgetTester tester) =>
+        tester.widget<Text>(find.byKey(BriefSection.sourceKey)).data!;
+
+    testWidgets('people, related and invite-alone, on both faces',
+        (tester) async {
+      for (final (brief, want) in [
+        (ready(), BriefSection.fromPeopleText),
+        (
+          ready(
+              path: MeetingBrief.pathRelated,
+              threadRefs: const [invite, found]),
+          BriefSection.fromRelatedText
+        ),
+        (
+          ready(path: MeetingBrief.pathRelated, threadRefs: const [invite]),
+          BriefSection.fromInviteText
+        ),
+        (ready(withThreads: false), BriefSection.fromInviteText),
+        (
+          ready(path: MeetingBrief.pathRelated, withThreads: false),
+          BriefSection.fromInviteText
+        ),
+        // The people path with only the invite's own thread: no mail with
+        // the people was found either.
+        (ready(threadRefs: const [invite]), BriefSection.fromInviteText),
+        (ready(threadRefs: const [invite, found]), BriefSection.fromPeopleText),
+      ]) {
+        for (final compact in [false, true]) {
+          await pump(tester, EventBriefView(brief: brief), compact: compact);
+          expect(find.byKey(BriefSection.sourceKey), findsOneWidget);
+          expect(caption(tester), want, reason: 'compact: $compact');
+        }
+      }
+      expect(BriefSection.fromPeopleText,
+          'From your mail and Teams chats with the people in this meeting.');
+      expect(BriefSection.fromRelatedText,
+          'From threads related to this meeting — a sample, not everything '
+          'on the subject.');
+      expect(BriefSection.fromInviteText,
+          'From the invite alone — no other threads were found.');
+    });
+
+    testWidgets('an old row with no path reads as the people path',
+        (tester) async {
+      final old = EventBrief(
+        eventId: 'evt-1',
+        inputsHash: 'h',
+        status: EventBrief.ready,
+        briefJson: '{"headline":"H.","threads":[{"source":"email",'
+            '"conversation_key":"c-1","subject":"S"}]}',
+        generatedAt: calendarStamp(now),
+      );
+      await pump(tester, EventBriefView(brief: old));
+      expect(caption(tester), BriefSection.fromPeopleText);
+    });
+
+    testWidgets('the panel draws it above Generated; the agenda above '
+        'Regenerate', (tester) async {
+      await pump(tester, EventBriefView(brief: ready()));
+      expect(
+          tester.getTopLeft(find.byKey(BriefSection.sourceKey)).dy,
+          lessThan(tester.getTopLeft(find.byKey(BriefSection.statusKey)).dy));
+      await pump(tester, EventBriefView(brief: ready()), compact: true);
+      expect(
+          tester.getTopLeft(find.byKey(BriefSection.sourceKey)).dy,
+          lessThan(
+              tester.getTopLeft(find.byKey(BriefSection.regenerateKey)).dy));
+    });
+
+    testWidgets('no caption without a ready brief', (tester) async {
+      for (final view in [
+        EventBriefView(brief: row(EventBrief.skipped, hash: 'ineligible:no_mail')),
+        EventBriefView(brief: row(EventBrief.failed)),
+        const EventBriefView(),
+        EventBriefView(
+            brief: row(EventBrief.skipped,
+                hash: 'ineligible:materials_pending')),
+      ]) {
+        for (final compact in [false, true]) {
+          await pump(tester, view, compact: compact);
+          expect(find.byKey(BriefSection.sourceKey), findsNothing,
+              reason: '${view.brief?.status} compact: $compact');
+        }
+      }
+    });
   });
 }
 

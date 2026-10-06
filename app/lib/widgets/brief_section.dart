@@ -18,11 +18,12 @@ import 'time_format.dart';
 /// [compact] is the agenda's face, drawn under a meeting row whose glance
 /// already shows the headline: a ready brief's body — the catch-up, in the
 /// order it is read: Briefing, From the materials, People, Questions, Prep,
-/// Open asks, at most [compactPointsCap] References — and one Regenerate,
-/// with no heading, headline or footer. In any other state it draws nothing
-/// but the one sentence that says the files sent ahead are still being read
-/// (the event panel is where the other states say why). The panel draws the
-/// headline, the same body in the same order with every point, and the
+/// Open asks, at most [compactPointsCap] References — then the source
+/// caption ([sourceText]) and one Regenerate, with no heading, headline or
+/// footer. In any other state it draws nothing but the one sentence that
+/// says the files sent ahead are still being read (the event panel is where
+/// the other states say why). The panel draws the headline, the same body in
+/// the same order with every point, the same source caption, and the
 /// Generated line. The compact briefing is [BondType.body] on purpose,
 /// larger than the row's glance above it: the catch-up is read, the glance
 /// is scanned.
@@ -45,9 +46,9 @@ import 'time_format.dart';
 ///    brief to have it now.
 ///
 /// Write a brief ([onWrite]) is offered only with processing on, and never
-/// for a meeting that has started, was cancelled or declined, has nobody
-/// else or too many people: a person's request lifts the horizon and the
-/// mail rule, nothing else.
+/// for a meeting that has started, was cancelled or declined, or has nobody
+/// else: a person's request lifts the horizon and the mail rule, nothing
+/// else.
 class BriefSection extends StatelessWidget {
   const BriefSection({
     super.key,
@@ -77,6 +78,7 @@ class BriefSection extends StatelessWidget {
       ValueKey('brief-material-point-$i-$j');
   static Key personKeyFor(int i) => ValueKey('brief-person-$i');
   static const Key briefingKey = ValueKey('brief-briefing');
+  static const Key sourceKey = ValueKey('brief-source');
   static Key questionKeyFor(int i) => ValueKey('brief-question-$i');
 
   /// How many points the agenda's face shows under References; the panel
@@ -88,9 +90,8 @@ class BriefSection extends StatelessWidget {
   static const String pausedText =
       'Briefs are paused while processing is off.';
   static const String noMailText =
-      'No brief — no recent mail with these people.';
+      'No brief — no recent mail or Teams chats with these people.';
   static const String noOthersText = 'No brief — nobody else is invited.';
-  static const String tooManyText = 'No brief — too many people for a brief.';
   static const String tooFarText = 'Briefs are written for today and tomorrow.';
   static const String startedText = 'No brief — this meeting has started.';
   static const String ineligibleText = 'No brief for this meeting.';
@@ -99,6 +100,32 @@ class BriefSection extends StatelessWidget {
   static const String failedText = "The brief couldn't be written.";
   static const String comingText =
       'Brief coming after the next calendar sync.';
+
+  /// The source caption both faces draw under a ready brief: where its
+  /// threads came from, so a brief written from threads found by subject is
+  /// read as a sample rather than everything there is.
+  static const String fromPeopleText =
+      'From your mail and Teams chats with the people in this meeting.';
+  static const String fromRelatedText =
+      'From threads related to this meeting — a sample, not everything on '
+      'the subject.';
+  static const String fromInviteText =
+      'From the invite alone — no other threads were found.';
+
+  /// The one rule choosing the caption: no thread but the invite's own, on
+  /// either path (none at all included), is the invite alone; else the path
+  /// says which. A row written before the path and the invite flags were
+  /// stored reads as the people path, which it was.
+  static String sourceText(MeetingBrief brief) {
+    if (brief.threads.every((t) => t.invite)) return fromInviteText;
+    return brief.isRelated ? fromRelatedText : fromPeopleText;
+  }
+
+  static Widget _source(MeetingBrief brief) => Text(
+        sourceText(brief),
+        key: sourceKey,
+        style: BondType.caption.copyWith(color: BondColors.inkMuted),
+      );
   static const String writeLabel = 'Write a brief';
 
   /// Null while the read is in flight, which draws nothing rather than a
@@ -161,6 +188,10 @@ class BriefSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         ..._body(brief),
+        Padding(
+          padding: const EdgeInsets.only(top: BondSpacing.s4),
+          child: _source(brief),
+        ),
         // The panel footer's rule: a rewrite already asked for says so
         // rather than offering a second press.
         Align(
@@ -232,7 +263,6 @@ class BriefSection extends StatelessWidget {
   static String reasonText(String? reason) => switch (reason) {
         'no_mail' => noMailText,
         'no_others' => noOthersText,
-        'too_many' => tooManyText,
         'too_far' => tooFarText,
         'past' => startedText,
         'materials_pending' => materialsPendingText,
@@ -274,6 +304,8 @@ class BriefSection extends StatelessWidget {
           style: BondType.body.copyWith(fontWeight: FontWeight.w600),
         ),
         ..._body(brief),
+        const SizedBox(height: BondSpacing.s4),
+        _source(brief),
         const SizedBox(height: BondSpacing.s4),
         Wrap(
           crossAxisAlignment: WrapCrossAlignment.center,

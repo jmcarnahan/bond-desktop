@@ -11,12 +11,19 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// Runs only while processing is on and only after a sync that completed;
 /// the caller pumps the draft lane when this queued anything. Nothing here
 /// calls a model: the eligibility check and the inputs hash are store reads
-/// (it gathers with `passages: false`, so not even an embedding call).
+/// (it gathers with `passages: false`, so no passage embedding). The one
+/// network call it can cost is the thread search's query: a meeting with
+/// something to search by has its subject and description embedded once per
+/// distinct text per app run — the gatherer caches the vector — because the
+/// threads that search finds are hashed, so new mail or chat on the topic
+/// re-briefs.
 ///
 /// **The regeneration rule.** A meeting with no brief is queued. A stored
-/// brief is queued again when its inputs hash moved — at any age, so a deck
-/// or its digest landing an hour after the first brief re-briefs on the
-/// next pass rather than waiting out [freshFor]. A failed brief is retried
+/// brief is queued again when its inputs hash moved — once it is older than
+/// [rewriteAfter], or [rewriteNearAfter] when its meeting is within
+/// [rewriteNear] — so a deck or its digest landing an hour after the first
+/// brief re-briefs on the next pass rather than waiting out [freshFor]. A
+/// failed brief is retried
 /// only once it is older than [freshFor] (unless its inputs moved). What
 /// keeps a thread that is busy the morning of a meeting from buying a model
 /// call per sync is [_queuedFor] and the "fresh AND unchanged" rule: one set
@@ -37,8 +44,8 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// that may never finish.
 ///
 /// **What it writes itself.** A meeting found ineligible for a reason that
-/// can change while it stays on the calendar ([recorded]: no recent mail,
-/// nobody else invited, too many people) gets a `skipped` row naming the
+/// can change while it stays on the calendar ([recorded]: no recent mail
+/// or chat, nobody else invited) gets a `skipped` row naming the
 /// reason, so the panel says why rather than promising a brief after the
 /// next sync. Written only when the stored row does not already say so, and
 /// never over a ready brief, which stands. When the reason goes away the
@@ -50,10 +57,11 @@ import 'meeting_brief_handler.dart' show MeetingBriefHandler;
 /// few minutes. So an event whose stored row is FAILED and has not moved
 /// since it was gathered less than [recheck] ago is not gathered again — a
 /// back-off for a brief that could not be written. That is the only row it
-/// holds. A READY row is gathered on every pass: a deck sent the morning of
-/// the meeting, or its text landing, should reach the brief on the next
-/// sync rather than a quarter of an hour later, and [_queuedFor] with the
-/// "fresh AND unchanged" rule keep an unchanged one from queueing. An event
+/// holds. A READY row is gathered on every pass, so a deck sent the morning
+/// of the meeting, or its text landing, is seen on the next sync — when the
+/// brief is then written again is the young-brief wait's to say
+/// ([rewriteAfter], [rewriteNearAfter]) — and [_queuedFor] with the "fresh
+/// AND unchanged" rule keep an unchanged one from queueing. An event
 /// with NO stored row is never throttled: that is the state after Clear AI
 /// results, and the next synced tick should plan it at once. Nor is a
 /// `skipped` row: its reason is the kind that goes away within seconds — a
@@ -76,6 +84,25 @@ class BriefPlanner {
 
   static const Duration freshFor = Duration(hours: 2);
   static const Duration recheck = Duration(minutes: 15);
+
+  /// How young a READY brief is left alone when its inputs move, while its
+  /// meeting is more than [rewriteNear] off. The threads a brief is written
+  /// from follow the search vectors, which land one message at a time
+  /// behind the AI backlog, and a chat with the meeting's people moves with
+  /// every line: after a first sync or a Clear AI results every pass would
+  /// find a slightly different set and buy a rewrite of every meeting, every
+  /// pass, on the one generative model the backlog itself is waiting for.
+  /// So a brief just written waits this long before it is written again;
+  /// the moved hash is still there when it has, and a person's Regenerate
+  /// never waits.
+  static const Duration rewriteAfter = Duration(minutes: 30);
+  static const Duration rewriteNear = Duration(hours: 1);
+
+  /// The same wait once the meeting is within [rewriteNear] (or has no
+  /// readable start): short, because what was said in the last hour is what
+  /// the brief is for, and not nothing, because a chat going on with the
+  /// people in the meeting would otherwise buy a rewrite on every pass.
+  static const Duration rewriteNearAfter = Duration(minutes: 5);
   static const int maxPerPass = 6;
 
   static const String kind = 'meeting_brief';
@@ -87,7 +114,6 @@ class BriefPlanner {
   static const Set<BriefIneligibility> recorded = {
     BriefIneligibility.noMail,
     BriefIneligibility.noOthers,
-    BriefIneligibility.tooMany,
   };
 
   /// When each event was last gathered, and its stored row's `generated_at`
@@ -167,8 +193,9 @@ class BriefPlanner {
         if (recorded.contains(quick)) await _record(e.id, quick, stored, stamp);
         continue;
       }
-      // Fresh no longer skips the gather: a young brief whose inputs moved is
-      // written again. Only a failed row is throttled, as a back-off.
+      // Fresh does not skip the gather: a young brief whose inputs moved is
+      // written again once past the young-brief wait (below). Only a failed
+      // row is throttled, as a back-off.
       final generated = stored?.generatedAtUtc;
       final fresh =
           generated != null && nowUtc.difference(generated) < freshFor;
@@ -182,7 +209,8 @@ class BriefPlanner {
       }
 
       // Without passages: they are not hashed, and finding them costs an
-      // embedding call per meeting — the handler's gather finds them.
+      // embedding call per meeting — the handler's gather finds them. (The
+      // related search's query is hashed, and cached in the gatherer.)
       final gathered =
           await _gatherer.gather(e, now: nowUtc, passages: false);
       _lastChecked[e.id] = (at: nowUtc, generatedAt: stored?.generatedAt ?? '');
@@ -215,7 +243,17 @@ class BriefPlanner {
               !input.materialsPending &&
               _endedFor[e.id] != stored?.generatedAt;
           if (waitEnded) _endedFor[e.id] = stored?.generatedAt ?? '';
-          final changed = (moved && !(fresh && _queuedFor[e.id] == hash)) ||
+          // A young ready brief waits out its inputs settling: longer
+          // while its meeting is far off, a few minutes once it is near.
+          final far = start != null && start.isAfter(nowUtc.add(rewriteNear));
+          final settling = stored != null &&
+              stored.isReady &&
+              generated != null &&
+              nowUtc.difference(generated) <
+                  (far ? rewriteAfter : rewriteNearAfter);
+          final changed = (moved &&
+                  !settling &&
+                  !(fresh && _queuedFor[e.id] == hash)) ||
               (!fresh && stored?.status == EventBrief.failed) ||
               waitedEnough ||
               waitEnded;
